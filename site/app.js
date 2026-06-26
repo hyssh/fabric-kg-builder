@@ -9,6 +9,7 @@ if (navToggle && navLinks) {
 
 // ---------- Tabbed navigation ----------
 const panels = document.querySelectorAll(".tab-panel");
+const hero = document.getElementById("hero");
 const TAB_NAMES = new Set(Array.from(panels).map((p) => p.getAttribute("data-panel")));
 
 function activateTab(name, push) {
@@ -17,6 +18,10 @@ function activateTab(name, push) {
   panels.forEach((p) =>
     p.classList.toggle("is-active", p.getAttribute("data-panel") === name)
   );
+
+  // The hero is the landing banner — show it only on the Overview tab so other
+  // tabs surface their content immediately, with no banner to scroll past.
+  if (hero) hero.style.display = name === "overview" ? "" : "none";
 
   // Reflect active state on every control that targets a tab
   document.querySelectorAll("[data-tab]").forEach((el) =>
