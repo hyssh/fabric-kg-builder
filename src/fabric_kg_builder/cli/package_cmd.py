@@ -28,7 +28,7 @@ Example:
   fabric-kg package
   fabric-kg package --include-search --out dist
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

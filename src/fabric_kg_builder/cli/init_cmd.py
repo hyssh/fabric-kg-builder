@@ -8,7 +8,7 @@ Example:
   fabric-kg init
   fabric-kg init --template csv-only
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

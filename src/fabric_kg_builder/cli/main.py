@@ -53,7 +53,7 @@ Example (Surface sample data, Windows paths):
   fabric-kg deploy-ontology --env dev --multitype --no-mock
 
 \b
-Questions? Contact hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

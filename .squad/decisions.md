@@ -1070,12 +1070,12 @@ Enhanced all CLI help text in a purely additive, non-breaking way:
 
 1. **Top-level group** (`fabric-kg --help`):
    - Expanded docstring: describes the end-to-end transformation pipeline.
-   - Epilog: numbered 12-stage pipeline overview, Surface-sample Windows-path example sequence, and contact line `Questions? Contact hyssh@microsoft.com`.
+   - Epilog: numbered 12-stage pipeline overview, Surface-sample Windows-path example sequence, and contact line `Questions? Contact GitHub issues`.
    - Added `context_settings={"max_content_width": 120, "help_option_names": ["-h", "--help"]}`.
 
 2. **All 12 subcommands**: Each has an epilog with:
    - A realistic Example block using `sample_data\Surface_Troubleshootings` Windows paths where relevant.
-   - A `Questions? hyssh@microsoft.com` contact line.
+   - A `Questions? GitHub issues` contact line.
    - Improved help strings on every option (input types, defaults, behavior).
    - `show_default=True` added where it was missing.
 
@@ -1088,7 +1088,7 @@ Enhanced all CLI help text in a purely additive, non-breaking way:
 
 **Contact**
 
-Questions? hyssh@microsoft.com
+Questions? GitHub issues
 
 ---
 

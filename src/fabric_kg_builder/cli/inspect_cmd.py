@@ -102,7 +102,7 @@ Example:
   fabric-kg inspect-source --input sample_data\\Surface_Troubleshootings
   fabric-kg inspect-source --input data\\devices.csv --format json
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

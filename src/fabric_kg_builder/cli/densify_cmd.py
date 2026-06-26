@@ -41,7 +41,7 @@ Densification links each document's DeviceModel(s) to the Components, Parts,
 Procedures, and Symptoms in that same document, so the data agent can answer
 "parts/components/procedures for <device>" questions.
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

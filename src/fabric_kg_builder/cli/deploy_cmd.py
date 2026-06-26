@@ -51,7 +51,7 @@ Example:
   fabric-kg deploy-lakehouse --env dev --no-mock
   fabric-kg deploy-lakehouse --env dev --tables entities,relationships --mock
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 
@@ -266,7 +266,7 @@ With --multitype, a Data Agent grounding doc is also written by default
 (--create-data-agent-instruction) next to --parquet-dir, derived from the live
 graph and the domain brief's sample questions (--domain-file).
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 
@@ -626,7 +626,7 @@ Example:
   fabric-kg deploy-search --env dev --no-mock
   fabric-kg deploy-search --env dev --indexes kg-chunks --no-mock
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

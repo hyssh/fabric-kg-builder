@@ -231,7 +231,7 @@ Example:
   fabric-kg compile-data
   fabric-kg compile-data --input build/enriched --out build/parquet
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

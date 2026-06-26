@@ -69,7 +69,7 @@ Treatment, Medication, Provider."
   fabric-kg set-domain --industry legal --business-domain contracts \
     --domain-file data\\domain_brief.txt --force
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

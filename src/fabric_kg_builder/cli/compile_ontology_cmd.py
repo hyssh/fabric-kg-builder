@@ -17,7 +17,7 @@ Example:
   fabric-kg compile-ontology --env dev
   fabric-kg compile-ontology --model ontology\\model.yaml --ids ontology\\ids.lock.json --env prod
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

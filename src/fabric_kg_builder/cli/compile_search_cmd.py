@@ -377,7 +377,7 @@ Example:
   fabric-kg compile-search --input build/parquet --embed
   fabric-kg compile-search --indexes kg-chunks
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

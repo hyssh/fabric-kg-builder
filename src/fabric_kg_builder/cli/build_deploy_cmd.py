@@ -9,7 +9,7 @@ Example:
   fabric-kg build-deploy --input sample_data\\Surface_Troubleshootings --env prod --skip-search
 
 \b
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

@@ -2,7 +2,7 @@
 
 > Turn documents, images, and tabular data into a deployable Microsoft Fabric knowledge graph — enriched by Azure OpenAI, searched via Azure AI Search, governed by a Fabric Ontology, and deployed through **fabric-cicd**.
 
-📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [hyssh@microsoft.com](mailto:hyssh@microsoft.com)
+📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
 ---
 

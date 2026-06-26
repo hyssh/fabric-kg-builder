@@ -37,7 +37,7 @@ Example:
   fabric-kg validate --env dev
   fabric-kg validate --env prod --rules VAL-008,BRG-001 --report build\\validation.txt
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

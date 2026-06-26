@@ -340,7 +340,7 @@ Example:
   fabric-kg enrich --input sample_data\\Surface_Troubleshootings --resume
   fabric-kg enrich --input data\\devices.csv --domain-prompt "IoT device catalog"
 
-Questions? hyssh@microsoft.com
+Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 

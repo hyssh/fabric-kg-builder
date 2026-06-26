@@ -1,8 +1,7 @@
 {
   "name": "fabric-kg-builder",
   "owner": {
-    "name": "hyssh",
-    "email": "hyssh@microsoft.com"
+    "name": "hyssh"
   },
   "metadata": {
     "description": "Plugins for building Microsoft Fabric knowledge graphs with the fabric-kg CLI.",
