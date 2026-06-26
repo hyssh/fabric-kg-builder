@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli import cli
+from tests.conftest import combined_output, make_cli_runner
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -104,7 +105,7 @@ class TestInspectSourceCmd:
 
     def test_bad_path_exits_nonzero(self) -> None:
         """Non-existent path must cause non-zero exit."""
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(
             cli, ["inspect-source", "--input", "does_not_exist_xyz_abc.csv"]
         )
@@ -112,11 +113,11 @@ class TestInspectSourceCmd:
 
     def test_bad_path_shows_error_message(self) -> None:
         """Non-existent path must emit an error message."""
-        runner = CliRunner(mix_stderr=False)
+        runner = make_cli_runner()
         result = runner.invoke(
             cli, ["inspect-source", "--input", "does_not_exist_xyz_abc.csv"]
         )
-        all_output = result.output + (result.stderr or "")
+        all_output = combined_output(result)
         assert any(
             kw in all_output.lower() for kw in ("error", "not found")
         ), f"No error message found. Output: {all_output!r}"
@@ -125,7 +126,7 @@ class TestInspectSourceCmd:
         """Unsupported file extension must exit with code 3."""
         bad_file = tmp_path / "data.txt"
         bad_file.write_text("hello world\n")
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cli, ["inspect-source", "--input", str(bad_file)])
         assert result.exit_code == 3, (
             f"Expected exit 3 for unsupported type, got {result.exit_code}.\n{result.output}"

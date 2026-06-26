@@ -15,11 +15,68 @@ Mock targets
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Callable
 from unittest.mock import MagicMock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Session setup: ensure per-environment config exists for CLI tests.
+# ---------------------------------------------------------------------------
+# ontology/environments/{dev,test,prod}.json are gitignored (they hold real
+# resource IDs). A fresh checkout / CI only has the committed *.json.example
+# templates. Several CLI tests read these files via `--env dev`, so this
+# autouse, session-scoped fixture materializes them from the templates when
+# missing and removes only the copies it created.
+
+_REPO_ROOT = Path(__file__).parent.parent
+_ENV_DIR = _REPO_ROOT / "ontology" / "environments"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_env_configs() -> "object":
+    created: list[Path] = []
+    for env in ("dev", "test", "prod"):
+        target = _ENV_DIR / f"{env}.json"
+        template = _ENV_DIR / f"{env}.json.example"
+        if not target.exists() and template.exists():
+            shutil.copyfile(template, target)
+            created.append(target)
+    yield
+    for path in created:
+        path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Click CliRunner — version-agnostic (separate stdout/stderr).
+# ---------------------------------------------------------------------------
+# Click 8.2 removed the `mix_stderr` argument and always captures stdout and
+# stderr separately. On Click < 8.2 we must pass mix_stderr=False to get the
+# same behavior. Tests should read combined output via `combined_output()`.
+
+
+def make_cli_runner():
+    """Return a click CliRunner that captures stdout and stderr separately,
+    working across Click versions (8.1 needs mix_stderr=False; 8.2+ drops it)."""
+    from click.testing import CliRunner
+
+    try:
+        return CliRunner(mix_stderr=False)  # Click < 8.2
+    except TypeError:
+        return CliRunner()  # Click >= 8.2 (streams always separate)
+
+
+def combined_output(result) -> str:
+    """Return stdout + stderr from a click Result, tolerant of Click versions."""
+    out = result.output or ""
+    try:
+        err = result.stderr or ""
+    except (ValueError, AttributeError):
+        err = ""
+    return out + err
+
 
 # ---------------------------------------------------------------------------
 # Paths

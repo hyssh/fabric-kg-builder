@@ -22,6 +22,7 @@ from fabric_kg_builder.cli.compile_search_cmd import (
     _build_document_elements_schema,
     compile_search_cmd,
 )
+from tests.conftest import combined_output, make_cli_runner  # noqa: E402,F401
 from fabric_kg_builder.cli.deploy_cmd import (
     _read_fabric_env_config,
     deploy_lakehouse_cmd,
@@ -178,13 +179,13 @@ class TestPackageCmd:
         """--include-search emits a warning when build/search absent, but still exits 0."""
         build = _make_build(tmp_path, with_search=False)
         dist = tmp_path / "dist"
-        runner = CliRunner(mix_stderr=False)
+        runner = make_cli_runner()
         result = runner.invoke(
             package_cmd,
             ["--build-dir", str(build), "--out", str(dist), "--include-search"],
         )
         assert result.exit_code == 0
-        assert "WARNING" in (result.stderr or result.output)
+        assert "WARNING" in combined_output(result)
 
     def test_package_no_include_search_flag_skips_search(self, tmp_path):
         """Without --include-search, search dir is NOT bundled even if present."""

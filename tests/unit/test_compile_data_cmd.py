@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli.compile_data_cmd import compile_data_cmd
+from tests.conftest import combined_output, make_cli_runner  # noqa: F401
 from fabric_kg_builder.model.ids import (
     content_hash,
     make_chunk_id,
@@ -350,7 +351,7 @@ class TestValDuplicateEntityId:
         input_dir = _write_input(tmp_path, _dup_entity_fixture())
         out_dir = tmp_path / "parquet"
 
-        runner = CliRunner(mix_stderr=True)
+        runner = CliRunner()
         result = runner.invoke(
             compile_data_cmd,
             ["--input", str(input_dir), "--out", str(out_dir)],
@@ -400,13 +401,13 @@ class TestValDanglingRelFk:
         input_dir = _write_input(tmp_path, _dangling_fk_fixture())
         out_dir = tmp_path / "parquet"
 
-        runner = CliRunner(mix_stderr=True)
+        runner = make_cli_runner()
         result = runner.invoke(
             compile_data_cmd,
             ["--input", str(input_dir), "--out", str(out_dir)],
         )
-        assert "VAL-006" in result.output, (
-            f"Expected VAL-006 in output.\nOutput:\n{result.output}"
+        assert "VAL-006" in combined_output(result), (
+            f"Expected VAL-006 in output.\nOutput:\n{combined_output(result)}"
         )
 
 
