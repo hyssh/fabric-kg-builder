@@ -133,19 +133,26 @@ def _read_parquet_tables(build_dir: Path) -> dict[str, list[dict]]:
     """Read all canonical Parquet tables from *build_dir*/<name>.parquet.
 
     Returns a dict mapping table name → list of row dicts.
-    Silently skips missing files.  Requires pyarrow + pandas.
+    Silently skips missing files.  Requires pyarrow.
+
+    Reads via pyarrow directly (a hard dependency) rather than going through a
+    pandas round-trip.  pyarrow's ``to_pylist`` is version-stable across the
+    pyarrow releases CI pins, whereas ``pandas.read_parquet`` round-tripping a
+    pyarrow-written table can raise on some pyarrow/pandas version combinations
+    (e.g. tz-aware timestamp columns) — which previously caused tables to be
+    silently dropped and validators to no-op.
     """
     table_rows: dict[str, list[dict]] = {}
     try:
-        import pandas as pd  # noqa: PLC0415
+        import pyarrow.parquet as pq  # noqa: PLC0415
     except ImportError:  # pragma: no cover
         return table_rows
 
     parquet_dir = Path(build_dir)
     for parquet_path in parquet_dir.glob("*.parquet"):
         try:
-            df = pd.read_parquet(parquet_path)
-            table_rows[parquet_path.stem] = df.to_dict(orient="records")
+            table = pq.read_table(parquet_path)
+            table_rows[parquet_path.stem] = table.to_pylist()
         except Exception:  # noqa: BLE001 — skip unreadable tables
             pass
     return table_rows

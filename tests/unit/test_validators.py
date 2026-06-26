@@ -584,7 +584,6 @@ class TestValidateAll:
 
     def test_val010_trips_on_broken_data(self, tmp_path: Path):
         """validate_all detects VAL-010 when blob_url is missing from a visual asset Parquet."""
-        import pandas as pd  # noqa: PLC0415
         import pyarrow as pa  # noqa: PLC0415
         import pyarrow.parquet as pq  # noqa: PLC0415
         from fabric_kg_builder.model.arrow_schemas import TABLE_SCHEMAS  # noqa: PLC0415
