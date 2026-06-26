@@ -1,0 +1,1713 @@
+ontology:
+  name: "FabricKG"
+  description: "Fabric Knowledge Graph for Surface device service and troubleshooting domain"
+  version: "1.0.0"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MODULES  (organizational groupings; all share the same Fabric ontology item)
+  # ─────────────────────────────────────────────────────────────────────────────
+  modules:
+
+    - name: support-domain
+      description: "Domain entities for Surface device service — devices, parts, tools, symptoms, procedures"
+      entityTypeNames:
+        - Device
+        - Model
+        - Component
+        - Part
+        - PartNumber
+        - Tool
+        - Symptom
+        - Cause
+        - Resolution
+        - Procedure
+        - Step
+      relationshipTypeNames:
+        - has_component
+        - has_part
+        - has_part_number
+        - has_variant
+        - causes
+        - resolves
+        - uses_tool
+        - has_step
+        - acts_on
+
+    - name: document-evidence
+      description: "Document structure evidence — pages, tables, figures, chunks extracted from service guides"
+      entityTypeNames:
+        - Document
+        - DocumentChunk
+        - Section
+        - Page
+        - Table
+        - TableRow
+        - TableColumn
+        - TableCell
+        - Figure
+        - Image
+        - Caption
+        - Callout
+      relationshipTypeNames:
+        - contains_section
+        - contains_table
+        - contains_figure
+        - has_row
+        - has_column
+        - has_cell
+        - captioned_by
+        - has_callout
+        - evidenced_by
+
+    - name: visual-evidence
+      description: "Images and visual regions — diagrams, screenshots, callouts, bounding boxes in service guide figures"
+      entityTypeNames:
+        - ImageAsset
+        - Diagram
+        - Screenshot
+        - Photo
+        - VisualRegion
+        - OCRText
+        - BoundingBox
+        - DetectedLabel
+      relationshipTypeNames:
+        - shown_in
+        - stored_at
+        - extracted_from
+        - callout_identifies
+        - located_in_region
+        - visually_depicts
+        - ocr_mentions
+        - image_evidences
+
+    - name: retrieval
+      description: "Retrieval nodes — chunks and search records for graph-to-search bridge"
+      entityTypeNames:
+        - Chunk
+        - ChunkEmbedding
+        - SearchDocument
+        - SearchIndexRecord
+      relationshipTypeNames:
+        - indexed_as
+        - embeds_as
+        - applies_to
+
+    - name: provenance
+      description: "Cross-cutting provenance relationships connecting domain facts to their source documents"
+      entityTypeNames: []
+      relationshipTypeNames:
+        - source_section
+        - identifies
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ENTITY TYPES
+  # ─────────────────────────────────────────────────────────────────────────────
+  entityTypes:
+
+    # ── support-domain ────────────────────────────────────────────────────────
+
+    - name: Device
+      description: "A Surface product or device family (e.g. Surface Laptop 5, Surface Pro 9)"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Human-readable device name (e.g. 'Surface Laptop 5')"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key — type:normalized-name format (SPEC-002 §5.2)"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys: [canonical_key, display_name.lower()] + alias list (SPEC-002 entities.search_aliases)"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable SHA-256-derived entity ID (SPEC-002 entities.entity_id)"
+        - name: description
+          type: string
+          required: false
+          description: "Device description or notes"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Device
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: description
+            column: description
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Model
+      description: "A product model or SKU variant of a Surface device (e.g. Surface Laptop 5 13.5\" i7/16GB)"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Model name or SKU"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys for this model variant"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+        - name: sku
+          type: string
+          required: false
+          description: "Stock-keeping unit code"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Model
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: search_aliases
+            column: search_aliases
+          - property: sku
+            column: properties_json
+
+    - name: Component
+      description: "A named functional assembly within a Surface device (e.g. Battery Assembly, Display Module)"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Component name"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys for this component"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+        - name: description
+          type: string
+          required: false
+          description: "Component description"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Component
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: description
+            column: description
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Part
+      description: "A physical replaceable part in a Surface device (e.g. Battery Pack, Thermal Module)"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Part name"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys for this part"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+        - name: description
+          type: string
+          required: false
+          description: "Part description"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Part
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: description
+            column: description
+          - property: search_aliases
+            column: search_aliases
+
+    - name: PartNumber
+      description: "An OEM or SKU part number — first-class entity for traceability (e.g. M1287099-003)"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "The part number string (e.g. 'M1287099-003')"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized part number key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys for this part number"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: PartNumber
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Tool
+      description: "A repair or assembly tool used in a Surface service procedure (e.g. T5 Torx screwdriver, spudger)"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Tool name"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+        - name: description
+          type: string
+          required: false
+          description: "Tool description or specification"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Tool
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: description
+            column: description
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Symptom
+      description: "An observed failure or defect on a Surface device (e.g. 'no video output', 'battery not charging')"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Symptom description"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Symptom
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Cause
+      description: "A root cause linked to a symptom in a Surface service context (e.g. 'damaged flex cable')"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Cause description"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Cause
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Resolution
+      description: "A resolution step or fix for a Surface symptom (e.g. 'replace battery pack')"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Resolution description"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Resolution
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Procedure
+      description: "A named repair or assembly procedure from a Surface service guide (e.g. 'Battery Replacement')"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Procedure name"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+        - name: description
+          type: string
+          required: false
+          description: "Procedure description or overview"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Procedure
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: description
+            column: description
+          - property: search_aliases
+            column: search_aliases
+
+    - name: Step
+      description: "A single numbered step within a Surface service procedure"
+      module: support-domain
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Step heading or first sentence"
+        - name: canonical_key
+          type: string
+          required: true
+          description: "Normalized identity key"
+        - name: search_aliases
+          type: string
+          required: false
+          description: "Flattened search keys"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID"
+        - name: step_number
+          type: int
+          required: false
+          description: "Ordinal step number within the parent procedure"
+        - name: content
+          type: string
+          required: false
+          description: "Full step text"
+      dataBinding:
+        table: entities
+        entityIdColumn: entity_id
+        displayNameColumn: display_name
+        typeFilterColumn: entity_type
+        typeFilterValue: Step
+        additionalColumns:
+          - property: canonical_key
+            column: canonical_key
+          - property: search_aliases
+            column: search_aliases
+          - property: content
+            column: description
+
+    # ── document-evidence ────────────────────────────────────────────────────
+
+    - name: Document
+      description: "A source document (PDF, DOCX, HTML) — typically a Surface service guide"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Document path or filename"
+        - name: canonical_key
+          type: string
+          required: false
+          description: "Normalized source file identity key"
+      dataBinding:
+        table: source_files
+        entityIdColumn: source_file_id
+        displayNameColumn: path
+        additionalColumns:
+          - property: canonical_key
+            column: filename
+
+    - name: DocumentChunk
+      description: "A text chunk produced by document chunking — primary unit for AI Search retrieval"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Chunk content preview (first 200 chars)"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque chunk ID — SHA-256-derived (SPEC-002 chunks.chunk_id)"
+        - name: chunk_id
+          type: string
+          required: true
+          description: "Primary key for AI Search document lookup (= entity_id)"
+        - name: related_entity_ids
+          type: string
+          required: false
+          description: "Entity IDs linked to this chunk (SPEC-002 chunks.related_entity_ids); feeds AI Search entity_ids filterable field"
+        - name: entity_search_keys
+          type: string
+          required: false
+          description: "Denormalized canonical_keys + display_names + aliases for all linked entities (SPEC-002 chunks.entity_search_keys); feeds AI Search entity_aliases searchable field"
+        - name: content
+          type: string
+          required: false
+          description: "Full chunk text content"
+      dataBinding:
+        table: chunks
+        entityIdColumn: chunk_id
+        displayNameColumn: content
+        additionalColumns:
+          - property: entity_id
+            column: chunk_id
+          - property: chunk_id
+            column: chunk_id
+          - property: related_entity_ids
+            column: related_entity_ids
+          - property: entity_search_keys
+            column: entity_search_keys
+
+    - name: Section
+      description: "A heading/section within a service guide document"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Section heading"
+        - name: section_path
+          type: string
+          required: false
+          description: "Forward-slash-joined heading path (e.g. 'Introduction/Safety')"
+        - name: page_number
+          type: int
+          required: false
+          description: "Page number where the section starts"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: title
+        typeFilterColumn: element_type
+        typeFilterValue: section
+        additionalColumns:
+          - property: section_path
+            column: section_path
+          - property: page_number
+            column: page_number
+
+    - name: Page
+      description: "A page within a service guide document"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Page label (e.g. 'Page 5')"
+        - name: page_number
+          type: int
+          required: false
+          description: "1-indexed page number"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: title
+        typeFilterColumn: element_type
+        typeFilterValue: page
+        additionalColumns:
+          - property: page_number
+            column: page_number
+
+    - name: Table
+      description: "A structured table extracted from a service guide (e.g. parts list, torque specs)"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Table title or caption"
+        - name: page_number
+          type: int
+          required: false
+          description: "Page number"
+        - name: section_path
+          type: string
+          required: false
+          description: "Section path where table appears"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: title
+        typeFilterColumn: element_type
+        typeFilterValue: table
+        additionalColumns:
+          - property: page_number
+            column: page_number
+          - property: section_path
+            column: section_path
+
+    - name: TableRow
+      description: "A row within an extracted table"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Row label or first-cell content"
+        - name: row_index
+          type: int
+          required: false
+          description: "0-indexed row position"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: content
+        typeFilterColumn: element_type
+        typeFilterValue: table_row
+        additionalColumns:
+          - property: row_index
+            column: row_index
+
+    - name: TableColumn
+      description: "A column definition within an extracted table"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Column header text"
+        - name: col_index
+          type: int
+          required: false
+          description: "0-indexed column position"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: title
+        typeFilterColumn: element_type
+        typeFilterValue: table_cell
+        additionalColumns:
+          - property: col_index
+            column: col_index
+
+    - name: TableCell
+      description: "A single cell within an extracted table — primary evidence node for part number / spec data"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Cell text content"
+        - name: row_index
+          type: int
+          required: false
+          description: "Row index"
+        - name: col_index
+          type: int
+          required: false
+          description: "Column index"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: content
+        typeFilterColumn: element_type
+        typeFilterValue: table_cell
+        additionalColumns:
+          - property: row_index
+            column: row_index
+          - property: col_index
+            column: col_index
+
+    - name: Figure
+      description: "A figure extracted from a service guide document — carries blob_url to the stored image"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Figure title or caption"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Azure Blob Storage URL for the figure image"
+        - name: caption
+          type: string
+          required: false
+          description: "Figure caption text"
+        - name: page_number
+          type: int
+          required: false
+          description: "Page number the figure appears on"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: title
+        typeFilterColumn: element_type
+        typeFilterValue: figure
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: caption
+            column: content
+          - property: page_number
+            column: page_number
+
+    - name: Image
+      description: "An inline image within a service guide document — carries blob_url"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Image display label"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Azure Blob Storage URL for the image"
+        - name: page_number
+          type: int
+          required: false
+          description: "Source page number"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: title
+        typeFilterColumn: element_type
+        typeFilterValue: image
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: page_number
+            column: page_number
+
+    - name: Caption
+      description: "A caption text element near a figure or image in a service guide"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Caption text"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: content
+        typeFilterColumn: element_type
+        typeFilterValue: caption
+
+    - name: Callout
+      description: "A callout label in a service guide diagram pointing to a part or component"
+      module: document-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Callout label text (e.g. 'B – Battery connector')"
+        - name: label
+          type: string
+          required: false
+          description: "Short callout key (e.g. 'B')"
+      dataBinding:
+        table: document_elements
+        entityIdColumn: document_element_id
+        displayNameColumn: content
+        typeFilterColumn: element_type
+        typeFilterValue: callout
+        additionalColumns:
+          - property: label
+            column: title
+
+    # ── visual-evidence ───────────────────────────────────────────────────────
+
+    - name: ImageAsset
+      description: "A stored visual asset in Azure Blob Storage — figure, diagram, screenshot, or photo"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Asset caption or display name"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Azure Blob Storage URL for the image asset"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable entity ID — equals image_id from visual_assets table"
+        - name: asset_type
+          type: string
+          required: false
+          description: "figure | inline_image | screenshot | diagram | photo | chart | table_image"
+        - name: description
+          type: string
+          required: false
+          description: "LLM-generated visual description of the asset"
+        - name: caption
+          type: string
+          required: false
+          description: "Caption or nearby title"
+        - name: width
+          type: int
+          required: false
+          description: "Pixel width"
+        - name: height
+          type: int
+          required: false
+          description: "Pixel height"
+      dataBinding:
+        table: visual_assets
+        entityIdColumn: image_id
+        displayNameColumn: caption
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: entity_id
+            column: image_id
+          - property: asset_type
+            column: asset_type
+          - property: description
+            column: description
+          - property: caption
+            column: caption
+
+    - name: Diagram
+      description: "A diagram type of ImageAsset — schematic, exploded view, or assembly diagram in a service guide"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Diagram caption or title"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Azure Blob Storage URL for the diagram"
+        - name: description
+          type: string
+          required: false
+          description: "LLM-generated visual description"
+      dataBinding:
+        table: visual_assets
+        entityIdColumn: image_id
+        displayNameColumn: caption
+        typeFilterColumn: asset_type
+        typeFilterValue: diagram
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: description
+            column: description
+
+    - name: Screenshot
+      description: "A screenshot type of ImageAsset — UI or software screenshot in a service guide"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Screenshot caption or title"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Azure Blob Storage URL for the screenshot"
+        - name: description
+          type: string
+          required: false
+          description: "LLM-generated description"
+      dataBinding:
+        table: visual_assets
+        entityIdColumn: image_id
+        displayNameColumn: caption
+        typeFilterColumn: asset_type
+        typeFilterValue: screenshot
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: description
+            column: description
+
+    - name: Photo
+      description: "A photographic ImageAsset — physical device photo in a service guide"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Photo caption or title"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Azure Blob Storage URL for the photo"
+        - name: description
+          type: string
+          required: false
+          description: "LLM-generated description"
+      dataBinding:
+        table: visual_assets
+        entityIdColumn: image_id
+        displayNameColumn: caption
+        typeFilterColumn: asset_type
+        typeFilterValue: photo
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: description
+            column: description
+
+    - name: VisualRegion
+      description: "A bounding region within an image — callout, OCR text block, component region, or connector region"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Region label or detected object label"
+        - name: blob_url
+          type: blob_url
+          required: true
+          description: "Blob URL of parent or cropped image (from Document Intelligence output)"
+        - name: region_type
+          type: string
+          required: false
+          description: "callout | ocr_text | component_region | connector_region | warning_region | detected_label"
+        - name: label
+          type: string
+          required: false
+          description: "Callout label or detected label text (Vision LLM–generated)"
+        - name: polygon_json
+          type: string
+          required: false
+          description: "Region bounding polygon as JSON array of [x, y] pixel coordinates (Document Intelligence)"
+      dataBinding:
+        table: visual_regions
+        entityIdColumn: visual_region_id
+        displayNameColumn: label
+        additionalColumns:
+          - property: blob_url
+            column: blob_url
+          - property: region_type
+            column: region_type
+          - property: label
+            column: label
+          - property: polygon_json
+            column: polygon_json
+
+    - name: OCRText
+      description: "OCR text extracted from an image or visual region (Document Intelligence output)"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "OCR text content (first 200 chars)"
+        - name: text
+          type: string
+          required: false
+          description: "Full OCR text"
+      dataBinding:
+        table: visual_regions
+        entityIdColumn: visual_region_id
+        displayNameColumn: text
+        typeFilterColumn: region_type
+        typeFilterValue: ocr_text
+        additionalColumns:
+          - property: text
+            column: text
+
+    - name: BoundingBox
+      description: "Polygon or bounding box coordinates for a visual region — from Document Intelligence"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Bounding box label"
+        - name: polygon_json
+          type: string
+          required: false
+          description: "Bounding polygon as JSON"
+      dataBinding:
+        table: visual_regions
+        entityIdColumn: visual_region_id
+        displayNameColumn: label
+        additionalColumns:
+          - property: polygon_json
+            column: polygon_json
+
+    - name: DetectedLabel
+      description: "A label detected in an image by a vision model (Vision LLM–generated)"
+      module: visual-evidence
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Detected label text"
+        - name: label
+          type: string
+          required: false
+          description: "Full detected label"
+        - name: confidence
+          type: double
+          required: false
+          description: "Detection confidence [0.0–1.0]"
+      dataBinding:
+        table: visual_regions
+        entityIdColumn: visual_region_id
+        displayNameColumn: label
+        typeFilterColumn: region_type
+        typeFilterValue: detected_label
+        additionalColumns:
+          - property: label
+            column: label
+          - property: confidence
+            column: confidence
+
+    # ── retrieval ─────────────────────────────────────────────────────────────
+
+    - name: Chunk
+      description: "A retrieval chunk with text content — general-purpose chunking node"
+      module: retrieval
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Chunk content preview"
+        - name: content
+          type: string
+          required: false
+          description: "Full chunk text content"
+      dataBinding:
+        table: chunks
+        entityIdColumn: chunk_id
+        displayNameColumn: content
+
+    - name: ChunkEmbedding
+      description: "An embedding vector associated with a chunk (1536-dim text-embedding-3-large)"
+      module: retrieval
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Embedding label (chunk_id reference)"
+      dataBinding:
+        table: chunks
+        entityIdColumn: chunk_id
+        displayNameColumn: chunk_id
+
+    - name: SearchDocument
+      description: "A document stored in an Azure AI Search index"
+      module: retrieval
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "Search document key"
+      dataBinding:
+        table: chunks
+        entityIdColumn: chunk_id
+        displayNameColumn: chunk_id
+
+    - name: SearchIndexRecord
+      description: "A record in a specific Azure AI Search index — keyed by chunk_id; bridge node for Phase 2 retrieval"
+      module: retrieval
+      properties:
+        - name: display_name
+          type: string
+          required: true
+          description: "AI Search document key (= chunk_id)"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque record ID — SHA-256-derived (SPEC-002 chunks.chunk_id)"
+        - name: search_record_id
+          type: string
+          required: true
+          description: "AI Search document key for direct retrieval (= chunk_id at index-build time)"
+        - name: canonical_key
+          type: string
+          required: false
+          description: "Derived filterable field on AI Search document; populated at index-build time by compile-data JOIN to entities.canonical_key via related_entity_ids[0] — not a raw chunks column"
+        - name: entity_search_keys
+          type: string
+          required: false
+          description: "Derived searchable field; populated at index-build time from chunks.entity_search_keys (itself from entities.search_aliases) — feeds AI Search entity_aliases field"
+      dataBinding:
+        table: chunks
+        entityIdColumn: chunk_id
+        displayNameColumn: chunk_id
+        additionalColumns:
+          - property: entity_id
+            column: chunk_id
+          - property: search_record_id
+            column: chunk_id
+          # canonical_key and entity_search_keys are DERIVED at index-build via compile-data JOINs; not direct chunk columns
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # RELATIONSHIP TYPES
+  # ─────────────────────────────────────────────────────────────────────────────
+  relationshipTypes:
+
+    # ── support-domain ────────────────────────────────────────────────────────
+
+    - name: has_component
+      description: "A Surface device has a named functional component"
+      module: support-domain
+      sourceType: Device
+      targetType: Component
+      inversePolicy: materialize
+      inverseName: component_of
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_component
+
+    - name: has_part
+      description: "A component contains a physical replaceable part"
+      module: support-domain
+      sourceType: Component
+      targetType: Part
+      inversePolicy: materialize
+      inverseName: part_of
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_part
+
+    - name: has_part_number
+      description: "A part has one canonical OEM part number"
+      module: support-domain
+      sourceType: Part
+      targetType: PartNumber
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_part_number
+
+    - name: has_variant
+      description: "A Surface device family has a product model or SKU variant"
+      module: support-domain
+      sourceType: Device
+      targetType: Model
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_variant
+
+    - name: causes
+      description: "A root cause produces a symptom in a Surface device"
+      module: support-domain
+      sourceType: Cause
+      targetType: Symptom
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: causes
+
+    - name: resolves
+      description: "A resolution addresses a symptom"
+      module: support-domain
+      sourceType: Resolution
+      targetType: Symptom
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: resolves
+
+    - name: uses_tool
+      description: "A service procedure requires a specific tool"
+      module: support-domain
+      sourceType: Procedure
+      targetType: Tool
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: uses_tool
+
+    - name: has_step
+      description: "A procedure contains an ordered step"
+      module: support-domain
+      sourceType: Procedure
+      targetType: Step
+      inversePolicy: materialize
+      inverseName: step_of
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_step
+
+    - name: acts_on
+      description: "A procedure step acts on a component or part"
+      module: support-domain
+      sourceType: Step
+      targetType: Component
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: acts_on
+
+    # ── document-evidence ─────────────────────────────────────────────────────
+
+    - name: contains_section
+      description: "A document contains a section"
+      module: document-evidence
+      sourceType: Document
+      targetType: Section
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: contains_section
+
+    - name: contains_table
+      description: "A document contains an extracted table"
+      module: document-evidence
+      sourceType: Document
+      targetType: Table
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: contains_table
+
+    - name: contains_figure
+      description: "A document contains an extracted figure"
+      module: document-evidence
+      sourceType: Document
+      targetType: Figure
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: contains_figure
+
+    - name: has_row
+      description: "A table contains a table row"
+      module: document-evidence
+      sourceType: Table
+      targetType: TableRow
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_row
+
+    - name: has_column
+      description: "A table has a column definition"
+      module: document-evidence
+      sourceType: Table
+      targetType: TableColumn
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_column
+
+    - name: has_cell
+      description: "A table row contains a table cell"
+      module: document-evidence
+      sourceType: TableRow
+      targetType: TableCell
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_cell
+
+    - name: captioned_by
+      description: "A figure is captioned by a caption element"
+      module: document-evidence
+      sourceType: Figure
+      targetType: Caption
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: captioned_by
+
+    - name: has_callout
+      description: "A figure or diagram contains a callout label pointing to a part or component"
+      module: document-evidence
+      sourceType: Figure
+      targetType: Callout
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_callout
+
+    - name: evidenced_by
+      # BRIDGE RELATIONSHIP — Phase 1 traversal: domain entity → DocumentChunk → AI Search
+      description: "A domain entity (Part, Component, Step, etc.) is evidenced by a document chunk or table cell; bridge hop to AI Search (yields chunk_id + related_entity_ids)"
+      module: document-evidence
+      sourceType: Part
+      targetType: DocumentChunk
+      inversePolicy: none
+      evidenceLink: true
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: evidenced_by
+        evidenceIdColumn: evidence_id
+
+    # ── visual-evidence ───────────────────────────────────────────────────────
+
+    - name: shown_in
+      # BRIDGE RELATIONSHIP — Phase 1 traversal: domain entity → Figure/ImageAsset → blob_url
+      description: "A domain entity (Step, Part, Component) is shown in a figure or image asset; bridge hop to visual grounding (yields blob_url)"
+      module: visual-evidence
+      sourceType: Step
+      targetType: Figure
+      inversePolicy: alias
+      inverseName: shows
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: shown_in
+
+    - name: stored_at
+      description: "An image asset is stored at a Blob URL — expressed as blob_url property on the node, not a separate edge"
+      module: visual-evidence
+      sourceType: ImageAsset
+      targetType: ImageAsset
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: visual_assets
+        relationshipIdColumn: image_id
+        sourceEntityIdColumn: image_id
+        targetEntityIdColumn: image_id
+        typeFilterColumn: asset_type
+        typeFilterValue: ""
+
+    - name: extracted_from
+      description: "A visual region was extracted from a parent image asset (Document Intelligence)"
+      module: visual-evidence
+      sourceType: VisualRegion
+      targetType: ImageAsset
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: extracted_from
+
+    - name: callout_identifies
+      description: "A callout label in a diagram points to and identifies a domain entity"
+      module: visual-evidence
+      sourceType: Callout
+      targetType: Part
+      inversePolicy: alias
+      inverseName: identified_by
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: callout_identifies
+
+    - name: located_in_region
+      description: "A callout is located within a specific visual region (bounding box) in an image"
+      module: visual-evidence
+      sourceType: Callout
+      targetType: VisualRegion
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: located_in_region
+
+    - name: visually_depicts
+      description: "An image asset visually depicts a domain entity (e.g. a diagram depicts a component)"
+      module: visual-evidence
+      sourceType: ImageAsset
+      targetType: Component
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: visually_depicts
+
+    - name: ocr_mentions
+      description: "OCR text extracted from an image or region references a domain entity"
+      module: visual-evidence
+      sourceType: OCRText
+      targetType: Part
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: ocr_mentions
+
+    - name: image_evidences
+      description: "An image asset is evidence for a claim or domain entity"
+      module: visual-evidence
+      sourceType: ImageAsset
+      targetType: Part
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: image_evidences
+
+    # ── retrieval ─────────────────────────────────────────────────────────────
+
+    - name: indexed_as
+      # BRIDGE RELATIONSHIP — Phase 1 traversal hop 2: DocumentChunk → SearchIndexRecord → search_record_id
+      description: "A document chunk has a corresponding record in an AI Search index; bridge hop (yields search_record_id + search_index_name for Phase 2 AI Search lookup)"
+      module: retrieval
+      sourceType: DocumentChunk
+      targetType: SearchIndexRecord
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: indexed_as
+
+    - name: embeds_as
+      description: "A chunk has an associated embedding vector (1536-dim text-embedding-3-large)"
+      module: retrieval
+      sourceType: Chunk
+      targetType: ChunkEmbedding
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: embeds_as
+
+    - name: applies_to
+      description: "A search document or index record applies to (references) a domain entity"
+      module: retrieval
+      sourceType: SearchDocument
+      targetType: Device
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: applies_to
+
+    # ── provenance ────────────────────────────────────────────────────────────
+
+    - name: source_section
+      description: "An entity is mentioned in a specific section of a service guide document"
+      module: provenance
+      sourceType: Part
+      targetType: Section
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: source_section
+
+    - name: identifies
+      description: "A table cell value or part number identifies a domain entity (Part or Component)"
+      module: provenance
+      sourceType: TableCell
+      targetType: Part
+      inversePolicy: none
+      evidenceLink: true
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: source_entity_id
+        targetEntityIdColumn: target_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: identifies
+        evidenceIdColumn: evidence_id
+
+    # ── materialized inverses (IDs in 200x block) ─────────────────────────────
+    # These inverse entries allow the compiler to register the inverse name in
+    # ids.lock.json; they are not authored as forward relationships.
+
+    - name: component_of
+      description: "Inverse of has_component — a component belongs to a device (materialized inverse)"
+      module: support-domain
+      sourceType: Component
+      targetType: Device
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: target_entity_id
+        targetEntityIdColumn: source_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_component
+
+    - name: part_of
+      description: "Inverse of has_part — a part belongs to a component (materialized inverse)"
+      module: support-domain
+      sourceType: Part
+      targetType: Component
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: target_entity_id
+        targetEntityIdColumn: source_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_part
+
+    - name: step_of
+      description: "Inverse of has_step — a step belongs to a procedure (materialized inverse)"
+      module: support-domain
+      sourceType: Step
+      targetType: Procedure
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: target_entity_id
+        targetEntityIdColumn: source_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: has_step
+
+    - name: shows
+      description: "Alias inverse of shown_in — a figure or image shows a domain entity"
+      module: visual-evidence
+      sourceType: Figure
+      targetType: Step
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: target_entity_id
+        targetEntityIdColumn: source_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: shown_in
+
+    - name: identified_by
+      description: "Alias inverse of callout_identifies — a domain entity is identified by a callout"
+      module: visual-evidence
+      sourceType: Part
+      targetType: Callout
+      inversePolicy: none
+      evidenceLink: false
+      dataBinding:
+        table: relationships
+        relationshipIdColumn: relationship_id
+        sourceEntityIdColumn: target_entity_id
+        targetEntityIdColumn: source_entity_id
+        typeFilterColumn: relationship_type
+        typeFilterValue: callout_identifies

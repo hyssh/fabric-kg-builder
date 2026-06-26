@@ -1,0 +1,10 @@
+[
+  {
+    "relationship_id": "e2e:rel:has_component:battery",
+    "relationship_type": "has_component",
+    "source_entity_id": "e2e:device:surface-laptop-5",
+    "target_entity_id": "e2e:component:battery",
+    "evidence_id": "e2e:ev:figure12:calloutB",
+    "confidence": 0.88
+  }
+]

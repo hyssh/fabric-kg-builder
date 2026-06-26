@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>fabric-kg-builder — Documents to a deployable Microsoft Fabric knowledge graph</title>
+  <meta name="description" content="A Python CLI that turns your documents into a deployable Microsoft Fabric knowledge graph — enriched by Azure OpenAI, searched via Azure AI Search, governed by a Fabric Ontology, and queried with a Fabric Data Agent. Designed to drive from the GitHub Copilot CLI." />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232dd4bf'/><text x='16' y='22' font-size='18' font-family='monospace' text-anchor='middle' fill='%23061018' font-weight='bold'>kg</text></svg>" />
+</head>
+<body>
+
+  <!-- NAV -->
+  <header class="nav">
+    <div class="container nav__inner">
+      <a class="brand" href="#top">
+        <span class="brand__mark">kg</span>
+        <span>fabric-kg-builder</span>
+      </a>
+      <nav class="nav__links" id="navLinks">
+        <a href="#what">What it does</a>
+        <a href="#pipeline">How it works</a>
+        <a href="#copilot">Copilot CLI</a>
+        <a href="#best-practices">Best practices</a>
+        <a href="#reproduce">Reproduce</a>
+        <a href="#install">Install</a>
+        <a class="nav__cta" href="#install">Get started</a>
+      </nav>
+      <button class="nav__toggle" id="navToggle" aria-label="Toggle navigation">&#9776;</button>
+    </div>
+  </header>
+
+  <!-- HERO -->
+  <a id="top"></a>
+  <section class="hero">
+    <div class="container hero__content">
+      <p class="eyebrow">Microsoft Fabric &middot; Knowledge Graphs &middot; Azure AI</p>
+      <h1>Turn your documents into a deployable Fabric knowledge graph.</h1>
+      <p class="lede">
+        <strong>fabric-kg-builder</strong> is a Python CLI that transforms PDFs, Word docs, HTML, and
+        CSVs into a fully deployed Microsoft Fabric knowledge graph — enriched by Azure OpenAI,
+        governed by a Fabric Ontology, searched via Azure AI Search, and ready to query with a
+        Fabric Data Agent. Built to drive straight from the <strong>GitHub Copilot CLI</strong>.
+      </p>
+      <div class="hero__actions">
+        <a class="btn btn--primary" href="#install">Get started &rarr;</a>
+        <a class="btn btn--ghost" href="#copilot">Use with Copilot CLI</a>
+      </div>
+      <div class="hero__badges">
+        <span class="badge"><b>1</b> command-line tool</span>
+        <span class="badge"><b>12</b> entity types modeled</span>
+        <span class="badge"><b>fabric-cicd</b> deployment</span>
+        <span class="badge">Python <b>3.10+</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- BACKGROUND -->
+  <section id="background">
+    <div class="container">
+      <p class="eyebrow">Background</p>
+      <h2>Why a knowledge graph — and why this is hard</h2>
+      <p class="section-lede">
+        Enterprises sit on thousands of manuals, guides, and reports. Vector search alone returns
+        passages, not <em>connected facts</em>. A knowledge graph captures the relationships — which
+        part belongs to which device, which symptom a cause produces, which step a procedure
+        requires — so an AI agent can reason over them. The hard part isn't drawing boxes; it's
+        building a graph that's <strong>domain-fit</strong> and <strong>densely connected</strong>
+        enough to actually answer questions.
+      </p>
+      <div class="grid grid--3">
+        <div class="card">
+          <div class="card__icon">&#128218;</div>
+          <h3>The input problem</h3>
+          <p>Real documents mix prose, tables, figures, and part numbers. Extraction must handle all of them — Document Intelligence pulls tables as HTML and figures as images to Blob storage.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#129518;</div>
+          <h3>The sparsity problem</h3>
+          <p>LLMs extract per-section, leaving the graph fragmented — device models disconnected from their own parts; symptoms with no causes. A graph with islands answers nothing.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#127919;</div>
+          <h3>The fit problem</h3>
+          <p>A generic, one-size-fits-all schema retrieves poorly. The graph model should be shaped by <em>your</em> industry, domain, and the questions you actually need answered.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- WHAT IT DOES -->
+  <section id="what" class="section--alt">
+    <div class="container">
+      <p class="eyebrow">Capabilities</p>
+      <h2>What it does</h2>
+      <p class="section-lede">One CLI takes you from raw files to a live, queryable graph in Microsoft Fabric.</p>
+      <div class="grid grid--3">
+        <div class="card">
+          <div class="card__icon">&#129302;</div>
+          <h3>LLM enrichment</h3>
+          <p>Extracts entities, relationships, and evidence from documents via Azure OpenAI / Microsoft Foundry, guided by your domain brief.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#128279;</div>
+          <h3>Graph densification</h3>
+          <p>A deterministic pass links each document's device model to its parts &amp; procedures and connects Cause&rarr;Symptom&rarr;Resolution — no extra LLM cost.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#127760;</div>
+          <h3>Multi-type ontology</h3>
+          <p>Deploys one Fabric entity type per real domain type with typed relationships, so the Ontology Explorer shows a rich graph, not one generic box.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#128202;</div>
+          <h3>Lakehouse + AI Search</h3>
+          <p>Structured graph and ontology land in a schema-enabled Lakehouse; document text and embeddings power hybrid retrieval in Azure AI Search.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#129504;</div>
+          <h3>Data Agent grounding</h3>
+          <p>Auto-generates a Fabric Data Agent instruction file from the <em>live</em> graph and your sample questions, so natural-language &rarr; GQL actually returns rows.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#9881;&#65039;</div>
+          <h3>fabric-cicd deployment</h3>
+          <p>Deterministic, repeatable deploys to Lakehouse, Ontology, and Search across dev / test / prod environments.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PIPELINE -->
+  <section id="pipeline">
+    <div class="container">
+      <p class="eyebrow">How it works</p>
+      <h2>The pipeline</h2>
+      <p class="section-lede">
+        Each stage is a single command. Re-deploying reuses enriched data — so iteration is fast and cheap.
+      </p>
+      <div class="pipeline">
+        <div class="pipe-step"><div class="num">01</div><h4>set-domain</h4><p>Declare industry, domain &amp; sample questions</p></div>
+        <div class="pipe-step"><div class="num">02</div><h4>enrich</h4><p>LLM entity / relationship extraction</p></div>
+        <div class="pipe-step is-accent"><div class="num">03</div><h4>densify</h4><p>Link hub edges + Cause/Symptom/Resolution</p></div>
+        <div class="pipe-step"><div class="num">04</div><h4>compile-*</h4><p>Parquet, ontology &amp; search schemas</p></div>
+        <div class="pipe-step"><div class="num">05</div><h4>package</h4><p>Bundle artifacts with a manifest</p></div>
+        <div class="pipe-step is-accent"><div class="num">06</div><h4>deploy --multitype</h4><p>Lakehouse + rich ontology + search</p></div>
+        <div class="pipe-step"><div class="num">07</div><h4>Data Agent</h4><p>Ask questions in natural language</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section id="install" class="section--alt">
+    <div class="container">
+      <p class="eyebrow">Get started</p>
+      <h2>Install &amp; prerequisites</h2>
+      <p class="section-lede">
+        Requires Python 3.10+, an Azure subscription with a Microsoft Fabric workspace
+        (schema-enabled Lakehouse + Ontology), Azure OpenAI / Foundry, Azure AI Search, Document
+        Intelligence, and Blob storage. Auth uses <code>az login</code> (DefaultAzureCredential).
+      </p>
+      <div class="grid grid--2">
+        <div class="code">
+          <div class="code__bar"><span class="code__title">install</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmt"># clone and install (editable, with dev extras)</span>
+<span class="tok-cmd">git</span> clone https://github.com/hyssh/fabric-kg-builder
+<span class="tok-cmd">cd</span> fabric-kg-builder
+<span class="tok-cmd">pip</span> install -e .[dev]
+
+<span class="tok-cmt"># authenticate &amp; configure secrets</span>
+<span class="tok-cmd">az</span> login
+<span class="tok-cmd">cp</span> .env.example .env   <span class="tok-cmt"># fill in endpoints</span>
+
+<span class="tok-cmd">fabric-kg</span> <span class="tok-flag">--help</span></code></pre>
+        </div>
+        <div>
+          <ul class="tlist">
+            <li>Self-documenting CLI — every command has examples in <code>--help</code></li>
+            <li>Secrets stay in a local <code>.env</code> (never committed)</li>
+            <li>Per-environment config under <code>ontology/environments/</code></li>
+            <li>Deploys via <strong>fabric-cicd</strong> to your Fabric workspace</li>
+            <li>918+ unit tests; structured validation gates on every build</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- COPILOT CLI -->
+  <section id="copilot">
+    <div class="container">
+      <p class="eyebrow">Workflow</p>
+      <h2>Use it with the GitHub Copilot CLI</h2>
+      <p class="section-lede">
+        Every <code>fabric-kg</code> command ships rich <code>--help</code> — a pipeline overview,
+        parameters with defaults, worked examples, and a contact line. That makes it ideal to drive
+        conversationally from the GitHub Copilot CLI: Copilot reads the help, understands the flow,
+        and runs the right command for you.
+      </p>
+      <div class="grid grid--2">
+        <div class="code">
+          <div class="code__bar"><span class="code__title">in the GitHub Copilot CLI</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmt"># let Copilot discover the tool</span>
+&gt; run fabric-kg --help and summarize the pipeline
+
+<span class="tok-cmt"># then ask it to do the work</span>
+&gt; set the domain for field-service troubleshooting,
+  industry manufacturing, using my questions file
+&gt; enrich the PDFs in sample_data, then densify
+&gt; deploy a multitype ontology to dev</code></pre>
+        </div>
+        <div class="code">
+          <div class="code__bar"><span class="code__title">what Copilot runs for you</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmd">fabric-kg</span> set-domain <span class="tok-flag">--industry</span> manufacturing <span class="tok-flag">\</span>
+  <span class="tok-flag">--business-domain</span> field-service <span class="tok-flag">\</span>
+  <span class="tok-flag">--questions-file</span> sample_data\surface_questions.txt <span class="tok-flag">\</span>
+  <span class="tok-flag">--prompt</span> <span class="tok-str">"Surface hardware troubleshooting..."</span>
+
+<span class="tok-cmd">fabric-kg</span> enrich <span class="tok-flag">--input</span> sample_data\Surface_Troubleshootings
+<span class="tok-cmd">fabric-kg</span> densify <span class="tok-flag">--input</span> build\enriched <span class="tok-flag">--out</span> build\enriched_dense
+<span class="tok-cmd">fabric-kg</span> compile-data <span class="tok-flag">--input</span> build\enriched_dense
+<span class="tok-cmd">fabric-kg</span> deploy-ontology <span class="tok-flag">--env</span> dev <span class="tok-flag">--multitype</span> <span class="tok-flag">\</span>
+  <span class="tok-flag">--parquet-dir</span> build\parquet <span class="tok-flag">--no-mock</span></code></pre>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Tip.</strong> Because the help text names every parameter and default, Copilot CLI
+        rarely guesses wrong. Point it at <code>fabric-kg &lt;command&gt; --help</code> when you want a
+        specific stage.
+      </div>
+    </div>
+  </section>
+
+  <!-- BEST PRACTICES -->
+  <section id="best-practices" class="section--alt">
+    <div class="container">
+      <p class="eyebrow">Best practices</p>
+      <h2>Design once, iterate cheaply</h2>
+      <p class="section-lede">
+        The biggest driver of graph quality is the up-front domain brief. Get these right and you
+        minimize the expensive cycle of re-design and re-deployment.
+      </p>
+      <div class="bp">
+        <div class="bp__item">
+          <h3><span class="dot"></span>Start from a domain template</h3>
+          <p>Name the entity types and relationships that fit your industry. The Surface corpus uses a
+            <em>field-service</em> template: Device, DeviceModel, Component, Part, PartNumber,
+            Procedure, Step, Tool, Symptom, Cause, Resolution.</p>
+          <p>Healthcare, legal, and finance starters are in the README's <em>Domain Template Playbook</em>.</p>
+        </div>
+        <div class="bp__item">
+          <h3><span class="dot"></span>Declare industry &amp; business domain</h3>
+          <p><code>set-domain</code> requires <code>--industry</code> and <code>--business-domain</code>.
+            These shape which types the model proposes and how the graph is organized.</p>
+          <p>They flow into enrichment and into the auto-generated Data Agent grounding.</p>
+        </div>
+        <div class="bp__item">
+          <h3><span class="dot"></span>Lead with sample questions</h3>
+          <p>Pass <code>--questions-file</code> with 3–5 questions the graph must answer. These are the
+            <strong>single biggest lever</strong> on ontology quality — they tell the model exactly which
+            entity types and relationships are needed so every question is answerable.</p>
+          <p>They're also recycled as Data Agent few-shots automatically.</p>
+        </div>
+        <div class="bp__item">
+          <h3><span class="dot"></span>Always densify before compiling</h3>
+          <p>Run <code>fabric-kg densify</code> between <code>enrich</code> and <code>compile-data</code>.
+            It connects the islands extraction leaves behind — without another LLM pass.</p>
+          <p>On the Surface corpus this took relationships from <strong>3,715 &rarr; 32,118</strong> and
+            isolated symptoms from <strong>327 &rarr; 8</strong>.</p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Iterate without re-enriching.</strong> Enrichment is the slow, costly stage — run it once.
+        Densify, compile, and <code>deploy-ontology --multitype</code> all reuse the enriched data, so
+        refining your model and re-deploying takes minutes, not hours. Test &rarr; inspect &rarr; tune
+        densify or grounding &rarr; re-deploy. No re-enrichment required.
+      </div>
+    </div>
+  </section>
+
+  <!-- RESULTS -->
+  <section id="results">
+    <div class="container">
+      <p class="eyebrow">Proven on real data</p>
+      <h2>The Surface troubleshooting corpus</h2>
+      <p class="section-lede">
+        Built end-to-end from 22 official Microsoft Surface service guides — the reference template
+        shipped with the tool.
+      </p>
+      <div class="stats">
+        <div class="stat"><div class="num">22</div><div class="label">service-guide PDFs</div></div>
+        <div class="stat"><div class="num">10.9k</div><div class="label">unique graph entities</div></div>
+        <div class="stat"><div class="num">37.8k</div><div class="label">relationships after densify</div></div>
+        <div class="stat"><div class="num">27k+</div><div class="label">AI Search documents</div></div>
+      </div>
+      <div class="callout">
+        <strong>Before &amp; after densify.</strong> A device model like &ldquo;Surface Laptop 5&rdquo;
+        went from <strong>0</strong> to <strong>400+ components, 220 parts, and 468 procedures</strong>;
+        symptoms with no causes dropped from 79% to 2%. Same enriched data — just a connected graph.
+      </div>
+    </div>
+  </section>
+
+  <!-- REPRODUCE -->
+  <section id="reproduce" class="section--alt">
+    <div class="container">
+      <p class="eyebrow">Try it yourself</p>
+      <h2>Reproduce the Surface use case</h2>
+      <p class="section-lede">
+        The Surface troubleshooting graph is the worked example shipped with the tool. One script
+        rebuilds it end-to-end — from the 22 sample PDFs to a deployed Fabric Lakehouse, multi-type
+        Ontology, and AI Search index. Build the artifacts with no Azure account, or pass
+        <code>-Deploy</code> to publish live.
+      </p>
+
+      <div class="grid grid--2">
+        <div>
+          <h3 style="margin-top:0">1 &middot; Install &amp; (optionally) sign in</h3>
+          <div class="code">
+            <div class="code__bar"><span class="code__title">setup</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmt"># from the cloned repo root</span>
+<span class="tok-cmd">pip</span> install -e .[dev]
+
+<span class="tok-cmt"># only needed for a live deploy (-Deploy):</span>
+<span class="tok-cmd">az</span> login
+<span class="tok-cmd">Copy-Item</span> ontology\environments\dev.json.example <span class="tok-flag">`</span>
+            ontology\environments\dev.json   <span class="tok-cmt"># then edit with your Azure IDs</span></code></pre>
+          </div>
+        </div>
+        <div>
+          <h3 style="margin-top:0">2 &middot; Run the recipe</h3>
+          <div class="code">
+            <div class="code__bar"><span class="code__title">reproduce-surface-kg.ps1</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmt"># build artifacts only (no Azure calls)</span>
+.\scripts\reproduce-surface-kg.ps1
+
+<span class="tok-cmt"># full pipeline → Lakehouse + Ontology + Search</span>
+.\scripts\reproduce-surface-kg.ps1 <span class="tok-flag">-Deploy</span>
+
+<span class="tok-cmt"># POSIX equivalent</span>
+<span class="tok-cmd">./scripts/reproduce-surface-kg.sh</span> --deploy --env dev</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <p class="section-lede" style="margin-top:36px">
+        The script runs a preflight check, then every stage in order — each one a single
+        <code>fabric-kg</code> command:
+      </p>
+      <div class="pipeline">
+        <div class="pipe-step"><div class="num">01</div><h4>set-domain</h4><p>Field-service template + sample questions</p></div>
+        <div class="pipe-step"><div class="num">02</div><h4>enrich</h4><p>LLM extraction (cached after first run)</p></div>
+        <div class="pipe-step is-accent"><div class="num">03</div><h4>densify</h4><p>Hub + Cause/Symptom/Resolution + Step rollup + RCA</p></div>
+        <div class="pipe-step"><div class="num">04</div><h4>compile + package</h4><p>Parquet, ontology, search &amp; bundle</p></div>
+        <div class="pipe-step is-accent"><div class="num">05</div><h4>deploy</h4><p>Lakehouse + multitype ontology + search</p></div>
+      </div>
+
+      <div class="callout">
+        <strong>After a live deploy</strong> the script writes
+        <code>data/surface_kg/data-agent-instructions.md</code> from your live graph — paste it into a
+        Fabric <strong>Data Agent</strong>, add the AI Search index as a second source, and you can ask
+        questions like <em>&ldquo;why is my Surface battery swollen and what should a technician do?&rdquo;</em>
+        Full steps are in <code>scripts/README.md</code> and the README&rsquo;s Domain Template Playbook.
+      </div>
+    </div>
+  </section>
+
+  <!-- ARCHITECTURE -->
+  <section id="architecture">
+    <div class="container">
+      <p class="eyebrow">Architecture</p>
+      <h2>Where everything lands</h2>
+      <p class="section-lede">
+        Structured graph &amp; ontology live in the Lakehouse; full text and embeddings live in AI
+        Search. A Fabric Data Agent reasons over the ontology and grounds answers in both.
+      </p>
+      <div class="arch">
+        <div class="arch__node"><div class="ic">&#128196;</div><h4>Sources</h4><p>PDF / DOCX / HTML / CSV + Document Intelligence</p></div>
+        <div class="arch__node"><div class="ic">&#127960;&#65039;</div><h4>Fabric Lakehouse</h4><p>Graph nodes, edges &amp; ontology bindings (Delta / OneLake)</p></div>
+        <div class="arch__node"><div class="ic">&#128270;</div><h4>Azure AI Search</h4><p>Chunk &amp; element text + 1536-dim vectors</p></div>
+        <div class="arch__node"><div class="ic">&#129504;</div><h4>Fabric Data Agent</h4><p>NL &rarr; GQL over the multi-type ontology</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECURITY -->
+  <section id="security" class="section--alt">
+    <div class="container">
+      <p class="eyebrow">Trust</p>
+      <h2>Security &amp; privacy by design</h2>
+      <div class="grid grid--3">
+        <div class="card">
+          <div class="card__icon">&#128274;</div>
+          <h3>Secrets stay local</h3>
+          <p>Endpoints and credentials live in a local <code>.env</code> that is never committed. Auth prefers <code>DefaultAzureCredential</code> (az login / managed identity).</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#128737;&#65039;</div>
+          <h3>Prompt-injection safe</h3>
+          <p>User-supplied domain text is only ever placed in the LLM <em>user</em> message — never the system prompt — so it can't override extraction rules.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#9989;</div>
+          <h3>Validated &amp; deterministic</h3>
+          <p>Structured validation gates run on every build; IDs and densification edges are deterministic and auditable via an origin tag.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq">
+    <div class="container">
+      <p class="eyebrow">FAQ</p>
+      <h2>Common questions</h2>
+      <div class="faq">
+        <details>
+          <summary>Why does the Fabric Ontology Explorer show one box per type, not per record?</summary>
+          <p>The Explorer is a <em>schema</em> view: it draws one box per entity <strong>type</strong>, with all
+            instances bound behind it from Lakehouse tables. With <code>--multitype</code> you get one box per
+            real domain type (Component, Procedure, Symptom…) instead of a single generic node.</p>
+        </details>
+        <details>
+          <summary>Do I have to re-run enrichment every time I change the model?</summary>
+          <p>No. Enrichment is run once. Densify, compile, and deploy all reuse the enriched JSON, so iterating
+            on the graph model and re-deploying takes minutes.</p>
+        </details>
+        <details>
+          <summary>My Data Agent returns &ldquo;no data found&rdquo; even though the graph has data. Why?</summary>
+          <p>Usually a name mismatch (exact-match on &ldquo;Surface Pro 10&rdquo; vs the real
+            &ldquo;Surface Pro 10 for Business&rdquo;) or a sparse graph. Run <code>densify</code>, and paste the
+            auto-generated <code>data-agent-instructions.md</code> into your agent — it enforces <code>CONTAINS</code>
+            matching and short, single-hop queries.</p>
+        </details>
+        <details>
+          <summary>Can I use it for non-hardware domains?</summary>
+          <p>Yes. The Surface template is just the reference. Define your own entity types and relationships for
+            healthcare, legal, finance, or any document-heavy domain — the README's Domain Template Playbook has
+            starting points.</p>
+        </details>
+        <details>
+          <summary>What deploys the Fabric items?</summary>
+          <p><strong>fabric-cicd</strong>. Deployments are deterministic and repeatable across dev / test / prod,
+            reading per-environment config from <code>ontology/environments/</code>.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer__grid">
+        <div style="max-width: 320px">
+          <a class="brand" href="#top" style="margin-bottom: 14px">
+            <span class="brand__mark">kg</span><span>fabric-kg-builder</span>
+          </a>
+          <p style="color: var(--text-faint); font-size: 0.9rem; margin: 0;">
+            Documents in, a deployable Microsoft Fabric knowledge graph out — driven from the GitHub Copilot CLI.
+          </p>
+        </div>
+        <div>
+          <h4>Get started</h4>
+          <a href="#install">Install</a>
+          <a href="#reproduce">Reproduce the Surface example</a>
+          <a href="#copilot">Copilot CLI workflow</a>
+          <a href="#best-practices">Best practices</a>
+        </div>
+        <div>
+          <h4>Learn</h4>
+          <a href="#pipeline">Pipeline</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#faq">FAQ</a>
+        </div>
+        <div>
+          <h4>Project</h4>
+          <a href="https://github.com/hyssh/fabric-kg-builder">GitHub repository</a>
+          <a href="https://github.com/hyssh/fabric-kg-builder/blob/main/README.md">README &amp; Playbook</a>
+          <a href="mailto:hyssh@microsoft.com">Contact: hyssh@microsoft.com</a>
+        </div>
+      </div>
+      <div class="footer__bottom">
+        <span>Built with Microsoft Fabric, Azure OpenAI &amp; Azure AI Search.</span>
+        <span>Questions? <a href="mailto:hyssh@microsoft.com">hyssh@microsoft.com</a></span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
+

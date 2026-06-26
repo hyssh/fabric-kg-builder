@@ -1,0 +1,41 @@
+# Surface knowledge-graph sample questions (verified against the live graph)
+# Used by `fabric-kg set-domain --questions-file` to seed the ontology design
+# and the generated Data Agent few-shots. Lines starting with # are ignored.
+
+# --- Root-cause analysis (Symptom hub: cause + diagnose + remediate + resolve) ---
+Why is my Surface battery swollen, and what should a technician check and do before replacing it?
+What can cause battery expansion, how do I diagnose it, and how is it resolved?
+What causes battery overheating, and what is the repair procedure and its steps?
+My Surface battery is leaking - what is the root cause and how is it fixed?
+What should a technician do if the battery is venting?
+There is smoke or sparks from the device battery - what are the causes and what should I do?
+
+# --- Single-hop troubleshooting ---
+What can cause battery expansion?
+How is a swollen battery resolved?
+What diagnostic test is used for battery issues?
+What procedure remediates battery overheating, and what are its steps?
+
+# --- Device / component / part structure ---
+What components does the Surface Pro 10 for Business have?
+List the parts of the Display Assembly.
+What part number is the Surflink Screw?
+What part numbers belong to the Surface Laptop 5?
+
+# --- Procedures, steps and tools ---
+What steps are in the kickstand replacement procedure for the Surface Go 2?
+What tools does the display replacement procedure need?
+How many steps are in the SSD removal procedure?
+What procedures apply to the Surface Pro for Business 11th Edition with Intel?
+List all the steps in the Battery Replacement Process.
+
+# --- Graph-shaped queries (fan-out / aggregation / set logic — only the graph can answer) ---
+# These exploit the ontology's structure: counting and joining across all 22 documents.
+How many Surface device models are affected by battery expansion?
+List every device model that shares the "battery overheating" symptom.
+For battery expansion, how many causes, diagnostic tests, repair procedures, and resolutions are linked?
+Which components have the most part numbers across the whole catalog?
+What tools are used by the display replacement, and which other procedures use those same tools?
+Which symptoms are linked to the most causes?
+Across all models, which repair procedures have the most steps?
+What part numbers are shared between more than one device model?

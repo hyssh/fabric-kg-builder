@@ -1,0 +1,98 @@
+{
+  "source_file_id": "src:surface-pro-7-kickstand-abc123",
+  "pass": "p2",
+  "entities": [
+    {
+      "entity_id": "entity:b2c4d7eb82fe23e7752f9fe1cc7bc7ad",
+      "entity_type": "Device",
+      "display_name": "Surface Pro 7",
+      "canonical_key": "device:surface-pro-7",
+      "aliases": ["SPro7"],
+      "search_aliases": "Surface Pro 7|SPro7",
+      "description": "Microsoft Surface Pro 7 tablet device.",
+      "properties_json": null,
+      "source_file_id": "src:surface-pro-7-kickstand-abc123",
+      "confidence": 0.97,
+      "is_placeholder": false,
+      "content_hash": "b2c4d7eb82fe23e7752f9fe1cc7bc7adadebc402af48e66fed68c7de91b08c97",
+      "created_at": "2026-06-24T12:00:00+00:00",
+      "updated_at": "2026-06-24T12:00:00+00:00"
+    },
+    {
+      "entity_id": "entity:00a2deb5d08a19d1c514d5b0a5b9cd13",
+      "entity_type": "Component",
+      "display_name": "Kickstand",
+      "canonical_key": "component:kickstand",
+      "aliases": [],
+      "search_aliases": "Kickstand",
+      "description": "Adjustable rear kickstand on Surface Pro 7.",
+      "properties_json": null,
+      "source_file_id": "src:surface-pro-7-kickstand-abc123",
+      "confidence": 0.93,
+      "is_placeholder": false,
+      "content_hash": "00a2deb5d08a19d1c514d5b0a5b9cd13488bb7e54f6f1b6fd27ef9825dac689d",
+      "created_at": "2026-06-24T12:00:00+00:00",
+      "updated_at": "2026-06-24T12:00:00+00:00"
+    }
+  ],
+  "relationships": [
+    {
+      "relationship_id": "rel:8bff24b72f8e661e8f6e7fd643e065b1",
+      "relationship_type": "HAS_COMPONENT",
+      "source_entity_id": "entity:b2c4d7eb82fe23e7752f9fe1cc7bc7ad",
+      "target_entity_id": "entity:00a2deb5d08a19d1c514d5b0a5b9cd13",
+      "evidence_id": "evid:579d476136ec3ef3993ff2b3513f4128",
+      "properties_json": null,
+      "confidence": 0.91,
+      "is_placeholder": false,
+      "content_hash": "8bff24b72f8e661e8f6e7fd643e065b1bf69f75bea5c4c368f790ffcd05f0d6f",
+      "created_at": "2026-06-24T12:00:00+00:00"
+    }
+  ],
+  "chunks": [
+    {
+      "chunk_id": "chunk:1afc780d2afc69ce2fefb3dbc1e4bddf",
+      "source_file_id": "src:surface-pro-7-kickstand-abc123",
+      "document_element_id": null,
+      "chunk_type": "section_text",
+      "content": "The Surface Pro 7 kickstand opens to multiple angles and is replaceable.",
+      "content_html": null,
+      "embedding_text": "The Surface Pro 7 kickstand opens to multiple angles and is replaceable.",
+      "blob_url": null,
+      "page_number": 1,
+      "section_path": "Kickstand > Overview",
+      "table_id": null,
+      "figure_id": null,
+      "image_id": null,
+      "related_entity_ids": [
+        "entity:b2c4d7eb82fe23e7752f9fe1cc7bc7ad",
+        "entity:00a2deb5d08a19d1c514d5b0a5b9cd13"
+      ],
+      "entity_search_keys": null,
+      "content_hash": "f4057d9aa5c7162da8afee0a2734e105df742ef3019d7459cfabbe60a74e412f",
+      "created_at": "2026-06-24T12:00:00+00:00"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "evid:579d476136ec3ef3993ff2b3513f4128",
+      "source_file_id": "src:surface-pro-7-kickstand-abc123",
+      "source_type": "document_span",
+      "document_element_id": null,
+      "chunk_id": "chunk:1afc780d2afc69ce2fefb3dbc1e4bddf",
+      "page_number": 1,
+      "section_path": "Kickstand > Overview",
+      "table_id": null,
+      "row_index": null,
+      "col_index": null,
+      "figure_id": null,
+      "image_id": null,
+      "callout_id": null,
+      "visual_region_id": null,
+      "blob_url": null,
+      "text": "The Surface Pro 7 kickstand",
+      "content_hash": "c69a57fea1d1344bf22e0fcbd81dd86f34947198d5d3093a76a0b02aa5c1c266",
+      "created_at": "2026-06-24T12:00:00+00:00"
+    }
+  ]
+}

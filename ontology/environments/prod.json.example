@@ -1,0 +1,79 @@
+{
+  "_comment": "Non-secret environment config for the PROD environment. All secrets (API keys, connection strings, SPN credentials, SAS tokens) are loaded from .env and NEVER stored here. See .env.example for the required secret keys. All <placeholder> values MUST be verified and populated before first production deployment.",
+  "env": "prod",
+  "auth_strategy": "ManagedIdentity",
+  "_comment_auth": "Prod: Managed Identity preferred when running in Azure; Service Principal fallback via .env (FABRIC_CLIENT_ID, FABRIC_CLIENT_SECRET, FABRIC_TENANT_ID). No API key fallback in prod.",
+
+  "azure": {
+    "subscription_id": "<prod-subscription-id>",
+    "subscription_name": "<prod-subscription-name>",
+    "resource_group": "<prod-resource-group>"
+  },
+
+  "fabric": {
+    "_comment": "TODO: provision production Fabric workspace and Lakehouse. Require change-management approval before populating IDs.",
+    "workspace_id": "<prod-workspace-id>",
+    "lakehouse_item_id": "<prod-lakehouse-item-id>",
+    "ontology_display_name_suffix": "",
+    "_comment_suffix": "No suffix for prod — the canonical display name has no environment qualifier.",
+    "sensitivity_label": "<sensitivity-label-display-name>",
+    "_comment_sensitivity": "TODO: set to org sensitivity label display name for production data (e.g., 'Confidential'). GUID resolved at deploy time via Fabric admin API (SPEC-003 §9.6).",
+    "schema_name": "dbo"
+  },
+
+  "blob_storage": {
+    "_comment": "TODO: provision or designate a production Blob Storage account/container. Secrets in .env.",
+    "account_name": "<prod-blob-account-name>",
+    "region": "<prod-blob-region>",
+    "container": "<prod-blob-container>",
+    "path_prefix": "prod/"
+  },
+
+  "ai_search": {
+    "_comment": "TODO: provision or designate a production AI Search service with appropriate SKU for scale. Secrets (AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_API_KEY) in .env.",
+    "service_name": "<prod-search-service-name>",
+    "region": "<prod-search-region>",
+    "endpoint": "https://<prod-search-service-name>.search.windows.net",
+    "index_prefix": "kg-",
+    "_comment_prefix": "No env suffix in prod index names — canonical index names are used directly.",
+    "index_chunks": "kg-chunks",
+    "index_document_elements": "kg-document-elements",
+    "_comment_indices": "Base index names per SPEC-001 §6. Runtime appends index_prefix to form deployed index names."
+  },
+
+  "foundry": {
+    "_comment": "TODO: provision or designate a production Foundry project. Secrets (AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY) in .env.",
+    "account": "<prod-foundry-account>",
+    "project": "<prod-foundry-project>",
+    "region": "<prod-foundry-region>",
+    "endpoint": "https://<prod-foundry-account>.services.ai.azure.com/api/projects/<prod-foundry-project>",
+    "_comment_endpoint": "Verify exact URL in Azure AI Foundry portal → your project → endpoint.",
+    "chat_deployment": "<prod-chat-deployment-name>",
+    "_comment_chat": "Target model: gpt-5.5-mini. Deployment name TBD once provisioned for prod.",
+    "embedding_deployment": "<prod-embedding-deployment-name>",
+    "embedding_model": "text-embedding-3-large",
+    "embedding_dimensions": 1536,
+    "_comment_dimensions": "LOCKED: 1536 dims must match AI Search chunk_vector field width (SPEC-002 / INFRA-001 §1b). Changing requires full reindex of all production AI Search data."
+  },
+
+  "document_intelligence": {
+    "_comment": "TODO: provision or designate a production Document Intelligence resource. REQUIRED for PDF/image extraction pipeline. Secrets in .env.",
+    "resource_name": "<prod-doc-intelligence-resource>",
+    "region": "<prod-doc-intelligence-region>",
+    "endpoint": "https://<prod-doc-intelligence-resource>.cognitiveservices.azure.com",
+    "_comment_endpoint": "Standard Cognitive Services endpoint format. Verify in Azure Portal."
+  },
+
+  "vision": {
+    "_comment": "TODO: provision or designate a production Azure AI Vision resource. Secrets in .env.",
+    "resource_name": "<prod-vision-resource>",
+    "region": "<prod-vision-region>",
+    "endpoint": "https://<prod-vision-resource>.cognitiveservices.azure.com"
+  },
+
+  "key_vault": {
+    "_comment": "TODO: provision production Key Vault. In prod, migrate all secrets from .env to Key Vault and use Managed Identity access instead of direct .env loading.",
+    "name": "<prod-key-vault-name>",
+    "region": "<prod-key-vault-region>"
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "_comment": "Non-secret environment config TEMPLATE for the DEV environment. Copy to dev.json and fill in your own values. All secrets (API keys, connection strings, SPN credentials, SAS tokens) are loaded from .env and NEVER stored here. See .env.example for the required secret keys. dev.json / test.json / prod.json are gitignored — never commit real resource IDs or names.",
+  "env": "dev",
+  "auth_strategy": "DefaultAzureCredential",
+  "_comment_auth": "Dev: developer runs 'az login'. CI: Service Principal credentials via .env (FABRIC_CLIENT_ID, FABRIC_CLIENT_SECRET, FABRIC_TENANT_ID).",
+
+  "azure": {
+    "subscription_id": "<your-subscription-id>",
+    "subscription_name": "<your-subscription-name>",
+    "resource_group": "<your-resource-group>"
+  },
+
+  "fabric": {
+    "_comment": "Fabric workspace ID + schema-enabled Lakehouse item ID from your workspace.",
+    "workspace_id": "<your-fabric-workspace-id>",
+    "lakehouse_item_id": "<your-lakehouse-item-id>",
+    "lakehouse_display_name": "kg_lakehouse",
+    "onelake_tables_path": "https://onelake.dfs.fabric.microsoft.com/<workspace-id>/<lakehouse-item-id>/Tables",
+    "onelake_files_path": "https://onelake.dfs.fabric.microsoft.com/<workspace-id>/<lakehouse-item-id>/Files",
+    "sql_endpoint": "<your-lakehouse-sql-endpoint-host>.datawarehouse.fabric.microsoft.com",
+    "schemas_enabled": true,
+    "ontology_display_name_suffix": "-dev",
+    "sensitivity_label": "<sensitivity-label-display-name>",
+    "_comment_sensitivity": "Set to your org sensitivity label display name (e.g., 'General'). The GUID is resolved at deploy time from the display name via the Fabric admin API.",
+    "schema_name": "dbo"
+  },
+
+  "blob_storage": {
+    "_comment": "Storage account for visual assets. Secrets (connection string or SAS token) in .env as AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_SAS_TOKEN.",
+    "account_name": "<your-storage-account>",
+    "region": "<region>",
+    "container": "kg-assets",
+    "path_prefix": "dev/"
+  },
+
+  "ai_search": {
+    "_comment": "Azure AI Search service. Secrets (AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_API_KEY) in .env.",
+    "enabled": true,
+    "service_name": "<your-search-service>",
+    "region": "<region>",
+    "endpoint": "https://<your-search-service>.search.windows.net",
+    "index_prefix": "kg-dev-",
+    "index_chunks": "kg-chunks",
+    "index_document_elements": "kg-document-elements",
+    "_comment_indices": "Runtime appends index_prefix to form deployed index names (e.g., kg-dev-kg-chunks)."
+  },
+
+  "foundry": {
+    "_comment": "Azure AI Foundry account + project. Secrets (AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY) in .env.",
+    "account": "<your-foundry-account>",
+    "project": "<your-foundry-project>",
+    "region": "<region>",
+    "endpoint": "https://<your-foundry-account>.services.ai.azure.com/api/projects/<your-foundry-project>",
+    "openai_endpoint": "https://<your-foundry-account>.openai.azure.com/",
+    "_comment_openai_endpoint": "Azure OpenAI endpoint for the AzureOpenAI SDK (openai.azure.com). Matches AZURE_OPENAI_ENDPOINT in .env.",
+    "chat_deployment": "<your-chat-deployment>",
+    "embedding_deployment": "<your-embedding-deployment>",
+    "embedding_model": "text-embedding-3-large",
+    "embedding_dimensions": 1536,
+    "_comment_dimensions": "LOCKED: 1536 dims must match the AI Search chunk_vector field width. Changing requires a full reindex.",
+    "api_version": "2024-12-01-preview"
+  },
+
+  "document_intelligence": {
+    "_comment": "Azure AI Document Intelligence. REQUIRED for PDF/image extraction. Secrets (AZURE_DOC_INTELLIGENCE_ENDPOINT, AZURE_DOC_INTELLIGENCE_API_KEY) in .env.",
+    "resource_name": "<your-docintel-resource>",
+    "region": "<region>",
+    "endpoint": "https://<your-docintel-resource>.cognitiveservices.azure.com"
+  },
+
+  "vision": {
+    "_comment": "Azure AI Vision for multimodal image analysis. Secrets in .env.",
+    "resource_name": "<your-vision-resource>",
+    "region": "<region>",
+    "endpoint": "https://<your-vision-resource>.cognitiveservices.azure.com"
+  },
+
+  "key_vault": {
+    "_comment": "Optional Key Vault. App secrets currently loaded from .env. DefaultAzureCredential can access KV directly if secrets are migrated there.",
+    "name": "<your-key-vault>",
+    "region": "<region>"
+  }
+}

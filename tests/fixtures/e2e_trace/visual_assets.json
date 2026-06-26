@@ -1,0 +1,15 @@
+[
+  {
+    "image_id": "e2e:va:figure12",
+    "source_file_id": "sf:e2e:sample.docx",
+    "document_element_id": "de:e2e:figure12",
+    "asset_type": "diagram",
+    "page_number": 42,
+    "caption": "Battery connector location",
+    "blob_url": "https://fake.blob.core.windows.net/kg-assets/e2e/figure12.png",
+    "image_hash": "abc123",
+    "description": "Diagram showing the battery connector and surrounding screws.",
+    "confidence": 0.95,
+    "is_placeholder": false
+  }
+]

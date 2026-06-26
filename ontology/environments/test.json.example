@@ -1,0 +1,77 @@
+{
+  "_comment": "Non-secret environment config for the TEST environment. All secrets (API keys, connection strings, SPN credentials, SAS tokens) are loaded from .env and NEVER stored here. See .env.example for the required secret keys. Populate all <placeholder> values before promoting to test.",
+  "env": "test",
+  "auth_strategy": "ServicePrincipal",
+  "_comment_auth": "Test/CI: Service Principal credentials via .env (FABRIC_CLIENT_ID, FABRIC_CLIENT_SECRET, FABRIC_TENANT_ID). DefaultAzureCredential also works for local test runs.",
+
+  "azure": {
+    "subscription_id": "<test-subscription-id>",
+    "subscription_name": "<test-subscription-name>",
+    "resource_group": "<test-resource-group>"
+  },
+
+  "fabric": {
+    "_comment": "TODO: provision a test Fabric workspace and Lakehouse, then fill in the IDs below.",
+    "workspace_id": "<test-workspace-id>",
+    "lakehouse_item_id": "<test-lakehouse-item-id>",
+    "ontology_display_name_suffix": "-test",
+    "sensitivity_label": "<sensitivity-label-display-name>",
+    "_comment_sensitivity": "TODO: set to org sensitivity label display name. GUID resolved at deploy time via Fabric admin API (SPEC-003 §9.6).",
+    "schema_name": "dbo"
+  },
+
+  "blob_storage": {
+    "_comment": "TODO: provision or designate a Blob Storage account/container for the test environment. Secrets in .env.",
+    "account_name": "<test-blob-account-name>",
+    "region": "<test-blob-region>",
+    "container": "<test-blob-container>",
+    "path_prefix": "test/"
+  },
+
+  "ai_search": {
+    "_comment": "TODO: provision or designate an AI Search service for the test environment. Secrets (AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_API_KEY) in .env.",
+    "service_name": "<test-search-service-name>",
+    "region": "<test-search-region>",
+    "endpoint": "https://<test-search-service-name>.search.windows.net",
+    "index_prefix": "kg-test-",
+    "index_chunks": "kg-chunks",
+    "index_document_elements": "kg-document-elements",
+    "_comment_indices": "Base index names per SPEC-001 §6. Runtime appends index_prefix to form deployed index names."
+  },
+
+  "foundry": {
+    "_comment": "TODO: provision or designate a Foundry project for test. Secrets (AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY) in .env.",
+    "account": "<test-foundry-account>",
+    "project": "<test-foundry-project>",
+    "region": "<test-foundry-region>",
+    "endpoint": "https://<test-foundry-account>.services.ai.azure.com/api/projects/<test-foundry-project>",
+    "_comment_endpoint": "Verify exact URL in Azure AI Foundry portal → your project → endpoint.",
+    "chat_deployment": "<test-chat-deployment-name>",
+    "_comment_chat": "Target model: gpt-5.5-mini. Deployment name TBD once provisioned for test.",
+    "embedding_deployment": "<test-embedding-deployment-name>",
+    "embedding_model": "text-embedding-3-large",
+    "embedding_dimensions": 1536,
+    "_comment_dimensions": "LOCKED: 1536 dims must match AI Search chunk_vector field width (SPEC-002 / INFRA-001 §1b). Changing requires full reindex."
+  },
+
+  "document_intelligence": {
+    "_comment": "TODO: provision or designate a Document Intelligence resource for test. REQUIRED for PDF/image extraction. Secrets in .env.",
+    "resource_name": "<test-doc-intelligence-resource>",
+    "region": "<test-doc-intelligence-region>",
+    "endpoint": "https://<test-doc-intelligence-resource>.cognitiveservices.azure.com",
+    "_comment_endpoint": "Standard Cognitive Services endpoint format. Verify in Azure Portal."
+  },
+
+  "vision": {
+    "_comment": "TODO: provision or designate an Azure AI Vision resource for test. Secrets in .env.",
+    "resource_name": "<test-vision-resource>",
+    "region": "<test-vision-region>",
+    "endpoint": "https://<test-vision-resource>.cognitiveservices.azure.com"
+  },
+
+  "key_vault": {
+    "_comment": "TODO: provision or designate a Key Vault for test if secrets are migrated from .env to KV.",
+    "name": "<test-key-vault-name>",
+    "region": "<test-key-vault-region>"
+  }
+}

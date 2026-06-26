@@ -1,0 +1,35 @@
+# fabric-kg.yaml — NON-SECRET configuration for fabric-kg-builder.
+# Secrets (API keys, connection strings, SAS tokens) are NEVER stored here.
+# They live in .env and are referenced via ${ENV_VAR} interpolation or read
+# directly from the environment. See .env.example for the required secret keys.
+#
+# Per-environment resource IDs (workspace, lakehouse, endpoints) live in
+# ontology/environments/{env}.json and override values here.
+
+foundry:
+  # Azure AI Foundry project endpoint — provided via .env (secret-adjacent).
+  endpoint: ${AZURE_AI_FOUNDRY_ENDPOINT}
+  # Azure OpenAI endpoint for AzureOpenAI SDK (distinct from services.ai.azure.com project URL).
+  openai_endpoint: ${AZURE_OPENAI_ENDPOINT}
+  project: example-project
+
+enrichment:
+  # Enrichment/chat model deployment. Default gpt-5.4-mini @ >=200K TPM.
+  chat_deployment: gpt-5-4-mini
+  # Embedding model deployment — text-embedding-3-large.
+  embedding_deployment: embedding
+  # LOCKED: must match the AI Search chunk_vector field width. Reindex if changed.
+  embedding_dimensions: 1536
+  # Vision uses the chat deployment (multimodal) by default.
+  vision_deployment: gpt-5-4-mini
+
+blob_storage:
+  container: kg-assets
+
+search:
+  # AI Search is in MVP scope; per-env enablement set in environments/{env}.json.
+  enabled: true
+  index_prefix: kg-
+
+document_intelligence:
+  endpoint: ${AZURE_DOCINTEL_ENDPOINT}

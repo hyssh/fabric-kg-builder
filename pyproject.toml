@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fabric-kg-builder"
+version = "0.1.0"
+description = "CLI tool to build and deploy knowledge graphs to Microsoft Fabric"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pyarrow>=14.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "python-dotenv>=1.0",
+    "azure-identity>=1.15",
+    "azure-search-documents>=11.4",
+    "azure-storage-blob>=12.19",
+    "azure-ai-documentintelligence>=1.0",
+    # TODO: verify Foundry SDK pkg — azure-ai-projects is the Microsoft Foundry SDK
+    # that provides project-level scoping and unified DefaultAzureCredential auth.
+    # See SPEC-001 §4 and .squad/decisions.md decision 10.
+    "azure-ai-projects>=1.0",
+    "fabric-cicd>=0.1",
+    "deltalake>=1.6",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+fabric-kg = "fabric_kg_builder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Default run: fast unit + contract tests only.  slow/integration are opt-in.
+# Override with:  pytest -m integration   pytest -m slow   pytest -m ""
+# --cov-fail-under is intentionally ABSENT here; the strict 80% gate lives in
+# CI only (see .github/workflows/ci.yml).
+addopts = "--cov=fabric_kg_builder --cov-report=term-missing -m 'not slow and not integration'"
+markers = [
+    "unit: pure-function tests, no I/O (fast, no network)",
+    "contract: schema-conformance tests, fixture data only",
+    "integration: full-pipeline tests that read real sample_data files (opt-in)",
+    "slow: tests that take >2 s — real PDFs, large fixtures (opt-in, implies integration)",
+    "smoke: post-deploy live-environment checks (not part of merge gate)",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+# Targets per SPEC-005 §9: 80-90% on core modules.
+# The threshold is enforced by --cov-fail-under=80 in CI, not here.
+show_missing = true
+skip_covered = false

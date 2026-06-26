@@ -1,0 +1,50 @@
+{
+  "api_version": "2024-02-29-preview",
+  "model_id": "prebuilt-layout",
+  "content": "Surface Laptop 5 Service Guide\nBattery replacement procedure.",
+  "pages": [
+    {
+      "page_number": 1,
+      "width": 612.0,
+      "height": 792.0,
+      "unit": "pixel",
+      "words": [
+        {
+          "content": "Surface",
+          "polygon": [72.0, 72.0, 120.0, 72.0, 120.0, 88.0, 72.0, 88.0],
+          "confidence": 0.998
+        }
+      ],
+      "lines": [],
+      "selection_marks": [],
+      "spans": [{"offset": 0, "length": 7}]
+    }
+  ],
+  "paragraphs": [
+    {
+      "content": "Surface Laptop 5 Service Guide",
+      "role": "title",
+      "bounding_regions": [
+        {
+          "page_number": 1,
+          "polygon": [72.0, 72.0, 400.0, 72.0, 400.0, 92.0, 72.0, 92.0]
+        }
+      ],
+      "spans": [{"offset": 0, "length": 30}]
+    }
+  ],
+  "figures": [
+    {
+      "id": "figure:1",
+      "caption": {"content": "Battery assembly diagram"},
+      "bounding_regions": [
+        {
+          "page_number": 1,
+          "polygon": [100.0, 200.0, 400.0, 200.0, 400.0, 450.0, 100.0, 450.0]
+        }
+      ],
+      "spans": []
+    }
+  ],
+  "tables": []
+}

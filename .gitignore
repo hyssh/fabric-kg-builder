@@ -1,0 +1,53 @@
+# Squad: ignore runtime state (logs, inbox, sessions)
+.squad/orchestration-log/
+.squad/log/
+.squad/plugins/
+.squad/decisions/inbox/
+.squad/sessions/
+.squad/.scratch/
+# Squad: SubSquad activation file (local to this machine)
+.squad-workstream
+.squad/agents/*/history.md
+.squad/casting/history.json
+.squad/identity/now.md
+
+# Python build artifacts
+build/
+dist/
+
+# Pipeline working outputs (enriched JSON, parquet, search, deploy dist)
+data/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Per-environment resource config — contains real subscription/workspace IDs
+# and resource names. Keep local; commit only the sanitized *.json.example.
+ontology/environments/*.json
+!ontology/environments/*.json.example
+
+# Generated Parquet files (build-time artifacts)
+build/**/*.parquet
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp

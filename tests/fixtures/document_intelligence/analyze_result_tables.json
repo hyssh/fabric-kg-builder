@@ -1,0 +1,105 @@
+{
+  "api_version": "2024-02-29-preview",
+  "model_id": "prebuilt-layout",
+  "content": "# Parts List\n\n| Part | Part Number | Quantity |\n|------|-------------|----------|\n| Battery | M1287099-003 | 1 |\n| Display | M1234567-001 | 1 |",
+  "pages": [
+    {
+      "page_number": 1,
+      "width": 612.0,
+      "height": 792.0,
+      "unit": "pixel",
+      "words": [],
+      "lines": [],
+      "selection_marks": [],
+      "spans": [{"offset": 0, "length": 10}]
+    }
+  ],
+  "paragraphs": [
+    {
+      "content": "Parts List",
+      "role": "title",
+      "bounding_regions": [
+        {
+          "page_number": 1,
+          "polygon": [72.0, 72.0, 300.0, 72.0, 300.0, 92.0, 72.0, 92.0]
+        }
+      ],
+      "spans": [{"offset": 0, "length": 10}]
+    }
+  ],
+  "figures": [],
+  "tables": [
+    {
+      "row_count": 3,
+      "column_count": 3,
+      "cells": [
+        {
+          "row_index": 0,
+          "column_index": 0,
+          "content": "Part",
+          "kind": "columnHeader",
+          "bounding_regions": [{"page_number": 1, "polygon": [72.0, 110.0, 200.0, 110.0, 200.0, 130.0, 72.0, 130.0]}],
+          "spans": [{"offset": 20, "length": 4}]
+        },
+        {
+          "row_index": 0,
+          "column_index": 1,
+          "content": "Part Number",
+          "kind": "columnHeader",
+          "bounding_regions": [{"page_number": 1, "polygon": [200.0, 110.0, 350.0, 110.0, 350.0, 130.0, 200.0, 130.0]}],
+          "spans": [{"offset": 27, "length": 11}]
+        },
+        {
+          "row_index": 0,
+          "column_index": 2,
+          "content": "Quantity",
+          "kind": "columnHeader",
+          "bounding_regions": [{"page_number": 1, "polygon": [350.0, 110.0, 450.0, 110.0, 450.0, 130.0, 350.0, 130.0]}],
+          "spans": [{"offset": 41, "length": 8}]
+        },
+        {
+          "row_index": 1,
+          "column_index": 0,
+          "content": "Battery",
+          "bounding_regions": [{"page_number": 1, "polygon": [72.0, 130.0, 200.0, 130.0, 200.0, 150.0, 72.0, 150.0]}],
+          "spans": [{"offset": 52, "length": 7}]
+        },
+        {
+          "row_index": 1,
+          "column_index": 1,
+          "content": "M1287099-003",
+          "bounding_regions": [{"page_number": 1, "polygon": [200.0, 130.0, 350.0, 130.0, 350.0, 150.0, 200.0, 150.0]}],
+          "spans": [{"offset": 62, "length": 12}]
+        },
+        {
+          "row_index": 1,
+          "column_index": 2,
+          "content": "1",
+          "bounding_regions": [{"page_number": 1, "polygon": [350.0, 130.0, 450.0, 130.0, 450.0, 150.0, 350.0, 150.0]}],
+          "spans": [{"offset": 77, "length": 1}]
+        },
+        {
+          "row_index": 2,
+          "column_index": 0,
+          "content": "Display",
+          "bounding_regions": [{"page_number": 1, "polygon": [72.0, 150.0, 200.0, 150.0, 200.0, 170.0, 72.0, 170.0]}],
+          "spans": [{"offset": 81, "length": 7}]
+        },
+        {
+          "row_index": 2,
+          "column_index": 1,
+          "content": "M1234567-001",
+          "bounding_regions": [{"page_number": 1, "polygon": [200.0, 150.0, 350.0, 150.0, 350.0, 170.0, 200.0, 170.0]}],
+          "spans": [{"offset": 91, "length": 12}]
+        },
+        {
+          "row_index": 2,
+          "column_index": 2,
+          "content": "1",
+          "bounding_regions": [{"page_number": 1, "polygon": [350.0, 150.0, 450.0, 150.0, 450.0, 170.0, 350.0, 170.0]}],
+          "spans": [{"offset": 106, "length": 1}]
+        }
+      ]
+    }
+  ]
+}

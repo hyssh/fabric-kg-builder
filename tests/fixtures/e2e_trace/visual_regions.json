@@ -1,0 +1,12 @@
+[
+  {
+    "visual_region_id": "e2e:vr:figure12:calloutB",
+    "image_id": "e2e:va:figure12",
+    "region_type": "callout",
+    "label": "B",
+    "text": "Battery connector",
+    "identified_entity_id": "e2e:component:battery",
+    "blob_url": "https://fake.blob.core.windows.net/kg-assets/e2e/figure12.png",
+    "confidence": 0.90
+  }
+]

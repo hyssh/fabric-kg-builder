@@ -1,0 +1,26 @@
+[
+  {
+    "entity_id": "e2e:device:surface-laptop-5",
+    "entity_type": "Device",
+    "display_name": "Surface Laptop 5",
+    "canonical_key": "surface-laptop-5",
+    "aliases": "[]",
+    "search_aliases": "[\"surface laptop 5\", \"sl5\"]",
+    "description": "15-inch laptop",
+    "source_file_id": "sf:e2e:sample.csv",
+    "confidence": 1.0,
+    "is_placeholder": false
+  },
+  {
+    "entity_id": "e2e:component:battery",
+    "entity_type": "Component",
+    "display_name": "Battery",
+    "canonical_key": "surface-laptop-5:battery",
+    "aliases": "[\"Battery pack\"]",
+    "search_aliases": "[\"battery\", \"battery pack\"]",
+    "description": "Rechargeable internal battery",
+    "source_file_id": "sf:e2e:sample.csv",
+    "confidence": 0.91,
+    "is_placeholder": false
+  }
+]

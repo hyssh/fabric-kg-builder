@@ -1,0 +1,40 @@
+{
+  "entities": [
+    {
+      "id_hint": "surface-laptop-5",
+      "type": "Device",
+      "label": "Surface Laptop 5",
+      "aliases": [],
+      "description": "15-inch laptop device.",
+      "confidence": 1.0
+    },
+    {
+      "id_hint": "surface-laptop-5:battery",
+      "type": "Component",
+      "label": "Battery",
+      "aliases": ["Battery pack"],
+      "description": "Rechargeable internal battery assembly.",
+      "confidence": 0.91
+    }
+  ],
+  "relationships": [
+    {
+      "source_id_hint": "surface-laptop-5",
+      "relation": "has_component",
+      "target_id_hint": "surface-laptop-5:battery",
+      "evidence_id": "ev:sf:e2e:sample.csv:row:1",
+      "confidence": 0.95
+    }
+  ],
+  "chunks": [],
+  "visual_assets": [],
+  "visual_regions": [],
+  "evidence": [
+    {
+      "evidence_id": "ev:sf:e2e:sample.csv:row:1",
+      "source_type": "csv_row",
+      "row_index": 1,
+      "text": "Surface Laptop 5, Battery, M1287099-003"
+    }
+  ]
+}
