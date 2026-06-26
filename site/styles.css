@@ -75,14 +75,55 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
   display: grid; place-items: center; font-size: 15px; color: #061018; font-weight: 800;
 }
 .nav__links { display: flex; gap: 26px; align-items: center; }
-.nav__links a { color: var(--text-dim); font-size: 0.93rem; font-weight: 500; }
-.nav__links a:hover { color: var(--text); text-decoration: none; }
+.nav__links a, .nav__link { color: var(--text-dim); font-size: 0.93rem; font-weight: 500; }
+.nav__links a:hover, .nav__link:hover { color: var(--text); text-decoration: none; }
+.nav__link {
+  background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit;
+}
+.nav__link.is-active { color: var(--accent); }
+.nav__github { display: inline-flex; align-items: center; gap: 6px; }
+.nav__github svg { display: block; }
+.nav__github:hover { color: var(--text); text-decoration: none; }
 .nav__cta {
   background: var(--accent); color: #061018 !important; padding: 8px 16px;
   border-radius: 8px; font-weight: 700; font-size: 0.9rem;
+  border: 0; cursor: pointer; font-family: inherit;
 }
 .nav__cta:hover { background: #5eead4; text-decoration: none !important; }
 .nav__toggle { display: none; background: none; border: 0; color: var(--text); font-size: 1.5rem; cursor: pointer; }
+
+/* ---------- Tabs ---------- */
+.tabs {
+  position: sticky; top: 64px; z-index: 40;
+  background: rgba(11, 16, 32, 0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.tabs__inner { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.tabs__inner::-webkit-scrollbar { display: none; }
+.tab-btn {
+  appearance: none; background: transparent; border: 0; cursor: pointer;
+  color: var(--text-dim); font-family: inherit; font-size: 0.94rem; font-weight: 600;
+  padding: 15px 18px; white-space: nowrap; border-bottom: 2px solid transparent;
+  transition: color .15s ease, border-color .15s ease;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; }
+.tab-panel.is-active { display: block; animation: tabfade .28s ease; }
+.tab-panel > section:last-child { border-bottom: 0; }
+@keyframes tabfade {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.footer__link {
+  display: block; background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: inherit; text-align: left;
+  color: var(--text-dim); font-size: 0.92rem; margin-bottom: 8px;
+}
+.footer__link:hover { color: var(--text); text-decoration: underline; }
 
 /* ---------- Hero ---------- */
 .hero {

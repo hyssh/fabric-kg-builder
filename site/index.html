@@ -13,18 +13,23 @@
   <!-- NAV -->
   <header class="nav">
     <div class="container nav__inner">
-      <a class="brand" href="#top">
+      <a class="brand" href="#overview" data-tab="overview">
         <span class="brand__mark">kg</span>
         <span>fabric-kg-builder</span>
       </a>
       <nav class="nav__links" id="navLinks">
-        <a href="#what">What it does</a>
-        <a href="#pipeline">How it works</a>
-        <a href="#copilot">Copilot CLI</a>
-        <a href="#best-practices">Best practices</a>
-        <a href="#reproduce">Reproduce</a>
-        <a href="#install">Install</a>
-        <a class="nav__cta" href="#install">Get started</a>
+        <button class="nav__link" data-tab="overview">Overview</button>
+        <button class="nav__link" data-tab="how-it-works">How it works</button>
+        <button class="nav__link" data-tab="install">Install</button>
+        <button class="nav__link" data-tab="copilot">Copilot CLI</button>
+        <button class="nav__link" data-tab="best-practices">Best practices</button>
+        <button class="nav__link" data-tab="reproduce">Reproduce</button>
+        <button class="nav__link" data-tab="faq">FAQ</button>
+        <a class="nav__link nav__github" href="https://github.com/hyssh/fabric-kg-builder" target="_blank" rel="noopener" aria-label="GitHub repository">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span>GitHub</span>
+        </a>
+        <button class="nav__cta" data-tab="install">Get started</button>
       </nav>
       <button class="nav__toggle" id="navToggle" aria-label="Toggle navigation">&#9776;</button>
     </div>
@@ -43,8 +48,8 @@
         Fabric Data Agent. Built to drive straight from the <strong>GitHub Copilot CLI</strong>.
       </p>
       <div class="hero__actions">
-        <a class="btn btn--primary" href="#install">Get started &rarr;</a>
-        <a class="btn btn--ghost" href="#copilot">Use with Copilot CLI</a>
+        <button class="btn btn--primary" data-tab="install">Get started &rarr;</button>
+        <button class="btn btn--ghost" data-tab="copilot">Use with Copilot CLI</button>
       </div>
       <div class="hero__badges">
         <span class="badge"><b>1</b> command-line tool</span>
@@ -55,7 +60,22 @@
     </div>
   </section>
 
-  <!-- BACKGROUND -->
+  <!-- TAB BAR -->
+  <div class="tabs">
+    <div class="container tabs__inner" role="tablist">
+      <button class="tab-btn is-active" data-tab="overview" role="tab">Overview</button>
+      <button class="tab-btn" data-tab="how-it-works" role="tab">How it works</button>
+      <button class="tab-btn" data-tab="install" role="tab">Install</button>
+      <button class="tab-btn" data-tab="copilot" role="tab">Copilot CLI</button>
+      <button class="tab-btn" data-tab="best-practices" role="tab">Best practices</button>
+      <button class="tab-btn" data-tab="reproduce" role="tab">Reproduce</button>
+      <button class="tab-btn" data-tab="faq" role="tab">FAQ</button>
+    </div>
+  </div>
+
+  <!-- TAB PANELS -->
+  <main class="tab-panels">
+  <div class="tab-panel is-active" data-panel="overview">
   <section id="background">
     <div class="container">
       <p class="eyebrow">Background</p>
@@ -87,8 +107,6 @@
       </div>
     </div>
   </section>
-
-  <!-- WHAT IT DOES -->
   <section id="what" class="section--alt">
     <div class="container">
       <p class="eyebrow">Capabilities</p>
@@ -128,8 +146,29 @@
       </div>
     </div>
   </section>
-
-  <!-- PIPELINE -->
+  <section id="results">
+    <div class="container">
+      <p class="eyebrow">Proven on real data</p>
+      <h2>The Surface troubleshooting corpus</h2>
+      <p class="section-lede">
+        Built end-to-end from 22 official Microsoft Surface service guides — the reference template
+        shipped with the tool.
+      </p>
+      <div class="stats">
+        <div class="stat"><div class="num">22</div><div class="label">service-guide PDFs</div></div>
+        <div class="stat"><div class="num">10.9k</div><div class="label">unique graph entities</div></div>
+        <div class="stat"><div class="num">37.8k</div><div class="label">relationships after densify</div></div>
+        <div class="stat"><div class="num">27k+</div><div class="label">AI Search documents</div></div>
+      </div>
+      <div class="callout">
+        <strong>Before &amp; after densify.</strong> A device model like &ldquo;Surface Laptop 5&rdquo;
+        went from <strong>0</strong> to <strong>400+ components, 220 parts, and 468 procedures</strong>;
+        symptoms with no causes dropped from 79% to 2%. Same enriched data — just a connected graph.
+      </div>
+    </div>
+  </section>
+  </div>
+  <div class="tab-panel" data-panel="how-it-works">
   <section id="pipeline">
     <div class="container">
       <p class="eyebrow">How it works</p>
@@ -148,8 +187,24 @@
       </div>
     </div>
   </section>
-
-  <!-- INSTALL -->
+  <section id="architecture">
+    <div class="container">
+      <p class="eyebrow">Architecture</p>
+      <h2>Where everything lands</h2>
+      <p class="section-lede">
+        Structured graph &amp; ontology live in the Lakehouse; full text and embeddings live in AI
+        Search. A Fabric Data Agent reasons over the ontology and grounds answers in both.
+      </p>
+      <div class="arch">
+        <div class="arch__node"><div class="ic">&#128196;</div><h4>Sources</h4><p>PDF / DOCX / HTML / CSV + Document Intelligence</p></div>
+        <div class="arch__node"><div class="ic">&#127960;&#65039;</div><h4>Fabric Lakehouse</h4><p>Graph nodes, edges &amp; ontology bindings (Delta / OneLake)</p></div>
+        <div class="arch__node"><div class="ic">&#128270;</div><h4>Azure AI Search</h4><p>Chunk &amp; element text + 1536-dim vectors</p></div>
+        <div class="arch__node"><div class="ic">&#129504;</div><h4>Fabric Data Agent</h4><p>NL &rarr; GQL over the multi-type ontology</p></div>
+      </div>
+    </div>
+  </section>
+  </div>
+  <div class="tab-panel" data-panel="install">
   <section id="install" class="section--alt">
     <div class="container">
       <p class="eyebrow">Get started</p>
@@ -185,8 +240,8 @@
       </div>
     </div>
   </section>
-
-  <!-- COPILOT CLI -->
+  </div>
+  <div class="tab-panel" data-panel="copilot">
   <section id="copilot">
     <div class="container">
       <p class="eyebrow">Workflow</p>
@@ -230,8 +285,45 @@
       </div>
     </div>
   </section>
+  <section id="plugin" class="section--alt">
+    <div class="container">
+      <p class="eyebrow">Install as a plugin</p>
+      <h2>Install fabric-kg as a Copilot CLI plugin</h2>
+      <p class="section-lede">
+        Package the whole workflow as an installable GitHub Copilot CLI plugin: two skills
+        (the build/deploy pipeline and the Surface reproduction) plus a guided
+        <code>kg-builder</code> agent. The plugin drives the installed <code>fabric-kg</code>
+        CLI &mdash; so <code>pip install fabric-kg-builder</code> is still a prerequisite.
+      </p>
+      <div class="grid grid--2">
+        <div class="code">
+          <div class="code__bar"><span class="code__title">install from the marketplace</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmt"># register this repo as a plugin marketplace</span>
+<span class="tok-cmd">copilot</span> plugin marketplace add hyssh/fabric-kg-builder
 
-  <!-- BEST PRACTICES -->
+<span class="tok-cmt"># install the plugin</span>
+<span class="tok-cmd">copilot</span> plugin install fabric-kg@fabric-kg-builder</code></pre>
+        </div>
+        <div class="code">
+          <div class="code__bar"><span class="code__title">verify in a Copilot CLI session</span><button class="code__copy">Copy</button></div>
+<pre><code><span class="tok-cmd">/plugin</span> list
+<span class="tok-cmd">/skills</span> list
+<span class="tok-cmd">/agent</span>
+
+<span class="tok-cmt"># then just ask</span>
+&gt; reproduce the Surface troubleshooting graph and deploy to dev</code></pre>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Prerequisite.</strong> The plugin orchestrates the <code>fabric-kg</code> CLI via the
+        shell, so install the CLI first (<code>pip install fabric-kg-builder</code> or
+        <code>pip install -e .</code>). A local/dev install also works:
+        <code>copilot plugin install ./plugins/fabric-kg</code>.
+      </div>
+    </div>
+  </section>
+  </div>
+  <div class="tab-panel" data-panel="best-practices">
   <section id="best-practices" class="section--alt">
     <div class="container">
       <p class="eyebrow">Best practices</p>
@@ -277,31 +369,31 @@
       </div>
     </div>
   </section>
-
-  <!-- RESULTS -->
-  <section id="results">
+  <section id="security" class="section--alt">
     <div class="container">
-      <p class="eyebrow">Proven on real data</p>
-      <h2>The Surface troubleshooting corpus</h2>
-      <p class="section-lede">
-        Built end-to-end from 22 official Microsoft Surface service guides — the reference template
-        shipped with the tool.
-      </p>
-      <div class="stats">
-        <div class="stat"><div class="num">22</div><div class="label">service-guide PDFs</div></div>
-        <div class="stat"><div class="num">10.9k</div><div class="label">unique graph entities</div></div>
-        <div class="stat"><div class="num">37.8k</div><div class="label">relationships after densify</div></div>
-        <div class="stat"><div class="num">27k+</div><div class="label">AI Search documents</div></div>
-      </div>
-      <div class="callout">
-        <strong>Before &amp; after densify.</strong> A device model like &ldquo;Surface Laptop 5&rdquo;
-        went from <strong>0</strong> to <strong>400+ components, 220 parts, and 468 procedures</strong>;
-        symptoms with no causes dropped from 79% to 2%. Same enriched data — just a connected graph.
+      <p class="eyebrow">Trust</p>
+      <h2>Security &amp; privacy by design</h2>
+      <div class="grid grid--3">
+        <div class="card">
+          <div class="card__icon">&#128274;</div>
+          <h3>Secrets stay local</h3>
+          <p>Endpoints and credentials live in a local <code>.env</code> that is never committed. Auth prefers <code>DefaultAzureCredential</code> (az login / managed identity).</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#128737;&#65039;</div>
+          <h3>Prompt-injection safe</h3>
+          <p>User-supplied domain text is only ever placed in the LLM <em>user</em> message — never the system prompt — so it can't override extraction rules.</p>
+        </div>
+        <div class="card">
+          <div class="card__icon">&#9989;</div>
+          <h3>Validated &amp; deterministic</h3>
+          <p>Structured validation gates run on every build; IDs and densification edges are deterministic and auditable via an origin tag.</p>
+        </div>
       </div>
     </div>
   </section>
-
-  <!-- REPRODUCE -->
+  </div>
+  <div class="tab-panel" data-panel="reproduce">
   <section id="reproduce" class="section--alt">
     <div class="container">
       <p class="eyebrow">Try it yourself</p>
@@ -364,51 +456,8 @@
       </div>
     </div>
   </section>
-
-  <!-- ARCHITECTURE -->
-  <section id="architecture">
-    <div class="container">
-      <p class="eyebrow">Architecture</p>
-      <h2>Where everything lands</h2>
-      <p class="section-lede">
-        Structured graph &amp; ontology live in the Lakehouse; full text and embeddings live in AI
-        Search. A Fabric Data Agent reasons over the ontology and grounds answers in both.
-      </p>
-      <div class="arch">
-        <div class="arch__node"><div class="ic">&#128196;</div><h4>Sources</h4><p>PDF / DOCX / HTML / CSV + Document Intelligence</p></div>
-        <div class="arch__node"><div class="ic">&#127960;&#65039;</div><h4>Fabric Lakehouse</h4><p>Graph nodes, edges &amp; ontology bindings (Delta / OneLake)</p></div>
-        <div class="arch__node"><div class="ic">&#128270;</div><h4>Azure AI Search</h4><p>Chunk &amp; element text + 1536-dim vectors</p></div>
-        <div class="arch__node"><div class="ic">&#129504;</div><h4>Fabric Data Agent</h4><p>NL &rarr; GQL over the multi-type ontology</p></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- SECURITY -->
-  <section id="security" class="section--alt">
-    <div class="container">
-      <p class="eyebrow">Trust</p>
-      <h2>Security &amp; privacy by design</h2>
-      <div class="grid grid--3">
-        <div class="card">
-          <div class="card__icon">&#128274;</div>
-          <h3>Secrets stay local</h3>
-          <p>Endpoints and credentials live in a local <code>.env</code> that is never committed. Auth prefers <code>DefaultAzureCredential</code> (az login / managed identity).</p>
-        </div>
-        <div class="card">
-          <div class="card__icon">&#128737;&#65039;</div>
-          <h3>Prompt-injection safe</h3>
-          <p>User-supplied domain text is only ever placed in the LLM <em>user</em> message — never the system prompt — so it can't override extraction rules.</p>
-        </div>
-        <div class="card">
-          <div class="card__icon">&#9989;</div>
-          <h3>Validated &amp; deterministic</h3>
-          <p>Structured validation gates run on every build; IDs and densification edges are deterministic and auditable via an origin tag.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- FAQ -->
+  </div>
+  <div class="tab-panel" data-panel="faq">
   <section id="faq">
     <div class="container">
       <p class="eyebrow">FAQ</p>
@@ -446,13 +495,15 @@
       </div>
     </div>
   </section>
+  </div>
+  </main>
 
-  <!-- FOOTER -->
+<!-- FOOTER -->
   <footer class="footer">
     <div class="container">
       <div class="footer__grid">
         <div style="max-width: 320px">
-          <a class="brand" href="#top" style="margin-bottom: 14px">
+          <a class="brand" href="#overview" data-tab="overview" style="margin-bottom: 14px">
             <span class="brand__mark">kg</span><span>fabric-kg-builder</span>
           </a>
           <p style="color: var(--text-faint); font-size: 0.9rem; margin: 0;">
@@ -461,16 +512,16 @@
         </div>
         <div>
           <h4>Get started</h4>
-          <a href="#install">Install</a>
-          <a href="#reproduce">Reproduce the Surface example</a>
-          <a href="#copilot">Copilot CLI workflow</a>
-          <a href="#best-practices">Best practices</a>
+          <button class="footer__link" data-tab="install">Install</button>
+          <button class="footer__link" data-tab="reproduce">Reproduce the Surface example</button>
+          <button class="footer__link" data-tab="copilot">Copilot CLI workflow</button>
+          <button class="footer__link" data-tab="best-practices">Best practices</button>
         </div>
         <div>
           <h4>Learn</h4>
-          <a href="#pipeline">Pipeline</a>
-          <a href="#architecture">Architecture</a>
-          <a href="#faq">FAQ</a>
+          <button class="footer__link" data-tab="how-it-works">Pipeline</button>
+          <button class="footer__link" data-tab="how-it-works">Architecture</button>
+          <button class="footer__link" data-tab="faq">FAQ</button>
         </div>
         <div>
           <h4>Project</h4>
