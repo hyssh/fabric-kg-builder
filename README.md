@@ -542,6 +542,30 @@ All commands accept the global options `--config PATH`, `--env [dev|test|prod]`,
 
 ---
 
+## Use from GitHub Copilot CLI (plugin)
+
+You can drive `fabric-kg` directly from [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli)
+via an installable plugin in [`plugins/fabric-kg/`](plugins/fabric-kg/). The
+plugin bundles two skills (the build/deploy pipeline and the Surface RCA
+reproduction) and a guided `kg-builder` agent. It orchestrates the **installed
+`fabric-kg` CLI** — so `pip install fabric-kg-builder` (or `pip install -e .`)
+is still a prerequisite.
+
+Install it from the repo's plugin marketplace:
+
+```shell
+copilot plugin marketplace add hyssh/fabric-kg-builder
+copilot plugin install fabric-kg@fabric-kg-builder
+```
+
+Then in a Copilot CLI session, verify with `/plugin list`, `/skills list`, and
+`/agent`, and just ask — e.g. *"Build a Fabric knowledge graph from the PDFs in
+./docs, densify it, and validate"* or *"Reproduce the Surface troubleshooting
+graph and deploy to dev"*. See [`plugins/fabric-kg/README.md`](plugins/fabric-kg/README.md)
+for all install options (marketplace, repo subdirectory, local path).
+
+---
+
 ## Project Layout
 
 ```
@@ -558,6 +582,8 @@ fabric-kg-builder/
 │       ├── deploy/         # Lakehouse, Ontology, Search deployers (fabric-cicd)
 │       ├── model/          # Pydantic data models
 │       └── validate/       # Artifact and schema validators
+├── plugins/
+│   └── fabric-kg/          # GitHub Copilot CLI plugin (skills + agent)
 ├── tests/
 │   ├── unit/               # Pure-function tests, no I/O
 │   ├── contract/           # Schema-conformance tests, fixture data only

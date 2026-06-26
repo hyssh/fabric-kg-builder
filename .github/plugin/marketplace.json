@@ -1,0 +1,19 @@
+{
+  "name": "fabric-kg-builder",
+  "owner": {
+    "name": "hyssh",
+    "email": "hyssh@microsoft.com"
+  },
+  "metadata": {
+    "description": "Plugins for building Microsoft Fabric knowledge graphs with the fabric-kg CLI.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "fabric-kg",
+      "description": "Drive the fabric-kg CLI from Copilot CLI: documents to a Fabric Lakehouse + multi-type Ontology + AI Search + Data Agent grounding. Includes a pipeline skill, a Surface RCA reproduction skill, and a guided KG-builder agent.",
+      "version": "0.1.0",
+      "source": "plugins/fabric-kg"
+    }
+  ]
+}
