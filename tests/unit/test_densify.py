@@ -433,6 +433,7 @@ def test_hvac_configuration_links_native_domain_types():
     assert ("cause", "fault", "causes_fault") in edges
     assert ("fault", "action", "corrected_by") in edges
     assert ("procedure", "step", "has_work_step") in edges
+    assert ("fault", "procedure", "diagnosed_by") in edges
 
 
 def test_custom_hub_types_do_not_require_surface_keywords():
