@@ -411,6 +411,7 @@ def test_hvac_configuration_links_native_domain_types():
             {"entity_id": "fault", "entity_type": "Fault", "display_name": "compressor thermal alarm"},
             {"entity_id": "action", "entity_type": "CorrectiveAction", "display_name": "correct compressor thermal fault"},
             {"entity_id": "procedure", "entity_type": "MaintenanceProcedure", "display_name": "Inspect compressor thermal alarm"},
+            {"entity_id": "repair", "entity_type": "MaintenanceProcedure", "display_name": "Repair compressor thermal alarm"},
             {"entity_id": "step", "entity_type": "WorkStep", "display_name": "Measure compressor temperature"},
         ],
         "relationships": [],
@@ -424,16 +425,17 @@ def test_hvac_configuration_links_native_domain_types():
     doc, steps = link_procedure_steps(doc, config=config)
     doc, rca = link_rca_paths(doc, ubiquity_ratio=1, config=config)
     edges = {(r["source_entity_id"], r["target_entity_id"], r["relationship_type"]) for r in doc["relationships"]}
-    assert hubs == 2
+    assert hubs == 3
     assert scr == 3
     assert steps == 1
-    assert rca == 1
+    assert rca == 2
     assert ("equipment", "component", "has_component") in edges
     assert ("equipment", "procedure", "has_maintenance_procedure") in edges
     assert ("cause", "fault", "causes_fault") in edges
     assert ("fault", "action", "corrected_by") in edges
     assert ("procedure", "step", "has_work_step") in edges
     assert ("fault", "procedure", "diagnosed_by") in edges
+    assert ("fault", "repair", "remediated_by") in edges
 
 
 def test_custom_hub_types_do_not_require_surface_keywords():

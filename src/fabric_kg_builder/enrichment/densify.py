@@ -186,7 +186,9 @@ def is_specific_device_model(display_name: str | None) -> bool:
 def _is_qualified_hub(display_name: str | None, qualification: str) -> bool:
     if qualification == "specific":
         return is_specific_device_model(display_name)
-    return bool(display_name and display_name.strip().lower() not in _GENERIC_NAMES)
+    if qualification == "any":
+        return bool(display_name and display_name.strip().lower() not in _GENERIC_NAMES)
+    raise ValueError(f"unsupported hub qualification: {qualification}")
 
 
 def _new_hub_relationship(
@@ -664,7 +666,7 @@ _ROLLUP_STOPWORDS = set(
 
 
 def is_umbrella_procedure(display_name, patterns: tuple[str, ...] | None = None):
-    """True if *display_name* looks like an umbrella 'X Replacement Process'."""
+    """True if *display_name* matches a configured umbrella naming pattern."""
     if patterns is None:
         return bool(_UMBRELLA_RE.search(display_name or ""))
     return any(re.search(pattern, display_name or "", re.IGNORECASE) for pattern in patterns)
