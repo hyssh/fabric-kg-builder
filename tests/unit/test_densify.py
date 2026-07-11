@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fabric_kg_builder.enrichment.densify import (
+    DensifyConfig,
     densify_document,
     is_diagnostic_procedure,
     is_specific_device_model,
@@ -11,6 +12,7 @@ from fabric_kg_builder.enrichment.densify import (
     link_rca_paths,
     link_symptom_cause_resolution,
     link_umbrella_steps,
+    load_densify_config,
 )
 
 
@@ -365,3 +367,94 @@ def test_umbrella_idempotent():
     doc, a2 = link_umbrella_steps(doc)
     assert a1 == 3
     assert a2 == 0
+
+
+def _hvac_config():
+    return DensifyConfig.from_mapping({
+        "hub": {
+            "source_types": ["Equipment"],
+            "qualification": "any",
+            "target_relationships": {
+                "HVACComponent": "has_component",
+                "MaintenanceProcedure": "has_maintenance_procedure",
+            },
+        },
+        "scr": {
+            "cause_types": ["FaultCause"],
+            "symptom_types": ["Fault"],
+            "resolution_types": ["CorrectiveAction"],
+            "cause_symptom_relationship": "causes_fault",
+            "symptom_resolution_relationship": "corrected_by",
+            "cause_resolution_relationship": "addressed_by",
+        },
+        "procedure_steps": {
+            "procedure_types": ["MaintenanceProcedure"],
+            "step_types": ["WorkStep"],
+            "relationship": "has_work_step",
+        },
+        "rca": {
+            "symptom_types": ["Fault"],
+            "procedure_types": ["MaintenanceProcedure"],
+            "diagnosed_by_relationship": "diagnosed_by",
+            "remediated_by_relationship": "remediated_by",
+        },
+    })
+
+
+def test_hvac_configuration_links_native_domain_types():
+    config = _hvac_config()
+    doc = {
+        "entities": [
+            {"entity_id": "equipment", "entity_type": "Equipment", "display_name": "Air Handler"},
+            {"entity_id": "component", "entity_type": "HVACComponent", "display_name": "Compressor"},
+            {"entity_id": "cause", "entity_type": "FaultCause", "display_name": "compressor thermal failure"},
+            {"entity_id": "fault", "entity_type": "Fault", "display_name": "compressor thermal alarm"},
+            {"entity_id": "action", "entity_type": "CorrectiveAction", "display_name": "correct compressor thermal fault"},
+            {"entity_id": "procedure", "entity_type": "MaintenanceProcedure", "display_name": "Inspect compressor thermal alarm"},
+            {"entity_id": "step", "entity_type": "WorkStep", "display_name": "Measure compressor temperature"},
+        ],
+        "relationships": [],
+        "document_elements": [
+            {"page_number": 1, "sort_order": 1, "content": "Inspect compressor thermal alarm"},
+            {"page_number": 1, "sort_order": 2, "content": "Measure compressor temperature"},
+        ],
+    }
+    doc, hubs = densify_document(doc, config=config)
+    doc, scr = link_symptom_cause_resolution(doc, ubiquity_ratio=1, config=config)
+    doc, steps = link_procedure_steps(doc, config=config)
+    doc, rca = link_rca_paths(doc, ubiquity_ratio=1, config=config)
+    edges = {(r["source_entity_id"], r["target_entity_id"], r["relationship_type"]) for r in doc["relationships"]}
+    assert hubs == 2
+    assert scr == 3
+    assert steps == 1
+    assert rca == 1
+    assert ("equipment", "component", "has_component") in edges
+    assert ("equipment", "procedure", "has_maintenance_procedure") in edges
+    assert ("cause", "fault", "causes_fault") in edges
+    assert ("fault", "action", "corrected_by") in edges
+    assert ("procedure", "step", "has_work_step") in edges
+
+
+def test_custom_hub_types_do_not_require_surface_keywords():
+    config = DensifyConfig.from_mapping({
+        "hub": {
+            "source_types": ["Equipment"],
+            "qualification": "any",
+            "target_relationships": {"HVACComponent": "contains"},
+        },
+    })
+    doc, added = densify_document({
+        "entities": [
+            {"entity_id": "ahu", "entity_type": "Equipment", "display_name": "Air Handling Unit"},
+            {"entity_id": "fan", "entity_type": "HVACComponent", "display_name": "Supply Fan"},
+        ],
+        "relationships": [],
+    }, config=config)
+    assert added == 1
+    assert doc["relationships"][0]["relationship_type"] == "contains"
+
+
+def test_load_densify_config(tmp_path):
+    path = tmp_path / "densify.yaml"
+    path.write_text("hub:\n  qualification: any\n", encoding="utf-8")
+    assert load_densify_config(path).hub_qualification == "any"

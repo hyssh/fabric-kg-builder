@@ -26,6 +26,7 @@ import click
 
 from fabric_kg_builder.enrichment.densify import (
     densify_document,
+    load_densify_config,
     link_procedure_steps,
     link_rca_paths,
     link_symptom_cause_resolution,
@@ -37,9 +38,8 @@ Example:
   fabric-kg densify --input data\\surface_kg\\enriched --out data\\surface_kg\\enriched_dense
 
 \b
-Densification links each document's DeviceModel(s) to the Components, Parts,
-Procedures, and Symptoms in that same document, so the data agent can answer
-"parts/components/procedures for <device>" questions.
+Densification links each document's hub entities to configured target types in
+that same document. Use --densify-config to map a domain-specific schema.
 
 Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
@@ -55,6 +55,8 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
               help="Output directory for densified canonical JSON files.")
 @click.option("--max-models", default=5, show_default=True, type=int,
               help="Maximum specific device models to use as hubs per document.")
+@click.option("--densify-config", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="YAML file overriding densification type, relationship, and naming mappings.")
 @click.option("--link-scr/--no-link-scr", "link_scr", default=True, show_default=True,
               help="Also link Cause→Symptom→Resolution troubleshooting triples via "
                    "document-scoped keyword overlap (associative edges, confidence 0.45).")
@@ -66,16 +68,14 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
                    "diagnostic Procedure and Symptom -> remediated_by -> repair Procedure "
                    "(connects symptoms to actionable fixes; confidence 0.4).")
 def densify_cmd(
-    input_path: str, output_path: str, max_models: int, link_scr: bool,
+    input_path: str, output_path: str, max_models: int, densify_config: str | None, link_scr: bool,
     link_steps: bool, link_rca: bool,
 ) -> None:
-    """Add source-document DeviceModel hub edges to enriched JSON.
+    """Add source-document hub edges to enriched JSON.
 
-    For each enriched document, links the specific Surface model(s) it covers to
-    the Component / Part / Procedure / Symptom entities in the same document.
-    Reuses existing relationship verbs (has_component, has_part, has_procedure,
-    has_symptom) so the multi-type ontology folds the new edges into existing
-    typed relationships.
+    The default configuration links Surface device models to Components, Parts,
+    Procedures, and Symptoms. ``--densify-config`` can map equivalent types and
+    relationship verbs for another domain.
 
     With --link-scr (default), also connects isolated Cause / Symptom /
     Resolution troubleshooting entities within each document. With --link-steps
@@ -91,6 +91,10 @@ def densify_cmd(
     if not files:
         click.echo(f"[densify] ERROR: no *_canonical.json files in {in_dir}", err=True)
         sys.exit(1)
+    try:
+        config = load_densify_config(densify_config) if densify_config else None
+    except (OSError, ValueError) as exc:
+        raise click.UsageError(f"invalid --densify-config: {exc}") from exc
 
     out_dir.mkdir(parents=True, exist_ok=True)
     click.echo(f"[densify] input  : {in_dir}")
@@ -106,18 +110,18 @@ def densify_cmd(
     try:
         for f in files:
             doc = json.loads(f.read_text(encoding="utf-8"))
-            doc, added = densify_document(doc, max_models=max_models)
+            doc, added = densify_document(doc, max_models=max_models, config=config)
             scr = 0
             steps = 0
             rca = 0
             if link_scr:
-                doc, scr = link_symptom_cause_resolution(doc)
+                doc, scr = link_symptom_cause_resolution(doc, config=config)
             if link_steps:
-                doc, steps = link_procedure_steps(doc)
-                doc, rollup = link_umbrella_steps(doc)
+                doc, steps = link_procedure_steps(doc, config=config)
+                doc, rollup = link_umbrella_steps(doc, config=config)
                 steps += rollup
             if link_rca:
-                doc, rca = link_rca_paths(doc)
+                doc, rca = link_rca_paths(doc, config=config)
             if added or scr or steps or rca:
                 total_docs_linked += 1
                 total_added += added
