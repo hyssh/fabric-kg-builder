@@ -473,6 +473,44 @@ Example — *"Battery expansion"* resolves to **28 causes**, **1 diagnostic test
 
 Densify is deterministic, idempotent, and **strictly additive** — input files are never modified and existing edges are never removed; it only appends. `compile-data` enforces this with an **additivity guard** that fails the build if any entity or relationship present in the input is missing from the output. Run densify every time between `enrich` and `compile-data`.
 
+#### Domain mappings
+
+The defaults above preserve the Surface schema. For another schema, pass
+`--densify-config path/to/densify.yaml`. The YAML may override hub source types,
+their qualification (`specific`, the Surface keyword-and-version heuristic, or
+`any`, which only rejects generic names), target relationship verbs, S/C/R types
+and verbs, procedure/step types and verb, RCA verbs, and umbrella naming regexes:
+
+```yaml
+hub:
+  source_types: [Equipment]
+  qualification: any
+  target_relationships:
+    HVACComponent: has_component
+    MaintenanceProcedure: has_maintenance_procedure
+scr:
+  cause_types: [FaultCause]
+  symptom_types: [Fault]
+  resolution_types: [CorrectiveAction]
+  cause_symptom_relationship: causes_fault
+  symptom_resolution_relationship: corrected_by
+procedure_steps:
+  procedure_types: [MaintenanceProcedure]
+  step_types: [WorkStep]
+  relationship: has_work_step
+rca:
+  symptom_types: [Fault]
+  procedure_types: [MaintenanceProcedure]
+  diagnosed_by_relationship: diagnosed_by
+  remediated_by_relationship: remediated_by
+```
+
+Mappings are document-scoped heuristics, not semantic inference: S/C/R and RCA
+still require discriminating shared name tokens, procedure-step links require
+matching `document_elements` text and reading order, and umbrella rollups require
+the configured naming regex and shared key nouns. Review inferred, lower-confidence
+edges before relying on them for safety-critical decisions.
+
 ---
 
 ### The Iteration Loop

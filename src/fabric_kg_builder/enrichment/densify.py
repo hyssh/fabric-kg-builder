@@ -26,8 +26,12 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from fabric_kg_builder.model.ids import content_hash, make_relationship_id
 
@@ -42,6 +46,112 @@ HUB_RELATION_BY_TARGET: dict[str, str] = {
     "Procedure": "has_procedure",
     "Symptom": "has_symptom",
 }
+
+
+@dataclass(frozen=True)
+class DensifyConfig:
+    """Type and relationship mappings used by the densification passes."""
+
+    hub_source_types: tuple[str, ...] = ("DeviceModel",)
+    hub_qualification: str = "specific"
+    hub_target_relationships: dict[str, str] = field(
+        default_factory=lambda: dict(HUB_RELATION_BY_TARGET)
+    )
+    cause_types: tuple[str, ...] = ("Cause",)
+    symptom_types: tuple[str, ...] = ("Symptom",)
+    resolution_types: tuple[str, ...] = ("Resolution",)
+    cause_symptom_relationship: str = "causes"
+    symptom_resolution_relationship: str = "resolved_by"
+    cause_resolution_relationship: str = "addressed_by"
+    procedure_types: tuple[str, ...] = ("Procedure",)
+    step_types: tuple[str, ...] = ("Step",)
+    procedure_step_relationship: str = "has_step"
+    rca_symptom_types: tuple[str, ...] = ("Symptom",)
+    rca_procedure_types: tuple[str, ...] = ("Procedure",)
+    rca_diagnosed_by_relationship: str = "diagnosed_by"
+    rca_remediated_by_relationship: str = "remediated_by"
+    umbrella_patterns: tuple[str, ...] = (
+        r"replacement process$",
+        r"\breplacement$",
+        r"\bprocess$",
+    )
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any]) -> "DensifyConfig":
+        """Create a config from a YAML mapping, retaining omitted defaults."""
+        def section(name: str) -> dict[str, Any]:
+            value = raw.get(name, {})
+            if not isinstance(value, dict):
+                raise ValueError(f"densify config '{name}' must be a mapping")
+            return value
+
+        def types(value: Any, default: tuple[str, ...], name: str) -> tuple[str, ...]:
+            if value is None:
+                return default
+            if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+                raise ValueError(f"densify config '{name}' must be a non-empty list of strings")
+            return tuple(value)
+
+        defaults = cls()
+        hub = section("hub")
+        scr = section("scr")
+        procedure_steps = section("procedure_steps")
+        rca = section("rca")
+        umbrella = section("umbrella")
+        qualification = hub.get("qualification", defaults.hub_qualification)
+        if qualification not in {"specific", "any"}:
+            raise ValueError("densify config 'hub.qualification' must be 'specific' or 'any'")
+        target_relationships = hub.get("target_relationships", defaults.hub_target_relationships)
+        if not isinstance(target_relationships, dict) or not target_relationships or not all(
+            isinstance(entity_type, str) and entity_type and isinstance(relationship, str) and relationship
+            for entity_type, relationship in target_relationships.items()
+        ):
+            raise ValueError("densify config 'hub.target_relationships' must be a non-empty string mapping")
+        patterns = umbrella.get("patterns", defaults.umbrella_patterns)
+        if not isinstance(patterns, (list, tuple)) or not patterns or not all(isinstance(pattern, str) and pattern for pattern in patterns):
+            raise ValueError("densify config 'umbrella.patterns' must be a non-empty list of regular expressions")
+        try:
+            for pattern in patterns:
+                re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"invalid densify umbrella pattern: {exc}") from exc
+
+        def verb(mapping: dict[str, Any], name: str, default: str) -> str:
+            value = mapping.get(name, default)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"densify config '{name}' must be a non-empty string")
+            return value
+
+        return cls(
+            hub_source_types=types(hub.get("source_types"), defaults.hub_source_types, "hub.source_types"),
+            hub_qualification=qualification,
+            hub_target_relationships=dict(target_relationships),
+            cause_types=types(scr.get("cause_types"), defaults.cause_types, "scr.cause_types"),
+            symptom_types=types(scr.get("symptom_types"), defaults.symptom_types, "scr.symptom_types"),
+            resolution_types=types(scr.get("resolution_types"), defaults.resolution_types, "scr.resolution_types"),
+            cause_symptom_relationship=verb(scr, "cause_symptom_relationship", defaults.cause_symptom_relationship),
+            symptom_resolution_relationship=verb(scr, "symptom_resolution_relationship", defaults.symptom_resolution_relationship),
+            cause_resolution_relationship=verb(scr, "cause_resolution_relationship", defaults.cause_resolution_relationship),
+            procedure_types=types(procedure_steps.get("procedure_types"), defaults.procedure_types, "procedure_steps.procedure_types"),
+            step_types=types(procedure_steps.get("step_types"), defaults.step_types, "procedure_steps.step_types"),
+            procedure_step_relationship=verb(procedure_steps, "relationship", defaults.procedure_step_relationship),
+            rca_symptom_types=types(rca.get("symptom_types"), defaults.rca_symptom_types, "rca.symptom_types"),
+            rca_procedure_types=types(rca.get("procedure_types"), defaults.rca_procedure_types, "rca.procedure_types"),
+            rca_diagnosed_by_relationship=verb(rca, "diagnosed_by_relationship", defaults.rca_diagnosed_by_relationship),
+            rca_remediated_by_relationship=verb(rca, "remediated_by_relationship", defaults.rca_remediated_by_relationship),
+            umbrella_patterns=tuple(patterns),
+        )
+
+
+DEFAULT_DENSIFY_CONFIG = DensifyConfig()
+
+
+def load_densify_config(path: str | Path) -> DensifyConfig:
+    """Load a YAML densification configuration file."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("densify config must be a YAML mapping")
+    return DensifyConfig.from_mapping(raw)
 
 # Product keywords that mark a DeviceModel name as *specific* (vs generic like
 # "model" / "this device model" / "device").
@@ -73,6 +183,14 @@ def is_specific_device_model(display_name: str | None) -> bool:
     return has_digit or has_edition
 
 
+def _is_qualified_hub(display_name: str | None, qualification: str) -> bool:
+    if qualification == "specific":
+        return is_specific_device_model(display_name)
+    if qualification == "any":
+        return bool(display_name and display_name.strip().lower() not in _GENERIC_NAMES)
+    raise ValueError(f"unsupported hub qualification: {qualification}")
+
+
 def _new_hub_relationship(
     rel_type: str, source_entity_id: str, target_entity_id: str
 ) -> dict[str, Any]:
@@ -91,7 +209,7 @@ def _new_hub_relationship(
 
 
 def densify_document(
-    doc: dict[str, Any], max_models: int = 5
+    doc: dict[str, Any], max_models: int = 5, config: DensifyConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Add DeviceModel→entity hub edges to one enriched document.
 
@@ -111,13 +229,14 @@ def densify_document(
     """
     entities = doc.get("entities") or []
     relationships = doc.get("relationships") or []
+    config = config or DEFAULT_DENSIFY_CONFIG
 
     # Specific device models in this document, ranked by name length (longer ⇒
     # more specific), capped.
     models = [
         e for e in entities
-        if e.get("entity_type") == "DeviceModel"
-        and is_specific_device_model(e.get("display_name"))
+        if e.get("entity_type") in config.hub_source_types
+        and _is_qualified_hub(e.get("display_name"), config.hub_qualification)
     ]
     models.sort(key=lambda e: len(e.get("display_name") or ""), reverse=True)
     models = models[:max_models]
@@ -134,7 +253,7 @@ def densify_document(
     # Targets: linkable entities of the hub-eligible types in this document.
     new_rels: list[dict[str, Any]] = []
     for ent in entities:
-        rel_type = HUB_RELATION_BY_TARGET.get(ent.get("entity_type"))
+        rel_type = config.hub_target_relationships.get(ent.get("entity_type"))
         if rel_type is None:
             continue
         tgt = ent["entity_id"]
@@ -209,6 +328,7 @@ def link_symptom_cause_resolution(
     top_k: int = 3,
     ubiquity_ratio: float = 0.4,
     min_shared: int = 1,
+    config: DensifyConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Link Cause→Symptom→Resolution triples within one enriched document.
 
@@ -227,10 +347,11 @@ def link_symptom_cause_resolution(
     """
     entities = doc.get("entities") or []
     relationships = doc.get("relationships") or []
+    config = config or DEFAULT_DENSIFY_CONFIG
 
-    causes = [e for e in entities if e.get("entity_type") == "Cause"]
-    symptoms = [e for e in entities if e.get("entity_type") == "Symptom"]
-    resolutions = [e for e in entities if e.get("entity_type") == "Resolution"]
+    causes = [e for e in entities if e.get("entity_type") in config.cause_types]
+    symptoms = [e for e in entities if e.get("entity_type") in config.symptom_types]
+    resolutions = [e for e in entities if e.get("entity_type") in config.resolution_types]
     if not symptoms or (not causes and not resolutions):
         return doc, 0
 
@@ -276,13 +397,13 @@ def link_symptom_cause_resolution(
         linked_res = [rid for ov, rid in ranked_res[:top_k] if ov >= min_shared]
 
         for cid in linked_causes:
-            add(_SCR_CAUSE_SYMPTOM, cid, sid, "densify:scr-keyword")
+            add(config.cause_symptom_relationship, cid, sid, "densify:scr-keyword")
         for rid in linked_res:
-            add(_SCR_SYMPTOM_RESOLUTION, sid, rid, "densify:scr-keyword")
+            add(config.symptom_resolution_relationship, sid, rid, "densify:scr-keyword")
         # Transitive Cause → Resolution (high precision: both share the symptom).
         for cid in linked_causes:
             for rid in linked_res:
-                add(_SCR_CAUSE_RESOLUTION, cid, rid, "densify:scr-transitive")
+                add(config.cause_resolution_relationship, cid, rid, "densify:scr-transitive")
 
     relationships.extend(new_rels)
     doc["relationships"] = relationships
@@ -335,6 +456,7 @@ def _entity_position(display_name: str, index: list[tuple[int, int, str]]) -> tu
 def link_procedure_steps(
     doc: dict[str, Any],
     max_steps_per_procedure: int = 60,
+    config: DensifyConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Link Step entities to their nearest preceding Procedure by reading order.
 
@@ -349,11 +471,12 @@ def link_procedure_steps(
     entities = doc.get("entities") or []
     relationships = doc.get("relationships") or []
     index = _build_element_index(doc.get("document_elements") or [])
+    config = config or DEFAULT_DENSIFY_CONFIG
     if not index:
         return doc, 0
 
-    procedures = [e for e in entities if e.get("entity_type") == "Procedure"]
-    steps = [e for e in entities if e.get("entity_type") == "Step"]
+    procedures = [e for e in entities if e.get("entity_type") in config.procedure_types]
+    steps = [e for e in entities if e.get("entity_type") in config.step_types]
     if not procedures or not steps:
         return doc, 0
 
@@ -401,15 +524,15 @@ def link_procedure_steps(
         existing_pairs.add((cur_proc, eid))
         per_proc[cur_proc] = per_proc.get(cur_proc, 0) + 1
         new_rels.append({
-            "relationship_id": make_relationship_id(_PROC_STEP_RELATION, cur_proc, eid),
-            "relationship_type": _PROC_STEP_RELATION,
+            "relationship_id": make_relationship_id(config.procedure_step_relationship, cur_proc, eid),
+            "relationship_type": config.procedure_step_relationship,
             "source_entity_id": cur_proc,
             "target_entity_id": eid,
             "evidence_id": None,
             "properties_json": '{"origin":"densify:proc-step-readingorder"}',
             "confidence": _PROC_STEP_CONFIDENCE,
             "is_placeholder": False,
-            "content_hash": content_hash(f"{_PROC_STEP_RELATION}:{cur_proc}:{eid}"),
+            "content_hash": content_hash(f"{config.procedure_step_relationship}:{cur_proc}:{eid}"),
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -456,7 +579,7 @@ def is_diagnostic_procedure(display_name):
     return any(k in name for k in _DIAGNOSTIC_KEYWORDS)
 
 
-def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1):
+def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1, config: DensifyConfig | None = None):
     """Link each Symptom to its diagnostic and remediation Procedures.
 
     Within one document, scores Symptom/Procedure pairs by shared discriminating
@@ -469,9 +592,10 @@ def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1):
     """
     entities = doc.get("entities") or []
     relationships = doc.get("relationships") or []
+    config = config or DEFAULT_DENSIFY_CONFIG
 
-    symptoms = [e for e in entities if e.get("entity_type") == "Symptom"]
-    procedures = [e for e in entities if e.get("entity_type") == "Procedure"]
+    symptoms = [e for e in entities if e.get("entity_type") in config.rca_symptom_types]
+    procedures = [e for e in entities if e.get("entity_type") in config.rca_procedure_types]
     if not symptoms or not procedures:
         return doc, 0
 
@@ -503,9 +627,9 @@ def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1):
                 continue
             pid = proc["entity_id"]
             rel_type = (
-                _RCA_DIAGNOSED_BY
+                config.rca_diagnosed_by_relationship
                 if is_diagnostic_procedure(proc.get("display_name"))
-                else _RCA_REMEDIATED_BY
+                else config.rca_remediated_by_relationship
             )
             if sid == pid or (sid, pid) in existing_pairs:
                 continue
@@ -541,9 +665,11 @@ _ROLLUP_STOPWORDS = set(
 )
 
 
-def is_umbrella_procedure(display_name):
-    """True if *display_name* looks like an umbrella 'X Replacement Process'."""
-    return bool(_UMBRELLA_RE.search(display_name or ""))
+def is_umbrella_procedure(display_name, patterns: tuple[str, ...] | None = None):
+    """True if *display_name* matches a configured umbrella naming pattern."""
+    if patterns is None:
+        return bool(_UMBRELLA_RE.search(display_name or ""))
+    return any(re.search(pattern, display_name or "", re.IGNORECASE) for pattern in patterns)
 
 
 def _rollup_key_nouns(display_name):
@@ -553,7 +679,7 @@ def _rollup_key_nouns(display_name):
     }
 
 
-def link_umbrella_steps(doc):
+def link_umbrella_steps(doc, config: DensifyConfig | None = None):
     """Roll fragment-procedure steps up to umbrella procedures by key-noun.
 
     For each umbrella procedure with no steps of its own, links it (has_step) to
@@ -562,22 +688,23 @@ def link_umbrella_steps(doc):
     """
     entities = doc.get("entities") or []
     relationships = doc.get("relationships") or []
-    procedures = [e for e in entities if e.get("entity_type") == "Procedure"]
+    config = config or DEFAULT_DENSIFY_CONFIG
+    procedures = [e for e in entities if e.get("entity_type") in config.procedure_types]
     if not procedures:
         return doc, 0
 
     has_step = {}
     for r in relationships:
-        if r.get("relationship_type") == "has_step":
+        if r.get("relationship_type") == config.procedure_step_relationship:
             has_step.setdefault(r.get("source_entity_id"), set()).add(r.get("target_entity_id"))
 
     umbrellas = [
         p for p in procedures
-        if is_umbrella_procedure(p.get("display_name")) and not has_step.get(p["entity_id"])
+        if is_umbrella_procedure(p.get("display_name"), config.umbrella_patterns) and not has_step.get(p["entity_id"])
     ]
     fragments = [
         p for p in procedures
-        if has_step.get(p["entity_id"]) and not is_umbrella_procedure(p.get("display_name"))
+        if has_step.get(p["entity_id"]) and not is_umbrella_procedure(p.get("display_name"), config.umbrella_patterns)
     ]
     if not umbrellas or not fragments:
         return doc, 0
@@ -602,7 +729,7 @@ def link_umbrella_steps(doc):
                 existing_pairs.add((uid, sid))
                 new_rels.append(
                     _inferred_scr_relationship(
-                        _ROLLUP_RELATION, uid, sid, "densify:umbrella-step-rollup",
+                        config.procedure_step_relationship, uid, sid, "densify:umbrella-step-rollup",
                         confidence=_ROLLUP_CONFIDENCE,
                     )
                 )
