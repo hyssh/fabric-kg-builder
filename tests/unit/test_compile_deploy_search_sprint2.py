@@ -214,7 +214,7 @@ class TestLinkageDerivation:
         doc = derive_document_element_doc(_DOC_ELEMENT_ROW)
         assert doc["section_path"] == "Chapter 2 > Connectivity"
 
-    def test_derive_visual_docs_preserves_asset_and_region_evidence(self):
+    def test_derive_visual_docs_returns_asset_and_region_docs_with_complete_fields(self):
         """Visual search docs retain image, region, text, Blob, and entity context."""
         docs = derive_visual_docs(
             [_VISUAL_ASSET_ROW], [_VISUAL_REGION_ROW], build_entity_lookup([_ENTITY_ROW])
@@ -322,7 +322,7 @@ class TestCompileSearchSprint2:
         assert len(docs) == 1
         assert docs[0]["chunk_id"] == "chk-001"
 
-    def test_compile_search_visual_assets_includes_regions(self, tmp_path):
+    def test_compile_search_visual_assets_generates_asset_and_region_records(self, tmp_path):
         """compile-search emits retrievable asset and region records."""
         parquet_dir = tmp_path / "build" / "parquet"
         _write_parquet(parquet_dir, "visual_assets", [_VISUAL_ASSET_ROW])
