@@ -26,6 +26,7 @@ build_entity_search_keys(related_entity_ids, entity_lookup) → list[str]
 derive_chunk_search_docs(chunks, entities, *, graph_path)  → list[dict]
 derive_chunk_doc(chunk, entities_by_id)                    → dict  (single-chunk)
 derive_document_element_doc(element, entities_by_id)       → dict  (single-element)
+derive_visual_docs(assets, regions, entities)              → list[dict]
 """
 
 from __future__ import annotations
@@ -258,6 +259,86 @@ def derive_document_element_doc(
         "content_type": element.get("element_type", ""),
     }
     return doc
+
+
+def derive_visual_docs(
+    assets: list[dict[str, Any]],
+    regions: list[dict[str, Any]],
+    entities_by_id: Optional[dict[str, dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    """Return kg-visual-assets documents for visual assets and their regions."""
+    entities_by_id = entities_by_id or {}
+    assets_by_id = {asset["image_id"]: asset for asset in assets}
+    docs = [_derive_visual_asset_doc(asset) for asset in assets]
+    docs.extend(
+        _derive_visual_region_doc(region, assets_by_id.get(region["image_id"]), entities_by_id)
+        for region in regions
+    )
+    return docs
+
+
+def _derive_visual_asset_doc(asset: dict[str, Any]) -> dict[str, Any]:
+    """Return one visual-asset search document."""
+    content = "\n".join(
+        value for value in (
+            asset.get("caption"),
+            asset.get("alt_text"),
+            asset.get("description"),
+        ) if value
+    )
+    return {
+        "visual_id": asset["image_id"],
+        "record_type": "asset",
+        "image_id": asset["image_id"],
+        "visual_region_id": None,
+        "document_element_id": asset.get("document_element_id"),
+        "content": content,
+        "embedding_text": content,
+        "asset_type": asset.get("asset_type", ""),
+        "region_type": None,
+        "page_number": asset.get("page_number"),
+        "section_path": asset.get("section_path"),
+        "polygon_json": None,
+        "blob_url": asset.get("blob_url"),
+        "source_path": asset.get("source_file_id", ""),
+        "last_modified": _iso(asset.get("created_at")),
+        "entity_ids": [],
+        "canonical_key": "",
+        "entity_types": [],
+        "graph_path": None,
+    }
+
+
+def _derive_visual_region_doc(
+    region: dict[str, Any],
+    asset: Optional[dict[str, Any]],
+    entities_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return one visual-region search document with its asset context."""
+    entity_id = region.get("identified_entity_id")
+    entity = entities_by_id.get(entity_id) if entity_id else None
+    content = "\n".join(value for value in (region.get("label"), region.get("text")) if value)
+    return {
+        "visual_id": region["visual_region_id"],
+        "record_type": "region",
+        "image_id": region["image_id"],
+        "visual_region_id": region["visual_region_id"],
+        "document_element_id": asset.get("document_element_id") if asset else None,
+        "content": content,
+        "embedding_text": content,
+        "asset_type": asset.get("asset_type", "") if asset else "",
+        "region_type": region.get("region_type", ""),
+        "page_number": asset.get("page_number") if asset else None,
+        "section_path": asset.get("section_path") if asset else None,
+        "polygon_json": region.get("normalized_polygon_json") or region.get("polygon_json"),
+        "blob_url": region.get("blob_url") or (asset.get("blob_url") if asset else None),
+        "source_path": asset.get("source_file_id", "") if asset else "",
+        "last_modified": _iso(region.get("created_at")),
+        "entity_ids": [entity_id] if entity_id else [],
+        "canonical_key": entity.get("canonical_key", "") if entity else "",
+        "entity_types": [entity.get("entity_type", "")] if entity else [],
+        "graph_path": None,
+    }
 
 
 # ---------------------------------------------------------------------------

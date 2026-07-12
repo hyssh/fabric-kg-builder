@@ -639,7 +639,7 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
               help="Path to build/search/ directory (output of compile-search).")
 @click.option("--indexes", default=None, show_default=True,
               help="Comma-separated subset of indexes to deploy "
-                   "(default: kg-chunks,kg-document-elements).")
+                   "(default: kg-chunks,kg-document-elements,kg-visual-assets).")
 @click.option("--recreate", is_flag=True, default=False,
               help="Drop and recreate the index before pushing (caution: loses all documents).")
 @click.option("--mock/--no-mock", "use_mock", default=False, show_default=True,
@@ -680,10 +680,12 @@ def deploy_search_cmd(
     index_prefix: str = ai_search.get("index_prefix", "")
     index_chunks: str = ai_search.get("index_chunks", "kg-chunks")
     index_doc_elements: str = ai_search.get("index_document_elements", "kg-document-elements")
+    index_visual_assets: str = ai_search.get("index_visual_assets", "kg-visual-assets")
 
     _all_indexes = {
         "kg-chunks": f"{index_prefix}{index_chunks}",
         "kg-document-elements": f"{index_prefix}{index_doc_elements}",
+        "kg-visual-assets": f"{index_prefix}{index_visual_assets}",
     }
 
     selected_names = (

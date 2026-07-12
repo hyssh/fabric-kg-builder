@@ -42,6 +42,7 @@
     "index_prefix": "kg-dev-",
     "index_chunks": "kg-chunks",
     "index_document_elements": "kg-document-elements",
+    "index_visual_assets": "kg-visual-assets",
     "_comment_indices": "Runtime appends index_prefix to form deployed index names (e.g., kg-dev-kg-chunks)."
   },
 
