@@ -24,6 +24,7 @@ from fabric_kg_builder.cli.deploy_cmd import deploy_search_cmd, _read_search_env
 from fabric_kg_builder.search.linkage import (
     derive_chunk_doc,
     derive_document_element_doc,
+    derive_visual_docs,
     build_entity_lookup,
 )
 from fabric_kg_builder.search.push import PushResult, push_from_build_dir
@@ -66,6 +67,31 @@ _DOC_ELEMENT_ROW = {
     "section_path": "Chapter 2 > Connectivity",
     "content_hash": "def456",
     "extracted_at": "2026-06-24T00:00:00+00:00",
+}
+
+_VISUAL_ASSET_ROW = {
+    "image_id": "img-001",
+    "source_file_id": "src-001",
+    "document_element_id": "de-001",
+    "asset_type": "figure",
+    "page_number": 3,
+    "section_path": "Chapter 2 > Connectivity",
+    "caption": "Figure 1: USB-C connector",
+    "alt_text": "A close-up of the USB-C connector",
+    "description": "The connector is located on the left side.",
+    "blob_url": "https://example.blob.core.windows.net/images/img-001.png",
+    "created_at": "2026-06-24T00:00:00+00:00",
+}
+
+_VISUAL_REGION_ROW = {
+    "visual_region_id": "vr-001",
+    "image_id": "img-001",
+    "region_type": "ocr_text",
+    "label": "USB-C",
+    "text": "USB-C charging port",
+    "normalized_polygon_json": "[[0,0],[1,0],[1,1],[0,1]]",
+    "identified_entity_id": "ent-001",
+    "created_at": "2026-06-24T00:00:00+00:00",
 }
 
 
@@ -111,6 +137,7 @@ def _make_env_json_with_search(
             "index_prefix": "kg-dev-",
             "index_chunks": "kg-chunks",
             "index_document_elements": "kg-document-elements",
+            "index_visual_assets": "kg-visual-assets",
         },
     }
     path = envs_dir / f"{env}.json"
@@ -186,6 +213,22 @@ class TestLinkageDerivation:
         """section_path is preserved correctly."""
         doc = derive_document_element_doc(_DOC_ELEMENT_ROW)
         assert doc["section_path"] == "Chapter 2 > Connectivity"
+
+    def test_derive_visual_docs_returns_asset_and_region_docs_with_complete_fields(self):
+        """Visual search docs retain image, region, text, Blob, and entity context."""
+        docs = derive_visual_docs(
+            [_VISUAL_ASSET_ROW], [_VISUAL_REGION_ROW], build_entity_lookup([_ENTITY_ROW])
+        )
+        asset_doc, region_doc = docs
+        assert asset_doc["visual_id"] == "img-001"
+        assert asset_doc["blob_url"] == _VISUAL_ASSET_ROW["blob_url"]
+        assert "USB-C connector" in asset_doc["content"]
+        assert region_doc["visual_id"] == "vr-001"
+        assert region_doc["image_id"] == "img-001"
+        assert region_doc["visual_region_id"] == "vr-001"
+        assert region_doc["blob_url"] == _VISUAL_ASSET_ROW["blob_url"]
+        assert region_doc["page_number"] == 3
+        assert region_doc["entity_ids"] == ["ent-001"]
 
     def test_build_entity_lookup_keyed_by_entity_id(self):
         """build_entity_lookup returns dict keyed by entity_id."""
@@ -278,6 +321,24 @@ class TestCompileSearchSprint2:
         docs = json.loads((out / "kg-chunks" / "docs.json").read_text())
         assert len(docs) == 1
         assert docs[0]["chunk_id"] == "chk-001"
+
+    def test_compile_search_visual_assets_generates_asset_and_region_records(self, tmp_path):
+        """compile-search emits retrievable asset and region records."""
+        parquet_dir = tmp_path / "build" / "parquet"
+        _write_parquet(parquet_dir, "visual_assets", [_VISUAL_ASSET_ROW])
+        _write_parquet(parquet_dir, "visual_regions", [_VISUAL_REGION_ROW])
+        _write_parquet(parquet_dir, "entities", [_ENTITY_ROW])
+        out = tmp_path / "search"
+        result = CliRunner().invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-visual-assets",
+        ])
+        assert result.exit_code == 0, result.output
+        schema = json.loads((out / "kg-visual-assets" / "index.schema.json").read_text())
+        assert {f["name"] for f in schema["fields"]} >= {
+            "visual_id", "image_id", "visual_region_id", "blob_url", "page_number",
+        }
+        docs = json.loads((out / "kg-visual-assets" / "docs.json").read_text())
+        assert {doc["visual_id"] for doc in docs} == {"img-001", "vr-001"}
 
     def test_compile_search_docs_json_entity_ids_filterable(self, tmp_path):
         """docs.json chunk doc has entity_ids populated from related_entity_ids."""
@@ -430,8 +491,9 @@ class TestDeploySearchCmd:
         _make_env_json_with_search(tmp_path)
         runner = CliRunner()
         result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
-        # kg-dev-kg-chunks is the prefixed deployed index name
-        assert "kg-dev-" in result.output
+        assert "kg-dev-kg-chunks" in result.output
+        assert "kg-dev-kg-document-elements" in result.output
+        assert "kg-dev-kg-visual-assets" in result.output
 
     def test_deploy_search_disabled_skips_push(self, tmp_path, monkeypatch):
         """deploy-search exits 0 immediately when ai_search.enabled=false."""

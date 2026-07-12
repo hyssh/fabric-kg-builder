@@ -38,6 +38,7 @@
     "_comment_prefix": "No env suffix in prod index names — canonical index names are used directly.",
     "index_chunks": "kg-chunks",
     "index_document_elements": "kg-document-elements",
+    "index_visual_assets": "kg-visual-assets",
     "_comment_indices": "Base index names per SPEC-001 §6. Runtime appends index_prefix to form deployed index names."
   },
 

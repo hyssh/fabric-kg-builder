@@ -339,6 +339,54 @@ def _build_document_elements_schema() -> dict:
     }
 
 
+def _build_visual_assets_schema() -> dict:
+    """AI Search index schema for visual assets and regions."""
+    fields: list[dict] = [
+        {"name": "visual_id", "type": "Edm.String", "key": True, "searchable": False,
+         "filterable": True, "sortable": False, "facetable": False, "retrievable": True},
+        {"name": "record_type", "type": "Edm.String", "searchable": False,
+         "filterable": True, "sortable": False, "facetable": True, "retrievable": True},
+        {"name": "image_id", "type": "Edm.String", "searchable": False,
+         "filterable": True, "sortable": False, "facetable": False, "retrievable": True},
+        {"name": "visual_region_id", "type": "Edm.String", "searchable": False,
+         "filterable": True, "sortable": False, "facetable": False, "retrievable": True},
+        {"name": "document_element_id", "type": "Edm.String", "searchable": False,
+         "filterable": True, "sortable": False, "facetable": False, "retrievable": True},
+        {"name": "content", "type": "Edm.String", "searchable": True,
+         "filterable": False, "sortable": False, "facetable": False, "retrievable": True},
+        {"name": "embedding_text", "type": "Edm.String", "searchable": False,
+         "filterable": False, "sortable": False, "facetable": False, "retrievable": False},
+        {"name": "asset_type", "type": "Edm.String", "searchable": False,
+         "filterable": True, "sortable": False, "facetable": True, "retrievable": True},
+        {"name": "region_type", "type": "Edm.String", "searchable": False,
+         "filterable": True, "sortable": False, "facetable": True, "retrievable": True},
+        {"name": "page_number", "type": "Edm.Int32", "searchable": False,
+         "filterable": True, "sortable": True, "facetable": False, "retrievable": True},
+        {"name": "section_path", "type": "Edm.String", "searchable": True,
+         "filterable": True, "sortable": False, "facetable": False, "retrievable": True},
+        {"name": "polygon_json", "type": "Edm.String", "searchable": False,
+         "filterable": False, "sortable": False, "facetable": False, "retrievable": True},
+        _vector_field("visual_vector"),
+    ]
+    fields.extend(_common_entity_linkage_fields())
+    return {
+        "_schema_version": "1",
+        "name": "kg-visual-assets",
+        "fields": fields,
+        "vectorSearch": _build_chunks_schema()["vectorSearch"],
+        "semantic": {
+            "defaultConfiguration": "kg-visual-assets-semantic",
+            "configurations": [{
+                "name": "kg-visual-assets-semantic",
+                "prioritizedFields": {
+                    "prioritizedContentFields": [{"fieldName": "content"}],
+                    "titleField": {"fieldName": "image_id"},
+                },
+            }],
+        },
+    }
+
+
 # Registry: index name -> (schema_builder_fn, parquet_table, doc_deriver_fn)
 _INDEXES: dict[str, dict[str, Any]] = {
     "kg-chunks": {
@@ -354,6 +402,13 @@ _INDEXES: dict[str, dict[str, Any]] = {
         "id_field": "document_element_id",
         "vector_field": "element_vector",
         "text_field": "content",
+    },
+    "kg-visual-assets": {
+        "schema_fn": _build_visual_assets_schema,
+        "parquet_table": "visual_assets",
+        "id_field": "visual_id",
+        "vector_field": "visual_vector",
+        "text_field": "embedding_text",
     },
 }
 
@@ -391,7 +446,7 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
               help="Output directory; writes {index}/index.schema.json and {index}/docs.json.")
 @click.option("--indexes", default=None, show_default=True,
               help="Comma-separated subset of indexes to compile "
-                   "(default: kg-chunks,kg-document-elements).")
+                   "(default: kg-chunks,kg-document-elements,kg-visual-assets).")
 @click.option("--embed", is_flag=True, default=False,
               help="Attach 1536-dim embeddings to vector fields "
                    "(requires AZURE_AI_FOUNDRY_ENDPOINT env var).")
@@ -403,7 +458,8 @@ def compile_search_cmd(
 ) -> None:
     """Generate AI Search index schemas and document batches from canonical Parquet tables.
 
-    Reads chunks and document_elements Parquet tables from --input, derives
+    Reads chunks, document_elements, visual_assets, and visual_regions Parquet
+    tables from --input, derives
     AI Search documents with entity linkage fields (entity_ids, entity_aliases,
     canonical_key, graph_path, blob_url, content_type), optionally attaches
     1536-dim embeddings (text-embedding-3-large, LOCKED — SPEC-002 §11.7), and
@@ -419,6 +475,7 @@ def compile_search_cmd(
         from fabric_kg_builder.search.linkage import (
             derive_chunk_doc,
             derive_document_element_doc,
+            derive_visual_docs,
             build_entity_lookup,
         )
     except ImportError as exc:  # pragma: no cover
@@ -447,7 +504,7 @@ def compile_search_cmd(
     click.echo(f"[compile-search] Output : {out_path}")
     click.echo(f"[compile-search] Embed  : {embed}")
 
-    # Load entities once — shared across both indexes for entity linkage
+    # Load entities once — shared across indexes for entity linkage
     entities_rows = _read_parquet_table(in_path, "entities")
     entities_by_id = build_entity_lookup(entities_rows)
     click.echo(f"[compile-search] Entities loaded: {len(entities_by_id)}")
@@ -481,21 +538,31 @@ def compile_search_cmd(
 
         # Read source Parquet and derive docs
         rows = _read_parquet_table(in_path, parquet_table)
-        if not rows:
+        visual_regions = (
+            _read_parquet_table(in_path, "visual_regions")
+            if index_name == "kg-visual-assets"
+            else []
+        )
+        if not rows and not visual_regions:
             click.echo(
                 f"[compile-search]   {index_name}: no rows found in "
                 f"{in_path}/{parquet_table}.parquet — docs.json skipped."
             )
             continue
 
-        deriver = (
-            derive_chunk_doc
-            if index_name == "kg-chunks"
-            else derive_document_element_doc
-        )
-        docs: list[dict[str, Any]] = [
-            deriver(row, entities_by_id) for row in rows
-        ]
+        if index_name == "kg-visual-assets":
+            docs = derive_visual_docs(
+                rows,
+                visual_regions,
+                entities_by_id,
+            )
+        else:
+            deriver = (
+                derive_chunk_doc
+                if index_name == "kg-chunks"
+                else derive_document_element_doc
+            )
+            docs = [deriver(row, entities_by_id) for row in rows]
 
         # Optionally attach embeddings
         if embed:
