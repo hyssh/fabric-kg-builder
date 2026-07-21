@@ -1,29 +1,19 @@
-"""densify.py — deterministic graph densification for the knowledge graph.
+"""Deterministic, explicitly configured graph densification.
 
-Entity/relationship extraction runs per document section, so the resulting graph
-is full of islands: a `DeviceModel` node (e.g. "Surface Laptop 5") often has no
-edges to the Components/Parts/Procedures described in the *same* service guide,
-so data-agent queries like "parts for the Surface Laptop 5" return nothing.
+Extraction can leave related entities disconnected when they occur in separate
+text units. This module can add document-scoped hub, associative, sequence, and
+diagnostic-path edges, but it never guesses a domain taxonomy. Every entity type
+and relationship verb must come from an explicit :class:`DensifyConfig`.
 
-This module adds **source-document hub edges**: within each enriched document, it
-links the device model(s) that document covers to the Component / Part /
-Procedure / Symptom entities in that same document. The links are deterministic
-(stable IDs), idempotent (existing pairs are never duplicated), and reversible
-(written to a new directory — the source enriched files are untouched).
-
-It does NOT call an LLM and does NOT re-run extraction.
-
-In addition to the DeviceModel hub edges, :func:`link_symptom_cause_resolution`
-connects troubleshooting triples (Cause → Symptom → Resolution) that the
-per-section extraction left isolated, using document-scoped keyword overlap
-gated by token specificity (ubiquitous tokens like "battery" in a battery guide
-are ignored), plus a high-precision transitive ``Cause → Resolution`` shortcut.
-These associative edges carry a lower confidence (0.45) and an ``origin`` tag so
-they are auditable and removable.
+The default configuration is intentionally empty. This keeps production behavior
+domain-neutral and prevents a sample taxonomy from being injected into unrelated
+domains. Added edges are deterministic, idempotent, marked as inferred, and
+inherit lineage from their source entity.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -37,44 +27,124 @@ from fabric_kg_builder.model.ids import content_hash, make_relationship_id
 
 logger = logging.getLogger(__name__)
 
-# DeviceModel → target-type hub relationship verbs.  These reuse the dominant
-# verbs already present in the data so the multi-type ontology planner folds the
-# new edges into the existing (DeviceModel → X) typed relationships.
-HUB_RELATION_BY_TARGET: dict[str, str] = {
-    "Component": "has_component",
-    "Part": "has_part",
-    "Procedure": "has_procedure",
-    "Symptom": "has_symptom",
-}
+_COMMON_LINEAGE_FIELDS = (
+    "asset_id",
+    "asset_version_id",
+    "run_id",
+    "source_locator_json",
+    "schema_version",
+    "domain_hash",
+)
 
 
 @dataclass(frozen=True)
 class DensifyConfig:
     """Type and relationship mappings used by the densification passes."""
 
-    hub_source_types: tuple[str, ...] = ("DeviceModel",)
+    hub_source_types: tuple[str, ...] = ()
     hub_qualification: str = "specific"
-    hub_target_relationships: dict[str, str] = field(
-        default_factory=lambda: dict(HUB_RELATION_BY_TARGET)
-    )
-    cause_types: tuple[str, ...] = ("Cause",)
-    symptom_types: tuple[str, ...] = ("Symptom",)
-    resolution_types: tuple[str, ...] = ("Resolution",)
-    cause_symptom_relationship: str = "causes"
-    symptom_resolution_relationship: str = "resolved_by"
-    cause_resolution_relationship: str = "addressed_by"
-    procedure_types: tuple[str, ...] = ("Procedure",)
-    step_types: tuple[str, ...] = ("Step",)
-    procedure_step_relationship: str = "has_step"
-    rca_symptom_types: tuple[str, ...] = ("Symptom",)
-    rca_procedure_types: tuple[str, ...] = ("Procedure",)
-    rca_diagnosed_by_relationship: str = "diagnosed_by"
-    rca_remediated_by_relationship: str = "remediated_by"
-    umbrella_patterns: tuple[str, ...] = (
-        r"replacement process$",
-        r"\breplacement$",
-        r"\bprocess$",
-    )
+    hub_target_relationships: dict[str, str] = field(default_factory=dict)
+    cause_types: tuple[str, ...] = ()
+    symptom_types: tuple[str, ...] = ()
+    resolution_types: tuple[str, ...] = ()
+    cause_symptom_relationship: str = ""
+    symptom_resolution_relationship: str = ""
+    cause_resolution_relationship: str = ""
+    procedure_types: tuple[str, ...] = ()
+    step_types: tuple[str, ...] = ()
+    procedure_step_relationship: str = ""
+    rca_symptom_types: tuple[str, ...] = ()
+    rca_procedure_types: tuple[str, ...] = ()
+    rca_diagnosed_by_relationship: str = ""
+    rca_remediated_by_relationship: str = ""
+    umbrella_patterns: tuple[str, ...] = ()
+
+    @property
+    def has_rules(self) -> bool:
+        """Return whether at least one densification pass is configured."""
+        return bool(
+            self.hub_source_types
+            or self.cause_types
+            or self.procedure_types
+            or self.rca_symptom_types
+            or self.umbrella_patterns
+        )
+
+    @property
+    def entity_types(self) -> frozenset[str]:
+        """Return all configured entity type names."""
+        return frozenset(
+            (
+                *self.hub_source_types,
+                *self.hub_target_relationships.keys(),
+                *self.cause_types,
+                *self.symptom_types,
+                *self.resolution_types,
+                *self.procedure_types,
+                *self.step_types,
+                *self.rca_symptom_types,
+                *self.rca_procedure_types,
+            )
+        )
+
+    @property
+    def relationship_types(self) -> frozenset[str]:
+        """Return all configured relationship type names."""
+        return frozenset(
+            value
+            for value in (
+                *self.hub_target_relationships.values(),
+                self.cause_symptom_relationship,
+                self.symptom_resolution_relationship,
+                self.cause_resolution_relationship,
+                self.procedure_step_relationship,
+                self.rca_diagnosed_by_relationship,
+                self.rca_remediated_by_relationship,
+            )
+            if value
+        )
+
+    def validate_complete(self) -> None:
+        """Reject partially configured rules that could infer ambiguous edges."""
+        if bool(self.hub_source_types) != bool(self.hub_target_relationships):
+            raise ValueError(
+                "densify config 'hub' requires both source_types and target_relationships"
+            )
+        scr_values = (
+            self.cause_types,
+            self.symptom_types,
+            self.resolution_types,
+            self.cause_symptom_relationship,
+            self.symptom_resolution_relationship,
+            self.cause_resolution_relationship,
+        )
+        if any(scr_values) and not all(scr_values):
+            raise ValueError(
+                "densify config 'scr' requires all three type lists and relationship verbs"
+            )
+        procedure_values = (
+            self.procedure_types,
+            self.step_types,
+            self.procedure_step_relationship,
+        )
+        if any(procedure_values) and not all(procedure_values):
+            raise ValueError(
+                "densify config 'procedure_steps' requires procedure_types, step_types, and relationship"
+            )
+        rca_values = (
+            self.rca_symptom_types,
+            self.rca_procedure_types,
+            self.rca_diagnosed_by_relationship,
+            self.rca_remediated_by_relationship,
+        )
+        if any(rca_values) and not all(rca_values):
+            raise ValueError(
+                "densify config 'rca' requires both type lists and relationship verbs"
+            )
+        if self.umbrella_patterns and not all(procedure_values):
+            raise ValueError(
+                "densify config 'umbrella' requires a complete procedure_steps rule"
+            )
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "DensifyConfig":
@@ -88,9 +158,11 @@ class DensifyConfig:
         def types(value: Any, default: tuple[str, ...], name: str) -> tuple[str, ...]:
             if value is None:
                 return default
-            if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
-                raise ValueError(f"densify config '{name}' must be a non-empty list of strings")
-            return tuple(value)
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                raise ValueError(f"densify config '{name}' must be a list of strings")
+            return tuple(item.strip() for item in value)
 
         defaults = cls()
         hub = section("hub")
@@ -102,14 +174,19 @@ class DensifyConfig:
         if qualification not in {"specific", "any"}:
             raise ValueError("densify config 'hub.qualification' must be 'specific' or 'any'")
         target_relationships = hub.get("target_relationships", defaults.hub_target_relationships)
-        if not isinstance(target_relationships, dict) or not target_relationships or not all(
-            isinstance(entity_type, str) and entity_type and isinstance(relationship, str) and relationship
+        if not isinstance(target_relationships, dict) or not all(
+            isinstance(entity_type, str)
+            and entity_type.strip()
+            and isinstance(relationship, str)
+            and relationship.strip()
             for entity_type, relationship in target_relationships.items()
         ):
-            raise ValueError("densify config 'hub.target_relationships' must be a non-empty string mapping")
+            raise ValueError("densify config 'hub.target_relationships' must be a string mapping")
         patterns = umbrella.get("patterns", defaults.umbrella_patterns)
-        if not isinstance(patterns, (list, tuple)) or not patterns or not all(isinstance(pattern, str) and pattern for pattern in patterns):
-            raise ValueError("densify config 'umbrella.patterns' must be a non-empty list of regular expressions")
+        if not isinstance(patterns, (list, tuple)) or not all(
+            isinstance(pattern, str) and pattern for pattern in patterns
+        ):
+            raise ValueError("densify config 'umbrella.patterns' must be a list of regular expressions")
         try:
             for pattern in patterns:
                 re.compile(pattern, re.IGNORECASE)
@@ -118,14 +195,17 @@ class DensifyConfig:
 
         def verb(mapping: dict[str, Any], name: str, default: str) -> str:
             value = mapping.get(name, default)
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"densify config '{name}' must be a non-empty string")
-            return value
+            if not isinstance(value, str):
+                raise ValueError(f"densify config '{name}' must be a string")
+            return value.strip()
 
-        return cls(
+        config = cls(
             hub_source_types=types(hub.get("source_types"), defaults.hub_source_types, "hub.source_types"),
             hub_qualification=qualification,
-            hub_target_relationships=dict(target_relationships),
+            hub_target_relationships={
+                entity_type.strip(): relationship.strip()
+                for entity_type, relationship in target_relationships.items()
+            },
             cause_types=types(scr.get("cause_types"), defaults.cause_types, "scr.cause_types"),
             symptom_types=types(scr.get("symptom_types"), defaults.symptom_types, "scr.symptom_types"),
             resolution_types=types(scr.get("resolution_types"), defaults.resolution_types, "scr.resolution_types"),
@@ -141,6 +221,8 @@ class DensifyConfig:
             rca_remediated_by_relationship=verb(rca, "remediated_by_relationship", defaults.rca_remediated_by_relationship),
             umbrella_patterns=tuple(patterns),
         )
+        config.validate_complete()
+        return config
 
 
 DEFAULT_DENSIFY_CONFIG = DensifyConfig()
@@ -153,74 +235,91 @@ def load_densify_config(path: str | Path) -> DensifyConfig:
         raise ValueError("densify config must be a YAML mapping")
     return DensifyConfig.from_mapping(raw)
 
-# Product keywords that mark a DeviceModel name as *specific* (vs generic like
-# "model" / "this device model" / "device").
-_PRODUCT_KEYWORDS = ("surface", "laptop", "pro", "studio", "go", "book", "hub")
-
-# Generic device-model names to never treat as a real hub.
 _GENERIC_NAMES = {
-    "model", "models", "device", "devices", "this device model",
-    "device model", "unit", "units", "product", "products",
+    "concept",
+    "concepts",
+    "entity",
+    "entities",
+    "item",
+    "items",
+    "model",
+    "models",
+    "object",
+    "objects",
+    "record",
+    "records",
+    "thing",
+    "things",
+    "unknown",
+    "unspecified",
 }
 
 
-def is_specific_device_model(display_name: str | None) -> bool:
-    """Return True if *display_name* looks like a concrete Surface model.
-
-    A specific model contains a product keyword AND a distinguishing token
-    (a digit or the word "edition").  This filters out generic placeholders
-    like "model" or "this device model" that would create noisy hub links.
-    """
+def is_specific_hub_name(display_name: str | None) -> bool:
+    """Return whether a hub name is concrete rather than a placeholder."""
     if not display_name:
         return False
-    name = display_name.strip().lower()
+    name = re.sub(r"\s+", " ", display_name).strip().lower()
     if name in _GENERIC_NAMES:
         return False
-    if not any(k in name for k in _PRODUCT_KEYWORDS):
+    if name.startswith(("this ", "the current ", "an unspecified ", "unknown ")):
         return False
-    has_digit = bool(re.search(r"\d", name))
-    has_edition = "edition" in name
-    return has_digit or has_edition
+    return bool(re.search(r"[a-z0-9]", name)) and len(name) >= 3
 
 
 def _is_qualified_hub(display_name: str | None, qualification: str) -> bool:
     if qualification == "specific":
-        return is_specific_device_model(display_name)
+        return is_specific_hub_name(display_name)
     if qualification == "any":
         return bool(display_name and display_name.strip().lower() not in _GENERIC_NAMES)
     raise ValueError(f"unsupported hub qualification: {qualification}")
 
 
-def _new_hub_relationship(
-    rel_type: str, source_entity_id: str, target_entity_id: str
+def _new_inferred_relationship(
+    rel_type: str,
+    source_entity: dict[str, Any],
+    target_entity: dict[str, Any],
+    *,
+    origin: str,
+    confidence: float,
 ) -> dict[str, Any]:
-    return {
+    source_entity_id = source_entity["entity_id"]
+    target_entity_id = target_entity["entity_id"]
+    row = {
         "relationship_id": make_relationship_id(rel_type, source_entity_id, target_entity_id),
         "relationship_type": rel_type,
         "source_entity_id": source_entity_id,
         "target_entity_id": target_entity_id,
         "evidence_id": None,
-        "properties_json": '{"origin":"densify:source-model-hub"}',
-        "confidence": 0.5,
+        "properties_json": json.dumps(
+            {"origin": origin, "provenance_origin": "inferred"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "confidence": confidence,
         "is_placeholder": False,
         "content_hash": content_hash(f"{rel_type}:{source_entity_id}:{target_entity_id}"),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "parent_record_id": source_entity_id,
     }
+    for field_name in _COMMON_LINEAGE_FIELDS:
+        if field_name in source_entity:
+            row[field_name] = source_entity[field_name]
+    return row
 
 
 def densify_document(
-    doc: dict[str, Any], max_models: int = 5, config: DensifyConfig | None = None,
+    doc: dict[str, Any], max_hubs: int = 5, config: DensifyConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
-    """Add DeviceModel→entity hub edges to one enriched document.
+    """Add explicitly configured hub-to-entity edges to one document.
 
     Parameters
     ----------
     doc:
         A parsed enriched canonical document (one source file) with
         ``entities`` and ``relationships`` lists.
-    max_models:
-        Cap on the number of specific device models to use as hubs per document
-        (guards against pathological docs that mention many models).
+    max_hubs:
+        Cap on the number of qualified hubs per document.
 
     Returns
     -------
@@ -231,19 +330,15 @@ def densify_document(
     relationships = doc.get("relationships") or []
     config = config or DEFAULT_DENSIFY_CONFIG
 
-    # Specific device models in this document, ranked by name length (longer ⇒
-    # more specific), capped.
-    models = [
+    hubs = [
         e for e in entities
         if e.get("entity_type") in config.hub_source_types
         and _is_qualified_hub(e.get("display_name"), config.hub_qualification)
     ]
-    models.sort(key=lambda e: len(e.get("display_name") or ""), reverse=True)
-    models = models[:max_models]
-    if not models:
+    hubs.sort(key=lambda e: len(e.get("display_name") or ""), reverse=True)
+    hubs = hubs[:max_hubs]
+    if not hubs:
         return doc, 0
-
-    model_ids = [m["entity_id"] for m in models]
 
     # Existing (source, target) pairs — never duplicate.
     existing_pairs: set[tuple[str, str]] = {
@@ -257,13 +352,22 @@ def densify_document(
         if rel_type is None:
             continue
         tgt = ent["entity_id"]
-        for mid in model_ids:
-            if mid == tgt:
+        for hub in hubs:
+            hub_id = hub["entity_id"]
+            if hub_id == tgt:
                 continue
-            if (mid, tgt) in existing_pairs:
+            if (hub_id, tgt) in existing_pairs:
                 continue
-            existing_pairs.add((mid, tgt))
-            new_rels.append(_new_hub_relationship(rel_type, mid, tgt))
+            existing_pairs.add((hub_id, tgt))
+            new_rels.append(
+                _new_inferred_relationship(
+                    rel_type,
+                    hub,
+                    ent,
+                    origin="densify:source-hub",
+                    confidence=0.5,
+                )
+            )
 
     relationships.extend(new_rels)
     doc["relationships"] = relationships
@@ -271,29 +375,21 @@ def densify_document(
 
 
 # ---------------------------------------------------------------------------
-# Symptom ↔ Cause ↔ Resolution linking (troubleshooting triples)
+# Explicit three-stage associative linking
 # ---------------------------------------------------------------------------
 
-# Tokens too generic to be a useful linking signal.  Domain words like
-# "battery"/"surface" are added dynamically per-document (ubiquity gate), but
-# these are always dropped.
+# Tokens too generic to be a useful linking signal. Domain-specific ubiquitous
+# terms are removed dynamically by the document-frequency gate.
 _SCR_STOPWORDS = set(
     "the a an and or of to in on for with without your you this that these those is "
     "are be by from at as it its their them they we our using use used into not no "
-    "non device devices surface microsoft guide service should must may can will if "
-    "when before after during while replace replacement install installation remove "
-    "removal also other more most some any all per via due such only than then them "
+    "non should must may can will if when before after during while also other more "
+    "most some any all per via due such only than then them "
     "this that have has had been being which what when where how who whom each".split()
 )
 
-# Confidence assigned to inferred (associative) S/C/R edges — lower than
-# extracted edges so downstream consumers can distinguish them.
+# Confidence assigned to inferred associative edges.
 _SCR_CONFIDENCE = 0.45
-
-# Cause→Symptom and Symptom→Resolution verbs (reuse existing dominant verbs).
-_SCR_CAUSE_SYMPTOM = "causes"
-_SCR_SYMPTOM_RESOLUTION = "resolved_by"
-_SCR_CAUSE_RESOLUTION = "addressed_by"
 
 
 def _salient_tokens(display_name: str | None) -> set[str]:
@@ -306,21 +402,19 @@ def _salient_tokens(display_name: str | None) -> set[str]:
 
 
 def _inferred_scr_relationship(
-    rel_type: str, source_entity_id: str, target_entity_id: str, origin: str,
+    rel_type: str,
+    source_entity: dict[str, Any],
+    target_entity: dict[str, Any],
+    origin: str,
     confidence: float = _SCR_CONFIDENCE,
 ) -> dict[str, Any]:
-    return {
-        "relationship_id": make_relationship_id(rel_type, source_entity_id, target_entity_id),
-        "relationship_type": rel_type,
-        "source_entity_id": source_entity_id,
-        "target_entity_id": target_entity_id,
-        "evidence_id": None,
-        "properties_json": f'{{"origin":"{origin}"}}',
-        "confidence": confidence,
-        "is_placeholder": False,
-        "content_hash": content_hash(f"{rel_type}:{source_entity_id}:{target_entity_id}"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+    return _new_inferred_relationship(
+        rel_type,
+        source_entity,
+        target_entity,
+        origin=origin,
+        confidence=confidence,
+    )
 
 
 def link_symptom_cause_resolution(
@@ -330,15 +424,12 @@ def link_symptom_cause_resolution(
     min_shared: int = 1,
     config: DensifyConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
-    """Link Cause→Symptom→Resolution triples within one enriched document.
+    """Link an explicitly configured three-stage pattern within one document.
 
-    Uses document-scoped keyword overlap gated by token *specificity*: a token
-    that appears in more than *ubiquity_ratio* of the document's S/C/R entities
-    (e.g. "battery" in a battery guide) is ignored, so only discriminating tokens
-    (e.g. "thermal", "venting", "kickstand") create links. For each Symptom, the
-    top *top_k* Causes and Resolutions by shared-token count are linked. A
-    high-precision transitive ``Cause → Resolution`` (``addressed_by``) edge is
-    added wherever a linked Cause→Symptom→Resolution path results.
+    Uses document-scoped keyword overlap gated by token specificity. Terms that
+    occur across too many configured entities are ignored. For each middle-stage
+    entity, the top ``top_k`` first- and third-stage entities are linked, plus a
+    transitive first-to-third edge when both associations are supported.
 
     Inferred edges carry confidence 0.45 and an ``origin`` tag. Deterministic,
     idempotent (existing pairs never duplicated), non-destructive.
@@ -375,13 +466,22 @@ def link_symptom_cause_resolution(
     }
     new_rels: list[dict[str, Any]] = []
 
+    entity_by_id = {entity["entity_id"]: entity for entity in scr}
+
     def add(rel_type: str, src: str, tgt: str, origin: str) -> None:
         if src == tgt or (src, tgt) in existing_pairs:
             return
         existing_pairs.add((src, tgt))
-        new_rels.append(_inferred_scr_relationship(rel_type, src, tgt, origin))
+        new_rels.append(
+            _inferred_scr_relationship(
+                rel_type,
+                entity_by_id[src],
+                entity_by_id[tgt],
+                origin,
+            )
+        )
 
-    # Symptom → its top causes / resolutions, plus transitive Cause → Resolution.
+    # Middle stage → ranked first/third stages, plus the transitive shortcut.
     for s in symptoms:
         sid = s["entity_id"]
         ranked_causes = sorted(
@@ -400,7 +500,7 @@ def link_symptom_cause_resolution(
             add(config.cause_symptom_relationship, cid, sid, "densify:scr-keyword")
         for rid in linked_res:
             add(config.symptom_resolution_relationship, sid, rid, "densify:scr-keyword")
-        # Transitive Cause → Resolution (high precision: both share the symptom).
+        # High precision: both endpoints share the same middle-stage entity.
         for cid in linked_causes:
             for rid in linked_res:
                 add(config.cause_resolution_relationship, cid, rid, "densify:scr-transitive")
@@ -411,17 +511,12 @@ def link_symptom_cause_resolution(
 
 
 # ---------------------------------------------------------------------------
-# Procedure → Step linking (by document reading order)
+# Configured parent → child linking by document reading order
 # ---------------------------------------------------------------------------
 #
-# Per-section extraction rarely emits has_step edges (only ~2% of procedures
-# end up with any step in the raw graph), so "list the steps for procedure X"
-# queries return nothing even though the Step entities exist. We reconstruct the
-# links structurally: map each Procedure and Step entity to its position in the
-# document (page_number, sort_order) via the document_elements text, then assign
-# each Step to the nearest *preceding* Procedure in reading order.
+# Map configured parent and child entities to their positions in document
+# elements, then assign each child to the nearest preceding parent.
 
-_PROC_STEP_RELATION = "has_step"
 _PROC_STEP_CONFIDENCE = 0.5
 # A Step links to the current procedure only if it appears within this many
 # elements after it (guards against a trailing step bleeding into a far-away
@@ -458,11 +553,11 @@ def link_procedure_steps(
     max_steps_per_procedure: int = 60,
     config: DensifyConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
-    """Link Step entities to their nearest preceding Procedure by reading order.
+    """Link configured child entities to their nearest preceding parent.
 
-    Maps Procedure and Step entities to document positions using
-    ``document_elements`` text, walks the merged sequence in reading order, and
-    attaches each Step to the most recent Procedure seen (within
+    Maps configured types to positions using ``document_elements`` text, walks
+    the merged sequence in reading order, and attaches each child to the most
+    recent parent (within
     :data:`_PROC_STEP_MAX_GAP` elements). Deterministic, idempotent,
     non-destructive; inferred edges carry confidence 0.5 and an origin tag.
 
@@ -503,6 +598,7 @@ def link_procedure_steps(
         (r.get("source_entity_id"), r.get("target_entity_id")) for r in relationships
     }
     new_rels: list[dict[str, Any]] = []
+    entity_by_id = {entity["entity_id"]: entity for entity in entities}
     cur_proc: str | None = None
     cur_proc_ord: int | None = None
     per_proc: dict[str, int] = {}
@@ -523,18 +619,15 @@ def link_procedure_steps(
             continue
         existing_pairs.add((cur_proc, eid))
         per_proc[cur_proc] = per_proc.get(cur_proc, 0) + 1
-        new_rels.append({
-            "relationship_id": make_relationship_id(config.procedure_step_relationship, cur_proc, eid),
-            "relationship_type": config.procedure_step_relationship,
-            "source_entity_id": cur_proc,
-            "target_entity_id": eid,
-            "evidence_id": None,
-            "properties_json": '{"origin":"densify:proc-step-readingorder"}',
-            "confidence": _PROC_STEP_CONFIDENCE,
-            "is_placeholder": False,
-            "content_hash": content_hash(f"{config.procedure_step_relationship}:{cur_proc}:{eid}"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        new_rels.append(
+            _new_inferred_relationship(
+                config.procedure_step_relationship,
+                entity_by_id[cur_proc],
+                entity_by_id[eid],
+                origin="densify:sequence-reading-order",
+                confidence=_PROC_STEP_CONFIDENCE,
+            )
+        )
 
     relationships.extend(new_rels)
     doc["relationships"] = relationships
@@ -542,25 +635,13 @@ def link_procedure_steps(
 
 
 # ---------------------------------------------------------------------------
-# RCA diagnostic-path linking (Symptom -> Procedure)
+# Optional diagnostic-path linking
 # ---------------------------------------------------------------------------
 #
-# The data already has Symptom<-Cause and Symptom->Resolution, but the link from
-# a Symptom to the actionable Procedure (and its Steps) is essentially missing
-# (only a handful of has_resolution edges). This linker closes that gap so a
-# Symptom becomes the hub of a full root-cause-analysis answer:
-#
-#   Cause --causes--> Symptom --diagnosed_by--> Procedure[diagnostic]
-#                       |  \--remediated_by--> Procedure[repair] --has_step--> Step
-#                       \--resolved_by--> Resolution
-#
-# Procedures are classified as *diagnostic* (SDT / check / test / inspect /
-# validate / verify / status) vs *repair* by name, then linked to symptoms in the
-# same document by discriminating-keyword overlap (same ubiquity gate as the
-# Cause/Symptom/Resolution linker).
+# Process names are classified as diagnostic versus remediating by configurable
+# entity types and conservative name signals, then linked by discriminating
+# keyword overlap.
 
-_RCA_DIAGNOSED_BY = "diagnosed_by"      # Symptom -> diagnostic Procedure
-_RCA_REMEDIATED_BY = "remediated_by"    # Symptom -> repair Procedure
 _RCA_CONFIDENCE = 0.4
 
 # Procedure-name keywords that mark a procedure as a diagnostic test/check
@@ -580,15 +661,12 @@ def is_diagnostic_procedure(display_name):
 
 
 def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1, config: DensifyConfig | None = None):
-    """Link each Symptom to its diagnostic and remediation Procedures.
+    """Link configured issue-like entities to diagnostic/remediation processes.
 
-    Within one document, scores Symptom/Procedure pairs by shared discriminating
-    tokens (ubiquitous tokens like "battery" in a battery guide are ignored), and
-    for the top *top_k* procedures per symptom adds ``diagnosed_by`` if the
-    procedure name is diagnostic (:func:`is_diagnostic_procedure`) else
-    ``remediated_by``. Reuses the Symptom/Cause/Resolution token model. Inferred
-    edges carry confidence 0.4 and an origin tag. Deterministic, idempotent,
-    non-destructive. Returns ``(doc, added)``.
+    Scores configured entity/process pairs by shared discriminating tokens. For
+    the top ``top_k`` processes, uses the configured diagnostic relationship
+    when the process name matches :func:`is_diagnostic_procedure`; otherwise it
+    uses the configured remediation relationship.
     """
     entities = doc.get("entities") or []
     relationships = doc.get("relationships") or []
@@ -635,7 +713,13 @@ def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1, config: Densi
                 continue
             existing_pairs.add((sid, pid))
             new_rels.append(
-                _inferred_scr_relationship(rel_type, sid, pid, "densify:rca-" + rel_type, confidence=_RCA_CONFIDENCE)
+                _inferred_scr_relationship(
+                    rel_type,
+                    s,
+                    proc,
+                    "densify:diagnostic-path-" + rel_type,
+                    confidence=_RCA_CONFIDENCE,
+                )
             )
 
     relationships.extend(new_rels)
@@ -645,31 +729,25 @@ def link_rca_paths(doc, top_k=3, ubiquity_ratio=0.4, min_shared=1, config: Densi
 
 
 # ---------------------------------------------------------------------------
-# Umbrella-procedure step rollup
+# Configured umbrella-parent child rollup
 # ---------------------------------------------------------------------------
 #
-# Named "X Replacement Process" procedures are what users ask for ("steps for the
-# battery replacement"), but the steps were extracted under fragment procedures
-# ("Remove the Battery", "Insert the Battery"). After link_procedure_steps() has
-# attached steps to fragments, this pass rolls those steps up to the umbrella by
-# shared key-noun within the same document, so the umbrella procedure exposes the
-# full step set. Runs AFTER link_procedure_steps. Additive, idempotent.
+# After the reading-order pass attaches children to fragment parents, this pass
+# can roll those children up to a configured umbrella parent by shared key noun.
 
-_ROLLUP_RELATION = "has_step"
 _ROLLUP_CONFIDENCE = 0.45
-_UMBRELLA_RE = re.compile(r"replacement process$|\breplacement$|\bprocess$", re.IGNORECASE)
 _ROLLUP_STOPWORDS = set(
     "the a an of to and or for with this that process replacement remove install "
-    "removal installation procedure device devices surface microsoft step steps "
-    "guide service new old".split()
+    "removal installation procedure step steps guide new old".split()
 )
 
 
 def is_umbrella_procedure(display_name, patterns: tuple[str, ...] | None = None):
     """True if *display_name* matches a configured umbrella naming pattern."""
-    if patterns is None:
-        return bool(_UMBRELLA_RE.search(display_name or ""))
-    return any(re.search(pattern, display_name or "", re.IGNORECASE) for pattern in patterns)
+    return any(
+        re.search(pattern, display_name or "", re.IGNORECASE)
+        for pattern in (patterns or ())
+    )
 
 
 def _rollup_key_nouns(display_name):
@@ -709,6 +787,7 @@ def link_umbrella_steps(doc, config: DensifyConfig | None = None):
     if not umbrellas or not fragments:
         return doc, 0
 
+    entity_by_id = {entity["entity_id"]: entity for entity in entities}
     frag_nouns = {f["entity_id"]: _rollup_key_nouns(f.get("display_name")) for f in fragments}
 
     existing_pairs = {
@@ -729,7 +808,10 @@ def link_umbrella_steps(doc, config: DensifyConfig | None = None):
                 existing_pairs.add((uid, sid))
                 new_rels.append(
                     _inferred_scr_relationship(
-                        config.procedure_step_relationship, uid, sid, "densify:umbrella-step-rollup",
+                        config.procedure_step_relationship,
+                        u,
+                        entity_by_id[sid],
+                        "densify:umbrella-step-rollup",
                         confidence=_ROLLUP_CONFIDENCE,
                     )
                 )

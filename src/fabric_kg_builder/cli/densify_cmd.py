@@ -1,13 +1,12 @@
-"""densify command — add source-document DeviceModel hub edges to enriched JSON.
+"""densify command - apply explicit, domain-approved graph densification rules.
 
 Pipeline helper stage (runs between ``enrich`` and ``compile-data``).
 
-Reads enriched canonical ``*_canonical.json`` files from *input*, links the
-device model(s) each document covers to the Component / Part / Procedure /
-Symptom entities in that same document, and writes densified copies to *out*.
-This makes "X for device Y" queries traversable in the deployed graph.
+Reads enriched canonical ``*_canonical.json`` files from *input*, applies only
+the entity types and relationship verbs declared in an explicit densification
+configuration, and writes densified copies to *out*.
 
-Deterministic, idempotent, and non-destructive — the input files are never
+Deterministic, idempotent, and non-destructive - the input files are never
 modified; existing edges are never duplicated.
 
 Exit codes
@@ -19,11 +18,11 @@ Exit codes
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import click
 
+from fabric_kg_builder.domain import EnrichmentContractError, require_ready_domain_contract
 from fabric_kg_builder.enrichment.densify import (
     densify_document,
     load_densify_config,
@@ -35,11 +34,12 @@ from fabric_kg_builder.enrichment.densify import (
 
 _DENSIFY_EPILOG = """\b
 Example:
-  fabric-kg densify --input data\\surface_kg\\enriched --out data\\surface_kg\\enriched_dense
+  fabric-kg densify --input build\\enriched --out build\\enriched_dense
+    --domain-file domain.yaml --densify-config densify.yaml
 
 \b
-Densification links each document's hub entities to configured target types in
-that same document. Use --densify-config to map a domain-specific schema.
+Densification never selects a sample taxonomy by default. The approved
+domain.yaml must declare every configured entity type and relationship verb.
 
 Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
@@ -53,64 +53,101 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 @click.option("--out", "output_path", default="build/enriched_dense", show_default=True,
               type=click.Path(),
               help="Output directory for densified canonical JSON files.")
-@click.option("--max-models", default=5, show_default=True, type=int,
-              help="Maximum specific device models to use as hubs per document.")
-@click.option("--densify-config", default=None, type=click.Path(exists=True, dir_okay=False),
-              help="YAML file overriding densification type, relationship, and naming mappings.")
-@click.option("--link-scr/--no-link-scr", "link_scr", default=True, show_default=True,
-              help="Also link Cause→Symptom→Resolution troubleshooting triples via "
-                   "document-scoped keyword overlap (associative edges, confidence 0.45).")
-@click.option("--link-steps/--no-link-steps", "link_steps", default=True, show_default=True,
-              help="Also link each Procedure to its Steps by document reading order "
-                   "(reconstructs has_step edges extraction missed; confidence 0.5).")
-@click.option("--link-rca/--no-link-rca", "link_rca", default=True, show_default=True,
-              help="Also build RCA diagnostic-path edges: Symptom -> diagnosed_by -> "
-                   "diagnostic Procedure and Symptom -> remediated_by -> repair Procedure "
-                   "(connects symptoms to actionable fixes; confidence 0.4).")
+@click.option("--max-hubs", "--max-models", default=5, show_default=True, type=click.IntRange(min=1),
+              help="Maximum configured hub entities to use per document.")
+@click.option("--domain-file", default="domain.yaml", show_default=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Approved domain contract used to validate configured types and verbs.")
+@click.option("--densify-config", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining explicit densification types and relationship mappings.")
+@click.option("--link-associations/--no-link-associations", "link_scr", default=False,
+              show_default=True,
+              help="Apply the explicitly configured three-stage associative rule.")
+@click.option("--link-steps/--no-link-steps", "link_steps", default=False, show_default=True,
+              help="Apply the configured parent/child reading-order and umbrella rules.")
+@click.option("--link-diagnostics/--no-link-diagnostics", "link_rca", default=False,
+              show_default=True,
+              help="Apply the explicitly configured diagnostic/remediation path rule.")
 def densify_cmd(
-    input_path: str, output_path: str, max_models: int, densify_config: str | None, link_scr: bool,
-    link_steps: bool, link_rca: bool,
+    input_path: str,
+    output_path: str,
+    max_hubs: int,
+    domain_file: str,
+    densify_config: str,
+    link_scr: bool,
+    link_steps: bool,
+    link_rca: bool,
 ) -> None:
-    """Add source-document hub edges to enriched JSON.
+    """Apply explicit domain-approved densification rules to enriched JSON.
 
-    The default configuration links Surface device models to Components, Parts,
-    Procedures, and Symptoms. ``--densify-config`` can map equivalent types and
-    relationship verbs for another domain.
-
-    With --link-scr (default), also connects isolated Cause / Symptom /
-    Resolution troubleshooting entities within each document. With --link-steps
-    (default), reconstructs Procedure -> Step edges by document reading order.
+    No rule runs unless it is present in ``--densify-config``. Every configured
+    type and verb must also be declared by the approved domain contract.
     """
     in_dir = Path(input_path)
     out_dir = Path(output_path)
     if not in_dir.is_dir():
-        click.echo(f"[densify] ERROR: input directory not found: {in_dir}", err=True)
-        sys.exit(1)
+        raise click.ClickException(f"input directory not found: {in_dir}")
 
     files = sorted(in_dir.glob("*_canonical.json"))
     if not files:
-        click.echo(f"[densify] ERROR: no *_canonical.json files in {in_dir}", err=True)
-        sys.exit(1)
+        raise click.ClickException(f"no *_canonical.json files in {in_dir}")
     try:
-        config = load_densify_config(densify_config) if densify_config else None
+        contract, _review, _status = require_ready_domain_contract(domain_file)
+        config = load_densify_config(densify_config)
+    except EnrichmentContractError as exc:
+        raise click.UsageError(str(exc)) from exc
     except (OSError, ValueError) as exc:
         raise click.UsageError(f"invalid --densify-config: {exc}") from exc
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if not config.has_rules:
+        raise click.UsageError("--densify-config does not define any densification rules")
+
+    undeclared_entities = sorted(
+        config.entity_types - set(contract.candidate_model.entity_categories)
+    )
+    undeclared_relationships = sorted(
+        config.relationship_types - set(contract.candidate_model.relationship_categories)
+    )
+    if undeclared_entities or undeclared_relationships:
+        details: list[str] = []
+        if undeclared_entities:
+            details.append(f"undeclared entity types: {', '.join(undeclared_entities)}")
+        if undeclared_relationships:
+            details.append(
+                f"undeclared relationship types: {', '.join(undeclared_relationships)}"
+            )
+        raise click.UsageError(
+            "densify rules must be declared in approved domain.yaml; " + "; ".join(details)
+        )
+
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise click.ClickException(f"could not create output directory '{out_dir}': {exc}") from exc
     click.echo(f"[densify] input  : {in_dir}")
     click.echo(f"[densify] output : {out_dir}")
     click.echo(f"[densify] files  : {len(files)}")
-    click.echo(f"[densify] link-scr: {link_scr}  link-steps: {link_steps}  link-rca: {link_rca}")
+    click.echo(f"[densify] domain : {domain_file}")
+    click.echo(f"[densify] config : {densify_config}")
+    click.echo(
+        f"[densify] associative: {link_scr}  sequence: {link_steps}  diagnostic: {link_rca}"
+    )
 
     total_added = 0
     total_scr = 0
     total_steps = 0
     total_rca = 0
     total_docs_linked = 0
-    try:
-        for f in files:
+    for f in files:
+        try:
             doc = json.loads(f.read_text(encoding="utf-8"))
-            doc, added = densify_document(doc, max_models=max_models, config=config)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise click.ClickException(
+                f"could not read canonical document '{f}': {exc}"
+            ) from exc
+
+        try:
+            doc, added = densify_document(doc, max_hubs=max_hubs, config=config)
             scr = 0
             steps = 0
             rca = 0
@@ -122,25 +159,30 @@ def densify_cmd(
                 steps += rollup
             if link_rca:
                 doc, rca = link_rca_paths(doc, config=config)
-            if added or scr or steps or rca:
-                total_docs_linked += 1
-                total_added += added
-                total_scr += scr
-                total_steps += steps
-                total_rca += rca
+        except (KeyError, TypeError, ValueError) as exc:
+            raise click.ClickException(f"invalid canonical data in '{f}': {exc}") from exc
+
+        if added or scr or steps or rca:
+            total_docs_linked += 1
+            total_added += added
+            total_scr += scr
+            total_steps += steps
+            total_rca += rca
+        try:
             (out_dir / f.name).write_text(
                 json.dumps(doc, ensure_ascii=False, default=str), encoding="utf-8"
             )
-            click.echo(
-                f"[densify]   {f.name}: +{added} hub, +{scr} S/C/R, "
-                f"+{steps} step, +{rca} RCA edges"
-            )
-    except Exception as exc:  # noqa: BLE001
-        click.echo(f"[densify] ERROR: {exc}", err=True)
-        sys.exit(1)
+        except OSError as exc:
+            raise click.ClickException(
+                f"could not write densified document '{f.name}': {exc}"
+            ) from exc
+        click.echo(
+            f"[densify]   {f.name}: +{added} hub, +{scr} associative, "
+            f"+{steps} sequence, +{rca} diagnostic edges"
+        )
 
     click.echo(
-        f"[densify] SUCCESS — added {total_added} hub + {total_scr} S/C/R + "
-        f"{total_steps} step + {total_rca} RCA edges across "
-        f"{total_docs_linked}/{len(files)} documents → {out_dir}"
+        f"[densify] SUCCESS - added {total_added} hub + {total_scr} associative + "
+        f"{total_steps} sequence + {total_rca} diagnostic edges across "
+        f"{total_docs_linked}/{len(files)} documents -> {out_dir}"
     )

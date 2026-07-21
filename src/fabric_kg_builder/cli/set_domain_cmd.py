@@ -1,8 +1,4 @@
-"""set-domain command — intake a user-supplied domain prompt.
-
-Security: domain/user text is NEVER placed in the LLM system prompt.
-See SPEC-004 §2.3 and fabric_kg_builder.enrichment.domain for details.
-"""
+"""Deprecated compatibility command for the legacy domain.json workflow."""
 
 from __future__ import annotations
 
@@ -42,6 +38,13 @@ def _build_foundry_client(ctx_obj: dict):
 
 
 _SET_DOMAIN_EPILOG = """\b
+DEPRECATED: this command writes the legacy build\\enriched\\domain.json format.
+For milestone M1 and later, use:
+  fabric-kg domain init --out domain.yaml
+  fabric-kg domain review --file domain.yaml
+  fabric-kg domain approve --file domain.yaml
+
+\b
 A good domain brief names four things:
   1. INDUSTRY / business domain — pass via --industry and --business-domain
   2. ENTITY TYPES               — the node types you want in the graph
@@ -131,7 +134,7 @@ def set_domain_cmd(
     output_dir: str,
     force: bool,
 ) -> None:
-    """Persist a domain brief to build/enriched/domain.json via an LLM rephrase pass.
+    """Persist a legacy domain brief to build/enriched/domain.json via an LLM rephrase pass.
 
     Exactly one of --prompt or --domain-file must be provided.  --industry and
     --business-domain are required: they declare the domain template that shapes
@@ -139,7 +142,9 @@ def set_domain_cmd(
     USER message (never the system prompt, SPEC-004 §2.3), rephrased into a
     structured DomainBrief, and saved as JSON.
 
-    Subsequent 'enrich' runs pick up the saved brief automatically.
+    This command is retained only as a deprecated compatibility path.  Enrichment
+    now requires an approved domain.yaml contract; convert the resulting
+    domain.json with 'fabric-kg domain convert-legacy'.
 
     For best results, also pass --questions-file with 3-5 sample questions the
     graph must answer.  The sample questions are the strongest signal for which
@@ -147,6 +152,10 @@ def set_domain_cmd(
     Playbook'.
     """
     ctx.ensure_object(dict)
+    click.echo(
+        "[set-domain] DEPRECATED: this writes legacy domain.json only. "
+        "Run 'fabric-kg domain convert-legacy' before enrichment."
+    )
 
     # Validate mutual exclusion.
     if prompt is None and domain_file is None:

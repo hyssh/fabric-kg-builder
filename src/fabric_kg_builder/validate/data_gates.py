@@ -1,4 +1,4 @@
-"""Data-integrity validation gates VAL-001..VAL-012.
+"""Data-integrity validation gates VAL-001..VAL-017.
 
 Implements the subset of SPEC-002 §9 validation rules that operate on
 in-memory row dicts (before and after Parquet write).
@@ -17,6 +17,11 @@ VAL-009  No duplicate visual_region_id values in visual_regions (D-14)
 VAL-010  visual_regions.image_id exists in visual_assets      (D-05 for visual_regions)
 VAL-011  evidence.image_id (non-null) exists in visual_assets (D-05 for evidence)
 VAL-012  evidence.visual_region_id / callout_id (non-null) exist in visual_regions (D-06)
+VAL-013  No duplicate property observation or conflict IDs
+VAL-014  property_observations.entity_id exists in entities
+VAL-015  property observation evidence IDs exist in evidence
+VAL-016  property_conflicts reference existing observations
+VAL-017  semantic relationships have a valid primary evidence ID
 
 Usage
 -----
@@ -61,7 +66,7 @@ class Violation:
 
 
 def run_gates(table_rows: dict[str, list[dict]]) -> list[Violation]:
-    """Run VAL-001..VAL-012 against *table_rows*.
+    """Run VAL-001..VAL-017 against *table_rows*.
 
     Parameters
     ----------
@@ -87,6 +92,11 @@ def run_gates(table_rows: dict[str, list[dict]]) -> list[Violation]:
     violations.extend(_val010_visual_regions_image_fk(table_rows))
     violations.extend(_val011_evidence_image_fk(table_rows))
     violations.extend(_val012_evidence_visual_region_fk(table_rows))
+    violations.extend(_val013_dup_property_ids(table_rows))
+    violations.extend(_val014_property_entity_fk(table_rows))
+    violations.extend(_val015_property_evidence_fk(table_rows))
+    violations.extend(_val016_property_conflict_fk(table_rows))
+    violations.extend(_val017_semantic_relationship_evidence_fk(table_rows))
     return violations
 
 
@@ -188,13 +198,131 @@ def _val007_dangling_evidence_fk(table_rows: dict[str, list[dict]]) -> list[Viol
     }
     violations: list[Violation] = []
     for rel in table_rows.get("relationships", []):
-        eid = rel.get("evidence_id")
-        if eid is not None and eid not in evidence_ids:
+        relationship_evidence = set(rel.get("evidence_ids") or [])
+        if rel.get("evidence_id"):
+            relationship_evidence.add(rel["evidence_id"])
+        for eid in sorted(relationship_evidence):
+            if eid in evidence_ids:
+                continue
             violations.append(
                 Violation(
                     "VAL-007",
                     "relationships",
                     f"evidence_id '{eid}' not found in evidence",
+                )
+            )
+    return violations
+
+
+def _val013_dup_property_ids(
+    table_rows: dict[str, list[dict]],
+) -> list[Violation]:
+    return [
+        *_dup_id_violations(
+            table_rows.get("property_observations", []),
+            "observation_id",
+            "VAL-013",
+            "property_observations",
+        ),
+        *_dup_id_violations(
+            table_rows.get("property_conflicts", []),
+            "conflict_id",
+            "VAL-013",
+            "property_conflicts",
+        ),
+    ]
+
+
+def _val014_property_entity_fk(
+    table_rows: dict[str, list[dict]],
+) -> list[Violation]:
+    entity_ids = {
+        row["entity_id"]
+        for row in table_rows.get("entities", [])
+        if row.get("entity_id")
+    }
+    return [
+        Violation(
+            "VAL-014",
+            "property_observations",
+            f"entity_id '{row.get('entity_id')}' not found in entities",
+        )
+        for row in table_rows.get("property_observations", [])
+        if row.get("entity_id") not in entity_ids
+    ]
+
+
+def _val015_property_evidence_fk(
+    table_rows: dict[str, list[dict]],
+) -> list[Violation]:
+    evidence_ids = {
+        row["evidence_id"]
+        for row in table_rows.get("evidence", [])
+        if row.get("evidence_id")
+    }
+    violations: list[Violation] = []
+    for row in table_rows.get("property_observations", []):
+        for evidence_id in row.get("evidence_ids") or []:
+            if evidence_id not in evidence_ids:
+                violations.append(
+                    Violation(
+                        "VAL-015",
+                        "property_observations",
+                        f"evidence_id '{evidence_id}' not found in evidence",
+                    )
+                )
+    return violations
+
+
+def _val016_property_conflict_fk(
+    table_rows: dict[str, list[dict]],
+) -> list[Violation]:
+    observation_ids = {
+        row["observation_id"]
+        for row in table_rows.get("property_observations", [])
+        if row.get("observation_id")
+    }
+    violations: list[Violation] = []
+    for row in table_rows.get("property_conflicts", []):
+        for observation_id in row.get("observation_ids") or []:
+            if observation_id not in observation_ids:
+                violations.append(
+                    Violation(
+                        "VAL-016",
+                        "property_conflicts",
+                        f"observation_id '{observation_id}' not found in "
+                        "property_observations",
+                    )
+                )
+    return violations
+
+
+def _val017_semantic_relationship_evidence_fk(
+    table_rows: dict[str, list[dict]],
+) -> list[Violation]:
+    evidence_ids = {
+        row["evidence_id"]
+        for row in table_rows.get("evidence", [])
+        if row.get("evidence_id")
+    }
+    violations: list[Violation] = []
+    for row in table_rows.get("semantic_relationships", []):
+        evidence_id = row.get("evidence_id")
+        if not evidence_id:
+            violations.append(
+                Violation(
+                    "VAL-017",
+                    "semantic_relationships",
+                    f"relationship_id '{row.get('relationship_id')}' has no "
+                    "primary evidence_id",
+                )
+            )
+        elif evidence_id not in evidence_ids:
+            violations.append(
+                Violation(
+                    "VAL-017",
+                    "semantic_relationships",
+                    f"evidence_id '{evidence_id}' not found in evidence",
                 )
             )
     return violations

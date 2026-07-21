@@ -14,9 +14,11 @@ from fabric_kg_builder.sources.pdf_extractor import PdfExtractResult
 from fabric_kg_builder.sources.docx_extractor import DocxExtractResult
 from fabric_kg_builder.sources.html_extractor import HtmlExtractResult
 
-_CSV_EXTS = {".csv", ".tsv", ".xlsx"}
-_DOC_EXTS = {".pdf", ".docx", ".html", ".htm", ".md"}
-_SUPPORTED_EXTS = _CSV_EXTS | _DOC_EXTS
+_CSV_EXTS = {".csv", ".tsv", ".xls", ".xlsx"}
+_DOC_EXTS = {".pdf", ".docx", ".html", ".htm", ".md", ".pptx"}
+_TABULAR_EXTS = {".parquet"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif"}
+_SUPPORTED_EXTS = _CSV_EXTS | _DOC_EXTS | _TABULAR_EXTS | _IMAGE_EXTS
 
 
 def _collect_files(p: Path) -> list[Path]:
@@ -125,7 +127,7 @@ def inspect_source_cmd(input_path: str, output_format: str, out_dir: str | None)
     (heading, paragraph, table, figure, etc.).
 
     Supports single files and directories (all supported files in the directory).
-    Supported extensions: .csv .tsv .xlsx .pdf .docx .html .htm .md
+    Supported extensions: .csv .tsv .xls .xlsx .pdf .docx .html .htm .md
 
     Exit codes: 0 success · 1 error · 3 unsupported source type.
     """
@@ -141,12 +143,13 @@ def inspect_source_cmd(input_path: str, output_format: str, out_dir: str | None)
         if p.is_file():
             click.echo(
                 f"Error: unsupported file type '{p.suffix.lower()}'. "
-                f"Supported: .csv, .tsv, .xlsx, .pdf, .docx, .html, .htm, .md",
+                f"Supported: .csv, .tsv, .xls, .xlsx, .pdf, .docx, .html, .htm, .md, "
+                f".pptx, .parquet, .png, .jpg, .jpeg, .tiff, .tif",
                 err=True,
             )
             sys.exit(3)
         click.echo(
-            f"Error: no supported source files (.csv/.tsv/.xlsx/.pdf/.docx/.html) found in '{input_path}'.",
+            f"Error: no supported source files found in '{input_path}'.",
             err=True,
         )
         sys.exit(1)
@@ -170,7 +173,7 @@ def inspect_source_cmd(input_path: str, output_format: str, out_dir: str | None)
             if output_format == "table":
                 _print_table_summary(result, file_path)
         else:
-            # PDF / DOCX / HTML path via router
+            # PDF / DOCX / HTML / PPTX / Parquet / Image path via router
             extract_result = _extract_doc(file_path)
             if extract_result is None:
                 load_errors.append(f"{file_path.name}: extraction failed")

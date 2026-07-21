@@ -1,4 +1,4 @@
-"""LLM enrichment orchestration via Microsoft Foundry SDK (azure-ai-projects).
+"""LLM enrichment orchestration via the Azure OpenAI SDK.
 
 Runs batched LLM calls to extract entities, relationships, evidence,
 chunks, and visual assets from source records. Supports checkpointing

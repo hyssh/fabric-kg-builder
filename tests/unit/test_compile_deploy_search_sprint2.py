@@ -19,7 +19,13 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from fabric_kg_builder.cli.compile_search_cmd import compile_search_cmd
+from fabric_kg_builder.cli.compile_search_cmd import (
+    _build_chunks_schema,
+    _build_document_elements_schema,
+    _build_visual_assets_schema,
+    _reuse_unchanged_vectors,
+    compile_search_cmd,
+)
 from fabric_kg_builder.cli.deploy_cmd import deploy_search_cmd, _read_search_env_config
 from fabric_kg_builder.search.linkage import (
     derive_chunk_doc,
@@ -28,6 +34,15 @@ from fabric_kg_builder.search.linkage import (
     build_entity_lookup,
 )
 from fabric_kg_builder.search.push import PushResult, push_from_build_dir
+from fabric_kg_builder.semantic import (
+    compile_semantic_bundle,
+    load_semantic_bundle,
+)
+from tests.unit.test_semantic_contract import (
+    _approve,
+    _contract,
+    _write_bundle,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +177,52 @@ class TestLinkageDerivation:
                       "last_modified", "content_type"):
             assert field in doc, f"Missing field: {field}"
 
+
+    def test_reuse_unchanged_vectors_streams_prior_documents(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        prior_path = tmp_path / "docs.json"
+        prior_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "chunk_id": "unchanged",
+                        "embedding_text": "same",
+                        "chunk_vector": [0.1, 0.2],
+                    },
+                    {
+                        "chunk_id": "changed",
+                        "embedding_text": "",
+                        "content": "old fallback",
+                        "chunk_vector": [0.3, 0.4],
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        docs = [
+            {"chunk_id": "unchanged", "embedding_text": "same"},
+            {
+                "chunk_id": "changed",
+                "embedding_text": "",
+                "content": "new fallback",
+            },
+        ]
+
+        reused = _reuse_unchanged_vectors(
+            docs,
+            prior_docs_path=prior_path,
+            id_field="chunk_id",
+            text_field="embedding_text",
+            vector_field="chunk_vector",
+            dimensions=2,
+        )
+
+        assert reused == 1
+        assert docs[0]["chunk_vector"] == [0.1, 0.2]
+        assert "chunk_vector" not in docs[1]
+
     def test_derive_chunk_doc_entity_ids_populated(self):
         """entity_ids comes from related_entity_ids."""
         doc = derive_chunk_doc(_CHUNK_ROW)
@@ -293,6 +354,15 @@ class TestSearchPush:
 
 class TestCompileSearchSprint2:
     """Tests for compile-search full document generation from Parquet fixtures."""
+
+    def test_all_generated_schemas_have_unique_declared_fields(self):
+        for schema_builder in (
+            _build_chunks_schema,
+            _build_document_elements_schema,
+            _build_visual_assets_schema,
+        ):
+            field_names = [field["name"] for field in schema_builder()["fields"]]
+            assert len(field_names) == len(set(field_names))
 
     def test_compile_search_with_parquet_writes_docs_json(self, tmp_path):
         """compile-search writes docs.json when Parquet input is present."""
@@ -438,6 +508,33 @@ class TestCompileSearchSprint2:
         # docs.json skipped when no Parquet
         assert not (out / "kg-chunks" / "docs.json").exists()
 
+    def test_compile_search_required_visual_assets_rejects_zero_rows(self, tmp_path):
+        empty_input = tmp_path / "empty"
+        empty_input.mkdir()
+        out = tmp_path / "search"
+        visual_dir = out / "kg-visual-assets"
+        visual_dir.mkdir(parents=True)
+        stale_docs = visual_dir / "docs.json"
+        stale_docs.write_text('[{"visual_id":"stale"}]', encoding="utf-8")
+
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(empty_input),
+                "--out",
+                str(out),
+                "--indexes",
+                "kg-visual-assets",
+                "--require-visual-assets",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "kg-visual-assets is required" in result.output
+        assert "visual_extraction status" in result.output
+        assert not stale_docs.exists()
+
     def test_compile_search_summary_line_has_doc_count(self, tmp_path):
         """SUCCESS line in output includes the document count."""
         parquet_dir = _make_parquet_input(tmp_path)
@@ -459,6 +556,293 @@ class TestCompileSearchSprint2:
                 "--input", str(parquet_dir), "--out", str(out),
             ])
         assert result.exit_code == 0
+
+    def test_compile_search_rejects_stale_authoritative_entity_metadata(
+        self,
+        tmp_path,
+    ):
+        parquet_dir = tmp_path / "build" / "parquet"
+        stale_entity = {
+            **_ENTITY_ROW,
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": "entity-type:device",
+                    "semantic_contract_hash": "sha256:stale",
+                }
+            ),
+        }
+        _write_parquet(parquet_dir, "entities", [stale_entity])
+        _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+        semantic_dir = tmp_path / "build" / "semantic"
+        semantic_dir.mkdir(parents=True)
+        (semantic_dir / "semantic-manifest.json").write_text(
+            json.dumps({"contract_hash": "sha256:active"}),
+            encoding="utf-8",
+        )
+        (semantic_dir / "normalized-contract.json").write_text(
+            json.dumps(
+                {
+                    "entity_types": [
+                        {"id": "entity-type:device", "name": "Device"}
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(parquet_dir),
+                "--out",
+                str(tmp_path / "search"),
+                "--indexes",
+                "kg-chunks",
+                "--semantic-manifest",
+                str(semantic_dir / "semantic-manifest.json"),
+                "--require-semantic-contract",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "sha256:stale" in result.output
+        assert "sha256:active" in result.output
+
+    def test_compile_search_projects_crosswalk_property_and_relationship_ids(
+        self,
+        tmp_path,
+    ):
+        contract = _approve(_contract("search-linkage"))
+        paths = _write_bundle(tmp_path, contract)
+        semantic_dir = compile_semantic_bundle(
+            load_semantic_bundle(
+                contract_path=paths[0],
+                mappings_path=paths[1],
+                vocabulary_path=paths[2],
+                ids_lock_path=paths[3],
+            )
+        ).write(tmp_path / "build" / "semantic")
+        subject = next(
+            entity
+            for entity in contract.entity_types
+            if entity.name == "Subject"
+        )
+        relationship = contract.relationship_types[0]
+        parquet_dir = tmp_path / "build" / "parquet"
+        entity_row = {
+            **_ENTITY_ROW,
+            "entity_type": "Subject",
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": subject.id,
+                    "semantic_contract_hash": (
+                        contract.approval.contract_hash
+                    ),
+                }
+            ),
+        }
+        _write_parquet(parquet_dir, "entities", [entity_row])
+        _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+        _write_parquet(
+            parquet_dir,
+            "evidence",
+            [
+                {
+                    "evidence_id": "ev-001",
+                    "chunk_id": "chk-001",
+                    "document_element_id": None,
+                }
+            ],
+        )
+        _write_parquet(
+            parquet_dir,
+            "semantic_relationships",
+            [
+                {
+                    "semantic_relationship_id": relationship.id,
+                    "evidence_ids_json": json.dumps(["ev-001"]),
+                }
+            ],
+        )
+
+        out = tmp_path / "search"
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(parquet_dir),
+                "--out",
+                str(out),
+                "--indexes",
+                "kg-chunks",
+                "--semantic-manifest",
+                str(semantic_dir / "semantic-manifest.json"),
+                "--semantic-model-manifest",
+                str(semantic_dir / "semantic-model-manifest.json"),
+                "--semantic-crosswalk",
+                str(semantic_dir / "semantic-crosswalk.json"),
+                "--require-semantic-contract",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        docs = json.loads(
+            (out / "kg-chunks" / "docs.json").read_text(encoding="utf-8")
+        )
+        assert docs[0]["semantic_relationship_ids"] == [relationship.id]
+        expected_property_ids = sorted(
+            prop.property_id
+            for prop in compile_semantic_bundle(
+                load_semantic_bundle(
+                    contract_path=paths[0],
+                    mappings_path=paths[1],
+                    vocabulary_path=paths[2],
+                    ids_lock_path=paths[3],
+                )
+            ).semantic_model_manifest.property_definitions
+            if prop.owner_type_id == subject.id
+        )
+        assert docs[0]["semantic_property_ids"] == expected_property_ids
+        manifest = json.loads(
+            (out / "search-manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["semantic_model_manifest_hash"]
+        assert manifest["semantic_crosswalk_hash"]
+
+    def test_compile_search_materializes_orphan_relationship_evidence(
+        self,
+        tmp_path,
+    ):
+        contract = _approve(_contract("relationship-evidence"))
+        paths = _write_bundle(tmp_path, contract)
+        semantic_dir = compile_semantic_bundle(
+            load_semantic_bundle(
+                contract_path=paths[0],
+                mappings_path=paths[1],
+                vocabulary_path=paths[2],
+                ids_lock_path=paths[3],
+            )
+        ).write(tmp_path / "build" / "semantic")
+        subject = next(
+            entity
+            for entity in contract.entity_types
+            if entity.name == "Subject"
+        )
+        target = next(
+            entity
+            for entity in contract.entity_types
+            if entity.id != subject.id
+        )
+        relationship = contract.relationship_types[0]
+        parquet_dir = tmp_path / "build" / "parquet"
+        source_entity = {
+            **_ENTITY_ROW,
+            "entity_id": "entity:source",
+            "entity_type": "Subject",
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": subject.id,
+                    "semantic_contract_hash": contract.approval.contract_hash,
+                }
+            ),
+        }
+        target_entity = {
+            **_ENTITY_ROW,
+            "entity_id": "entity:target",
+            "entity_type": target.name,
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": target.id,
+                    "semantic_contract_hash": contract.approval.contract_hash,
+                }
+            ),
+        }
+        _write_parquet(
+            parquet_dir,
+            "entities",
+            [source_entity, target_entity],
+        )
+        _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+        _write_parquet(
+            parquet_dir,
+            "evidence",
+            [
+                {
+                    "evidence_id": "evid:relationship",
+                    "chunk_id": None,
+                    "document_element_id": None,
+                    "text": "Source has a verified relationship to target.",
+                    "source_file_id": "src:source",
+                    "asset_version_id": "asset-version-1",
+                    "source_locator_json": json.dumps(
+                        {"blob_uri": "https://example.test/source.pdf"}
+                    ),
+                }
+            ],
+        )
+        _write_parquet(
+            parquet_dir,
+            "semantic_relationships",
+            [
+                {
+                    "semantic_relationship_id": relationship.id,
+                    "source_entity_id": "entity:source",
+                    "target_entity_id": "entity:target",
+                    "evidence_ids_json": json.dumps(
+                        ["evid:relationship"]
+                    ),
+                }
+            ],
+        )
+
+        out = tmp_path / "search"
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(parquet_dir),
+                "--out",
+                str(out),
+                "--indexes",
+                "kg-chunks",
+                "--semantic-manifest",
+                str(semantic_dir / "semantic-manifest.json"),
+                "--semantic-model-manifest",
+                str(semantic_dir / "semantic-model-manifest.json"),
+                "--semantic-crosswalk",
+                str(semantic_dir / "semantic-crosswalk.json"),
+                "--require-semantic-contract",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        docs = json.loads(
+            (out / "kg-chunks" / "docs.json").read_text(encoding="utf-8")
+        )
+        evidence_doc = next(
+            doc
+            for doc in docs
+            if doc["content_type"] == "relationship_evidence"
+        )
+        assert evidence_doc["evidence_ids"] == ["evid:relationship"]
+        assert evidence_doc["entity_ids"] == [
+            "entity:source",
+            "entity:target",
+        ]
+        assert evidence_doc["semantic_relationship_ids"] == [
+            relationship.id
+        ]
+        assert evidence_doc["source_file_id"] == "src:source"
+        assert evidence_doc["asset_version_id"] == "asset-version-1"
+        assert (
+            evidence_doc["blob_url"]
+            == "https://example.test/source.pdf"
+        )
 
 
 # ===========================================================================

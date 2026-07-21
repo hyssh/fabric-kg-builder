@@ -27,12 +27,17 @@ from .schema import (
     BlobStorageConfig,
     Config,
     DocumentIntelligenceConfig,
+    EnrichmentConfig,
     FabricConfig,
     FoundryConfig,
 )
 
 # Matches ${VAR} and ${VAR:-default}
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}")
+_PLACEHOLDER_RE = re.compile(
+    r"(?:<[^>]+>|\bplaceholder\b|\byour[-_ ])",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +70,25 @@ def _interpolate_deep(obj: object) -> object:
     if isinstance(obj, str):
         return _interpolate(obj)
     return obj
+
+
+def _blob_account_name_from_environment() -> str:
+    """Resolve a Blob account name from supported environment variables."""
+    for variable in ("AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_ACCOUNT_NAME"):
+        value = os.environ.get(variable, "").strip()
+        if value:
+            return value
+
+    for variable in ("AZURE_STORAGE_ACCOUNT_URL", "FABRIC_KG_BLOB_ACCOUNT_URL"):
+        value = os.environ.get(variable, "").strip()
+        match = re.fullmatch(
+            r"https://([a-z0-9]{3,24})\.blob\.core\.windows\.net/?",
+            value,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +154,30 @@ def load_config(
     return _build_config(env, raw_yaml, env_cfg)
 
 
+def load_enrichment_config(
+    yaml_path: Optional[Path] = None,
+) -> EnrichmentConfig:
+    """Load the non-secret typed enrichment section without requiring cloud config."""
+    root = Path.cwd()
+    _yaml_path = yaml_path or root / "fabric-kg.yaml"
+    raw_yaml: dict = {}
+    if _yaml_path.exists():
+        with open(_yaml_path, "r", encoding="utf-8") as fh:
+            raw_yaml = yaml.safe_load(fh) or {}
+    raw_yaml = _interpolate_deep(raw_yaml)  # type: ignore[assignment]
+    return EnrichmentConfig.model_validate(raw_yaml.get("enrichment") or {})
+
+
+def resolve_max_concurrent(
+    config: EnrichmentConfig,
+    cli_override: int | None = None,
+) -> int:
+    """Return the validated effective concurrency, with CLI taking precedence."""
+    if cli_override is None:
+        return config.max_concurrent
+    return EnrichmentConfig(max_concurrent=cli_override).max_concurrent
+
+
 def load_fabric_ids(
     env: str = "dev",
     environments_dir: Optional[Path] = None,
@@ -155,11 +203,31 @@ def load_fabric_ids(
     return "", ""
 
 
+def load_fabric_binding_target(
+    env: str = "dev",
+    environments_dir: Optional[Path] = None,
+) -> tuple[str, str, str]:
+    """Return workspace, Lakehouse, and schema for Fabric data bindings."""
+    root = Path.cwd()
+    _envs_dir = environments_dir or root / "ontology" / "environments"
+    env_json_path = _envs_dir / f"{env}.json"
+    if env_json_path.exists():
+        with open(env_json_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        fabric = data.get("fabric", {})
+        return (
+            fabric.get("workspace_id", ""),
+            fabric.get("lakehouse_item_id", ""),
+            fabric.get("schema_name") or "dbo",
+        )
+    return "", "", "dbo"
+
+
 def _resolved(value: object) -> str:
-    """Return a usable string, or '' if the value is empty or an unresolved ${VAR}."""
+    """Return a usable string, or ``""`` for unresolved/example placeholders."""
     if not value or not isinstance(value, str):
         return ""
-    return "" if _ENV_VAR_RE.search(value) else value
+    return "" if _ENV_VAR_RE.search(value) or _PLACEHOLDER_RE.search(value) else value
 
 
 def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
@@ -167,6 +235,7 @@ def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
     foundry_yaml = raw_yaml.get("foundry", {})
     enrichment_yaml = raw_yaml.get("enrichment", {})
     foundry_env = env_cfg.get("foundry", {})
+    enrichment = EnrichmentConfig.model_validate(enrichment_yaml or {})
 
     # Foundry endpoint is required — fail-fast with a clear message.
     # An unresolved ${VAR} placeholder (env var unset, no default) counts as missing.
@@ -207,6 +276,10 @@ def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
             foundry_env.get("api_version")
             or foundry_yaml.get("api_version", "2024-12-01-preview")
         ),
+        request_timeout_seconds=float(
+            foundry_env.get("request_timeout_seconds")
+            or foundry_yaml.get("request_timeout_seconds", 120.0)
+        ),
     )
 
     fabric_env = env_cfg.get("fabric", {})
@@ -219,7 +292,11 @@ def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
     blob_yaml = raw_yaml.get("blob_storage", {})
     blob_env = env_cfg.get("blob_storage", {})
     blob = BlobStorageConfig(
-        account_name=blob_env.get("account_name") or blob_yaml.get("account_name", ""),
+        account_name=(
+            _blob_account_name_from_environment()
+            or _resolved(blob_env.get("account_name"))
+            or _resolved(blob_yaml.get("account_name"))
+        ),
         container=blob_env.get("container") or blob_yaml.get("container", "kg-assets"),
         path_prefix=blob_env.get("path_prefix") or blob_yaml.get("path_prefix", ""),
     )
@@ -241,6 +318,7 @@ def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
 
     return Config(
         env=env,
+        enrichment=enrichment,
         foundry=foundry,
         fabric=fabric,
         blob=blob,

@@ -1,0 +1,71 @@
+"""Lineage v2 registry, migration, trace, and governance helpers."""
+
+from fabric_kg_builder.lineage.common import (
+    DEFAULT_ENVIRONMENT,
+    PIPELINE_VERSION,
+    TABLE_ID_FIELDS,
+    apply_common_lineage,
+    build_source_locator,
+    default_project_id,
+    dump_json,
+    ensure_lineage_defaults,
+    infer_media_type,
+    normalize_source_uri,
+    now_utc,
+    parse_json_text,
+    safe_original_name,
+    source_locator_json,
+)
+from fabric_kg_builder.lineage.governance import (
+    DeletionPlan,
+    OrphanReport,
+    build_deletion_plan,
+    check_deployment_record_safety,
+    check_manifest_redaction,
+    find_orphaned_records,
+    redact_for_manifest,
+)
+from fabric_kg_builder.lineage.migration import migrate_tables_to_v2
+from fabric_kg_builder.lineage.registry import AssetRegistry, LocalLandingStore, record_deployment
+from fabric_kg_builder.lineage.trace import (
+    BrokenEdge,
+    TraceResult,
+    TraceStep,
+    trace_asset,
+    trace_record,
+    trace_run,
+)
+
+__all__ = [
+    "AssetRegistry",
+    "BrokenEdge",
+    "DEFAULT_ENVIRONMENT",
+    "DeletionPlan",
+    "LocalLandingStore",
+    "OrphanReport",
+    "PIPELINE_VERSION",
+    "TABLE_ID_FIELDS",
+    "TraceResult",
+    "TraceStep",
+    "apply_common_lineage",
+    "build_deletion_plan",
+    "build_source_locator",
+    "check_deployment_record_safety",
+    "check_manifest_redaction",
+    "default_project_id",
+    "dump_json",
+    "ensure_lineage_defaults",
+    "find_orphaned_records",
+    "infer_media_type",
+    "migrate_tables_to_v2",
+    "normalize_source_uri",
+    "now_utc",
+    "parse_json_text",
+    "record_deployment",
+    "redact_for_manifest",
+    "safe_original_name",
+    "source_locator_json",
+    "trace_asset",
+    "trace_record",
+    "trace_run",
+]

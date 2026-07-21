@@ -10,6 +10,12 @@ Gates are defined in SPEC-003 §12.9.  Call ``validate_bridge(model)`` and
 inspect the returned :class:`BridgeViolation` list.  Violations with
 ``severity == "error"`` must block the build; ``"warning"`` violations are
 logged only.
+
+Domain-neutrality: gates BRG-003, BRG-009, BRG-010 apply to ALL entity types
+in non-infrastructure modules (any module name not in _INFRASTRUCTURE_MODULES),
+not only to the legacy "support-domain" module.  Visual/retrieval checks
+(BRG-004, BRG-005 shown_in) run only when the relevant capability types are
+present in the model.
 """
 
 from __future__ import annotations
@@ -42,8 +48,8 @@ class BridgeViolation:
 # Canonical bridge constants
 # ---------------------------------------------------------------------------
 
-# Support-domain properties required on every entity type in that module
-_SUPPORT_DOMAIN_REQUIRED_PROPS = ("entity_id", "canonical_key", "search_aliases")
+# Properties required on every domain (non-infrastructure) entity type
+_DOMAIN_ENTITY_REQUIRED_PROPS = ("entity_id", "canonical_key", "search_aliases")
 
 # Properties required on DocumentChunk for bridge traversal (BRG-001)
 _DOCUMENT_CHUNK_REQUIRED_PROPS = ("entity_id", "chunk_id", "related_entity_ids", "entity_search_keys")
@@ -51,14 +57,23 @@ _DOCUMENT_CHUNK_REQUIRED_PROPS = ("entity_id", "chunk_id", "related_entity_ids",
 # Properties required on SearchIndexRecord (BRG-002)
 _SEARCH_INDEX_RECORD_REQUIRED_PROPS = ("search_record_id",)
 
-# Visual entity types that must carry blob_url (BRG-004)
-_BLOB_URL_REQUIRED_ENTITY_TYPES = ("ImageAsset", "Figure")
+# Known visual entity type names — checks run only when they are PRESENT in the model
+_VISUAL_ENTITY_TYPE_NAMES = ("ImageAsset", "Figure")
 
-# Bridge relationship names that must exist with inversePolicy set (BRG-005)
-_BRIDGE_REL_NAMES = ("evidenced_by", "shown_in", "indexed_as")
+# Core bridge relationship names always required (BRG-005)
+_CORE_BRIDGE_REL_NAMES = ("evidenced_by", "indexed_as")
 
-# Support-domain module name
-_SUPPORT_DOMAIN = "support-domain"
+# Visual bridge relationship — required only when visual entity types are present
+_VISUAL_BRIDGE_REL_NAME = "shown_in"
+
+# Infrastructure modules: entity types in these modules are NOT domain entities
+# and are exempt from BRG-003/009/010 domain-entity checks.
+_INFRASTRUCTURE_MODULES: frozenset[str] = frozenset({
+    "document-evidence",
+    "visual-evidence",
+    "retrieval",
+    "provenance",
+})
 
 # Canonical tables for the bridge bindings (for column-level checks)
 _CHUNKS_TABLE = "chunks"
@@ -127,12 +142,22 @@ def _bound_columns(entity_type: dict[str, Any]) -> set[str]:
     return cols
 
 
-def _support_domain_entity_names(model: dict[str, Any]) -> set[str]:
+def _domain_entity_names(model: dict[str, Any]) -> set[str]:
+    """Return entity type names that are in non-infrastructure (domain) modules.
+
+    Checks ALL modules whose name is not in ``_INFRASTRUCTURE_MODULES``,
+    so it works for any module name — not only the legacy ``"support-domain"``.
+    """
     return {
         et["name"]
         for et in _entity_types(model)
-        if et.get("module") == _SUPPORT_DOMAIN
+        if et.get("module", "") not in _INFRASTRUCTURE_MODULES
     }
+
+
+def _has_visual_types(model: dict[str, Any]) -> bool:
+    """Return True if the model declares at least one visual entity type."""
+    return any(_entity_by_name(model, name) is not None for name in _VISUAL_ENTITY_TYPE_NAMES)
 
 
 def _bridge_source_types(model: dict[str, Any]) -> set[str]:
@@ -214,33 +239,43 @@ def _check_brg002(model: dict[str, Any]) -> list[BridgeViolation]:
 
 
 def _check_brg003(model: dict[str, Any]) -> list[BridgeViolation]:
-    """BRG-003: Every support-domain entity type declares entity_id, canonical_key, search_aliases."""
+    """BRG-003: Every domain entity type (non-infrastructure module) declares
+    entity_id, canonical_key, search_aliases.
+
+    This gate applies to ALL entity types whose module is NOT in
+    ``_INFRASTRUCTURE_MODULES`` — it is not limited to the legacy
+    ``"support-domain"`` module name.
+    """
     violations: list[BridgeViolation] = []
     for et in _entity_types(model):
-        if et.get("module") != _SUPPORT_DOMAIN:
+        if et.get("module", "") in _INFRASTRUCTURE_MODULES:
             continue
         name = et["name"]
         declared = _prop_names(et)
-        for prop in _SUPPORT_DOMAIN_REQUIRED_PROPS:
+        for prop in _DOMAIN_ENTITY_REQUIRED_PROPS:
             if prop not in declared:
                 violations.append(BridgeViolation(
                     "BRG-003", "error",
-                    f"support-domain entity type '{name}' is missing required property '{prop}' "
+                    f"Domain entity type '{name}' (module: '{et.get('module', '')}') is missing "
+                    f"required property '{prop}' "
                     f"(needed for AI Search entity filter / canonical key lookup)",
                 ))
     return violations
 
 
 def _check_brg004(model: dict[str, Any]) -> list[BridgeViolation]:
-    """BRG-004: ImageAsset and Figure declare blob_url property (format uri)."""
+    """BRG-004: Visual entity types that ARE present must carry blob_url (format uri).
+
+    This check runs only for visual entity types (ImageAsset, Figure) that are
+    actually declared in the model.  If neither is present, the model has no
+    visual-grounding capability and BRG-004 is silently skipped.
+    Specialized visual checks must not block domain-neutral ontologies.
+    """
     violations: list[BridgeViolation] = []
-    for type_name in _BLOB_URL_REQUIRED_ENTITY_TYPES:
+    for type_name in _VISUAL_ENTITY_TYPE_NAMES:
         et = _entity_by_name(model, type_name)
         if et is None:
-            violations.append(BridgeViolation(
-                "BRG-004", "error",
-                f"Entity type '{type_name}' not found — must exist with blob_url for visual grounding",
-            ))
+            # Visual type absent — visual grounding not configured; skip silently.
             continue
         # Must have blob_url property of type blob_url
         blob_prop = next(
@@ -270,9 +305,17 @@ def _check_brg004(model: dict[str, Any]) -> list[BridgeViolation]:
 
 
 def _check_brg005(model: dict[str, Any]) -> list[BridgeViolation]:
-    """BRG-005: evidenced_by, shown_in, indexed_as exist with inversePolicy set."""
+    """BRG-005: Core bridge relationships exist with inversePolicy set.
+
+    ``evidenced_by`` and ``indexed_as`` are always required.
+    ``shown_in`` is required only when visual entity types (ImageAsset / Figure)
+    are present in the model — domain-neutral ontologies without visual
+    grounding must not be penalised for omitting it.
+    """
     violations: list[BridgeViolation] = []
-    for rel_name in _BRIDGE_REL_NAMES:
+
+    # Core bridge relationships — always required
+    for rel_name in _CORE_BRIDGE_REL_NAMES:
         rt = _rel_by_name(model, rel_name)
         if rt is None:
             violations.append(BridgeViolation(
@@ -286,6 +329,24 @@ def _check_brg005(model: dict[str, Any]) -> list[BridgeViolation]:
                 f"Bridge relationship '{rel_name}' has no 'inversePolicy' field — "
                 f"all bridge relationships must declare inversePolicy (may be 'none')",
             ))
+
+    # Visual bridge relationship — required only when visual types are present
+    if _has_visual_types(model):
+        rt = _rel_by_name(model, _VISUAL_BRIDGE_REL_NAME)
+        if rt is None:
+            violations.append(BridgeViolation(
+                "BRG-005", "error",
+                f"Visual entity types are declared but bridge relationship "
+                f"'{_VISUAL_BRIDGE_REL_NAME}' not found in model.yaml — "
+                f"required for visual grounding traversal",
+            ))
+        elif "inversePolicy" not in rt:
+            violations.append(BridgeViolation(
+                "BRG-005", "error",
+                f"Bridge relationship '{_VISUAL_BRIDGE_REL_NAME}' has no 'inversePolicy' field — "
+                f"all bridge relationships must declare inversePolicy (may be 'none')",
+            ))
+
     return violations
 
 
@@ -390,19 +451,23 @@ def _check_brg008(model: dict[str, Any]) -> list[BridgeViolation]:
 
 
 def _check_brg009(model: dict[str, Any]) -> list[BridgeViolation]:
-    """BRG-009 (Warning): support-domain entities with no outbound bridge edge.
+    """BRG-009 (Warning): domain entities with no outbound bridge edge.
 
-    This is diagnostic only — entities with no evidenced_by or shown_in edge
-    cannot participate in Phase 1 traversal and will fall back to pure AI Search.
+    This is diagnostic only — domain entities (any non-infrastructure module)
+    with no evidenced_by or shown_in edge cannot participate in Phase 1
+    traversal and will fall back to pure AI Search.
+
+    The check is module-name-agnostic: it flags entities in any module not
+    in ``_INFRASTRUCTURE_MODULES``, not only the legacy "support-domain" module.
     """
     violations: list[BridgeViolation] = []
-    support_names = _support_domain_entity_names(model)
+    domain_names = _domain_entity_names(model)
     bridged_sources = _bridge_source_types(model)
-    unlinked = sorted(support_names - bridged_sources)
+    unlinked = sorted(domain_names - bridged_sources)
     for name in unlinked:
         violations.append(BridgeViolation(
             "BRG-009", "warning",
-            f"support-domain entity '{name}' has no outbound 'evidenced_by' or 'shown_in' "
+            f"Domain entity '{name}' has no outbound 'evidenced_by' or 'shown_in' "
             f"relationship — it cannot participate in Phase 1 bridge traversal "
             f"(will fall back to pure AI Search; add an evidenced_by edge to enable graph grounding)",
         ))
@@ -410,10 +475,14 @@ def _check_brg009(model: dict[str, Any]) -> list[BridgeViolation]:
 
 
 def _check_brg010(model: dict[str, Any]) -> list[BridgeViolation]:
-    """BRG-010: entity_id property on support-domain nodes has a non-empty column binding."""
+    """BRG-010: entity_id property on domain nodes has a non-empty column binding.
+
+    Applies to ALL entity types in non-infrastructure modules — not only the
+    legacy "support-domain" module.
+    """
     violations: list[BridgeViolation] = []
     for et in _entity_types(model):
-        if et.get("module") != _SUPPORT_DOMAIN:
+        if et.get("module", "") in _INFRASTRUCTURE_MODULES:
             continue
         name = et["name"]
         props = {p["name"]: p for p in et.get("properties", [])}
@@ -426,7 +495,7 @@ def _check_brg010(model: dict[str, Any]) -> list[BridgeViolation]:
         if not entity_id_col:
             violations.append(BridgeViolation(
                 "BRG-010", "error",
-                f"support-domain entity '{name}' has empty entityIdColumn in dataBinding — "
+                f"Domain entity '{name}' has empty entityIdColumn in dataBinding — "
                 f"entity_id cannot be populated (risk of duplicate/null IDs in graph)",
             ))
     return violations

@@ -18,6 +18,8 @@ Design notes
   between the same two types.  Modelling each separately yields an unusable
   graph, so we keep one RelationshipType per ``(source_type, target_type)`` pair
   and name it after the dominant (most frequent) verb for that pair.
+* **All observed domain types are candidates by default.**  Named profiles can
+  explicitly restrict the model for sample or curated domains.
 * **Only types/pairs above a count threshold are modelled**, keeping the graph
   legible.  Thresholds are caller-controlled.
 * Pure functions over Arrow tables — no I/O, fully unit-testable.
@@ -31,9 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Default "core" domain types for the Surface support corpus, in display order.
-# Callers may override; types not present in the data are dropped automatically.
-DEFAULT_CORE_TYPES: list[str] = [
+from fabric_kg_builder.semantic.source_tables import (
+    resolve_semantic_source_parquet,
+)
+
+SURFACE_SUPPORT_TYPES: tuple[str, ...] = (
     "Device",
     "DeviceModel",
     "Component",
@@ -46,7 +50,25 @@ DEFAULT_CORE_TYPES: list[str] = [
     "Cause",
     "Resolution",
     "Section",
-]
+)
+
+TYPE_PROFILES: dict[str, tuple[str, ...]] = {
+    "surface-support": SURFACE_SUPPORT_TYPES,
+}
+
+# Backward-compatible export only. build_plan() never applies this implicitly.
+DEFAULT_CORE_TYPES: list[str] = list(SURFACE_SUPPORT_TYPES)
+
+
+def get_type_profile(name: str) -> list[str]:
+    """Return the explicit type allowlist registered as *name*."""
+    try:
+        return list(TYPE_PROFILES[name])
+    except KeyError as exc:
+        available = ", ".join(sorted(TYPE_PROFILES))
+        raise ValueError(
+            f"Unknown ontology type profile {name!r}. Available profiles: {available}"
+        ) from exc
 
 
 def slugify_table(name: str) -> str:
@@ -62,6 +84,7 @@ class EntityTypePlan:
     type_name: str
     table_name: str  # e.g. "entities_component"
     count: int
+    source_types: tuple[str, ...] = ()
 
 
 @dataclass
@@ -106,11 +129,14 @@ def build_plan(
     Parameters
     ----------
     parquet_dir:
-        Directory containing ``entities.parquet`` and ``relationships.parquet``.
+        Directory containing ``semantic_entities.parquet`` and
+        ``semantic_relationships.parquet``.  Falls back to the canonical source
+        files for backwards-compatible packages.
     core_types:
-        Candidate entity-type names to model (defaults to
-        :data:`DEFAULT_CORE_TYPES`).  Types absent from the data, or below
-        *min_type_count*, are dropped.
+        Optional candidate entity-type names to model. When omitted, candidates
+        are derived from the observed ``entity_type`` values in first-seen
+        order. Types absent from the data, or below *min_type_count*, are
+        dropped.
     min_type_count:
         Minimum instance count for a type to be modelled.
     min_pair_count:
@@ -120,31 +146,55 @@ def build_plan(
         Hard cap on the number of relationship pairs (keeps the graph legible).
     """
     parquet_dir = Path(parquet_dir)
-    candidates = list(core_types if core_types is not None else DEFAULT_CORE_TYPES)
-
-    ent = _read_columns(parquet_dir / "entities.parquet", ["entity_id", "entity_type"])
+    ent_path = resolve_semantic_source_parquet(
+        parquet_dir,
+        "semantic_entities",
+    )
+    rel_path = resolve_semantic_source_parquet(
+        parquet_dir,
+        "semantic_relationships",
+    )
+    ent = _read_columns(ent_path, ["entity_id", "entity_type"])
     type_of: dict[str, str] = dict(zip(ent["entity_id"], ent["entity_type"]))
     type_counts = collections.Counter(ent["entity_type"])
+    if core_types is None:
+        candidates = list(
+            dict.fromkeys(
+                type_name
+                for type_name in ent["entity_type"]
+                if isinstance(type_name, str) and type_name.strip()
+            )
+        )
+    else:
+        candidates = list(dict.fromkeys(core_types))
 
-    # Keep candidate types that are actually present and above threshold,
-    # preserving the caller's display order.
-    present_types = [
-        t for t in candidates if type_counts.get(t, 0) >= min_type_count
-    ]
-    present_set = set(present_types)
+    # Fold spelling variants such as "equipment asset" and "equipment_asset"
+    # into one ontology type/table so their data cannot overwrite one another.
+    groups: dict[str, list[str]] = {}
+    for candidate in candidates:
+        if type_counts.get(candidate, 0) < min_type_count:
+            continue
+        groups.setdefault(slugify_table(candidate), []).append(candidate)
 
     entity_plans = [
         EntityTypePlan(
-            type_name=t,
-            table_name=f"entities_{slugify_table(t)}",
-            count=type_counts[t],
+            type_name=variants[0],
+            table_name=f"entities_{slug}",
+            count=sum(type_counts[variant] for variant in variants),
+            source_types=tuple(variants),
         )
-        for t in present_types
+        for slug, variants in groups.items()
     ]
+    normalized_type_of = {
+        raw_type: plan.type_name
+        for plan in entity_plans
+        for raw_type in plan.source_types
+    }
+    present_set = {plan.type_name for plan in entity_plans}
 
     # Relationships: collapse verbs by (source_type, target_type) pair.
     rel = _read_columns(
-        parquet_dir / "relationships.parquet",
+        rel_path,
         ["source_entity_id", "relationship_type", "target_entity_id"],
     )
     pair_counts: collections.Counter[tuple[str, str]] = collections.Counter()
@@ -154,8 +204,8 @@ def build_plan(
     for s, verb, t in zip(
         rel["source_entity_id"], rel["relationship_type"], rel["target_entity_id"]
     ):
-        st = type_of.get(s)
-        tt = type_of.get(t)
+        st = normalized_type_of.get(type_of.get(s, ""))
+        tt = normalized_type_of.get(type_of.get(t, ""))
         if st in present_set and tt in present_set:
             pair_counts[(st, tt)] += 1
             verb_counts[(st, tt)][(verb or "related_to")] += 1

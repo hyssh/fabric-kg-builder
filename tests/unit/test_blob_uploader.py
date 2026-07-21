@@ -10,7 +10,8 @@ Tests:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -38,13 +39,17 @@ _IMAGE_DATA = b"fake_png_bytes"
 
 def _make_blob_service_client(blob_exists: bool = False) -> MagicMock:
     """Build a fake BlobServiceClient mock."""
+    from azure.core.exceptions import ResourceNotFoundError
+
     blob_client = MagicMock()
     blob_client.url = _BLOB_URL
 
     if blob_exists:
         blob_client.get_blob_properties.return_value = MagicMock()
     else:
-        blob_client.get_blob_properties.side_effect = Exception("BlobNotFound")
+        blob_client.get_blob_properties.side_effect = ResourceNotFoundError(
+            "BlobNotFound"
+        )
 
     service_client = MagicMock()
     service_client.get_blob_client.return_value = blob_client
@@ -91,6 +96,35 @@ def test_upload_dedup_skips_upload_when_blob_exists():
 
 
 @pytest.mark.unit
+def test_upload_reuses_blob_created_between_probe_and_upload():
+    from azure.core.exceptions import ResourceExistsError
+
+    svc = _make_blob_service_client(blob_exists=False)
+    blob_client = svc.get_blob_client.return_value
+    blob_client.upload_blob.side_effect = ResourceExistsError("BlobAlreadyExists")
+    uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
+
+    url = uploader.upload("img123", _IMAGE_DATA, "png")
+
+    assert url == _BLOB_URL
+    blob_client.upload_blob.assert_called_once_with(_IMAGE_DATA, overwrite=False)
+
+
+@pytest.mark.unit
+def test_upload_surfaces_container_permission_failure():
+    from azure.core.exceptions import HttpResponseError
+
+    svc = _make_blob_service_client(blob_exists=False)
+    svc.get_container_client.return_value.create_container.side_effect = (
+        HttpResponseError("forbidden")
+    )
+    uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
+
+    with pytest.raises(HttpResponseError, match="forbidden"):
+        uploader.upload("img123", _IMAGE_DATA, "png")
+
+
+@pytest.mark.unit
 def test_upload_uses_path_prefix_in_blob_name():
     svc = _make_blob_service_client(blob_exists=False)
     uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
@@ -133,6 +167,137 @@ def test_upload_different_asset_ids_produce_different_blobs():
     blob_names = [c.kwargs["blob"] for c in calls]
     assert "visual/img_001.png" in blob_names
     assert "visual/img_002.png" in blob_names
+
+
+@pytest.mark.unit
+def test_upload_original_uses_immutable_version_path():
+    from azure.core.exceptions import ResourceNotFoundError
+
+    svc = MagicMock()
+    blob_client = MagicMock()
+    blob_client.url = "https://fakeaccount.blob.core.windows.net/kg-assets/raw/asset-1"
+    blob_client.get_blob_properties.side_effect = ResourceNotFoundError("missing")
+    blob_client.upload_blob.return_value = {"version_id": "blob-version-1"}
+    svc.get_blob_client.return_value = blob_client
+    uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
+
+    result = uploader.upload_original(
+        asset_id="asset-1",
+        asset_version_id="asset-version-1",
+        data=b"original",
+        original_name="report.pdf",
+        media_type="application/pdf",
+        metadata={"content_hash": "hash-1"},
+        tags={"artifact_type": "original"},
+    )
+
+    assert result.landing_path == (
+        "raw/asset-1/versions/asset-version-1/original/report.pdf"
+    )
+    assert result.blob_version_id == "blob-version-1"
+    assert not result.idempotent_reuse
+    svc.get_blob_client.assert_called_once_with(
+        container="kg-assets",
+        blob=(
+            "visual/raw/asset-1/versions/asset-version-1/"
+            "original/report.pdf"
+        ),
+    )
+    upload_kwargs = blob_client.upload_blob.call_args.kwargs
+    assert upload_kwargs["overwrite"] is False
+    assert upload_kwargs["metadata"] == {"content_hash": "hash-1"}
+    assert upload_kwargs["tags"] == {"artifact_type": "original"}
+    assert upload_kwargs["content_settings"].content_type == "application/pdf"
+
+
+@pytest.mark.unit
+def test_upload_original_reuses_matching_immutable_blob():
+    svc = MagicMock()
+    blob_client = MagicMock()
+    blob_client.url = "https://fake/original"
+    blob_client.get_blob_properties.return_value = MagicMock(
+        metadata={"content_hash": "hash-1"},
+        version_id="blob-version-1",
+        last_modified=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    svc.get_blob_client.return_value = blob_client
+    uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
+
+    result = uploader.upload_original(
+        asset_id="asset-1",
+        asset_version_id="asset-version-1",
+        data=b"original",
+        original_name="report.pdf",
+        media_type="application/pdf",
+        metadata={"content_hash": "hash-1"},
+        tags={},
+    )
+
+    assert result.idempotent_reuse
+    blob_client.upload_blob.assert_not_called()
+
+
+@pytest.mark.unit
+def test_upload_original_retries_without_tags_when_hns_rejects_them():
+    from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+
+    svc = MagicMock()
+    blob_client = MagicMock()
+    blob_client.url = "https://fake/original"
+    blob_client.get_blob_properties.side_effect = ResourceNotFoundError("missing")
+    tags_error = HttpResponseError("Blob Tags are unsupported")
+    tags_error.error_code = (
+        "FeatureNotYetSupportedForHierarchicalNamespaceAccounts"
+    )
+    blob_client.upload_blob.side_effect = [
+        tags_error,
+        {"version_id": "blob-version-1"},
+    ]
+    svc.get_blob_client.return_value = blob_client
+    uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
+
+    result = uploader.upload_original(
+        asset_id="asset-1",
+        asset_version_id="asset-version-1",
+        data=b"original",
+        original_name="report.pdf",
+        media_type="application/pdf",
+        metadata={"content_hash": "hash-1"},
+        tags={"artifact_type": "original"},
+    )
+
+    assert result.blob_version_id == "blob-version-1"
+    assert blob_client.upload_blob.call_count == 2
+    assert blob_client.upload_blob.call_args_list[0].kwargs["tags"] == {
+        "artifact_type": "original"
+    }
+    assert "tags" not in blob_client.upload_blob.call_args_list[1].kwargs
+    assert blob_client.upload_blob.call_args_list[1].kwargs["metadata"] == {
+        "content_hash": "hash-1"
+    }
+
+
+@pytest.mark.unit
+def test_upload_original_rejects_hash_collision():
+    svc = MagicMock()
+    blob_client = MagicMock()
+    blob_client.url = "https://fake/original"
+    blob_client.get_blob_properties.return_value = MagicMock(
+        metadata={"content_hash": "different-hash"},
+    )
+    svc.get_blob_client.return_value = blob_client
+    uploader = BlobUploader(_CONFIG, _blob_service_client=svc)
+
+    with pytest.raises(FileExistsError, match="content hash does not match"):
+        uploader.upload_original(
+            asset_id="asset-1",
+            asset_version_id="asset-version-1",
+            data=b"original",
+            original_name="report.pdf",
+            media_type="application/pdf",
+            metadata={"content_hash": "hash-1"},
+            tags={},
+        )
 
 
 # ---------------------------------------------------------------------------

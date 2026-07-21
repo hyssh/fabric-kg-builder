@@ -122,6 +122,7 @@ class FoundryClient:
                 azure_endpoint=openai_endpoint,
                 api_key=api_key,
                 api_version=config.api_version,
+                timeout=config.request_timeout_seconds,
             )
 
         from azure.identity import DefaultAzureCredential, get_bearer_token_provider  # type: ignore[import]
@@ -134,7 +135,22 @@ class FoundryClient:
             azure_endpoint=openai_endpoint,
             azure_ad_token_provider=token_provider,
             api_version=config.api_version,
+            timeout=config.request_timeout_seconds,
         )
+
+    def execution_identity(self) -> dict[str, Any]:
+        """Return non-secret model and request settings that affect outputs."""
+        return {
+            "provider": "azure_openai",
+            "chat_deployment": self._config.chat_deployment,
+            "api_version": self._config.api_version,
+            "request_timeout_seconds": self._config.request_timeout_seconds,
+            "completion_format": "json_object",
+            "temperature": 0.0,
+            "seed": 42,
+            "max_completion_tokens": 4_096,
+            "max_attempts": 2,
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -145,6 +161,9 @@ class FoundryClient:
         system: str,
         user: str,
         json_schema: dict,
+        *,
+        max_completion_tokens: int = 4_096,
+        max_attempts: int = 2,
     ) -> dict:
         """Call the chat deployment and return the parsed JSON response.
 
@@ -172,27 +191,51 @@ class FoundryClient:
         ValueError
             When the model returns content that cannot be parsed as JSON.
         """
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+        schema_instruction = ""
+        if json_schema:
+            schema_instruction = (
+                "\nReturn an object that validates exactly against this JSON "
+                "Schema. Do not add fields that the schema does not permit.\n"
+                f"{json.dumps(json_schema, sort_keys=True)}"
+            )
+        if max_completion_tokens < 256:
+            raise ValueError("max_completion_tokens must be at least 256.")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1.")
 
-        response = self._client.chat.completions.create(
-            model=self._config.chat_deployment,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            seed=42,
+        retry_instruction = (
+            "\nYour previous response was not valid JSON. Return a smaller, "
+            "complete JSON object now. Prefer fewer high-confidence items over "
+            "truncation. Do not include prose or Markdown."
         )
+        last_error: json.JSONDecodeError | None = None
+        raw = ""
+        for attempt in range(max_attempts):
+            attempt_system = system + schema_instruction
+            if attempt:
+                attempt_system += retry_instruction
+            response = self._client.chat.completions.create(
+                model=self._config.chat_deployment,
+                messages=[
+                    {"role": "system", "content": attempt_system},
+                    {"role": "user", "content": user},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                seed=42,
+                max_completion_tokens=max_completion_tokens,
+            )
+            raw = response.choices[0].message.content
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as exc:
+                last_error = exc
 
-        raw: str = response.choices[0].message.content
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Foundry response could not be parsed as JSON: {exc}\n"
-                f"Raw content (first 500 chars): {raw[:500]}"
-            ) from exc
+        assert last_error is not None
+        raise ValueError(
+            f"Foundry response could not be parsed as JSON after {max_attempts} "
+            f"attempt(s): {last_error}\nRaw content (first 500 chars): {raw[:500]}"
+        ) from last_error
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* and return one float vector per input string.

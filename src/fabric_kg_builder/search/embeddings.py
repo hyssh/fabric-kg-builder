@@ -3,12 +3,12 @@
 Verbal module: takes a batch of docs and a text field name, calls the
 embedding model, and returns the docs with a vector field attached.
 
-Offline / test mode: if ``mock=True`` (or AZURE_AI_FOUNDRY_ENDPOINT is unset)
+Offline / test mode: if ``mock=True`` (or no Azure OpenAI endpoint is set)
 the function fills each vector with zeros at the declared dimension — no
 network call is made.  Tests always pass ``mock=True``.
 
-Live mode: calls Azure AI Foundry embeddings endpoint via
-``azure-ai-projects`` EmbeddingsClient.
+Live mode calls an Azure OpenAI-compatible Foundry model endpoint through
+``openai.AzureOpenAI``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,55 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from fabric_kg_builder.sources.chunker import TiktokenTokenizer
+
+from .embedding_input import EMBEDDING_TOKEN_ENCODING, document_embedding_text
+
 _VECTOR_DIMS = 1536  # LOCKED — text-embedding-3-large (SPEC-002 §11.7)
+_DEFAULT_BATCH_SIZE = 256
+_MAX_BATCH_SIZE = 2048
+
+
+def _attach_live_vectors(
+    docs: list[dict[str, Any]],
+    *,
+    text_field: str,
+    vector_field: str,
+    dimensions: int,
+    batch_size: int,
+    create_embeddings: Any,
+) -> list[dict[str, Any]]:
+    """Attach live embeddings in provider-safe, order-preserving batches."""
+    tokenizer = TiktokenTokenizer(EMBEDDING_TOKEN_ENCODING)
+    for batch_start in range(0, len(docs), batch_size):
+        batch_docs = docs[batch_start : batch_start + batch_size]
+        response = create_embeddings(
+            [
+                document_embedding_text(
+                    doc,
+                    text_field=text_field,
+                    tokenizer=tokenizer,
+                )
+                for doc in batch_docs
+            ]
+        )
+        response_items = list(response.data)
+        if len(response_items) != len(batch_docs):
+            raise ValueError(
+                "Embedding response count does not match the request batch: "
+                f"requested={len(batch_docs)}, returned={len(response_items)}."
+            )
+        if all(isinstance(getattr(item, "index", None), int) for item in response_items):
+            response_items.sort(key=lambda item: item.index)
+        for doc, emb_item in zip(batch_docs, response_items):
+            vector = list(emb_item.embedding)
+            if len(vector) != dimensions:
+                raise ValueError(
+                    "Embedding dimensions do not match the configured index: "
+                    f"expected={dimensions}, returned={len(vector)}."
+                )
+            doc[vector_field] = vector
+    return docs
 
 
 def attach_vectors(
@@ -28,6 +76,7 @@ def attach_vectors(
     endpoint: str | None = None,
     deployment: str = "embedding",
     dimensions: int = _VECTOR_DIMS,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
 ) -> list[dict[str, Any]]:
     """Attach ``vector_field`` embeddings to each doc in-place.
 
@@ -41,7 +90,8 @@ def attach_vectors(
         Name of the vector field to write (e.g. ``"chunk_vector"``).
     mock:
         When True, fill with zero vectors — no network call.
-        Auto-enabled when ``AZURE_AI_FOUNDRY_ENDPOINT`` env var is absent.
+        Auto-enabled when neither ``AZURE_OPENAI_ENDPOINT`` nor the legacy
+        ``AZURE_AI_FOUNDRY_ENDPOINT`` variable is set.
     endpoint:
         Azure OpenAI endpoint (https://<name>.openai.azure.com/).
         Falls back to ``AZURE_AI_FOUNDRY_ENDPOINT`` for backward compat.
@@ -49,6 +99,9 @@ def attach_vectors(
         Foundry embedding deployment name.
     dimensions:
         Vector dimensions. LOCKED at 1536.
+    batch_size:
+        Maximum documents per provider request. Azure OpenAI accepts at most
+        2048 inputs; the lower default limits payload size and rate spikes.
 
     Returns
     -------
@@ -57,8 +110,16 @@ def attach_vectors(
     """
     if not docs:
         return docs
+    if not 1 <= batch_size <= _MAX_BATCH_SIZE:
+        raise ValueError(
+            f"batch_size must be between 1 and {_MAX_BATCH_SIZE}; got {batch_size}."
+        )
 
-    _endpoint = endpoint or os.environ.get("AZURE_AI_FOUNDRY_ENDPOINT", "")
+    _endpoint = (
+        endpoint
+        or os.environ.get("AZURE_OPENAI_ENDPOINT")
+        or os.environ.get("AZURE_AI_FOUNDRY_ENDPOINT", "")
+    )
     _use_mock = mock or not _endpoint
 
     if _use_mock:
@@ -67,7 +128,37 @@ def attach_vectors(
             doc[vector_field] = zero_vec
         return docs
 
-    # Live path — lazy import to avoid hard dep in offline environments
+    # Live path — lazy import to avoid hard deps in offline environments.
+    if ".services.ai.azure.com" in _endpoint:
+        try:
+            from azure.ai.projects import AIProjectClient  # type: ignore[import]
+            from azure.identity import DefaultAzureCredential  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-ai-projects and azure-identity are required for "
+                "Foundry project embeddings."
+            ) from exc
+        project_endpoint = (
+            os.environ.get("AZURE_AI_PROJECT_ENDPOINT") or _endpoint
+        )
+        project = AIProjectClient(
+            endpoint=project_endpoint,
+            credential=DefaultAzureCredential(),
+        )
+        aoai = project.get_openai_client()
+        return _attach_live_vectors(
+            docs,
+            text_field=text_field,
+            vector_field=vector_field,
+            dimensions=dimensions,
+            batch_size=batch_size,
+            create_embeddings=lambda texts: aoai.embeddings.create(
+                model=deployment,
+                input=texts,
+                dimensions=dimensions,
+            ),
+        )
+
     try:
         from azure.identity import DefaultAzureCredential, get_bearer_token_provider  # type: ignore[import]
         from openai import AzureOpenAI  # type: ignore[import]
@@ -95,16 +186,18 @@ def attach_vectors(
             api_version="2024-12-01-preview",
         )
 
-    texts = [doc.get(text_field) or "" for doc in docs]
-    response = aoai.embeddings.create(
-        model=deployment,
-        input=texts,
+    return _attach_live_vectors(
+        docs,
+        text_field=text_field,
+        vector_field=vector_field,
         dimensions=dimensions,
+        batch_size=batch_size,
+        create_embeddings=lambda texts: aoai.embeddings.create(
+            model=deployment,
+            input=texts,
+            dimensions=dimensions,
+        ),
     )
-    for doc, emb_item in zip(docs, response.data):
-        doc[vector_field] = emb_item.embedding
-
-    return docs
 
 
 def generate_embeddings(
@@ -159,6 +252,7 @@ def generate_embeddings(
         cache = {}
 
     docs = [derive_chunk_doc(chunk, entities_by_id) for chunk in chunks]
+    tokenizer = TiktokenTokenizer(EMBEDDING_TOKEN_ENCODING)
 
     # Identify chunks whose embedding is not yet cached.
     uncached_chunk_indices: list[int] = []
@@ -167,7 +261,13 @@ def generate_embeddings(
         ch = chunk.get("content_hash", "")
         if ch not in cache:
             uncached_chunk_indices.append(i)
-            uncached_texts.append(chunk.get("embedding_text") or chunk.get("content", ""))
+            uncached_texts.append(
+                document_embedding_text(
+                    chunk,
+                    text_field="embedding_text",
+                    tokenizer=tokenizer,
+                )
+            )
 
     # Embed uncached texts in batches.
     for batch_start in range(0, len(uncached_texts), batch_size):

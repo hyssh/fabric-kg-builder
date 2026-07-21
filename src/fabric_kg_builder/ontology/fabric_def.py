@@ -107,7 +107,7 @@ _RELATED_TO_CTX_SEED = "related_to:Contextualization:dbo.relationships"
 
 def _compute_ids() -> dict[str, str]:
     """Compute all stable IDs once and return as a dict."""
-    return {
+    ids = {
         "entity_type_id": _bigint_id(_KGENTITY_SEED),
         "prop_entity_id": _bigint_id(_PROP_ENTITY_ID_SEED),
         "prop_entity_type": _bigint_id(_PROP_ENTITY_TYPE_SEED),
@@ -117,6 +117,7 @@ def _compute_ids() -> dict[str, str]:
         "binding_guid": _guid_id(_KGENTITY_BINDING_SEED),
         "ctx_guid": _guid_id(_RELATED_TO_CTX_SEED),
     }
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +145,7 @@ def _entity_type_definition(ids: dict[str, str]) -> dict[str, Any]:
         "$schema": _ENTITY_TYPE_SCHEMA,
         "id": ids["entity_type_id"],
         "namespace": "usertypes",
-        "namespaceType": "Imported",
+        "namespaceType": "Custom",
         "baseEntityTypeId": None,
         "name": "KGEntity",
         "entityIdParts": [ids["prop_entity_id"]],
@@ -232,7 +233,7 @@ def _relationship_type_definition(ids: dict[str, str]) -> dict[str, Any]:
         "$schema": _RELATIONSHIP_TYPE_SCHEMA,
         "id": ids["rel_type_id"],
         "namespace": "usertypes",
-        "namespaceType": "Imported",
+        "namespaceType": "Custom",
         "name": "related_to",
         "source": {"entityTypeId": ids["entity_type_id"]},
         "target": {"entityTypeId": ids["entity_type_id"]},
@@ -366,6 +367,14 @@ def get_stable_ids() -> dict[str, str]:
 # type (Component, Procedure, Step, ...) bound to a per-type Lakehouse table, and
 # one typed RelationshipType per (source_type -> target_type) pair bound to a
 # per-pair edge table.  Consumed by deploy-ontology --multitype.
+
+# Typed serving columns intentionally shared by every maintenance entity type.
+# All are strings to remain compatible with Fabric's non-timeseries binding and
+# to preserve partial/exact source dates without inventing a precision.
+_MT_SERVING_PROPERTIES = (
+    "aliases_json", "description", "action", "status", "event_date",
+    "evidence_ids_json", "citation_json", "source_file_id",
+)
 #
 # Per-type tables are expected to share the same 4 bound columns as dbo.entities
 # (entity_id / entity_type / display_name / canonical_key).  Per-pair edge tables
@@ -374,13 +383,18 @@ def get_stable_ids() -> dict[str, str]:
 
 def _mt_type_ids(type_name: str) -> dict[str, str]:
     """Deterministic IDs for one EntityType and its 4 properties."""
-    return {
+    ids = {
         "entity_type_id": _bigint_id(f"{type_name}:entityType"),
         "prop_entity_id": _bigint_id(f"{type_name}:prop:entity_id"),
         "prop_entity_type": _bigint_id(f"{type_name}:prop:entity_type"),
         "prop_display_name": _bigint_id(f"{type_name}:prop:display_name"),
         "prop_canonical_key": _bigint_id(f"{type_name}:prop:canonical_key"),
     }
+    ids.update({
+        f"prop_{name}": _bigint_id(f"{type_name}:prop:{name}")
+        for name in _MT_SERVING_PROPERTIES
+    })
+    return ids
 
 
 def _mt_entity_type_definition(type_name: str, ids: dict[str, str]) -> dict[str, Any]:
@@ -388,7 +402,7 @@ def _mt_entity_type_definition(type_name: str, ids: dict[str, str]) -> dict[str,
         "$schema": _ENTITY_TYPE_SCHEMA,
         "id": ids["entity_type_id"],
         "namespace": "usertypes",
-        "namespaceType": "Imported",
+        "namespaceType": "Custom",
         "baseEntityTypeId": None,
         "name": type_name,
         "entityIdParts": [ids["prop_entity_id"]],
@@ -403,6 +417,10 @@ def _mt_entity_type_definition(type_name: str, ids: dict[str, str]) -> dict[str,
              "baseTypeNamespaceType": None, "valueType": "String"},
             {"id": ids["prop_canonical_key"], "name": "canonical_key", "redefines": None,
              "baseTypeNamespaceType": None, "valueType": "String"},
+        ] + [
+            {"id": ids[f"prop_{name}"], "name": name, "redefines": None,
+             "baseTypeNamespaceType": None, "valueType": "String"}
+            for name in _MT_SERVING_PROPERTIES
         ],
         "timeseriesProperties": [],
         "untypedProperties": [],
@@ -426,6 +444,9 @@ def _mt_entity_type_binding(
                 {"sourceColumnName": "entity_type", "targetPropertyId": ids["prop_entity_type"]},
                 {"sourceColumnName": "display_name", "targetPropertyId": ids["prop_display_name"]},
                 {"sourceColumnName": "canonical_key", "targetPropertyId": ids["prop_canonical_key"]},
+            ] + [
+                {"sourceColumnName": name, "targetPropertyId": ids[f"prop_{name}"]}
+                for name in _MT_SERVING_PROPERTIES
             ],
             "sourceTableProperties": {
                 "sourceType": "LakehouseTable",
@@ -466,18 +487,38 @@ def build_multitype_ontology_parts(
         {"path": ".platform", "payload_json": _platform_part(ontology_name)},
     ]
 
+    # Fabric type names are identifiers. Preserve raw type labels in the bound
+    # rows, but normalize only their ontology-facing names.
+    def fabric_type_name(raw_name: str, used: set[str]) -> str:
+        normalized = "".join(
+            character if character.isalnum() or character == "_" else "_"
+            for character in raw_name
+        ).strip("_") or "Entity"
+        if normalized[0].isdigit():
+            normalized = f"Entity_{normalized}"
+        candidate = normalized
+        suffix = 2
+        while candidate in used:
+            candidate = f"{normalized}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        return candidate
+
     # Per-type EntityType definition + DataBinding.
     type_ids: dict[str, dict[str, str]] = {}
+    ontology_type_names: dict[str, str] = {}
+    used_type_names: set[str] = set()
     for et in entity_types:
         type_name = et["type_name"]
         table_name = et["table_name"]
         ids = _mt_type_ids(type_name)
         ids["binding_guid"] = _guid_id(f"{type_name}:DataBinding:{schema}.{table_name}")
         type_ids[type_name] = ids
+        ontology_type_names[type_name] = fabric_type_name(type_name, used_type_names)
         et_id = ids["entity_type_id"]
         parts.append({
             "path": f"EntityTypes/{et_id}/definition.json",
-            "payload_json": _mt_entity_type_definition(type_name, ids),
+            "payload_json": _mt_entity_type_definition(ontology_type_names[type_name], ids),
         })
         parts.append({
             "path": f"EntityTypes/{et_id}/DataBindings/{ids['binding_guid']}.json",
@@ -504,7 +545,7 @@ def build_multitype_ontology_parts(
                 "$schema": _RELATIONSHIP_TYPE_SCHEMA,
                 "id": rt_id,
                 "namespace": "usertypes",
-                "namespaceType": "Imported",
+                "namespaceType": "Custom",
                 "name": name,
                 "source": {"entityTypeId": src_ids["entity_type_id"]},
                 "target": {"entityTypeId": tgt_ids["entity_type_id"]},

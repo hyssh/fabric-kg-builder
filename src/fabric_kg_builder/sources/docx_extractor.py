@@ -6,9 +6,11 @@ import hashlib
 import html
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from docx import Document
 from docx.document import Document as DocumentObject
+from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table
@@ -21,19 +23,24 @@ from fabric_kg_builder.model.ids import (
 )
 from fabric_kg_builder.model.schemas import DocumentElementRow, SourceFileRow
 
+if TYPE_CHECKING:
+    from .adapter import HyperlinkRecord
+
 
 class DocxExtractResult:
     """Result returned by :meth:`DocxExtractor.extract`."""
 
-    __slots__ = ("source_file", "document_elements")
+    __slots__ = ("source_file", "document_elements", "hyperlinks")
 
     def __init__(
         self,
         source_file: SourceFileRow,
         document_elements: list[DocumentElementRow],
+        hyperlinks: "list[HyperlinkRecord] | None" = None,
     ) -> None:
         self.source_file = source_file
         self.document_elements = document_elements
+        self.hyperlinks: list[HyperlinkRecord] = hyperlinks or []
 
 
 def _canonical_path(path: Path, project_root: Path | None) -> str:
@@ -46,6 +53,60 @@ def _canonical_path(path: Path, project_root: Path | None) -> str:
 
 def _file_content_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _extract_hyperlinks(document: DocumentObject) -> "list[HyperlinkRecord]":
+    """Extract all hyperlinks from a DOCX document (EXT-003).
+
+    Iterates every paragraph (including those inside tables) and resolves
+    ``<w:hyperlink r:id="…">`` relationship IDs to their target URLs.
+    Populates ``source_locator_json`` with paragraph or table-cell context.
+    """
+    from .adapter import HyperlinkRecord  # local import avoids circular deps
+    import json as _json
+
+    rels = document.part.rels
+    links: list[HyperlinkRecord] = []
+
+    def _collect_para_links(
+        para: Paragraph,
+        para_index: int,
+        table_locator: "dict | None" = None,
+    ) -> None:
+        for hl_elem in para._p.findall(".//" + qn("w:hyperlink")):
+            rid = hl_elem.get(qn("r:id"))
+            target = ""
+            if rid and rid in rels:
+                rel = rels[rid]
+                target = getattr(rel, "target_ref", "") or ""
+            # Gather anchor text from all <w:t> inside the hyperlink
+            texts = [
+                (t.text or "")
+                for t in hl_elem.findall(".//" + qn("w:t"))
+            ]
+            anchor = "".join(texts).strip()
+            if anchor or target:
+                if table_locator is not None:
+                    locator = _json.dumps({"type": "docx", **table_locator})
+                else:
+                    locator = _json.dumps({"type": "docx", "paragraph_index": para_index})
+                links.append(HyperlinkRecord(anchor=anchor, target=target, source_locator_json=locator))
+
+    for para_index, para in enumerate(document.paragraphs):
+        _collect_para_links(para, para_index=para_index)
+
+    for tbl_idx, tbl in enumerate(document.tables):
+        for row_idx, row in enumerate(tbl.rows):
+            for col_idx, cell in enumerate(row.cells):
+                tbl_locator = {
+                    "table_index": tbl_idx,
+                    "row_index": row_idx,
+                    "col_index": col_idx,
+                }
+                for para in cell.paragraphs:
+                    _collect_para_links(para, para_index=0, table_locator=tbl_locator)
+
+    return links
 
 
 def _iter_block_items(document: DocumentObject):
@@ -224,4 +285,8 @@ class DocxExtractor:
                     )
                     sort_order += 1
 
-        return DocxExtractResult(source_file=source_file, document_elements=document_elements)
+        return DocxExtractResult(
+            source_file=source_file,
+            document_elements=document_elements,
+            hyperlinks=_extract_hyperlinks(document),
+        )
