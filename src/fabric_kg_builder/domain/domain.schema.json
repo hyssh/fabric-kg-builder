@@ -1,0 +1,450 @@
+{
+  "$defs": {
+    "AmbiguousTerm": {
+      "additionalProperties": false,
+      "description": "Ambiguous or overloaded term.",
+      "properties": {
+        "term": {
+          "minLength": 1,
+          "title": "Term",
+          "type": "string"
+        },
+        "meanings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Meanings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "term"
+      ],
+      "title": "AmbiguousTerm",
+      "type": "object"
+    },
+    "ApprovalMetadata": {
+      "additionalProperties": false,
+      "description": "Approval state stored with the domain contract.",
+      "properties": {
+        "status": {
+          "default": "draft",
+          "enum": [
+            "draft",
+            "needs_review",
+            "approved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "approved_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved By"
+        },
+        "approved_at_utc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved At Utc"
+        },
+        "contract_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract Hash"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schema Version"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Version"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Version"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "title": "ApprovalMetadata",
+      "type": "object"
+    },
+    "BusinessSection": {
+      "additionalProperties": false,
+      "description": "Business and organizational context.",
+      "properties": {
+        "organization_context": {
+          "minLength": 1,
+          "title": "Organization Context",
+          "type": "string"
+        },
+        "users": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Users",
+          "type": "array"
+        },
+        "decisions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Decisions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "organization_context"
+      ],
+      "title": "BusinessSection",
+      "type": "object"
+    },
+    "CandidateModelSection": {
+      "additionalProperties": false,
+      "description": "Candidate entity and relationship categories.",
+      "properties": {
+        "entity_categories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Categories",
+          "type": "array"
+        },
+        "relationship_categories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Relationship Categories",
+          "type": "array"
+        }
+      },
+      "title": "CandidateModelSection",
+      "type": "object"
+    },
+    "CanonicalTerm": {
+      "additionalProperties": false,
+      "description": "Preferred business terminology.",
+      "properties": {
+        "term": {
+          "minLength": 1,
+          "title": "Term",
+          "type": "string"
+        },
+        "definition": {
+          "minLength": 1,
+          "title": "Definition",
+          "type": "string"
+        },
+        "synonyms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Synonyms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "term",
+        "definition"
+      ],
+      "title": "CanonicalTerm",
+      "type": "object"
+    },
+    "ConstraintsSection": {
+      "additionalProperties": false,
+      "description": "Temporal, regulatory, privacy, and safety constraints.",
+      "properties": {
+        "temporal": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Temporal",
+          "type": "array"
+        },
+        "regulatory": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Regulatory",
+          "type": "array"
+        },
+        "privacy": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Privacy",
+          "type": "array"
+        },
+        "safety": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Safety",
+          "type": "array"
+        }
+      },
+      "title": "ConstraintsSection",
+      "type": "object"
+    },
+    "DomainSection": {
+      "additionalProperties": false,
+      "description": "Top-level domain description.",
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "subdomains": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Subdomains",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "DomainSection",
+      "type": "object"
+    },
+    "ExamplesSection": {
+      "additionalProperties": false,
+      "description": "Positive and negative examples.",
+      "properties": {
+        "positive": {
+          "items": {
+            "$ref": "#/$defs/PositiveExample"
+          },
+          "title": "Positive",
+          "type": "array"
+        },
+        "negative": {
+          "items": {
+            "$ref": "#/$defs/NegativeExample"
+          },
+          "title": "Negative",
+          "type": "array"
+        }
+      },
+      "title": "ExamplesSection",
+      "type": "object"
+    },
+    "NegativeExample": {
+      "additionalProperties": false,
+      "description": "Representative negative example.",
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "reason"
+      ],
+      "title": "NegativeExample",
+      "type": "object"
+    },
+    "PositiveExample": {
+      "additionalProperties": false,
+      "description": "Representative positive example.",
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "expected": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "PositiveExample",
+      "type": "object"
+    },
+    "ProblemSection": {
+      "additionalProperties": false,
+      "description": "Problem statement and scoping.",
+      "properties": {
+        "statement": {
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        },
+        "desired_outcomes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Desired Outcomes",
+          "type": "array"
+        },
+        "in_scope": {
+          "items": {
+            "type": "string"
+          },
+          "title": "In Scope",
+          "type": "array"
+        },
+        "out_of_scope": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Out Of Scope",
+          "type": "array"
+        }
+      },
+      "required": [
+        "statement"
+      ],
+      "title": "ProblemSection",
+      "type": "object"
+    },
+    "TerminologySection": {
+      "additionalProperties": false,
+      "description": "Domain terminology catalogue.",
+      "properties": {
+        "canonical_terms": {
+          "items": {
+            "$ref": "#/$defs/CanonicalTerm"
+          },
+          "title": "Canonical Terms",
+          "type": "array"
+        },
+        "ambiguous_terms": {
+          "items": {
+            "$ref": "#/$defs/AmbiguousTerm"
+          },
+          "title": "Ambiguous Terms",
+          "type": "array"
+        }
+      },
+      "title": "TerminologySection",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Approved YAML source-of-truth for domain intent.",
+  "properties": {
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "domain": {
+      "$ref": "#/$defs/DomainSection"
+    },
+    "business": {
+      "$ref": "#/$defs/BusinessSection"
+    },
+    "problem": {
+      "$ref": "#/$defs/ProblemSection"
+    },
+    "competency_questions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Competency Questions",
+      "type": "array"
+    },
+    "terminology": {
+      "$ref": "#/$defs/TerminologySection"
+    },
+    "candidate_model": {
+      "$ref": "#/$defs/CandidateModelSection"
+    },
+    "constraints": {
+      "$ref": "#/$defs/ConstraintsSection"
+    },
+    "examples": {
+      "$ref": "#/$defs/ExamplesSection"
+    },
+    "approval": {
+      "$ref": "#/$defs/ApprovalMetadata"
+    }
+  },
+  "required": [
+    "domain",
+    "business",
+    "problem",
+    "terminology",
+    "candidate_model",
+    "constraints",
+    "examples"
+  ],
+  "title": "DomainContract",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "domain.schema.json"
+}

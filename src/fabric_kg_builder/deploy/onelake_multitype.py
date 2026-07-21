@@ -21,6 +21,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from fabric_kg_builder.semantic.source_tables import (
+    resolve_semantic_source_parquet,
+)
+
 logger = logging.getLogger(__name__)
 
 STATUS_PLANNED = "planned"
@@ -29,7 +33,11 @@ STATUS_SKIPPED = "skipped"
 STATUS_ERROR = "error"
 
 # Columns kept on each per-type entity table (must match the ontology binding).
-_ENTITY_BIND_COLS = ["entity_id", "entity_type", "display_name", "canonical_key"]
+_ENTITY_BIND_COLS = [
+    "entity_id", "entity_type", "display_name", "canonical_key", "aliases_json",
+    "description", "action", "status", "event_date", "evidence_ids_json",
+    "citation_json", "source_file_id",
+]
 # Columns kept on each per-pair edge table.
 _EDGE_BIND_COLS = ["source_entity_id", "target_entity_id"]
 
@@ -90,19 +98,37 @@ def materialize_multitype_tables(
     storage_options = {"bearer_token": tok, "use_fabric_endpoint": "true"}
 
     # ---- Per-type entity tables -------------------------------------------
-    ent = pq.read_table(str(parquet_dir / "entities.parquet"))
+    ent_path = resolve_semantic_source_parquet(
+        parquet_dir,
+        "semantic_entities",
+    )
+    rel_path = resolve_semantic_source_parquet(
+        parquet_dir,
+        "semantic_relationships",
+    )
+    ent = pq.read_table(str(ent_path))
     present = [c for c in _ENTITY_BIND_COLS if c in ent.schema.names]
     ent_lean = ent.select(present)
     etype_col = ent.column("entity_type")
 
     # Map entity_id -> entity_type for edge slicing.
-    id_to_type = dict(
-        zip(ent.column("entity_id").to_pylist(), ent.column("entity_type").to_pylist())
-    )
+    raw_to_plan_type = {
+        raw_type: entity_plan.type_name
+        for entity_plan in plan.entity_types
+        for raw_type in (entity_plan.source_types or (entity_plan.type_name,))
+    }
+    id_to_type = {
+        entity_id: raw_to_plan_type.get(raw_type)
+        for entity_id, raw_type in zip(
+            ent.column("entity_id").to_pylist(),
+            ent.column("entity_type").to_pylist(),
+        )
+    }
 
     for et in plan.entity_types:
         try:
-            mask = pc.equal(etype_col, pa.scalar(et.type_name))
+            source_types = list(et.source_types) or [et.type_name]
+            mask = pc.is_in(etype_col, value_set=pa.array(source_types))
             slice_tbl = ent_lean.filter(mask)
             write_deltalake(
                 _onelake_path(workspace_id, lakehouse_item_id, schema, et.table_name),
@@ -122,7 +148,7 @@ def materialize_multitype_tables(
             results[et.table_name] = f"{STATUS_ERROR}: {exc}"
 
     # ---- Per-pair edge tables ---------------------------------------------
-    rel = pq.read_table(str(parquet_dir / "relationships.parquet"))
+    rel = pq.read_table(str(rel_path))
     src_ids = rel.column("source_entity_id").to_pylist()
     tgt_ids = rel.column("target_entity_id").to_pylist()
     src_types = [id_to_type.get(s) for s in src_ids]

@@ -40,6 +40,7 @@ from tests.conftest import (
     make_blob_uploader,
     make_document_intelligence_client,
     make_foundry_client,
+    write_approved_domain_contract,
 )
 
 # ---------------------------------------------------------------------------
@@ -429,6 +430,7 @@ def test_enrich_with_di_and_blob_produces_visual_assets(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client_with_figure()
@@ -461,6 +463,8 @@ def test_enrich_with_di_and_blob_produces_visual_assets(tmp_path: Path) -> None:
     assert len(data["visual_assets"]) >= 1, (
         "Expected at least 1 visual_asset from DI figure"
     )
+    assert data["visual_extraction"]["status"] == "completed"
+    assert data["visual_extraction"]["reason"] == "figures_extracted"
 
 
 @pytest.mark.unit
@@ -470,6 +474,7 @@ def test_enrich_with_di_and_blob_produces_visual_regions(tmp_path: Path) -> None
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client_with_figure()
@@ -501,6 +506,7 @@ def test_enrich_visual_regions_image_id_matches_visual_assets(tmp_path: Path) ->
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client_with_figure()
@@ -535,6 +541,7 @@ def test_enrich_visual_asset_has_blob_url(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client_with_figure()
@@ -567,6 +574,7 @@ def test_enrich_visual_asset_has_correct_caption(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client_with_figure()
@@ -599,12 +607,13 @@ def test_enrich_visual_asset_has_correct_caption(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_enrich_without_blob_skips_visual_extraction(tmp_path: Path) -> None:
-    """When blob_uploader is None, no visual_assets are produced (graceful skip)."""
+def test_enrich_without_blob_reports_visual_extraction_skip(tmp_path: Path) -> None:
+    """Missing Blob configuration is explicit instead of a silent zero-row result."""
     pdf_path = tmp_path / "tiny.pdf"
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client_with_figure()
@@ -625,6 +634,8 @@ def test_enrich_without_blob_skips_visual_extraction(tmp_path: Path) -> None:
         f"enrich should exit 0 without blob. "
         f"Exit: {result.exit_code}\nOutput: {result.output}\nException: {result.exception}"
     )
+    assert "WARNING: visual extraction skipped" in result.output
+    assert "Blob uploader is unavailable" in result.output
 
     canonical_files = list(out_dir.glob("*_canonical.json"))
     assert canonical_files, "Canonical JSON must still be written"
@@ -633,15 +644,22 @@ def test_enrich_without_blob_skips_visual_extraction(tmp_path: Path) -> None:
     assert data.get("visual_assets", []) == [], (
         "visual_assets must be empty when blob is not configured"
     )
+    assert data["visual_extraction"] == {
+        "status": "skipped",
+        "reason": "blob_uploader_unavailable",
+        "asset_count": 0,
+        "region_count": 0,
+    }
 
 
 @pytest.mark.unit
-def test_enrich_without_di_skips_visual_extraction(tmp_path: Path) -> None:
-    """When di_layout_client is None, no visual_assets are produced (graceful skip)."""
+def test_enrich_without_di_reports_visual_extraction_skip(tmp_path: Path) -> None:
+    """Missing DI configuration is explicit instead of a silent zero-row result."""
     pdf_path = tmp_path / "tiny.pdf"
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
     blob_uploader = make_blob_uploader()
@@ -661,12 +679,19 @@ def test_enrich_without_di_skips_visual_extraction(tmp_path: Path) -> None:
         f"enrich should exit 0 without DI. "
         f"Exit: {result.exit_code}\nOutput: {result.output}\nException: {result.exception}"
     )
+    assert "WARNING: visual extraction skipped" in result.output
+    assert "Document Intelligence output is unavailable" in result.output
 
     canonical_files = list(out_dir.glob("*_canonical.json"))
     assert canonical_files
     data = json.loads(canonical_files[0].read_text())
     assert data.get("visual_assets", []) == [], (
         "visual_assets must be empty when DI is not configured"
+    )
+    assert data["visual_extraction"]["status"] == "skipped"
+    assert (
+        data["visual_extraction"]["reason"]
+        == "document_intelligence_unavailable"
     )
 
 
@@ -677,6 +702,7 @@ def test_enrich_without_di_and_blob_exits_zero(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client_from_dict(_MOCK_LLM_OUTPUT)
 

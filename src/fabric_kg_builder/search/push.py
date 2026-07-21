@@ -7,7 +7,6 @@ In MOCK mode (always used in tests and offline) the function logs what
 WOULD be pushed and returns a PushResult without making any network call.
 
 Live mode (opt-in via ``mock=False``) calls the Azure AI Search SDK.
-The AI Search SDK is NOT fabric-cicd — fabric-cicd is for Fabric items only.
 
 Change detection (SPEC-002 §11.6)
 ----------------------------------
@@ -39,14 +38,28 @@ class PushResult:
     succeeded: bool = True
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    failed: int = 0
 
     def __str__(self) -> str:
         mode = "MOCK" if self.mock else "LIVE"
         status = "OK" if self.succeeded else "FAILED"
         return (
             f"[{mode}] {status} — index={self.index_name!r}, "
-            f"docs={self.doc_count}, skipped={self.skipped}"
+            f"docs={self.doc_count}, skipped={self.skipped}, failed={self.failed}"
         )
+
+
+def _search_credential(api_key: str | None) -> Any:
+    """Use an explicit Search key when supplied, otherwise Azure identity."""
+    key = api_key or os.environ.get("AZURE_SEARCH_API_KEY")
+    if key:
+        from azure.core.credentials import AzureKeyCredential  # type: ignore[import]
+
+        return AzureKeyCredential(key)
+
+    from azure.identity import DefaultAzureCredential  # type: ignore[import]
+
+    return DefaultAzureCredential()
 
 
 def push_index(
@@ -68,7 +81,8 @@ def push_index(
     endpoint:
         AI Search service endpoint.  Falls back to ``AZURE_SEARCH_ENDPOINT``.
     api_key:
-        AI Search admin key.  Falls back to ``AZURE_SEARCH_API_KEY``.
+        AI Search admin key. Falls back to ``AZURE_SEARCH_API_KEY`` and then
+        ``DefaultAzureCredential``.
     mock:
         When True, log only — no network call.  Default True.
 
@@ -84,7 +98,6 @@ def push_index(
 
     try:
         from azure.search.documents.indexes import SearchIndexClient  # type: ignore[import]
-        from azure.core.credentials import AzureKeyCredential  # type: ignore[import]
         from azure.search.documents.indexes.models import SearchIndex  # type: ignore[import]
     except ImportError as exc:
         raise ImportError(
@@ -92,8 +105,10 @@ def push_index(
             "Install it or pass mock=True."
         ) from exc
 
-    _key = api_key or os.environ.get("AZURE_SEARCH_API_KEY", "")
-    client = SearchIndexClient(endpoint=_endpoint, credential=AzureKeyCredential(_key))
+    client = SearchIndexClient(
+        endpoint=_endpoint,
+        credential=_search_credential(api_key),
+    )
     # Build a minimal SearchIndex from the schema dict; full field mapping omitted
     # here — a proper implementation would convert schema["fields"] to SearchField objects.
     idx = SearchIndex(name=index_name)
@@ -121,7 +136,8 @@ def push_documents(
     endpoint:
         AI Search service endpoint.  Falls back to ``AZURE_SEARCH_ENDPOINT``.
     api_key:
-        AI Search admin key.  Falls back to ``AZURE_SEARCH_API_KEY``.
+        AI Search admin key. Falls back to ``AZURE_SEARCH_API_KEY`` and then
+        ``DefaultAzureCredential``.
     mock:
         When True, log only — no network call.  Default True.
     batch_size:
@@ -139,26 +155,49 @@ def push_documents(
 
     try:
         from azure.search.documents import SearchClient  # type: ignore[import]
-        from azure.core.credentials import AzureKeyCredential  # type: ignore[import]
+        from azure.core.exceptions import AzureError  # type: ignore[import]
     except ImportError as exc:
         raise ImportError(
             "azure-search-documents is required for live push. "
             "Install it or pass mock=True."
         ) from exc
 
-    _key = api_key or os.environ.get("AZURE_SEARCH_API_KEY", "")
     client = SearchClient(
         endpoint=_endpoint,
         index_name=index_name,
-        credential=AzureKeyCredential(_key),
+        credential=_search_credential(api_key),
     )
     errors: list[str] = []
+    failed: int = 0
     for start in range(0, len(docs), batch_size):
         batch = docs[start : start + batch_size]
-        result = client.upload_documents(documents=batch)
-        for r in result:
+        expected = len(batch)
+        try:
+            raw_result = client.upload_documents(documents=batch)
+        except AzureError as exc:
+            errors.append(
+                f"batch[{start}:{start + expected}]: upload raised "
+                f"{type(exc).__name__}: {exc}"
+            )
+            failed += expected
+            continue
+
+        results_list = list(raw_result) if raw_result is not None else []
+        received = len(results_list)
+
+        for r in results_list:
             if not r.succeeded:
                 errors.append(f"key={r.key}: {r.error_message}")
+                failed += 1
+
+        missing = max(expected - received, 0)
+        if received != expected:
+            errors.append(
+                f"batch[{start}:{start + expected}]: expected {expected} result(s), "
+                f"got {received}"
+                + (f" — {missing} document(s) unconfirmed" if missing else "")
+            )
+            failed += missing
 
     return PushResult(
         index_name=index_name,
@@ -166,6 +205,7 @@ def push_documents(
         mock=False,
         succeeded=not errors,
         errors=errors,
+        failed=failed,
     )
 
 
@@ -196,7 +236,8 @@ def push_chunk_docs(
     endpoint:
         AI Search service endpoint.  Falls back to ``AZURE_SEARCH_ENDPOINT``.
     api_key:
-        AI Search admin key.  Falls back to ``AZURE_SEARCH_API_KEY``.
+        AI Search admin key. Falls back to ``AZURE_SEARCH_API_KEY`` and then
+        ``DefaultAzureCredential``.
     mock:
         When True, log only — no network call.  Default True.
     existing_hashes:

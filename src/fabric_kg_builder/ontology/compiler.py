@@ -20,6 +20,7 @@ Per SPEC-003 §6.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -36,16 +37,20 @@ _PLATFORM_SCHEMA = (
     "platformProperties/2.0.0/schema.json"
 )
 _ENTITY_TYPE_DEF_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/ontology/entityType/1.0.0/schema.json"
+    "https://developer.microsoft.com/json-schemas/fabric/item/ontology/"
+    "entityType/1.0.0/schema.json"
 )
 _DATA_BINDING_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/ontology/dataBinding/1.0.0/schema.json"
+    "https://developer.microsoft.com/json-schemas/fabric/item/ontology/"
+    "dataBinding/1.0.0/schema.json"
 )
 _RELATIONSHIP_TYPE_DEF_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/ontology/relationshipType/1.0.0/schema.json"
+    "https://developer.microsoft.com/json-schemas/fabric/item/ontology/"
+    "relationshipType/1.0.0/schema.json"
 )
 _CONTEXTUALIZATION_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/ontology/contextualization/1.0.0/schema.json"
+    "https://developer.microsoft.com/json-schemas/fabric/item/ontology/"
+    "contextualization/1.0.0/schema.json"
 )
 
 # ---------------------------------------------------------------------------
@@ -61,12 +66,14 @@ _ONTOLOGY_NS: uuid.UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "FabricKG")
 
 _PROP_TYPE_MAP: dict[str, str] = {
     "string": "String",
-    "int": "Int64",
+    "int": "BigInt",
     "double": "Double",
     "boolean": "Boolean",
     "timestamp": "DateTime",
-    "blob_url": "String",  # emitted with "format": "uri" — see _build_property
+    "blob_url": "String",
 }
+
+_MAX_POSITIVE_BIGINT = 2**63 - 1
 
 # ---------------------------------------------------------------------------
 # Public exception
@@ -91,6 +98,77 @@ def _derive_guid(type_name: str, table: str) -> str:
     return str(uuid.uuid5(_ONTOLOGY_NS, f"{type_name}:{table}"))
 
 
+def _derive_bigint(seed: str) -> str:
+    """Return a deterministic positive signed 64-bit integer string."""
+    raw = int.from_bytes(
+        hashlib.sha256(seed.encode("utf-8")).digest()[:8],
+        "big",
+    )
+    return str((raw % (_MAX_POSITIVE_BIGINT - 1)) + 1)
+
+
+def _entity_id_property_names(et: dict[str, Any]) -> list[str]:
+    explicit = et.get("entityIdProperties")
+    if explicit:
+        return [str(name) for name in explicit]
+    property_names = {
+        str(prop.get("name"))
+        for prop in et.get("properties", [])
+        if prop.get("name")
+    }
+    source_column = str(
+        et.get("dataBinding", {}).get("entityIdColumn") or "entity_id"
+    )
+    if source_column in property_names:
+        return [source_column]
+    if "entity_id" in property_names:
+        return ["entity_id"]
+    return [source_column]
+
+
+def _display_name_property_name(et: dict[str, Any]) -> str:
+    explicit = et.get("displayNameProperty")
+    if explicit:
+        return str(explicit)
+    property_names = {
+        str(prop.get("name"))
+        for prop in et.get("properties", [])
+        if prop.get("name")
+    }
+    if "display_name" in property_names:
+        return "display_name"
+    source_column = str(
+        et.get("dataBinding", {}).get("displayNameColumn")
+        or _entity_id_property_names(et)[0]
+    )
+    return source_column
+
+
+def _normalized_entity_properties(
+    et: dict[str, Any],
+) -> list[dict[str, Any]]:
+    properties = [dict(prop) for prop in et.get("properties", [])]
+    property_names = {
+        str(prop.get("name"))
+        for prop in properties
+        if prop.get("name")
+    }
+    required_names = {
+        *_entity_id_property_names(et),
+        _display_name_property_name(et),
+    }
+    for name in sorted(required_names - property_names):
+        properties.append(
+            {
+                "name": name,
+                "type": "string",
+                "required": True,
+                "description": "Fabric Ontology binding key.",
+            }
+        )
+    return properties
+
+
 # ---------------------------------------------------------------------------
 # JSON / Base64 helper
 # ---------------------------------------------------------------------------
@@ -108,6 +186,32 @@ def _b64(obj: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _physical_type_ids(
+    ids: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Read legacy numeric maps or canonical semantic lock bindings."""
+    if "entityTypes" in ids or "relationshipTypes" in ids:
+        return (
+            dict(ids.get("entityTypes", {})),
+            dict(ids.get("relationshipTypes", {})),
+        )
+
+    def _extract(section: str) -> dict[str, str]:
+        values = ids.get(section, {})
+        if not isinstance(values, dict):
+            return {}
+        result: dict[str, str] = {}
+        for name, binding in values.items():
+            if not isinstance(binding, dict):
+                continue
+            fabric_id = binding.get("fabric_id")
+            if fabric_id:
+                result[str(name)] = str(fabric_id)
+        return result
+
+    return _extract("entity_types"), _extract("relationship_types")
+
+
 def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
     """Raise :class:`OntologyCompilerError` if the model or ID lock is invalid.
 
@@ -117,8 +221,7 @@ def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
     3. No duplicate IDs across entity and relationship type maps.
     4. Every relationship type references known entity type names.
     """
-    entity_ids: dict[str, str] = ids.get("entityTypes", {})
-    rel_ids: dict[str, str] = ids.get("relationshipTypes", {})
+    entity_ids, rel_ids = _physical_type_ids(ids)
 
     known_entity_names: set[str] = {et["name"] for et in model.get("entityTypes", [])}
 
@@ -129,6 +232,36 @@ def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
             raise OntologyCompilerError(
                 f"Entity type '{name}' in model.yaml has no matching ID in ids.lock.json"
             )
+        binding_id = et.get("dataBinding", {}).get("bindingId")
+        if binding_id:
+            try:
+                uuid.UUID(str(binding_id))
+            except ValueError as exc:
+                raise OntologyCompilerError(
+                    f"Entity type '{name}' has invalid bindingId "
+                    f"'{binding_id}'."
+                ) from exc
+        property_ids = [
+            str(prop.get("id") or _derive_bigint(f"{entity_ids[name]}:{prop['name']}"))
+            for prop in _normalized_entity_properties(et)
+        ]
+        for property_id in property_ids:
+            try:
+                numeric_id = int(property_id)
+            except ValueError as exc:
+                raise OntologyCompilerError(
+                    f"Entity type '{name}' has non-numeric property ID "
+                    f"'{property_id}'."
+                ) from exc
+            if numeric_id <= 0 or numeric_id > _MAX_POSITIVE_BIGINT:
+                raise OntologyCompilerError(
+                    f"Entity type '{name}' has property ID '{property_id}' "
+                    "outside Fabric's positive signed 64-bit range."
+                )
+        if len(property_ids) != len(set(property_ids)):
+            raise OntologyCompilerError(
+                f"Entity type '{name}' has duplicate property IDs."
+            )
 
     # 2. Relationship type IDs
     for rt in model.get("relationshipTypes", []):
@@ -137,9 +270,26 @@ def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
             raise OntologyCompilerError(
                 f"Relationship type '{name}' in model.yaml has no matching ID in ids.lock.json"
             )
+        contextualization_id = rt.get("dataBinding", {}).get(
+            "contextualizationId"
+        )
+        if contextualization_id:
+            try:
+                uuid.UUID(str(contextualization_id))
+            except ValueError as exc:
+                raise OntologyCompilerError(
+                    f"Relationship type '{name}' has invalid "
+                    f"contextualizationId '{contextualization_id}'."
+                ) from exc
 
     # 3. No duplicate IDs
     all_ids = list(entity_ids.values()) + list(rel_ids.values())
+    for et in model.get("entityTypes", []):
+        type_id = entity_ids[et["name"]]
+        all_ids.extend(
+            str(prop.get("id") or _derive_bigint(f"{type_id}:{prop['name']}"))
+            for prop in _normalized_entity_properties(et)
+        )
     seen: set[str] = set()
     for id_val in all_ids:
         if id_val in seen:
@@ -182,57 +332,119 @@ def _build_platform(ontology_name: str) -> dict[str, Any]:
     }
 
 
-def _build_property(prop: dict[str, Any]) -> dict[str, Any]:
+def _property_ids(
+    et: dict[str, Any],
+    type_id: str,
+) -> dict[str, str]:
+    return {
+        prop["name"]: str(
+            prop.get("id") or _derive_bigint(f"{type_id}:{prop['name']}")
+        )
+        for prop in _normalized_entity_properties(et)
+    }
+
+
+def _build_property(
+    prop: dict[str, Any],
+    property_id: str,
+) -> dict[str, Any]:
     ptype = prop.get("type", "string")
     fabric_type = _PROP_TYPE_MAP.get(ptype, "String")
-    out: dict[str, Any] = {
+    return {
+        "id": property_id,
         "name": prop["name"],
-        "type": fabric_type,
-        "isRequired": bool(prop.get("required", False)),
+        "redefines": None,
+        "baseTypeNamespaceType": None,
+        "valueType": fabric_type,
     }
-    if ptype == "blob_url":
-        out["format"] = "uri"
-    return out
 
 
 def _build_entity_definition(et: dict[str, Any], type_id: str) -> dict[str, Any]:
+    property_ids = _property_ids(et, type_id)
+    entity_id_properties = _entity_id_property_names(et)
+    display_name_property = _display_name_property_name(et)
+    if (
+        not entity_id_properties
+        or any(name not in property_ids for name in entity_id_properties)
+    ):
+        raise OntologyCompilerError(
+            f"Entity type '{et['name']}' does not map every entity ID part "
+            "to a declared property."
+        )
+    if display_name_property not in property_ids:
+        raise OntologyCompilerError(
+            f"Entity type '{et['name']}' display-name column does not map "
+            "to a declared property."
+        )
     return {
         "$schema": _ENTITY_TYPE_DEF_SCHEMA,
-        "typeId": type_id,
+        "id": type_id,
+        "namespace": "usertypes",
+        "baseEntityTypeId": None,
         "name": et["name"],
-        "description": et.get("description", ""),
-        "properties": [_build_property(p) for p in et.get("properties", [])],
+        "entityIdParts": [
+            property_ids[name] for name in entity_id_properties
+        ],
+        "displayNamePropertyId": property_ids[display_name_property],
+        "namespaceType": "Custom",
+        "visibility": "Visible",
+        "properties": [
+            _build_property(prop, property_ids[prop["name"]])
+            for prop in _normalized_entity_properties(et)
+        ],
+        "timeseriesProperties": [],
+        "untypedProperties": [],
     }
 
 
 def _build_data_binding(
     et: dict[str, Any],
     binding_guid: str,
+    workspace_id: str,
     lakehouse_id: str,
+    schema: str,
+    type_id: str,
 ) -> dict[str, Any]:
     db = et.get("dataBinding", {})
-    obj: dict[str, Any] = {
-        "$schema": _DATA_BINDING_SCHEMA,
-        "bindingId": binding_guid,
-        "displayName": f"{et['name']} from {db.get('table', '')}",
-        "dataSourceType": "Lakehouse",
-        "lakehouseId": lakehouse_id,
-        "tableName": db.get("table", ""),
-        "entityIdColumn": db.get("entityIdColumn", ""),
-        "displayNameColumn": db.get("displayNameColumn", ""),
+    property_ids = _property_ids(et, type_id)
+    source_columns = {
+        str(item["property"]): str(item["column"])
+        for item in db.get("additionalColumns", [])
     }
-    if db.get("typeFilterColumn"):
-        obj["typeFilterColumn"] = db["typeFilterColumn"]
-        # Include typeFilterValue even if empty string — callers can rely on its presence
-        # when typeFilterColumn is set (e.g., ImageAsset binds all rows by setting value "")
-        obj["typeFilterValue"] = db.get("typeFilterValue", "")
-    mappings = [
-        {"propertyName": col["property"], "columnName": col["column"]}
-        for col in db.get("additionalColumns", [])
+    entity_id_properties = _entity_id_property_names(et)
+    display_name_property = _display_name_property_name(et)
+    if len(entity_id_properties) == 1:
+        source_columns.setdefault(
+            entity_id_properties[0],
+            str(db.get("entityIdColumn", "")),
+        )
+    source_columns.setdefault(
+        str(display_name_property),
+        str(db.get("displayNameColumn", "")),
+    )
+    property_bindings = [
+        {
+            "sourceColumnName": source_columns[property_name],
+            "targetPropertyId": property_ids[property_name],
+        }
+        for property_name in property_ids
+        if source_columns.get(property_name)
     ]
-    if mappings:
-        obj["propertyMappings"] = mappings
-    return obj
+    return {
+        "$schema": _DATA_BINDING_SCHEMA,
+        "id": binding_guid,
+        "dataBindingConfiguration": {
+            "dataBindingType": "NonTimeSeries",
+            "propertyBindings": property_bindings,
+            "sourceTableProperties": {
+                "sourceType": "LakehouseTable",
+                "workspaceId": workspace_id,
+                "itemId": lakehouse_id,
+                "sourceTableName": db.get("table", ""),
+                "sourceSchema": schema,
+            },
+        },
+    }
 
 
 def _build_relationship_definition(
@@ -243,45 +455,53 @@ def _build_relationship_definition(
 ) -> dict[str, Any]:
     obj: dict[str, Any] = {
         "$schema": _RELATIONSHIP_TYPE_DEF_SCHEMA,
-        "typeId": type_id,
+        "id": type_id,
+        "namespace": "usertypes",
         "name": rt["name"],
-        "description": rt.get("description", ""),
-        "sourceTypeId": entity_ids.get(rt.get("sourceType", ""), ""),
-        "targetTypeId": entity_ids.get(rt.get("targetType", ""), ""),
+        "namespaceType": "Custom",
+        "source": {
+            "entityTypeId": entity_ids.get(rt.get("sourceType", ""), "")
+        },
+        "target": {
+            "entityTypeId": entity_ids.get(rt.get("targetType", ""), "")
+        },
     }
-    # Emit inverseTypeId for materialize and alias policies
-    inverse_policy = rt.get("inversePolicy", "none")
-    inverse_name = rt.get("inverseName")
-    if inverse_policy in ("materialize", "alias") and inverse_name:
-        inverse_id = rel_ids.get(inverse_name)
-        if inverse_id:
-            obj["inverseTypeId"] = inverse_id
     return obj
 
 
 def _build_contextualization(
     rt: dict[str, Any],
     ctx_guid: str,
+    workspace_id: str,
     lakehouse_id: str,
+    schema: str,
+    source_property_id: str,
+    target_property_id: str,
 ) -> dict[str, Any]:
     db = rt.get("dataBinding", {})
-    obj: dict[str, Any] = {
+    return {
         "$schema": _CONTEXTUALIZATION_SCHEMA,
-        "contextualizationId": ctx_guid,
-        "displayName": f"{rt['name']} from {db.get('table', '')}",
-        "dataSourceType": "Lakehouse",
-        "lakehouseId": lakehouse_id,
-        "tableName": db.get("table", ""),
-        "relationshipIdColumn": db.get("relationshipIdColumn", ""),
-        "sourceEntityIdColumn": db.get("sourceEntityIdColumn", ""),
-        "targetEntityIdColumn": db.get("targetEntityIdColumn", ""),
+        "id": ctx_guid,
+        "dataBindingTable": {
+            "workspaceId": workspace_id,
+            "itemId": lakehouse_id,
+            "sourceTableName": db.get("table", ""),
+            "sourceSchema": schema,
+            "sourceType": "LakehouseTable",
+        },
+        "sourceKeyRefBindings": [
+            {
+                "sourceColumnName": db.get("sourceEntityIdColumn", ""),
+                "targetPropertyId": source_property_id,
+            }
+        ],
+        "targetKeyRefBindings": [
+            {
+                "sourceColumnName": db.get("targetEntityIdColumn", ""),
+                "targetPropertyId": target_property_id,
+            }
+        ],
     }
-    if db.get("typeFilterColumn"):
-        obj["typeFilterColumn"] = db["typeFilterColumn"]
-        obj["typeFilterValue"] = db.get("typeFilterValue", "")
-    if db.get("evidenceIdColumn"):
-        obj["evidenceIdColumn"] = db["evidenceIdColumn"]
-    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +534,15 @@ class OntologyCompiler:
         self,
         model_path: Path | str,
         ids_lock_path: Path | str,
+        workspace_id: str = "",
         lakehouse_id: str = "",
+        schema: str = "dbo",
     ) -> None:
         self.model_path = Path(model_path)
         self.ids_lock_path = Path(ids_lock_path)
+        self.workspace_id = workspace_id
         self.lakehouse_id = lakehouse_id
+        self.schema = schema
 
         with self.model_path.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
@@ -340,9 +564,9 @@ class OntologyCompiler:
         The top-level ``definition.json`` manifest is *not* included here —
         it references these parts.  The ``.platform`` file IS included.
         """
-        entity_ids: dict[str, str] = self.ids.get("entityTypes", {})
-        rel_ids: dict[str, str] = self.ids.get("relationshipTypes", {})
+        entity_ids, rel_ids = _physical_type_ids(self.ids)
         ontology_name: str = self.model.get("name", "FabricKG")
+        entity_identifier_ids: dict[str, str] = {}
 
         parts: list[tuple[str, dict[str, Any]]] = []
 
@@ -353,6 +577,16 @@ class OntologyCompiler:
         for et in self.model.get("entityTypes", []):
             name = et["name"]
             type_id = entity_ids[name]
+            property_ids = _property_ids(et, type_id)
+            entity_id_properties = _entity_id_property_names(et)
+            if len(entity_id_properties) != 1:
+                raise OntologyCompilerError(
+                    f"Entity type '{name}' must expose exactly one entity ID "
+                    "property for relationship contextualization."
+                )
+            entity_identifier_ids[name] = property_ids[
+                entity_id_properties[0]
+            ]
 
             parts.append(
                 (
@@ -363,11 +597,18 @@ class OntologyCompiler:
 
             db = et.get("dataBinding", {})
             table = db.get("table", "")
-            guid = _derive_guid(name, table)
+            guid = db.get("bindingId") or _derive_guid(name, table)
             parts.append(
                 (
                     f"EntityTypes/{type_id}/DataBindings/{guid}.json",
-                    _build_data_binding(et, guid, self.lakehouse_id),
+                    _build_data_binding(
+                    et,
+                    guid,
+                    self.workspace_id,
+                    self.lakehouse_id,
+                    self.schema,
+                    type_id,
+                    ),
                 )
             )
 
@@ -379,17 +620,30 @@ class OntologyCompiler:
             parts.append(
                 (
                     f"RelationshipTypes/{type_id}/definition.json",
-                    _build_relationship_definition(rt, type_id, entity_ids, rel_ids),
+                    _build_relationship_definition(
+                    rt,
+                    type_id,
+                    entity_ids,
+                    rel_ids,
+                    ),
                 )
             )
 
             db = rt.get("dataBinding", {})
             table = db.get("table", "")
-            guid = _derive_guid(name, table)
+            guid = db.get("contextualizationId") or _derive_guid(name, table)
             parts.append(
                 (
                     f"RelationshipTypes/{type_id}/Contextualizations/{guid}.json",
-                    _build_contextualization(rt, guid, self.lakehouse_id),
+                    _build_contextualization(
+                    rt,
+                    guid,
+                    self.workspace_id,
+                    self.lakehouse_id,
+                    self.schema,
+                    entity_identifier_ids[rt["sourceType"]],
+                    entity_identifier_ids[rt["targetType"]],
+                    ),
                 )
             )
 

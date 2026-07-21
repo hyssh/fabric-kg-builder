@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from bs4 import BeautifulSoup, Tag
 
@@ -15,19 +16,24 @@ from fabric_kg_builder.model.ids import (
 )
 from fabric_kg_builder.model.schemas import DocumentElementRow, SourceFileRow
 
+if TYPE_CHECKING:
+    from .adapter import HyperlinkRecord
+
 
 class HtmlExtractResult:
     """Result returned by :meth:`HtmlExtractor.extract`."""
 
-    __slots__ = ("source_file", "document_elements")
+    __slots__ = ("source_file", "document_elements", "hyperlinks")
 
     def __init__(
         self,
         source_file: SourceFileRow,
         document_elements: list[DocumentElementRow],
+        hyperlinks: "list[HyperlinkRecord] | None" = None,
     ) -> None:
         self.source_file = source_file
         self.document_elements = document_elements
+        self.hyperlinks: list[HyperlinkRecord] = hyperlinks or []
 
 
 def _canonical_path(path: Path, project_root: Path | None) -> str:
@@ -36,6 +42,75 @@ def _canonical_path(path: Path, project_root: Path | None) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _is_file_path(source: str) -> bool:
+    """Return True iff *source* names an existing file on disk.
+
+    Deliberately avoids calling ``Path(source).exists()`` when the string
+    cannot be a valid path:
+
+    * Strings longer than 4096 bytes are longer than any OS path limit.
+    * Strings whose first non-whitespace character is ``<`` are HTML markup.
+    * Strings containing newlines are multi-line markup, not paths.
+    * ``OSError`` from the filesystem call is caught and treated as "not a file"
+      (e.g. Windows raises WinError 123 for paths with invalid characters).
+    """
+    if len(source) > 4096:
+        return False
+    stripped = source.lstrip()
+    if stripped.startswith("<") or "\n" in source:
+        return False
+    try:
+        return Path(source).exists()
+    except OSError:
+        return False
+
+
+def _extract_html_hyperlinks(
+    soup: BeautifulSoup,
+    current_element_id: str | None = None,
+) -> "list[HyperlinkRecord]":
+    """Extract all ``<a href>`` hyperlinks from parsed HTML (EXT-003).
+
+    Populates ``source_locator_json`` with element path and sort-order context.
+    """
+    from .adapter import HyperlinkRecord  # local import avoids circular deps
+    import json as _json
+
+    links: list[HyperlinkRecord] = []
+    for sort_order, a_tag in enumerate(soup.find_all("a")):
+        if not isinstance(a_tag, Tag):
+            continue
+        href = a_tag.get("href", "").strip()
+        if not href:
+            continue
+        anchor = a_tag.get_text(" ", strip=True)
+
+        # Build ancestor path (tag names from root to immediate parent)
+        path_parts: list[str] = []
+        for parent in a_tag.parents:
+            name = getattr(parent, "name", None)
+            if name and name not in ("[document]", "html"):
+                path_parts.append(name)
+        element_path = "/".join(reversed(path_parts)) + "/a"
+
+        locator = _json.dumps({
+            "type": "html",
+            "sort_order": sort_order,
+            "element_path": element_path,
+        })
+
+        links.append(
+            HyperlinkRecord(
+                anchor=anchor,
+                target=href,
+                source_element_id=current_element_id,
+                sort_order=sort_order,
+                source_locator_json=locator,
+            )
+        )
+    return links
 
 
 class HtmlExtractor:
@@ -53,7 +128,7 @@ class HtmlExtractor:
         byte_size: int
         canonical_path: str
 
-        if isinstance(source, Path) or Path(str(source)).exists():
+        if isinstance(source, Path) or _is_file_path(str(source)):
             path = Path(source)
             raw_bytes = path.read_bytes()
             raw_html = raw_bytes.decode("utf-8", errors="ignore")
@@ -215,4 +290,8 @@ class HtmlExtractor:
                 )
                 sort_order += 1
 
-        return HtmlExtractResult(source_file=source_file, document_elements=document_elements)
+        return HtmlExtractResult(
+            source_file=source_file,
+            document_elements=document_elements,
+            hyperlinks=_extract_html_hyperlinks(soup),
+        )

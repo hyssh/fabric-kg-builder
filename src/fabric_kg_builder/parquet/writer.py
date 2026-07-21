@@ -28,7 +28,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from fabric_kg_builder.model.arrow_schemas import TABLE_SCHEMAS
+from fabric_kg_builder.model.arrow_schemas import ALL_TABLE_SCHEMAS, TABLE_SCHEMAS
 
 # ---------------------------------------------------------------------------
 # Writer config — SPEC-002 §7.2
@@ -96,12 +96,12 @@ def write_table(
         If a NOT NULL column is null in any row, or on schema mismatch.
     """
     if schema is None:
-        if table_name not in TABLE_SCHEMAS:
+        if table_name not in ALL_TABLE_SCHEMAS:
             raise KeyError(
                 f"Unknown table '{table_name}'. "
-                f"Known tables: {sorted(TABLE_SCHEMAS)}"
+                f"Known tables: {sorted(ALL_TABLE_SCHEMAS)}"
             )
-        schema = TABLE_SCHEMAS[table_name]
+        schema = ALL_TABLE_SCHEMAS[table_name]
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +173,18 @@ def _validate_not_null(
 
 _NOW_SENTINEL = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
+# Common lineage sentinel values shared by all 8 canonical tables.
+_LINEAGE_SENTINEL: dict = {
+    "project_id": "placeholder",
+    "asset_id": "",
+    "asset_version_id": "",
+    "run_id": "",
+    "parent_record_id": None,
+    "source_locator_json": None,
+    "schema_version": "2.0",
+    "domain_hash": None,
+}
+
 # Placeholder rows per table; all NOT NULL columns get sentinel values.
 _PLACEHOLDER_ROWS: dict[str, dict] = {
     "source_files": {
@@ -186,6 +198,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "schema_profile_path": None,
         "row_count": None,
         "notes": None,
+        **_LINEAGE_SENTINEL,
     },
     "document_elements": {
         "document_element_id": f"elem:{_PLACEHOLDER_SENTINEL}",
@@ -203,6 +216,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "col_index": None,
         "content_hash": _PLACEHOLDER_HASH,
         "extracted_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
     "chunks": {
         "chunk_id": f"chunk:{_PLACEHOLDER_SENTINEL}",
@@ -222,6 +236,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "entity_search_keys": None,
         "content_hash": _PLACEHOLDER_HASH,
         "created_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
     "entities": {
         "entity_id": f"entity:{_PLACEHOLDER_SENTINEL}",
@@ -238,6 +253,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "content_hash": _PLACEHOLDER_HASH,
         "created_at": _NOW_SENTINEL,
         "updated_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
     "relationships": {
         "relationship_id": f"rel:{_PLACEHOLDER_SENTINEL}",
@@ -250,6 +266,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "is_placeholder": True,
         "content_hash": _PLACEHOLDER_HASH,
         "created_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
     "evidence": {
         "evidence_id": f"evid:{_PLACEHOLDER_SENTINEL}",
@@ -270,6 +287,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "text": None,
         "content_hash": _PLACEHOLDER_HASH,
         "created_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
     "visual_assets": {
         "image_id": f"img:{_PLACEHOLDER_SENTINEL}",
@@ -289,6 +307,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "confidence": None,
         "is_placeholder": True,
         "created_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
     "visual_regions": {
         "visual_region_id": f"vr:{_PLACEHOLDER_SENTINEL}",
@@ -302,6 +321,7 @@ _PLACEHOLDER_ROWS: dict[str, dict] = {
         "blob_url": None,
         "confidence": None,
         "created_at": _NOW_SENTINEL,
+        **_LINEAGE_SENTINEL,
     },
 }
 

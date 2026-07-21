@@ -16,11 +16,23 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from unittest.mock import MagicMock
 
 import pytest
+
+from fabric_kg_builder.domain import (
+    ApprovalMetadata,
+    CompetencyQuestionCoverage,
+    DomainReview,
+    compute_contract_hash,
+    load_domain_contract,
+    review_path_for_contract,
+    save_domain_contract,
+    save_json_document,
+)
 
 # ---------------------------------------------------------------------------
 # Session setup: ensure per-environment config exists for CLI tests.
@@ -88,6 +100,7 @@ _DI_FIXTURE = _FIXTURES_DIR / "document_intelligence" / "analyze_result.json"
 _DI_TABLES_FIXTURE = _FIXTURES_DIR / "document_intelligence" / "analyze_result_tables.json"
 _PARQUET_DIR = _FIXTURES_DIR / "parquet" / "valid"
 _CSV_FIXTURE = _FIXTURES_DIR / "csv" / "sample.csv"
+_DOMAIN_EXAMPLE = _REPO_ROOT / "examples" / "domains" / "supply-chain-risk.domain.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +133,43 @@ def sample_csv_path() -> Path:
     """
     assert _CSV_FIXTURE.exists(), f"Sample CSV fixture missing: {_CSV_FIXTURE}"
     return _CSV_FIXTURE
+
+
+def write_approved_domain_contract(target_path: Path) -> Path:
+    """Materialize a ready-for-enrichment contract and current review sidecar."""
+    contract = load_domain_contract(_DOMAIN_EXAMPLE)
+    contract_hash = compute_contract_hash(contract)
+    review = DomainReview(
+        schema_version=contract.schema_version,
+        contract_hash=contract_hash,
+        prompt_version="domain-review.v1",
+        model_version="test-model",
+        reviewed_at_utc="2026-07-14T20:00:00Z",
+        quality_score=0.95,
+        findings=[],
+        competency_question_coverage=[
+            CompetencyQuestionCoverage(
+                question=question,
+                supported=True,
+                required_concepts=["supplier", "product"],
+            )
+            for question in contract.competency_questions
+        ],
+        proposed_contract=None,
+    )
+    contract.approval = ApprovalMetadata(
+        status="approved",
+        approved_by="test.user@example.com",
+        approved_at_utc="2026-07-14T20:05:00Z",
+        contract_hash=contract_hash,
+        schema_version=contract.schema_version,
+        prompt_version=review.prompt_version,
+        model_version=review.model_version,
+        notes=["Test fixture approval."],
+    )
+    save_domain_contract(contract, target_path)
+    save_json_document(review.model_dump(mode="json"), review_path_for_contract(target_path))
+    return target_path
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +230,22 @@ def make_blob_uploader(url_pattern: str = "https://fake.blob.core.windows.net/kg
     uploader = MagicMock()
     uploader.upload.side_effect = lambda asset_id, data, ext: url_pattern.format(
         asset_id=asset_id, ext=ext
+    )
+    from fabric_kg_builder.lineage.registry import BlobWriteResult
+
+    uploader.upload_original.side_effect = lambda **kwargs: BlobWriteResult(
+        blob_uri=(
+            "https://fake.blob.core.windows.net/kg-assets/"
+            f"raw/{kwargs['asset_id']}/versions/{kwargs['asset_version_id']}/"
+            f"original/{kwargs['original_name']}"
+        ),
+        blob_version_id=kwargs["metadata"]["content_hash"],
+        landing_path=(
+            f"raw/{kwargs['asset_id']}/versions/{kwargs['asset_version_id']}/"
+            f"original/{kwargs['original_name']}"
+        ),
+        landing_timestamp=datetime.now(timezone.utc),
+        idempotent_reuse=False,
     )
     return uploader
 
@@ -319,6 +385,7 @@ def parquet_tables(tmp_path: Path) -> dict:
 __all__ = [
     "tmp_build_dir",
     "sample_csv_path",
+    "write_approved_domain_contract",
     "mock_foundry_client",
     "mock_blob_uploader",
     "mock_search_client",

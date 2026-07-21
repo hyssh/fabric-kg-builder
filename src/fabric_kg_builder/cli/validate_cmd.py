@@ -33,7 +33,26 @@ def _load_config_from_yaml(config_path: str) -> dict[str, Any]:
 
 
 _VALIDATE_EPILOG = """\b
-Example:
+Environment checks (VAL-025):
+  Live validation requires resource locators in the process environment even
+  when similar values exist in ontology/environments/<env>.json.
+
+  Common Entra-authenticated settings:
+\b
+    FABRIC_WORKSPACE_ID=<workspace-guid>
+    FABRIC_KG_BLOB_ACCOUNT_URL=https://<account>.blob.core.windows.net
+    AZURE_AI_FOUNDRY_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
+    AZURE_DOCINTEL_ENDPOINT=https://<resource>.cognitiveservices.azure.com
+    AZURE_SEARCH_ENDPOINT=https://<service>.search.windows.net
+
+  API keys and connection strings are optional when DefaultAzureCredential and
+  resource endpoints are used. Use --skip-env-check only for a deliberate
+  artifact-only/CI validation; it also skips the environment secret scan.
+
+PowerShell example:
+\b
+  $env:FABRIC_WORKSPACE_ID = "<workspace-guid>"
+  $env:FABRIC_KG_BLOB_ACCOUNT_URL = "https://<account>.blob.core.windows.net"
   fabric-kg validate --env dev
   fabric-kg validate --env prod --rules VAL-008,BRG-001 --report build\\validation.txt
 
@@ -46,7 +65,7 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 @click.option(
     "--env",
     required=True,
-    type=click.Choice(["dev", "test", "prod"]),
+    type=str,
     help="Target deployment environment to validate.",
 )
 @click.option(

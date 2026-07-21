@@ -72,6 +72,7 @@ STATUS_ERROR = "error"
 #   Drop  → content, content_html  (heavy text — lives in kg-document-elements)
 #   Drop  → row_index, col_index   (sparse table-HTML concerns — AI Search only)
 LAKEHOUSE_TABLE_PROJECTION: dict[str, list[str] | None] = {
+    # ── Core content tables ───────────────────────────────────────────────
     "source_files": None,   # all columns — file provenance / graph root
     "document_elements": [  # lean — structural + graph linkage only
         "document_element_id",
@@ -90,9 +91,27 @@ LAKEHOUSE_TABLE_PROJECTION: dict[str, list[str] | None] = {
     "entities": None,        # all columns — graph nodes + ontology bindings
     "relationships": None,   # all columns — graph edges
     "evidence": None,        # all columns — provenance links
+    # Deterministic canonicalized maintenance serving layer.  Graph Model and
+    # multi-type Ontology bind these tables; raw observations above stay intact.
+    "semantic_entities": None,
+    "semantic_relationships": None,
     "visual_assets": None,   # all columns — visual ontology assets
     "visual_regions": None,  # all columns — visual ontology regions
     # "chunks" intentionally omitted — text retrieval only → AI Search (kg-chunks)
+    # ── v2 graph/lineage tables (M6 SRV-001) ─────────────────────────────
+    "claims": None,               # all columns — claims graph
+    "claim_evidence": None,       # all columns — claim provenance links
+    "clusters": None,             # all columns — entity cluster hierarchy
+    "cluster_memberships": None,  # all columns — entity/rel/claim → cluster membership
+    "assets": None,               # all columns — immutable asset registry root
+    "asset_versions": None,       # all columns — immutable observed version rows
+    "processing_runs": None,      # all columns — pipeline execution manifests
+    "deployments": None,          # all columns — deployment sink locators
+    # ── M5 drawing tables (SPEC-006 §7.3) — schema owned by M5 ──────────
+    # Included here so OneLake write picks them up when M5 ships the Parquet
+    # files; M5 owns Pydantic/Arrow schema definitions for both tables.
+    "drawing_elements": None,     # all columns — drawing observation elements
+    "drawing_relationships": None,  # all columns — drawing spatial/topology rels
 }
 
 # Ordered list of tables included in the default Lakehouse projection (no chunks).

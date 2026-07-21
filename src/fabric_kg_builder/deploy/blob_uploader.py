@@ -28,10 +28,17 @@ to verify low-level call counts.
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from ..config.schema import BlobStorageConfig
+from ..lineage.common import now_utc, safe_original_name
+
+_HNS_BLOB_TAGS_UNSUPPORTED = "FeatureNotYetSupportedForHierarchicalNamespaceAccounts"
+_LOG = logging.getLogger(__name__)
 
 
 class BlobUploader:
@@ -103,20 +110,18 @@ class BlobUploader:
         """Create the target container if it doesn't exist (idempotent, once per instance).
 
         Mirrors the reference ingestion pattern: lazily create the container so a
-        first-time deploy/enrich doesn't fail with ContainerNotFound.  Silently
-        ignores 'already exists' and missing-create-permission cases.
+        first-time deploy/enrich doesn't fail with ContainerNotFound.
         """
         if self._container_ready:
             return
+        from azure.core.exceptions import ResourceExistsError
+
+        container_client = self._client.get_container_client(
+            self._config.container
+        )
         try:
-            cc = self._client.get_container_client(self._config.container)
-            try:
-                cc.create_container()
-            except Exception:
-                # Already exists, or no create permission — proceed either way.
-                pass
-        except Exception:
-            # Client without get_container_client (e.g. some mocks) — skip.
+            container_client.create_container()
+        except ResourceExistsError:
             pass
         self._container_ready = True
 
@@ -148,12 +153,99 @@ class BlobUploader:
         container = self._config.container
 
         blob_client = self._client.get_blob_client(container=container, blob=blob_name)
+        from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
         try:
             # If the blob already exists, return its URL without re-uploading.
             blob_client.get_blob_properties()
             return blob_client.url
-        except Exception:
-            # Blob does not exist — upload now.
-            blob_client.upload_blob(data, overwrite=False)
+        except ResourceNotFoundError:
+            # Another worker or a prior retry can create the immutable blob
+            # between the read and create requests.
+            try:
+                blob_client.upload_blob(data, overwrite=False)
+            except ResourceExistsError:
+                pass
             return blob_client.url
+
+    def upload_original(
+        self,
+        *,
+        asset_id: str,
+        asset_version_id: str,
+        data: bytes,
+        original_name: str,
+        media_type: str,
+        metadata: dict[str, str],
+        tags: dict[str, str],
+    ) -> Any:
+        """Land an immutable original asset version in Blob Storage."""
+        from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+        from azure.storage.blob import ContentSettings
+        from fabric_kg_builder.lineage.registry import BlobWriteResult
+
+        self._ensure_container()
+        landing_path = (
+            f"raw/{asset_id}/versions/{asset_version_id}/original/"
+            f"{safe_original_name(original_name)}"
+        )
+        prefix = self._config.path_prefix.strip("/")
+        blob_name = f"{prefix}/{landing_path}" if prefix else landing_path
+        blob_client = self._client.get_blob_client(
+            container=self._config.container,
+            blob=blob_name,
+        )
+
+        try:
+            properties = blob_client.get_blob_properties()
+        except ResourceNotFoundError:
+            upload_options = {
+                "overwrite": False,
+                "metadata": metadata,
+                "tags": tags,
+                "content_settings": ContentSettings(content_type=media_type),
+            }
+            try:
+                response = blob_client.upload_blob(data, **upload_options)
+            except HttpResponseError as exc:
+                if (
+                    getattr(exc, "error_code", None) != _HNS_BLOB_TAGS_UNSUPPORTED
+                    and _HNS_BLOB_TAGS_UNSUPPORTED not in str(exc)
+                ):
+                    raise
+                _LOG.warning(
+                    "Blob index tags are unsupported for hierarchical namespace "
+                    "storage; preserving immutable lineage through blob metadata."
+                )
+                upload_options.pop("tags")
+                response = blob_client.upload_blob(data, **upload_options)
+            version_id = (
+                response.get("version_id")
+                if isinstance(response, Mapping)
+                else None
+            )
+            return BlobWriteResult(
+                blob_uri=blob_client.url,
+                blob_version_id=version_id,
+                landing_path=landing_path,
+                landing_timestamp=now_utc(),
+                idempotent_reuse=False,
+            )
+
+        existing_metadata = getattr(properties, "metadata", None) or {}
+        existing_hash = existing_metadata.get("content_hash")
+        if existing_hash != metadata.get("content_hash"):
+            raise FileExistsError(
+                f"Immutable landing collision at {blob_client.url}: "
+                "existing content hash does not match."
+            )
+        landing_timestamp = getattr(properties, "last_modified", None)
+        if not isinstance(landing_timestamp, datetime):
+            landing_timestamp = now_utc()
+        return BlobWriteResult(
+            blob_uri=blob_client.url,
+            blob_version_id=getattr(properties, "version_id", None),
+            landing_path=landing_path,
+            landing_timestamp=landing_timestamp,
+            idempotent_reuse=True,
+        )

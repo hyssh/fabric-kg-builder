@@ -35,9 +35,17 @@ Usage
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 #: Default confidence assigned when the LLM omits it on an entity/relationship.
@@ -93,6 +101,36 @@ EvidenceSourceType = Literal[
     "chunk",
 ]
 
+PropertyValueType = Literal[
+    "string",
+    "integer",
+    "number",
+    "boolean",
+    "datetime",
+    "date",
+    "uri",
+    "json",
+]
+
+ObservationAssertionState = Literal[
+    "asserted",
+    "normalized",
+    "derived",
+    "inferred",
+    "unresolved",
+    "rejected",
+]
+
+TemporalPrecision = Literal[
+    "instant",
+    "day",
+    "month",
+    "year",
+    "interval",
+    "unknown",
+    "not_applicable",
+]
+
 
 # ---------------------------------------------------------------------------
 # Sub-models
@@ -141,6 +179,150 @@ class Entity(BaseModel):
     source_spans: list[Optional[str]] = Field(
         default_factory=list, description="Evidence id_hints or span refs"
     )
+    evidence_id_hints: list[str] = Field(
+        default_factory=list,
+        description="Evidence id_hints supporting entity identity.",
+    )
+    parent_id_hint: Optional[str] = Field(
+        default=None,
+        description="Optional parent entity reference used for disambiguation.",
+    )
+    location_id_hint: Optional[str] = Field(
+        default=None,
+        description="Optional location entity reference used for disambiguation.",
+    )
+    source_context: Optional[str] = Field(
+        default=None,
+        description="Source-provided context that prevents unsafe name-only merges.",
+    )
+    temporal_context: Optional[str] = Field(
+        default=None,
+        description="Source-provided temporal context used for entity resolution.",
+    )
+    stable_identifiers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Observed business identifiers, subject to evidence validation.",
+    )
+    cannot_link_keys: list[str] = Field(
+        default_factory=list,
+        description="Explicit source-supported keys that must not be merged.",
+    )
+    semantic_type_id: Optional[str] = Field(
+        default=None,
+        description="Runner-assigned canonical semantic entity type ID.",
+    )
+    semantic_lane: Optional[Literal["authoritative", "discovery"]] = Field(
+        default=None,
+        description="Runner-assigned contract lane; never trusted from the model.",
+    )
+    review_status: Optional[Literal["approved", "needs_review"]] = Field(
+        default=None,
+        description="Runner-assigned review status for semantic publication.",
+    )
+    observed_type: Optional[str] = Field(
+        default=None,
+        description="Original extractor type before contract normalization.",
+    )
+    resolution_context_key: Optional[str] = Field(
+        default=None,
+        description="Runner-assigned deterministic contextual identity discriminator.",
+    )
+    description_evidence_id_hints: list[str] = Field(
+        default_factory=list,
+        description="Runner-assigned evidence supporting the compiled description.",
+    )
+
+    @field_validator(
+        "evidence_id_hints",
+        "cannot_link_keys",
+        "description_evidence_id_hints",
+    )
+    @classmethod
+    def _dedupe_string_lists(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+class PropertyObservation(BaseModel):
+    """Typed entity-property observation emitted by the enrichment model."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    entity_id_hint: str = Field(
+        validation_alias=AliasChoices(
+            "entity_id_hint",
+            "entity",
+            "entity_id",
+            "subject_id_hint",
+        ),
+        description="References entities[].id_hint.",
+    )
+    property_name: str = Field(
+        validation_alias=AliasChoices(
+            "property_name",
+            "property",
+            "name",
+        ),
+        description="Observed property name or approved alias.",
+    )
+    value: Any
+    value_type: PropertyValueType
+    normalized_value: Any | None = None
+    unit: Optional[str] = None
+    confidence: float = Field(default=DEFAULT_CONFIDENCE, ge=0.0, le=1.0)
+    assertion_state: ObservationAssertionState = "asserted"
+    evidence_id_hints: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("evidence_id_hints", "evidence_ids"),
+    )
+    source_span_ids: list[str] = Field(default_factory=list)
+    observed_at: Optional[str] = None
+    temporal_precision: TemporalPrecision = "not_applicable"
+    semantic_property_id: Optional[str] = None
+    semantic_owner_type_id: Optional[str] = None
+    semantic_lane: Optional[Literal["authoritative", "discovery"]] = None
+    review_status: Optional[Literal["approved", "needs_review"]] = None
+    processing_status: Optional[
+        Literal["accepted", "discovery", "unresolved", "rejected"]
+    ] = None
+    conflict_id: Optional[str] = None
+    rejection_reasons: list[str] = Field(default_factory=list)
+    observed_property_name: Optional[str] = None
+
+    @field_validator(
+        "evidence_id_hints",
+        "source_span_ids",
+        "rejection_reasons",
+    )
+    @classmethod
+    def _dedupe_lists(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @field_validator("observed_at")
+    @classmethod
+    def _valid_observed_at(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
+    @model_validator(mode="after")
+    def _validate_value_type(self) -> "PropertyObservation":
+        value = self.value
+        if self.value_type in {"string", "datetime", "date", "uri"}:
+            valid = isinstance(value, str)
+        elif self.value_type == "integer":
+            valid = isinstance(value, int) and not isinstance(value, bool)
+        elif self.value_type == "number":
+            valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+        elif self.value_type == "boolean":
+            valid = isinstance(value, bool)
+        else:
+            valid = True
+        if not valid:
+            raise ValueError(
+                f"Property value does not match declared value_type "
+                f"'{self.value_type}'."
+            )
+        return self
 
 
 class Relationship(BaseModel):
@@ -177,8 +359,109 @@ class Relationship(BaseModel):
     evidence_id_hint: Optional[str] = Field(
         default=None, description="References evidence[].id_hint"
     )
+    evidence_id_hints: list[str] = Field(
+        default_factory=list,
+        description="All evidence id_hints supporting this relationship.",
+    )
+    source_span_ids: list[str] = Field(default_factory=list)
+    direction: Literal["forward", "reverse", "unknown"] = "forward"
+    observed_assertion_state: ObservationAssertionState = Field(
+        default="asserted",
+        validation_alias=AliasChoices(
+            "observed_assertion_state",
+            "assertion_state",
+        ),
+    )
+    valid_from: Optional[str] = None
+    valid_to: Optional[str] = None
+    temporal_precision: TemporalPrecision = "not_applicable"
+    description: Optional[str] = None
     confidence: float = Field(default=DEFAULT_CONFIDENCE, ge=0.0, le=1.0)
     rationale: Optional[str] = None
+    semantic_relationship_id: Optional[str] = Field(
+        default=None,
+        description="Runner-assigned canonical semantic relationship ID.",
+    )
+    semantic_lane: Optional[Literal["authoritative", "discovery"]] = Field(
+        default=None,
+        description="Runner-assigned contract lane; never trusted from the model.",
+    )
+    assertion_status: Optional[
+        Literal[
+            "asserted",
+            "normalized",
+            "derived",
+            "inferred",
+            "unresolved",
+            "rejected",
+        ]
+    ] = Field(
+        default=None,
+        description="Runner-assigned assertion state after evidence checks.",
+    )
+    review_status: Optional[Literal["approved", "needs_review"]] = Field(
+        default=None,
+        description="Runner-assigned review status for semantic publication.",
+    )
+    observed_relation: Optional[str] = Field(
+        default=None,
+        description="Original extractor relation before contract normalization.",
+    )
+    source_semantic_type_id: Optional[str] = None
+    target_semantic_type_id: Optional[str] = None
+    semantic_category: Optional[
+        Literal[
+            "hierarchy",
+            "containment",
+            "dependency",
+            "impact",
+            "control",
+            "support",
+            "documentation",
+            "temporal",
+            "other",
+        ]
+    ] = None
+    category_source: Optional[Literal["contract", "predicate", "unclassified"]] = None
+    processing_status: Optional[
+        Literal["accepted", "discovery", "unresolved", "rejected"]
+    ] = None
+    rejection_reasons: list[str] = Field(default_factory=list)
+    description_evidence_id_hints: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _merge_evidence_hints(self) -> "Relationship":
+        hints = list(self.evidence_id_hints)
+        if self.evidence_id_hint:
+            hints.insert(0, self.evidence_id_hint)
+        self.evidence_id_hints = list(
+            dict.fromkeys(value.strip() for value in hints if value.strip())
+        )
+        self.source_span_ids = list(
+            dict.fromkeys(
+                value.strip() for value in self.source_span_ids if value.strip()
+            )
+        )
+        self.rejection_reasons = list(
+            dict.fromkeys(
+                value.strip() for value in self.rejection_reasons if value.strip()
+            )
+        )
+        self.description_evidence_id_hints = list(
+            dict.fromkeys(
+                value.strip()
+                for value in self.description_evidence_id_hints
+                if value.strip()
+            )
+        )
+        return self
+
+    @field_validator("valid_from", "valid_to")
+    @classmethod
+    def _valid_temporal_bound(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
 
 
 class Chunk(BaseModel):
@@ -354,12 +637,17 @@ class LLMOutput(BaseModel):
     source_file_id: str = Field(
         description="Injected by the runner; LLM echoes back for traceability"
     )
+    semantic_contract_hash: Optional[str] = Field(
+        default=None,
+        description="Runner-assigned hash of the approved semantic contract.",
+    )
     pass_: str = Field(
         alias="pass",
         description="Extraction pass identifier: p1 | p2 | p3 | p4 | p5 | p6 | p7 | p8",
     )
     schema_profile: Optional[SchemaProfile] = None
     entities: list[Entity] = Field(default_factory=list)
+    property_observations: list[PropertyObservation] = Field(default_factory=list)
     relationships: list[Relationship] = Field(default_factory=list)
     chunks: list[Chunk] = Field(default_factory=list)
     visual_assets: list[VisualAsset] = Field(default_factory=list)
@@ -407,12 +695,54 @@ def validate(payload: dict) -> LLMOutput:
 #: Collection field name -> item model, for item-level tolerant validation.
 _COLLECTION_MODELS: dict[str, type[BaseModel]] = {
     "entities": Entity,
+    "property_observations": PropertyObservation,
     "relationships": Relationship,
     "chunks": Chunk,
     "visual_assets": VisualAsset,
     "visual_regions": VisualRegion,
     "evidence": Evidence,
     "placeholder_suggestions": PlaceholderSuggestion,
+}
+
+_RUNNER_OWNED_FIELDS: dict[str, frozenset[str]] = {
+    "entities": frozenset(
+        {
+            "semantic_type_id",
+            "semantic_lane",
+            "review_status",
+            "observed_type",
+            "resolution_context_key",
+            "description_evidence_id_hints",
+        }
+    ),
+    "property_observations": frozenset(
+        {
+            "semantic_property_id",
+            "semantic_owner_type_id",
+            "semantic_lane",
+            "review_status",
+            "processing_status",
+            "conflict_id",
+            "rejection_reasons",
+            "observed_property_name",
+        }
+    ),
+    "relationships": frozenset(
+        {
+            "semantic_relationship_id",
+            "semantic_lane",
+            "assertion_status",
+            "review_status",
+            "observed_relation",
+            "source_semantic_type_id",
+            "target_semantic_type_id",
+            "semantic_category",
+            "category_source",
+            "processing_status",
+            "rejection_reasons",
+            "description_evidence_id_hints",
+        }
+    ),
 }
 
 
@@ -440,10 +770,11 @@ def validate_tolerant(
         ``collection_name -> dropped_count``.
     """
     data = dict(payload) if isinstance(payload, dict) else {}
+    data.pop("semantic_contract_hash", None)
     if source_file_id is not None:
-        data.setdefault("source_file_id", source_file_id)
+        data["source_file_id"] = source_file_id
     if pass_name is not None:
-        data.setdefault("pass", pass_name)
+        data["pass"] = pass_name
 
     dropped: dict[str, int] = {}
     for field_name, item_model in _COLLECTION_MODELS.items():
@@ -453,6 +784,16 @@ def validate_tolerant(
         kept: list[dict] = []
         drop_count = 0
         for item in raw_items:
+            if isinstance(item, dict):
+                item = {
+                    key: value
+                    for key, value in item.items()
+                    if key
+                    not in _RUNNER_OWNED_FIELDS.get(
+                        field_name,
+                        frozenset(),
+                    )
+                }
             try:
                 item_model.model_validate(item)
                 kept.append(item)

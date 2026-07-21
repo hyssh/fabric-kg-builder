@@ -23,17 +23,27 @@ _NUMBERED_HEADING_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s+[A-Z]")
 class PdfExtractResult:
     """Result returned by :meth:`PdfExtractor.extract`."""
 
-    __slots__ = ("source_file", "document_elements", "page_count")
+    __slots__ = (
+        "source_file",
+        "document_elements",
+        "page_count",
+        "first_page_width",
+        "first_page_height",
+    )
 
     def __init__(
         self,
         source_file: SourceFileRow,
         document_elements: list[DocumentElementRow],
         page_count: int,
+        first_page_width: float | None = None,
+        first_page_height: float | None = None,
     ) -> None:
         self.source_file = source_file
         self.document_elements = document_elements
         self.page_count = page_count
+        self.first_page_width = first_page_width
+        self.first_page_height = first_page_height
 
 
 def _canonical_path(path: Path, project_root: Path | None) -> str:
@@ -165,6 +175,8 @@ class PdfExtractor:
         heading_id_stack: list[str] = []
 
         with pdfplumber.open(path) as pdf:
+            first_page_width = float(pdf.pages[0].width) if pdf.pages else None
+            first_page_height = float(pdf.pages[0].height) if pdf.pages else None
             for page_number, page in enumerate(pdf.pages, start=1):
                 page_text = (page.extract_text() or "").strip()
                 page_hash = compute_content_hash(page_text)
@@ -296,6 +308,8 @@ class PdfExtractor:
                 source_file=source_file,
                 document_elements=document_elements,
                 page_count=len(pdf.pages),
+                first_page_width=first_page_width,
+                first_page_height=first_page_height,
             )
 
     @staticmethod

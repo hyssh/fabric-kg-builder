@@ -1,4 +1,4 @@
-"""CSV / TSV / XLSX source loader — SPEC-002 §6.
+"""CSV / TSV / XLSX / XLS source loader — SPEC-002 §6.
 
 Reads a tabular source file, produces:
 - A ``SourceFileRow`` record (source_files table)
@@ -10,11 +10,12 @@ Supported formats
 - ``.csv``   — comma-separated, BOM-safe, auto-detects delimiter
 - ``.tsv``   — tab-separated
 - ``.xlsx``  — each sheet treated as a separate logical table (requires openpyxl)
+- ``.xls``   — legacy OLE workbook (requires xlrd)
 
 Error handling
 --------------
 - Malformed/empty CSV raises ``CsvLoaderError``
-- Missing xlsx dependency raises ``CsvLoaderError`` with a helpful message
+- Missing spreadsheet dependencies raise ``CsvLoaderError`` with a helpful message
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,7 @@ class CsvLoaderError(ValueError):
 # ---------------------------------------------------------------------------
 
 _SAMPLE_SIZE = 5  # values per column in schema-profile
-_SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xlsx"}
+_SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xls", ".xlsx"}
 
 
 # ---------------------------------------------------------------------------
@@ -172,17 +174,19 @@ def _row_content(headers: list[str], row: list[str]) -> str:
 class CsvLoadResult:
     """Result returned by :func:`load_csv`."""
 
-    __slots__ = ("source_file", "document_elements", "schema_profile")
+    __slots__ = ("source_file", "document_elements", "schema_profile", "hyperlinks")
 
     def __init__(
         self,
         source_file: SourceFileRow,
         document_elements: list[DocumentElementRow],
         schema_profile: dict,
+        hyperlinks: "list | None" = None,
     ) -> None:
         self.source_file = source_file
         self.document_elements = document_elements
         self.schema_profile = schema_profile
+        self.hyperlinks: list = hyperlinks or []
 
 
 def load_csv(
@@ -191,7 +195,7 @@ def load_csv(
     schema_profile_path: str | None = None,
     project_root: str | Path | None = None,
 ) -> CsvLoadResult:
-    """Load a CSV, TSV, or XLSX file and return canonical records + schema profile.
+    """Load a CSV, TSV, XLSX, or legacy XLS file and return canonical records.
 
     Parameters
     ----------
@@ -213,7 +217,8 @@ def load_csv(
     Raises
     ------
     CsvLoaderError
-        On empty files, malformed CSV, unsupported extension, or missing XLSX dep.
+        On empty files, malformed input, unsupported extension, or missing
+        spreadsheet dependency.
     FileNotFoundError
         When the file does not exist.
     """
@@ -228,8 +233,25 @@ def load_csv(
             f"Supported: {', '.join(sorted(_SUPPORTED_EXTENSIONS))}"
         )
 
-    if ext == ".xlsx":
-        return _load_xlsx(path, schema_profile_path=schema_profile_path, project_root=project_root)
+    if ext in {".xls", ".xlsx"}:
+        from .media_type import detect_media_type  # noqa: PLC0415
+
+        detected_mime = detect_media_type(path)
+        if detected_mime == "application/vnd.ms-excel":
+            return _load_xls(
+                path,
+                schema_profile_path=schema_profile_path,
+                project_root=project_root,
+            )
+        if ext == ".xls":
+            raise CsvLoaderError(
+                f"Legacy XLS file '{path.name}' does not contain an OLE workbook signature."
+            )
+        return _load_xlsx(
+            path,
+            schema_profile_path=schema_profile_path,
+            project_root=project_root,
+        )
 
     return _load_delimited(
         path,
@@ -276,6 +298,58 @@ def _load_delimited(
     )
 
 
+def _extract_xlsx_hyperlinks(path: Path) -> list:
+    """Extract hyperlinks from an XLSX file's cells (EXT-003).
+
+    Requires openpyxl in non-read-only mode.  Returns an empty list when
+    openpyxl is not installed.  Raises nothing — hyperlink extraction is
+    advisory and must not abort the main load.
+    """
+    try:
+        from .adapter import HyperlinkRecord  # local import  # noqa: PLC0415
+        import openpyxl  # noqa: PLC0415
+    except ImportError:
+        return []
+
+    import json as _json
+
+    try:
+        wb = openpyxl.load_workbook(path, read_only=False, data_only=True)
+    except (zipfile.BadZipFile, KeyError, openpyxl.utils.exceptions.InvalidFileException):
+        return []
+
+    links: list = []
+    try:
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    try:
+                        hl = cell.hyperlink
+                    except AttributeError:
+                        continue
+                    if hl is None:
+                        continue
+                    target = getattr(hl, "target", None) or ""
+                    if not target:
+                        continue
+                    anchor = str(cell.value or "").strip()
+                    cell_ref = f"{ws.title}!{cell.coordinate}"
+                    locator = _json.dumps({
+                        "type": "xlsx",
+                        "sheet": ws.title,
+                        "cell": cell.coordinate,
+                        "cell_ref": cell_ref,
+                    })
+                    links.append(HyperlinkRecord(
+                        anchor=anchor,
+                        target=target,
+                        source_locator_json=locator,
+                    ))
+    finally:
+        wb.close()
+    return links
+
+
 def _load_xlsx(
     path: Path,
     *,
@@ -291,7 +365,17 @@ def _load_xlsx(
             "Install it with: pip install openpyxl"
         ) from exc
 
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except (
+        zipfile.BadZipFile,
+        KeyError,
+        openpyxl.utils.exceptions.InvalidFileException,
+        OSError,
+    ) as exc:
+        raise CsvLoaderError(
+            f"XLSX file '{path.name}' is not a readable Office Open XML workbook."
+        ) from exc
     all_elements: list[DocumentElementRow] = []
     total_rows = 0
 
@@ -329,12 +413,87 @@ def _load_xlsx(
     if first_result is None:
         raise CsvLoaderError(f"XLSX file '{path.name}' contains no readable data sheets.")
 
+    # Extract hyperlinks (best-effort; never raises)
+    xlsx_hyperlinks = _extract_xlsx_hyperlinks(path)
+
     # Update row_count to span all sheets
     src = first_result.source_file.model_copy(update={"row_count": total_rows})
     return CsvLoadResult(
         source_file=src,
         document_elements=all_elements,
         schema_profile=first_result.schema_profile,
+        hyperlinks=xlsx_hyperlinks,
+    )
+
+
+def _load_xls(
+    path: Path,
+    *,
+    schema_profile_path: str | None,
+    project_root: Path | None,
+) -> CsvLoadResult:
+    """Load all sheets from a legacy OLE XLS workbook."""
+    try:
+        import xlrd  # noqa: PLC0415
+    except ImportError as exc:
+        raise CsvLoaderError(
+            "xlrd is required to load legacy XLS files. Install it with: pip install xlrd"
+        ) from exc
+
+    try:
+        workbook = xlrd.open_workbook(path, on_demand=True)
+    except (OSError, xlrd.biffh.XLRDError, xlrd.compdoc.CompDocError) as exc:
+        raise CsvLoaderError(
+            f"Legacy XLS file '{path.name}' is not a readable Excel workbook."
+        ) from exc
+
+    all_elements: list[DocumentElementRow] = []
+    total_rows = 0
+    first_result: CsvLoadResult | None = None
+    try:
+        for sheet_name in workbook.sheet_names():
+            sheet = workbook.sheet_by_name(sheet_name)
+            raw_rows = [
+                [
+                    str(sheet.cell_value(row_index, column_index))
+                    if sheet.cell_value(row_index, column_index) is not None
+                    else ""
+                    for column_index in range(sheet.ncols)
+                ]
+                for row_index in range(sheet.nrows)
+            ]
+            raw_rows = [row for row in raw_rows if any(value.strip() for value in row)]
+            if not raw_rows:
+                continue
+            headers = [header.strip() for header in raw_rows[0]]
+            data_rows = raw_rows[1:]
+            sheet_result = _build_result(
+                path=path,
+                headers=headers,
+                data_rows=data_rows,
+                source_type="xls",
+                schema_profile_path=schema_profile_path,
+                project_root=project_root,
+                sheet_name=sheet_name,
+            )
+            total_rows += len(data_rows)
+            all_elements.extend(sheet_result.document_elements)
+            if first_result is None:
+                first_result = sheet_result
+    finally:
+        workbook.release_resources()
+
+    if first_result is None:
+        raise CsvLoaderError(
+            f"Legacy XLS file '{path.name}' contains no readable data sheets."
+        )
+
+    src = first_result.source_file.model_copy(update={"row_count": total_rows})
+    return CsvLoadResult(
+        source_file=src,
+        document_elements=all_elements,
+        schema_profile=first_result.schema_profile,
+        hyperlinks=[],
     )
 
 

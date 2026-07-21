@@ -73,6 +73,7 @@ def tmp_project(tmp_path: Path, monkeypatch):
             "project": "test-project",
         },
         "enrichment": {
+            "max_concurrent": 6,
             "chat_deployment": "gpt-5-4-mini",
             "embedding_deployment": "embedding",
             "embedding_dimensions": 1536,
@@ -141,6 +142,28 @@ def test_load_config_env_json_overrides_yaml(tmp_project, monkeypatch):
     assert cfg.blob.path_prefix == "dev/"
 
 
+def test_load_config_blob_account_from_environment(tmp_project, monkeypatch):
+    monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://ep.example.com")
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "envstorageacct")
+    cfg = load_config(env="dev")
+    assert cfg.blob.account_name == "envstorageacct"
+
+
+def test_load_config_blob_account_from_url_environment(
+    tmp_project,
+    monkeypatch,
+):
+    monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://ep.example.com")
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT_NAME", raising=False)
+    monkeypatch.setenv(
+        "FABRIC_KG_BLOB_ACCOUNT_URL",
+        "https://urlstorageacct.blob.core.windows.net",
+    )
+    cfg = load_config(env="dev")
+    assert cfg.blob.account_name == "urlstorageacct"
+
+
 def test_load_config_ai_search_enabled_from_env_json(tmp_project, monkeypatch):
     monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://ep.example.com")
     cfg = load_config(env="dev")
@@ -178,3 +201,5 @@ def test_load_config_correct_types(tmp_project, monkeypatch):
     assert isinstance(cfg.foundry.embedding_dimensions, int)
     assert cfg.foundry.embedding_dimensions == 1536
     assert isinstance(cfg.ai_search.enabled, bool)
+    assert isinstance(cfg.enrichment.max_concurrent, int)
+    assert cfg.enrichment.max_concurrent == 6

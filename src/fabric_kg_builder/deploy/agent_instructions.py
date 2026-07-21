@@ -10,6 +10,12 @@ multitype plan, plus the user's competency questions from the domain brief.  It
 is emitted as a pipeline output (deploy-ontology --create-data-agent-instruction,
 default on), so the grounding always matches what was deployed.
 
+All examples, labels, edge aliases, routing keywords, and few-shots are derived
+from the compiled graph schema and the supplied domain contract/competency
+questions.  No domain-specific vocabulary is hard-coded here; the caller
+supplies context via ``entity_types``, ``relationship_pairs``,
+``competency_questions``, and the optional ``domain_contract`` dict.
+
 Deterministic, no LLM, no network.
 """
 
@@ -41,6 +47,15 @@ def _entity_lines(entity_types: list[Any]) -> list[str]:
     return lines
 
 
+def _gql_template(src: str, name: str, tgt: str) -> str:
+    """Return a generic single-hop GQL template using actual schema names."""
+    return (
+        f"MATCH (a:`{src}`)-[:`{name}`]->(b:`{tgt}`)\n"
+        "WHERE LOWER(a.`display_name`) CONTAINS LOWER(\"<keyword>\")\n"
+        "RETURN a.`display_name`, b.`display_name`"
+    )
+
+
 def build_agent_instructions(
     entity_types: list[Any],
     relationship_pairs: list[Any],
@@ -49,8 +64,13 @@ def build_agent_instructions(
     industry: str = "",
     business_domain: str = "",
     competency_questions: list[str] | None = None,
+    domain_contract: dict[str, Any] | None = None,
 ) -> str:
     """Return a Markdown Data Agent grounding document for the deployed graph.
+
+    All examples and keywords are derived from the passed ``entity_types``,
+    ``relationship_pairs``, ``competency_questions``, and ``domain_contract``.
+    No domain-specific vocabulary is injected by this function itself.
 
     Parameters
     ----------
@@ -63,19 +83,49 @@ def build_agent_instructions(
         Context echoed into the document header.
     competency_questions:
         Sample questions from the domain brief — rendered as suggested few-shots.
+    domain_contract:
+        Optional domain contract dict (``domain``, ``business_context``,
+        ``entity_concepts``, ``competency_questions``, routing hints).  When
+        provided, domain name and context are used in preference to
+        ``industry``/``business_domain``.
     """
-    competency_questions = competency_questions or []
+    competency_questions = list(competency_questions or [])
+
+    # Pull domain context from domain_contract when available
+    dc = domain_contract or {}
+    effective_industry = dc.get("domain") or industry
+    effective_domain = dc.get("business_context") or business_domain
+    if not competency_questions:
+        for cq in (dc.get("competency_questions") or []):
+            if isinstance(cq, dict):
+                q = cq.get("question", "")
+            else:
+                q = str(cq)
+            if q:
+                competency_questions.append(q)
+
     type_names = [
         (getattr(et, "type_name", None) if not isinstance(et, dict) else et.get("type_name"))
         for et in entity_types
     ]
     type_names = [t for t in type_names if t]
 
+    # Build relationship index for template generation
+    rel_index: list[tuple[str, str, str]] = []  # (src, name, tgt)
+    rel_names: set[str] = set()
+    for rp in relationship_pairs:
+        name = getattr(rp, "name", None) if not isinstance(rp, dict) else rp.get("name")
+        src = getattr(rp, "source_type", None) if not isinstance(rp, dict) else rp.get("source_type")
+        tgt = getattr(rp, "target_type", None) if not isinstance(rp, dict) else rp.get("target_type")
+        if name and src and tgt:
+            rel_index.append((src, name, tgt))
+            rel_names.add(name)
+
     ctx_bits = []
-    if industry:
-        ctx_bits.append(f"industry **{industry}**")
-    if business_domain:
-        ctx_bits.append(f"business domain **{business_domain}**")
+    if effective_industry:
+        ctx_bits.append(f"industry **{effective_industry}**")
+    if effective_domain:
+        ctx_bits.append(f"business domain **{effective_domain}**")
     ctx_line = (" for " + ", ".join(ctx_bits)) if ctx_bits else ""
 
     lines: list[str] = []
@@ -105,8 +155,7 @@ def build_agent_instructions(
     )
     lines.append("  WHERE LOWER(n.`display_name`) CONTAINS LOWER(\"<keyword>\").")
     lines.append(
-        "- Match a short distinguishing keyword, not the user's whole phrase "
-        "(e.g. \"swell\" or \"expansion\", not \"swollen battery\")."
+        "- Match a short distinguishing keyword from the user's phrase, not the full string."
     )
     lines.append(f"- Valid entity types: {', '.join(type_names)}.")
     lines.append("")
@@ -118,53 +167,65 @@ def build_agent_instructions(
     )
     lines.append("- If a query returns 0 rows, retry with a simpler 1-hop query before giving up.")
     lines.append("- Do not retry the same failing pattern repeatedly; after one simpler retry, stop.")
-    lines.append("")
-    lines.append("PROCEDURES & STEPS")
-    lines.append(
-        "- A named procedure (e.g. \"Enclosure Replacement\") may be split into sibling "
-        "procedures like \"Removal (Enclosure)\" / \"Installation (Enclosure)\". When the exact "
-        "name has no steps, broaden: match Procedure display_name CONTAINS the key noun "
-        "(e.g. \"enclosure\", \"ssd\", \"kickstand\") and return all has_step results."
-    )
-    lines.append(
-        "- For VERBATIM step-by-step instructions, the graph holds short step labels only. "
-        "Use the AI Search data source (document chunks) for the full instruction text — do "
-        "NOT expect long instructions from Step.display_name."
-    )
+
+    # Emit step-navigation guidance only when has_step is actually in the schema
+    if "has_step" in rel_names:
+        lines.append("")
+        lines.append("STEP NAVIGATION")
+        lines.append(
+            "- When navigating from a parent entity to its steps, use `has_step` with "
+            "OPTIONAL MATCH so missing steps do not zero the result."
+        )
+        lines.append(
+            "- If the exact name has no steps, broaden: match the parent "
+            "display_name CONTAINS a key noun and return all has_step results."
+        )
+        lines.append(
+            "- Step nodes hold short labels only. Use the AI Search data source "
+            "(document chunks) for full instruction text — do not expect long "
+            "instructions from step display_name."
+        )
+
     lines.append("")
     lines.append("FALLBACK")
     lines.append(
         "- If the graph returns nothing, say so plainly and offer the AI Search results "
-        "instead. Do NOT invent entities, IDs, or steps that are not in the result set."
+        "instead. Do NOT invent entities, IDs, or paths that are not in the result set."
     )
     lines.append("```")
     lines.append("")
     lines.append(
-        "> **Connect a second data source.** For \"detailed steps\" and other verbatim-text "
-        "questions, add your AI Search index (e.g. `kg-dev-kg-chunks`) to this Data Agent "
-        "alongside the ontology. The graph answers *structure* (which device has which "
-        "procedure/part, how many steps); AI Search answers *content* (the actual instructions)."
+        "> **Connect a second data source.** For verbatim-text questions, add your "
+        "AI Search index to this Data Agent alongside the ontology. "
+        "The graph answers *structure* (which entities relate, how many hops); "
+        "AI Search answers *content* (the actual document text)."
     )
     lines.append("")
 
-    # 2. Discover real names first
+    # 2. Discover real names — use actual first entity type from schema
     lines.append("## 2. FIRST — discover the real entity names")
     lines.append("")
     lines.append(
-        "User phrases rarely match stored `display_name` exactly (a user says "
-        "\"Surface Pro 10\" but the node is \"Surface Pro 10th Edition for Business\"). "
-        "Before answering device-specific questions, learn the real names so you can "
-        "pick the right CONTAINS keyword:"
+        "User phrases may not match stored `display_name` values exactly. "
+        "Before answering entity-specific questions, enumerate the actual names so "
+        "you can pick the right CONTAINS keyword:"
     )
     lines.append("")
-    lines.append("```gql")
-    lines.append("MATCH (d:`DeviceModel`) RETURN d.`display_name` LIMIT 100")
-    lines.append("```")
-    lines.append("")
-    lines.append(
-        "Then map the user's term to the closest real name and query with a short, "
-        "distinguishing CONTAINS keyword (e.g. \"pro 10\", \"laptop 5\")."
-    )
+    if type_names:
+        primary_type = type_names[0]
+        lines.append("```gql")
+        lines.append(f"MATCH (n:`{primary_type}`) RETURN n.`display_name` LIMIT 100")
+        lines.append("```")
+        lines.append("")
+        lines.append(
+            f"Repeat for other entity types ({', '.join(type_names[1:3])}{'...' if len(type_names) > 3 else ''}) "
+            "as needed. Map the user's term to the closest stored name and query "
+            "with a short, distinguishing CONTAINS keyword."
+            if len(type_names) > 1
+            else
+            "Map the user's term to the closest stored name and query "
+            "with a short, distinguishing CONTAINS keyword."
+        )
     lines.append("")
 
     # 3. Entity descriptions
@@ -173,65 +234,26 @@ def build_agent_instructions(
     lines.extend(_entity_lines(entity_types))
     lines.append("")
 
-    # 4. Relationship map (with copy-paste GQL templates)
+    # 4. Relationship map (with copy-paste GQL templates derived from actual schema)
     lines.append("## 4. Relationship map — use these EXACT edge names in GQL")
     lines.append("")
     lines.append(
         "These are the actual edge names in the deployed graph. Do not guess or "
-        "abbreviate them (e.g. it is `has_component`, not "
-        "`supported_model_has_component`):"
+        "abbreviate them:"
     )
     lines.append("")
     rel_lines = _rel_lines(relationship_pairs)
     lines.extend(rel_lines or ["- (no typed relationships in this graph)"])
     lines.append("")
-    # Concrete single-hop templates for the most useful device-rooted edges.
-    rel_names = {
-        (getattr(rp, "name", None) if not isinstance(rp, dict) else rp.get("name"))
-        for rp in relationship_pairs
-    }
-    templates: list[tuple[str, str]] = []
-    if "has_component" in rel_names:
-        templates.append((
-            "Components of a device model",
-            "MATCH (d:`DeviceModel`)-[:`has_component`]->(c:`Component`)\n"
-            "WHERE LOWER(d.`display_name`) CONTAINS LOWER(\"pro 10\")\n"
-            "RETURN DISTINCT c.`display_name`",
-        ))
-    if "has_step" in rel_names:
-        templates.append((
-            "Steps of a procedure (broaden by key noun if the exact name has none)",
-            "MATCH (p:`Procedure`)-[:`has_step`]->(s:`Step`)\n"
-            "WHERE LOWER(p.`display_name`) CONTAINS LOWER(\"kickstand\")\n"
-            "RETURN p.`display_name`, s.`display_name`",
-        ))
-    if "causes" in rel_names:
-        templates.append((
-            "Causes of a symptom",
-            "MATCH (c:`Cause`)-[:`causes`]->(s:`Symptom`)\n"
-            "WHERE LOWER(s.`display_name`) CONTAINS LOWER(\"expansion\")\n"
-            "RETURN DISTINCT c.`display_name`",
-        ))
-    if "remediated_by" in rel_names:
-        templates.append((
-            "Root-cause analysis for a symptom (cause + fix + steps in one query)",
-            "MATCH (s:`Symptom`)\n"
-            "WHERE LOWER(s.`display_name`) CONTAINS LOWER(\"expansion\")\n"
-            "OPTIONAL MATCH (c:`Cause`)-[:`causes`]->(s)\n"
-            "OPTIONAL MATCH (s)-[:`diagnosed_by`]->(dt:`Procedure`)\n"
-            "OPTIONAL MATCH (s)-[:`remediated_by`]->(rp:`Procedure`)\n"
-            "OPTIONAL MATCH (rp)-[:`has_step`]->(st:`Step`)\n"
-            "OPTIONAL MATCH (s)-[:`resolved_by`]->(r:`Resolution`)\n"
-            "RETURN s.`display_name`, c.`display_name`, dt.`display_name`,\n"
-            "       rp.`display_name`, st.`display_name`, r.`display_name`",
-        ))
-    if templates:
-        lines.append("Ready-to-use single-hop templates:")
+
+    # Emit one generic single-hop template per edge from the actual schema
+    if rel_index:
+        lines.append("Single-hop templates (replace `<keyword>` with the user's search term):")
         lines.append("")
-        for title, gql in templates:
-            lines.append(f"**{title}**")
+        for src, name, tgt in rel_index:
+            lines.append(f"**{src} → [{name}] → {tgt}**")
             lines.append("```gql")
-            lines.append(gql)
+            lines.append(_gql_template(src, name, tgt))
             lines.append("```")
             lines.append("")
 
@@ -240,7 +262,7 @@ def build_agent_instructions(
     lines.append("")
     if competency_questions:
         lines.append(
-            "Use the user's competency questions as few-shots. Map each to a SINGLE-HOP "
+            "Use the domain's competency questions as few-shots. Map each to a SINGLE-HOP "
             "GQL query using the relationship map above and CONTAINS on display_name:"
         )
         lines.append("")

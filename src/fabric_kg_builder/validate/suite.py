@@ -75,11 +75,30 @@ class ValidationViolation:
 # Required env vars (VAL-025)
 # ---------------------------------------------------------------------------
 
-_REQUIRED_ENV_VARS = (
-    "AZURE_AI_FOUNDRY_ENDPOINT",
-    "AZURE_AI_FOUNDRY_API_KEY",
-    "FABRIC_WORKSPACE_ID",
-    "AZURE_BLOB_CONNECTION_STRING",
+_REQUIRED_ENV_ALTERNATIVES = (
+    (
+        "Foundry or Azure OpenAI endpoint",
+        (
+            "AZURE_AI_PROJECT_ENDPOINT",
+            "AZURE_OPENAI_ENDPOINT",
+            "AZURE_AI_FOUNDRY_ENDPOINT",
+        ),
+    ),
+    (
+        "Fabric workspace",
+        (
+            "FABRIC_WORKSPACE_ID",
+            "FABRIC_KG_FABRIC_WORKSPACE_ID",
+        ),
+    ),
+    (
+        "Blob storage",
+        (
+            "AZURE_BLOB_CONNECTION_STRING",
+            "AZURE_STORAGE_ACCOUNT_URL",
+            "FABRIC_KG_BLOB_ACCOUNT_URL",
+        ),
+    ),
 )
 
 # Secret-like patterns for VAL-026 (intentionally imprecise — false positives
@@ -390,18 +409,17 @@ def _val024_domain_not_in_system_prompt(
 def _val025_required_env_vars(
     env_vars: dict[str, str] | None = None,
 ) -> list[ValidationViolation]:
-    """VAL-025: AZURE_AI_FOUNDRY_ENDPOINT, _API_KEY, FABRIC_WORKSPACE_ID,
-    AZURE_BLOB_CONNECTION_STRING must all be non-empty.
-    """
+    """VAL-025: each required service has one usable runtime locator."""
     if env_vars is None:
         env_vars = dict(os.environ)
     violations: list[ValidationViolation] = []
-    for var in _REQUIRED_ENV_VARS:
-        if not env_vars.get(var, "").strip():
+    for service, alternatives in _REQUIRED_ENV_ALTERNATIVES:
+        if not any(env_vars.get(var, "").strip() for var in alternatives):
             violations.append(ValidationViolation(
                 "VAL-025", "fail",
-                f"Required env var '{var}' is missing or empty — "
-                f"set it in .env or the environment before running",
+                f"Required {service} setting is missing or empty — set one of: "
+                f"{', '.join(alternatives)}. API keys and connection strings are "
+                "optional when Entra identity and resource endpoints are used.",
             ))
     return violations
 
