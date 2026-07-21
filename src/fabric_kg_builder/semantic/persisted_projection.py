@@ -292,6 +292,46 @@ def _type_compatible(data_type: str, arrow_type: Any) -> bool:
     return False
 
 
+def _coerce_complex_scalar_columns(table: Any, columns: list[Any]) -> Any:
+    """Serialize complex Arrow values for scalar Ontology properties."""
+    import pyarrow as pa  # type: ignore[import]
+    import pyarrow.types as pat  # type: ignore[import]
+
+    scalar_text_types = {"string", "uri", "json"}
+    for column in columns:
+        if column.data_type not in scalar_text_types:
+            continue
+        field_index = table.schema.get_field_index(column.column_name)
+        if field_index < 0:
+            continue
+        arrow_type = table.schema.field(field_index).type
+        if not (
+            pat.is_list(arrow_type)
+            or pat.is_large_list(arrow_type)
+            or pat.is_fixed_size_list(arrow_type)
+            or pat.is_map(arrow_type)
+            or pat.is_struct(arrow_type)
+        ):
+            continue
+        values = [
+            None
+            if value is None
+            else json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for value in table[column.column_name].to_pylist()
+        ]
+        table = table.set_column(
+            field_index,
+            column.column_name,
+            pa.array(values, type=pa.string()),
+        )
+    return table
+
+
 def _validate_arrow_table(
     *,
     semantic_id: str,
@@ -447,7 +487,10 @@ def materialize_semantic_tables(
                 f"omits {missing}.",
             ))
             continue
-        projected = sliced.select(expected_names)
+        projected = _coerce_complex_scalar_columns(
+            sliced.select(expected_names),
+            spec.columns,
+        )
         required_rows = availability[spec.semantic_id].required_rows
         key_column = (
             spec.entity_id_column

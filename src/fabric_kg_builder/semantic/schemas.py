@@ -715,7 +715,7 @@ class SemanticCrosswalk(_StrictPersistedModel):
         seen_agent_ids: set[str] = set()
         seen_graph_labels: set[str] = set()
         seen_graph_aliases: set[str] = set()
-        seen_table_search_pairs: set[tuple[str, str]] = set()
+        seen_table_search_pairs: set[tuple[str, str, str]] = set()
         for entry in all_entries:
             if entry.ontology_type_id is not None:
                 if entry.ontology_type_id in seen_ontology_ids:
@@ -755,11 +755,16 @@ class SemanticCrosswalk(_StrictPersistedModel):
                 entry.physical_table is not None
                 and entry.search_field_or_filter is not None
             ):
-                pair = (entry.physical_table, entry.search_field_or_filter)
+                pair = (
+                    entry.element_kind,
+                    entry.physical_table,
+                    entry.search_field_or_filter,
+                )
                 if pair in seen_table_search_pairs:
                     raise ValueError(
-                        "Duplicate physical_table/search_field_or_filter "
-                        f"mapping {pair!r} in crosswalk."
+                        "Duplicate element_kind/physical_table/"
+                        "search_field_or_filter mapping "
+                        f"{pair!r} in crosswalk."
                     )
                 seen_table_search_pairs.add(pair)
 

@@ -68,6 +68,9 @@ def build_public_graph_source_projection(
         "fabricKgPersistedProjectionReceiptHash": str(
             grounding.sidecar.get("persisted_projection_receipt_hash") or ""
         ),
+        "fabricKgOntologyItemId": str(
+            grounding.sidecar.get("ontology_item_id") or ""
+        ),
         "fabricKgGraphModelId": str(
             grounding.sidecar.get("graph_model_id") or ""
         ),

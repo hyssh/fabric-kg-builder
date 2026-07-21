@@ -208,7 +208,7 @@ _PROPERTY_TYPE_MAP = {
     "number": "double",
     "boolean": "boolean",
     "datetime": "timestamp",
-    "date": "timestamp",
+    "date": "string",
     "uri": "blob_url",
     "json": "string",
 }
@@ -1144,6 +1144,19 @@ def build_ontology_projection(
         entity.semantic_id: entity.canonical_name
         for entity in manifest.entity_types
     }
+
+    def physical_entity_id_property(entity_id: str) -> str:
+        table = entity_table_by_id[entity_id]
+        for prop in properties_by_owner.get(entity_id, []):
+            if (
+                prop.physical_source_column or prop.name
+            ) == table.entity_id_column:
+                return prop.name
+        raise SemanticCompileError(
+            f"Entity '{entity_id}' has no property mapped to physical entity "
+            f"ID column '{table.entity_id_column}'."
+        )
+
     ontology_model = {
         "name": ontology_name or contract_name,
         "description": contract_description,
@@ -1176,12 +1189,7 @@ def build_ontology_projection(
                     )
                 ],
                 "entityIdProperties": [
-                    prop.name
-                    for prop in properties_by_owner.get(
-                        entity.semantic_id,
-                        [],
-                    )
-                    if prop.property_id in entity.identifier_properties
+                    physical_entity_id_property(entity.semantic_id)
                 ],
                 "displayNameProperty": next(
                     prop.name

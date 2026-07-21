@@ -129,10 +129,19 @@ def compile_ontology_cmd(
                     semantic_root / "normalized-contract.json"
                 ).read_text(encoding="utf-8")
             )
+            sealed_ontology = yaml.safe_load(
+                (
+                    semantic_root / "ontology" / "model.yaml"
+                ).read_text(encoding="utf-8")
+            )
+            sealed_ontology_name = str(
+                (sealed_ontology or {}).get("ontology", {}).get("name")
+                or normalized_contract["name"]
+            )
             ontology_model, ontology_ids = build_ontology_projection(
                 loaded.manifest,
                 loaded.materialization_plan,
-                ontology_name=None,
+                ontology_name=sealed_ontology_name,
                 contract_name=str(normalized_contract["name"]),
                 contract_description=str(
                     normalized_contract["description"]

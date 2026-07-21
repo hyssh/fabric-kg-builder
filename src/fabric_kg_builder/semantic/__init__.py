@@ -117,7 +117,13 @@ from .query_planning import (
     decompose_semantic_request,
 )
 from .migration import LegacyIdImportResult, import_legacy_id_lock
-from .instructions import build_contract_agent_instructions
+from .instructions import (
+    build_contract_agent_instructions,
+    build_graph_source_description,
+    build_graph_source_instructions,
+    build_ontology_source_description,
+    build_ontology_source_instructions,
+)
 from .enrichment import (
     CompiledPropertyDefinition,
     SemanticEnrichmentContext,
@@ -255,6 +261,10 @@ __all__ = [
     "VocabularyTerm",
     "compute_semantic_contract_hash",
     "build_contract_agent_instructions",
+    "build_graph_source_description",
+    "build_graph_source_instructions",
+    "build_ontology_source_description",
+    "build_ontology_source_instructions",
     "build_agent_semantic_context",
     "build_graph_projection",
     "build_persisted_projection_receipt",

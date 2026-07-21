@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -66,6 +67,7 @@ from fabric_kg_builder.semantic import (
     normalize_semantic_contract,
     validate_approved_contract,
     validate_compiled_semantic_artifacts,
+    validate_ontology_projection_parts,
     validate_semantic_bundle,
 )
 from fabric_kg_builder.serving.graph_model import build_graph_model_parts
@@ -690,6 +692,7 @@ def test_shared_compiler_emits_exact_ontology_graph_and_agent_semantics(
     assert relationship["name"] == "has_event"
     assert relationship["sourceType"] == "Subject"
     assert relationship["targetType"] == "Event"
+
     assert compiled.graph_node_labels["Subject"] == "Subject"
     assert compiled.graph_relationships[0]["graph_label"] == "has_event"
     assert (
@@ -786,6 +789,65 @@ def test_shared_compiler_emits_exact_ontology_graph_and_agent_semantics(
         f"{prop.owner_type_id}/{prop.property_id}"
         for prop in compiled.semantic_model_manifest.property_definitions
     }
+
+
+def test_ontology_identity_uses_physical_relationship_key(
+    tmp_path: Path,
+) -> None:
+    contract = _contract()
+    subject = contract.entity_types[1]
+    subject.identifiers = ["canonical_key"]
+    subject.properties.append(
+        PropertyDefinition(
+            name="canonical_key",
+            type="string",
+            required=True,
+        )
+    )
+    subject.properties.append(
+        PropertyDefinition(name="observed_date", type="date")
+    )
+    approved = _approve(contract)
+    paths = _write_bundle(tmp_path, approved)
+
+    compiled = compile_semantic_bundle(
+        load_semantic_bundle(
+            contract_path=paths[0],
+            mappings_path=paths[1],
+            vocabulary_path=paths[2],
+            ids_lock_path=paths[3],
+        )
+    )
+    subject_projection = next(
+        entity
+        for entity in compiled.ontology_model["entityTypes"]
+        if entity["name"] == "Subject"
+    )
+
+    assert subject_projection["entityIdProperties"] == ["entity_id"]
+    observed_date = next(
+        prop
+        for prop in subject_projection["properties"]
+        if prop["name"] == "observed_date"
+    )
+    assert observed_date["type"] == "string"
+    compiled.write(tmp_path / "compiled")
+    ontology_parts = OntologyCompiler(
+        model_path=tmp_path / "compiled" / "ontology" / "model.yaml",
+        ids_lock_path=tmp_path / "compiled" / "ontology" / "ids.lock.json",
+        lakehouse_id="synthetic-lakehouse",
+    ).get_rest_parts()
+    findings = validate_ontology_projection_parts(
+        {
+            part["path"]: json.loads(
+                base64.b64decode(part["payload"]).decode("utf-8")
+            )
+            for part in ontology_parts
+        },
+        compiled.semantic_model_manifest,
+        compiled.materialization_plan,
+    )
+    assert findings == []
 
 
 def test_reserved_fabric_type_name_compiles_to_safe_physical_name(
@@ -940,12 +1002,11 @@ def test_contract_agent_instructions_use_exact_labels_and_direction(
         ],
         domain_context="Synthetic compliance operations.",
     )
-    assert (
-        "MATCH (source:`Subject`)-[rel:`has_event`]->(target:`Event`)"
-        in instructions
-    )
-    assert "required_for_asserted" in instructions
+    assert len(instructions) < 4000
     assert compiled.contract_hash in instructions
+    assert "Use Graph for exact relationship traversal" in instructions
+    assert "Fabric Lakehouse semantic source" not in instructions
+    assert "Mandatory Lakehouse relationship fallback" not in instructions
     assert "Surface" not in instructions
 
 
@@ -1023,8 +1084,8 @@ def test_optional_relationships_are_explicit_in_agent_routing(
         compiled.agent_semantic_context
     )
 
-    assert "publication=optional" in instructions
-    assert "must not become mandatory discovery joins" in instructions
+    assert "selected source elements" in instructions
+    assert "Do not use Lakehouse" in instructions
 
 
 def test_shared_compiler_records_observed_availability_without_schema_pruning(
@@ -1077,6 +1138,64 @@ def test_shared_compiler_records_observed_availability_without_schema_pruning(
         entity.semantic_id
         for entity in compiled.semantic_model_manifest.entity_types
     } == {entity.id for entity in contract.entity_types}
+
+
+def test_shared_compiler_allows_lineage_properties_and_shared_entity_id_fields(
+    tmp_path: Path,
+) -> None:
+    contract = _contract()
+    subject = contract.entity_types[1]
+    subject.properties.append(
+        PropertyDefinition(name="source_file_id", type="string")
+    )
+    subject.lineage_properties.append("source_file_id")
+    contract = _approve(contract)
+    mappings = _mappings(contract)
+    subject_mapping = next(
+        item
+        for item in mappings.entity_types
+        if item.semantic_id == subject.id
+    )
+    subject_mapping.type_filter_column = None
+    subject_mapping.type_filter_value = None
+    subject_mapping.property_columns["source_file_id"] = "source_file_id"
+
+    contract_path = tmp_path / "contract.yaml"
+    mappings_path = tmp_path / "mappings.yaml"
+    vocabulary_path = tmp_path / "vocabulary.yaml"
+    lock_path = tmp_path / "ids.lock.json"
+    contract_path.write_text(
+        yaml.safe_dump(contract.model_dump(mode="json"), sort_keys=False),
+        encoding="utf-8",
+    )
+    mappings_path.write_text(
+        yaml.safe_dump(mappings.model_dump(mode="json"), sort_keys=False),
+        encoding="utf-8",
+    )
+    vocabulary_path.write_text(
+        yaml.safe_dump(_vocabulary().model_dump(mode="json"), sort_keys=False),
+        encoding="utf-8",
+    )
+    lock_path.write_text(
+        json.dumps(_ids(contract).model_dump(mode="json")),
+        encoding="utf-8",
+    )
+
+    compiled = compile_semantic_bundle(
+        load_semantic_bundle(
+            contract_path=contract_path,
+            mappings_path=mappings_path,
+            vocabulary_path=vocabulary_path,
+            ids_lock_path=lock_path,
+        )
+    )
+    lineage_entry = next(
+        item
+        for item in compiled.semantic_crosswalk.property_entries
+        if item.owner_type_id == subject.id
+        and item.search_field_or_filter == "source_file_id"
+    )
+    assert lineage_entry.data_agent_element_id is None
 
 
 def test_persisted_semantic_authority_rejects_crosswalk_tampering(
@@ -1238,7 +1357,13 @@ def test_offline_semantic_graph_and_agent_compile_commands(
     semantic_out = build_out / "semantic"
     semantic_result = CliRunner().invoke(
         compile_semantic_cmd,
-        [*common, "--out", str(semantic_out)],
+        [
+            *common,
+            "--out",
+            str(semantic_out),
+            "--ontology-name",
+            "kgv021_Ontology",
+        ],
     )
     assert semantic_result.exit_code == 0, semantic_result.output
     assert (semantic_out / "semantic-manifest.json").exists()
@@ -1259,6 +1384,13 @@ def test_offline_semantic_graph_and_agent_compile_commands(
         (ontology_out / "ontology-manifest.json").read_text(encoding="utf-8")
     )
     assert ontology_manifest["contract_hash"] == contract.approval.contract_hash
+    ontology_platform = json.loads(
+        (ontology_out / ".platform").read_text(encoding="utf-8")
+    )
+    assert (
+        ontology_platform["metadata"]["displayName"]
+        == "kgv021_Ontology"
+    )
 
     graph_out = build_out / "graph"
     graph_result = CliRunner().invoke(
@@ -1402,9 +1534,9 @@ def test_offline_semantic_graph_and_agent_compile_commands(
         ],
     )
     assert agent_result.exit_code == 0, agent_result.output
-    assert "has_event" in (agent_out / "instructions.md").read_text(
-        encoding="utf-8"
-    )
+    instructions = (agent_out / "instructions.md").read_text(encoding="utf-8")
+    assert "Which subjects have events?" in instructions
+    assert "has_event" not in instructions
     agent_manifest = json.loads(
         (agent_out / "agent-manifest.json").read_text(encoding="utf-8")
     )
@@ -1430,6 +1562,8 @@ def test_offline_semantic_graph_and_agent_compile_commands(
     compiled_contract = load_competency_contract(
         agent_out / "competency-contract.json"
     )
+    assert compiled_contract.cases[0].probes.direct_graph is not None
+    assert "has_event" in compiled_contract.cases[0].probes.direct_graph.query
     assert compiled_contract.query_schema is not None
     agent_manifest = json.loads(
         (agent_out / "agent-manifest.json").read_text(encoding="utf-8")

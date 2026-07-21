@@ -169,7 +169,7 @@ def validate_ontology_projection_parts(
         "number": "Double",
         "boolean": "Boolean",
         "datetime": "DateTime",
-        "date": "DateTime",
+        "date": "String",
         "uri": "String",
         "json": "String",
     }
@@ -186,6 +186,23 @@ def validate_ontology_projection_parts(
     entity_by_id = {
         entity.semantic_id: entity for entity in manifest.entity_types
     }
+
+    def physical_entity_id_property(
+        entity_id: str,
+    ) -> Any | None:
+        table = entity_table_by_id.get(entity_id)
+        if table is None:
+            return None
+        return next(
+            (
+                prop
+                for prop in properties_by_owner.get(entity_id, [])
+                if (
+                    prop.physical_source_column or prop.name
+                ) == table.entity_id_column
+            ),
+            None,
+        )
 
     def _source_target_matches(
         source: dict[str, Any],
@@ -245,12 +262,16 @@ def validate_ontology_projection_parts(
             if isinstance(prop, dict) and prop.get("name")
         }
         table = entity_table_by_id.get(entity.semantic_id)
-        expected_entity_id_parts = [
-            prop.ontology_projection.ontology_property_id
-            for property_id in entity.identifier_properties
-            for prop in owner_properties
-            if prop.property_id == property_id
-        ]
+        entity_id_property = physical_entity_id_property(
+            entity.semantic_id
+        )
+        expected_entity_id_parts = (
+            [
+                entity_id_property.ontology_projection.ontology_property_id
+            ]
+            if entity_id_property is not None
+            else []
+        )
         display_property = next(
             (
                 prop
@@ -355,46 +376,40 @@ def validate_ontology_projection_parts(
             ))
         source_entity = entity_by_id.get(relationship.source_type_id)
         target_entity = entity_by_id.get(relationship.target_type_id)
-        source_properties = (
-            properties_by_owner.get(source_entity.semantic_id, [])
+        source_id_property = (
+            physical_entity_id_property(source_entity.semantic_id)
             if source_entity is not None
-            else []
+            else None
         )
-        target_properties = (
-            properties_by_owner.get(target_entity.semantic_id, [])
+        target_id_property = (
+            physical_entity_id_property(target_entity.semantic_id)
             if target_entity is not None
-            else []
+            else None
         )
-        expected_source_refs = [
-            {
+        expected_source_refs = (
+            [{
                 "sourceColumnName": table.source_column,
                 "targetPropertyId": (
-                    prop.ontology_projection.ontology_property_id
+                    source_id_property
+                    .ontology_projection
+                    .ontology_property_id
                 ),
-            }
-            for property_id in (
-                source_entity.identifier_properties
-                if source_entity is not None
-                else []
-            )
-            for prop in source_properties
-            if prop.property_id == property_id
-        ] if table is not None else []
-        expected_target_refs = [
-            {
+            }]
+            if table is not None and source_id_property is not None
+            else []
+        )
+        expected_target_refs = (
+            [{
                 "sourceColumnName": table.target_column,
                 "targetPropertyId": (
-                    prop.ontology_projection.ontology_property_id
+                    target_id_property
+                    .ontology_projection
+                    .ontology_property_id
                 ),
-            }
-            for property_id in (
-                target_entity.identifier_properties
-                if target_entity is not None
-                else []
-            )
-            for prop in target_properties
-            if prop.property_id == property_id
-        ] if table is not None else []
+            }]
+            if table is not None and target_id_property is not None
+            else []
+        )
         data_binding_table = binding.get("dataBindingTable", {})
         if table is None or (
             binding.get("id") != contextualization_id
@@ -809,23 +824,6 @@ def validate_compiled_semantic_artifacts(
                     f"found {actual}",
                 )
             )
-        instructions = instructions_path.read_text(encoding="utf-8")
-        if "OPTIONAL MATCH" not in instructions:
-            findings.append(
-                ArtifactFinding(
-                    "OPTIONAL_ROUTE_POLICY_MISSING",
-                    "Agent instructions do not require OPTIONAL MATCH for later hops.",
-                )
-            )
-        for edge in catalog_edges.values():
-            graph_label = str(edge.get("graph_label") or "")
-            if graph_label and graph_label not in instructions:
-                findings.append(
-                    ArtifactFinding(
-                        "AGENT_LABEL_MISSING",
-                        f"Agent instructions omit Graph label {graph_label}.",
-                    )
-                )
     if context_path.exists():
         actual = _sha256(context_path)
         if agent_manifest.get("semantic_context_hash") != actual:
@@ -1564,7 +1562,7 @@ def validate_crosswalk_against_manifest(
         expected: Any,
         enabled: bool,
     ) -> None:
-        if not enabled and expected is None:
+        if not enabled:
             return
         if expected in {None, ""}:
             findings.append(ArtifactFinding(

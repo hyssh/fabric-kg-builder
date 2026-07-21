@@ -1788,7 +1788,7 @@ def deploy_data_agent_cmd(
 
     from fabric_kg_builder.knowledge.agent_validation import (  # noqa: PLC0415
         AgentPublicationError,
-        build_public_lakehouse_source_projection,
+        build_public_graph_source_projection,
         build_public_ontology_source_projection,
         build_persisted_agent_grounding,
         deploy_and_validate_data_agent,
@@ -1799,12 +1799,17 @@ def deploy_data_agent_cmd(
         DataAgentTargetError,
         DataSourceSpec,
         FabricDataAgentClient,
+        graph_few_shots_from_competency_contract,
         stage_snapshot_from_spec,
     )
     from fabric_kg_builder.knowledge.transport import RequestsTransport  # noqa: PLC0415
     from fabric_kg_builder.semantic import (  # noqa: PLC0415
         PersistedProjectionReceipt,
         build_contract_agent_instructions,
+        build_graph_source_description,
+        build_graph_source_instructions,
+        build_ontology_source_description,
+        build_ontology_source_instructions,
         load_semantic_model_artifacts,
     )
     try:
@@ -1854,13 +1859,14 @@ def deploy_data_agent_cmd(
         public_elements, public_metadata = (
             build_public_ontology_source_projection(grounding)
         )
-        lakehouse_elements, lakehouse_metadata = (
-            build_public_lakehouse_source_projection(
-                grounding=grounding,
-                plan=loaded.materialization_plan,
-                lakehouse_item_id=fabric_cfg["lakehouse_item_id"],
-                schema_name=fabric_cfg["schema_name"],
-            )
+        graph_elements, graph_metadata = (
+            build_public_graph_source_projection(grounding)
+        )
+        competency_path = agent_dir / "competency-contract.json"
+        graph_few_shots = graph_few_shots_from_competency_contract(
+            json.loads(competency_path.read_text(encoding="utf-8"))
+            if competency_path.exists()
+            else {}
         )
         spec = DataAgentSpec(
             display_name=data_agent_name,
@@ -1878,37 +1884,37 @@ def deploy_data_agent_cmd(
                         fabric_cfg["ontology_display_name"]
                         or ontology_item_id
                     ),
-                    instructions=instructions,
-                    description=(
-                        "Manifest-owned persisted Ontology source for typed "
-                        "business entities, relationships, and evidence."
+                    instructions=build_ontology_source_instructions(
+                        semantic_context
+                    ),
+                    description=build_ontology_source_description(
+                        semantic_context
                     ),
                     metadata=public_metadata,
                     elements=list(public_elements),
                     preview=True,
                 ),
                 DataSourceSpec(
-                    source_type="lakehouse",
-                    name="semantic-tables",
-                    artifact_id=fabric_cfg["lakehouse_item_id"],
+                    source_type="graph",
+                    name=(
+                        fabric_cfg["graph_model_display_name"]
+                        or graph_model_id
+                    ),
+                    artifact_id=graph_model_id,
                     workspace_id=workspace_id,
                     display_name=(
-                        fabric_cfg["lakehouse_display_name"]
-                        or fabric_cfg["lakehouse_item_id"]
+                        fabric_cfg["graph_model_display_name"]
+                        or graph_model_id
                     ),
-                    instructions=(
-                        "Use only the selected contract-owned semantic tables "
-                        "as a read-only fallback when Ontology returns no rows. "
-                        "Join source_entity_id and target_entity_id to entity_id "
-                        "and return exact entity_id, evidence_id, and "
-                        "source_file_id values."
+                    instructions=build_graph_source_instructions(
+                        semantic_context
                     ),
-                    description=(
-                        "Persisted semantic entity and relationship tables for "
-                        "exact fallback joins and lineage."
+                    description=build_graph_source_description(
+                        semantic_context
                     ),
-                    metadata=lakehouse_metadata,
-                    elements=list(lakehouse_elements),
+                    metadata=graph_metadata,
+                    elements=list(graph_elements),
+                    few_shots=graph_few_shots,
                 ),
             ],
         )
@@ -1962,7 +1968,7 @@ def deploy_data_agent_cmd(
             published_description=(
                 f"{data_agent_name} persisted semantic release."
             ),
-            required_source_type="ontology",
+            required_source_type="graph",
         )
     except (
         AgentPublicationError,

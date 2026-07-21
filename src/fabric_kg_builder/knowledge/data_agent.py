@@ -73,6 +73,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 from urllib.parse import quote, urljoin
@@ -279,6 +280,48 @@ class FewShotExample:
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the official few-shot dict shape."""
         return {"id": self.id, "question": self.question, "query": self.query}
+
+
+def graph_few_shots_from_competency_contract(
+    contract: dict[str, Any],
+    *,
+    limit: int = 5,
+) -> list[FewShotExample]:
+    """Return validated Graph question/query examples from a compiled contract."""
+    if limit < 1 or not isinstance(contract, dict):
+        return []
+    examples: list[FewShotExample] = []
+    cases = contract.get("cases")
+    if not isinstance(cases, list):
+        return examples
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        question = str(case.get("question") or "").strip()
+        probes = case.get("probes")
+        graph = probes.get("direct_graph") if isinstance(probes, dict) else None
+        if (
+            not question
+            or not isinstance(graph, dict)
+            or graph.get("static_validation_passed") is not True
+        ):
+            continue
+        query = str(graph.get("query") or "").strip()
+        if not query:
+            continue
+        stable_key = "\n".join(
+            [str(case.get("id") or ""), question, query]
+        )
+        examples.append(
+            FewShotExample(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key)),
+                question=question,
+                query=query,
+            )
+        )
+        if len(examples) >= limit:
+            break
+    return examples
 
 
 @dataclass
