@@ -44,6 +44,7 @@ build/**/*.parquet
 # Pytest / coverage
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # Editor / OS
