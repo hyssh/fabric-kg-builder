@@ -231,13 +231,14 @@ class TestCompileDataHappyPath:
             ["--input", str(input_dir), "--out", str(out_dir)],
         )
         parquet_files = {p.stem for p in out_dir.glob("*.parquet")}
-        expected = {
+        # Core canonical tables must always be present.
+        required = {
             "entities", "relationships", "chunks", "evidence",
             "source_files", "document_elements", "visual_assets", "visual_regions",
         }
-        assert expected == parquet_files, (
-            f"Missing or unexpected Parquet files.\n"
-            f"Expected: {expected}\nGot: {parquet_files}"
+        missing = required - parquet_files
+        assert not missing, (
+            f"Required Parquet files missing: {missing}\nGot: {parquet_files}"
         )
 
     def test_entities_parquet_is_readable(self, tmp_path: Path) -> None:

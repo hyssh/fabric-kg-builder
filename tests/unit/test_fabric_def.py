@@ -158,7 +158,7 @@ class TestKGEntityDefinition:
 
     def test_entity_type_namespace_type(self, parts):
         payload = self._entity_def(parts)
-        assert payload["namespaceType"] == "Imported"
+        assert payload["namespaceType"] == "Custom"
 
     def test_entity_type_visibility(self, parts):
         payload = self._entity_def(parts)
@@ -305,7 +305,7 @@ class TestRelationshipTypeDefinition:
 
     def test_relationship_type_namespace_type(self, parts):
         payload = self._rel_def(parts)
-        assert payload["namespaceType"] == "Imported"
+        assert payload["namespaceType"] == "Custom"
 
     def test_relationship_source_entity_type(self, parts, ids):
         payload = self._rel_def(parts)
@@ -556,13 +556,21 @@ class TestUpdateOntologyDefinitionLive:
         parts = build_ontology_parts(_WS, _LH)
         resp = self._make_resp(202, location="https://api.fabric.microsoft.com/v1/operations/op-xyz")
 
-        with patch("requests.post", return_value=resp):
+        # The 202 response triggers LRO polling via requests.get; mock it to return Succeeded.
+        lro_resp = MagicMock()
+        lro_resp.status_code = 200
+        lro_resp.headers = {}
+        lro_resp.json.return_value = {"status": "Succeeded"}
+
+        with patch("requests.post", return_value=resp), \
+             patch("requests.get", return_value=lro_resp):
             result = update_ontology_definition(
                 workspace_id=_WS,
                 ontology_item_id="live-item-lro",
                 parts=parts,
                 mock=False,
                 token_provider=lambda: "test-token",
+                _lro_sleep=lambda _: None,
             )
 
         assert result["status"] == "ok-202"

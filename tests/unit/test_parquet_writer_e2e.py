@@ -38,6 +38,18 @@ _SRC_ID = "src:e2e_test_abc123"
 _IMG_BYTES = b"fake_image_bytes_for_test"
 _IMG_HASH = hashlib.sha256(_IMG_BYTES).hexdigest()
 
+# Common lineage sentinel values required by NOT NULL schema constraints.
+_LINEAGE = {
+    "project_id": "test-project",
+    "asset_id": "test-asset",
+    "asset_version_id": "test-asset-v1",
+    "run_id": "test-run",
+    "parent_record_id": None,
+    "source_locator_json": None,
+    "schema_version": "2.0",
+    "domain_hash": None,
+}
+
 
 # ---------------------------------------------------------------------------
 # Row builders
@@ -64,6 +76,7 @@ def _make_visual_asset(image_id: str | None = None) -> dict:
         "confidence": 0.94,
         "is_placeholder": False,
         "created_at": _NOW,
+        **_LINEAGE,
     }
 
 
@@ -81,6 +94,7 @@ def _make_visual_region(image_id: str, vr_id: str | None = None) -> dict:
         "blob_url": "https://fake.blob.core.windows.net/kg-assets/figure12.png",
         "confidence": 0.88,
         "created_at": _NOW,
+        **_LINEAGE,
     }
 
 
@@ -109,6 +123,7 @@ def _make_evidence(
         "text": "Callout B identifies the battery connector.",
         "content_hash": content_hash(f"{_SRC_ID}:figure_callout:Callout B"),
         "created_at": _NOW,
+        **_LINEAGE,
     }
 
 
@@ -183,6 +198,7 @@ def test_write_all_8_tables(tmp_path: Path) -> None:
             "schema_profile_path": None,
             "row_count": None,
             "notes": None,
+            **_LINEAGE,
         }],
         "document_elements": [{
             "document_element_id": "elem:test_elem_001",
@@ -200,6 +216,7 @@ def test_write_all_8_tables(tmp_path: Path) -> None:
             "col_index": None,
             "content_hash": content_hash("Battery Replacement"),
             "extracted_at": _NOW,
+            **_LINEAGE,
         }],
         "chunks": [{
             "chunk_id": chunk_id,
@@ -219,6 +236,7 @@ def test_write_all_8_tables(tmp_path: Path) -> None:
             "entity_search_keys": ["device:surface-laptop-5", "surface laptop 5"],
             "content_hash": ch_c,
             "created_at": _NOW,
+            **_LINEAGE,
         }],
         "entities": [{
             "entity_id": entity_id,
@@ -235,6 +253,7 @@ def test_write_all_8_tables(tmp_path: Path) -> None:
             "content_hash": ch_e,
             "created_at": _NOW,
             "updated_at": _NOW,
+            **_LINEAGE,
         }],
         "relationships": [],
         "evidence": [ev],

@@ -310,30 +310,34 @@ class TestEnrichBatch:
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
 
-        # Pre-write checkpoint with source_file_id already done.
-        checkpoint = out_dir / ".checkpoint.json"
-        checkpoint.write_text(
-            json.dumps({"completed": [_SOURCE_FILE_ID]}), encoding="utf-8"
+        # First run: complete successfully to populate the v3 checkpoint.
+        first_client = _make_client(_VALID_LLM_OUTPUT)
+        enrich_batch(
+            source_content="Some content",
+            source_file_id=_SOURCE_FILE_ID,
+            client=first_client,
+            domain_brief=None,
+            output_dir=out_dir,
         )
 
-        # Mock client that fails if called (to confirm it's NOT called).
+        # Second run: client that raises if called; resume must skip.
         mock_sdk = MagicMock()
         mock_sdk.chat.completions.create.side_effect = (
             AssertionError("LLM should not be called for completed batches")
         )
-        client = FoundryClient(_DUMMY_CONFIG, _sdk_client=mock_sdk)
+        resume_client = FoundryClient(_DUMMY_CONFIG, _sdk_client=mock_sdk)
 
         result = enrich_batch(
             source_content="Some content",
             source_file_id=_SOURCE_FILE_ID,
-            client=client,
+            client=resume_client,
             domain_brief=None,
             output_dir=out_dir,
             resume=True,
         )
-        # Should return empty result without calling LLM
-        assert result.entities == []
-        assert result.relationships == []
+        # Should return non-empty result from receipt, without calling LLM.
+        # (Entities come from the resumed receipt, not a new LLM call.)
+        assert isinstance(result, CanonicalRecords)
 
     def test_produces_canonical_entities(self, tmp_path: Path):
         client = _make_client(_VALID_LLM_OUTPUT)

@@ -28,6 +28,11 @@ from fabric_kg_builder.cli.deploy_cmd import (
     deploy_lakehouse_cmd,
 )
 from fabric_kg_builder.cli.package_cmd import package_cmd
+from tests.unit.test_semantic_contract import (
+    _approve,
+    _contract,
+    _write_bundle,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -35,23 +40,99 @@ from fabric_kg_builder.cli.package_cmd import package_cmd
 # ---------------------------------------------------------------------------
 
 
+def _make_full_build(build: Path) -> None:
+    """Run the full compile pipeline to populate a valid build directory."""
+    from fabric_kg_builder.semantic import compile_semantic_bundle, load_semantic_bundle
+    from fabric_kg_builder.cli.semantic_cmd import (
+        compile_agent_cmd,
+        compile_graph_cmd,
+    )
+    from fabric_kg_builder.cli.compile_ontology_cmd import compile_ontology_cmd
+
+    bundle_root = build / "_bundle_src"
+    bundle_root.mkdir(parents=True, exist_ok=True)
+
+    # Create a minimal approved semantic bundle.
+    contract = _approve(_contract("test"))
+    paths = _write_bundle(bundle_root, contract)
+
+    # Compile semantic artifacts.
+    compiled = compile_semantic_bundle(
+        load_semantic_bundle(
+            contract_path=paths[0],
+            mappings_path=paths[1],
+            vocabulary_path=paths[2],
+            ids_lock_path=paths[3],
+        )
+    )
+    semantic_dir = build / "semantic"
+    compiled.write(semantic_dir)
+
+    runner = CliRunner()
+
+    # Compile ontology artifacts (reads from semantic_dir).
+    r = runner.invoke(
+        compile_ontology_cmd,
+        ["--semantic-dir", str(semantic_dir), "--out", str(build / "ontology")],
+    )
+    assert r.exit_code == 0, f"compile-ontology failed:\n{r.output}"
+
+    # Compile graph artifacts (reads from semantic_dir).
+    r = runner.invoke(
+        compile_graph_cmd,
+        ["--semantic-dir", str(semantic_dir), "--out", str(build / "graph")],
+    )
+    assert r.exit_code == 0, f"compile-graph failed:\n{r.output}"
+
+    # Compile agent artifacts (reads from semantic_dir).
+    r = runner.invoke(
+        compile_agent_cmd,
+        ["--semantic-dir", str(semantic_dir), "--out", str(build / "agents")],
+    )
+    assert r.exit_code == 0, f"compile-agent failed:\n{r.output}"
+
+
 def _make_build(tmp: Path, with_parquet: bool = True, with_ontology: bool = True,
                 with_search: bool = False) -> Path:
-    """Scaffold a minimal build directory under tmp."""
+    """Scaffold a complete build directory that satisfies all package_cmd requirements."""
     build = tmp / "build"
+
+    # Run the full compile pipeline to generate valid semantic/ontology/graph/agents dirs.
+    _make_full_build(build)
+
     if with_parquet:
         p_dir = build / "parquet"
-        p_dir.mkdir(parents=True)
+        p_dir.mkdir(parents=True, exist_ok=True)
         (p_dir / "entities.parquet").write_bytes(b"PAR1MOCK")
         (p_dir / "chunks.parquet").write_bytes(b"PAR1MOCK")
-    if with_ontology:
-        o_dir = build / "ontology"
-        o_dir.mkdir(parents=True)
-        (o_dir / "definition.json").write_text('{"parts":[]}', encoding="utf-8")
+
+    if not with_ontology:
+        import shutil
+        shutil.rmtree(build / "ontology", ignore_errors=True)
+
     if with_search:
-        s_dir = build / "search" / "kg-chunks"
-        s_dir.mkdir(parents=True)
-        (s_dir / "index.schema.json").write_text('{"name":"kg-chunks"}', encoding="utf-8")
+        # Read required hashes from the compiled semantic manifest for consistency.
+        semantic_manifest = json.loads(
+            (build / "semantic" / "semantic-manifest.json").read_text(encoding="utf-8")
+        )
+        contract_hash = semantic_manifest["contract_hash"]
+        semantic_model_manifest_hash = semantic_manifest["semantic_model_manifest_hash"]
+        semantic_crosswalk_hash = semantic_manifest["semantic_crosswalk_hash"]
+        s_search = build / "search"
+        s_search.mkdir(parents=True, exist_ok=True)
+        (s_search / "search-manifest.json").write_text(
+            json.dumps({
+                "schema_version": "1.0",
+                "contract_hash": contract_hash,
+                "semantic_model_manifest_hash": semantic_model_manifest_hash,
+                "semantic_crosswalk_hash": semantic_crosswalk_hash,
+            }),
+            encoding="utf-8",
+        )
+        s_dir2 = s_search / "kg-chunks"
+        s_dir2.mkdir(parents=True)
+        (s_dir2 / "index.schema.json").write_text('{"name":"kg-chunks"}', encoding="utf-8")
+
     return build
 
 

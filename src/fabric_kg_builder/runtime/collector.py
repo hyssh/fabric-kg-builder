@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -45,7 +45,7 @@ from .semantic_reliability import (
 
 
 def _timestamp_utc() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _route_result_category(
