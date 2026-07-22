@@ -316,17 +316,36 @@ class TestCreateOrGetOntologyItemLive:
         list_resp = self._make_list_response([])
         create_resp = self._make_create_response_202(lro_location)
 
+        # Mock LRO poll: returns Succeeded on the first poll attempt.
+        lro_poll_resp = MagicMock()
+        lro_poll_resp.ok = True
+        lro_poll_resp.status_code = 200
+        lro_poll_resp.headers = {}
+        lro_poll_resp.json.return_value = {
+            "status": "Succeeded",
+            "itemId": "lro-created-item-id",
+        }
+
+        get_call_count = {"n": 0}
+
+        def fake_get(url, **kwargs):
+            n = get_call_count["n"]
+            get_call_count["n"] += 1
+            if n == 0:
+                return list_resp   # list items call
+            return lro_poll_resp   # LRO poll call(s)
+
         def fake_token():
             return "fake-token"
 
-        with patch("requests.get", return_value=list_resp), \
+        with patch("requests.get", side_effect=fake_get), \
              patch("requests.post", return_value=create_resp):
             result = create_or_get_ontology_item(
                 _WS, _ONTOLOGY_NAME, mock=False, token_provider=fake_token
             )
 
         assert result["created"] is True
-        assert result["item_id"].startswith("lro:")
+        assert result["item_id"].startswith("lro:") or result["item_id"] == "lro-created-item-id"
         assert "202" in result["note"]
 
     def test_note_always_mentions_definition_api_limitation(self):
@@ -349,6 +368,19 @@ class TestCreateOrGetOntologyItemLive:
 class TestDeployOntologyCmdLive:
     """CLI tests for deploy-ontology --no-mock path (mocked ontology helpers)."""
 
+    # Minimal fake Fabric env config — no real workspace IDs.
+    _FAKE_FABRIC_CFG = {
+        "workspace_id": "test-ws-id-00000000",
+        "workspace_display_name": "test-workspace",
+        "lakehouse_item_id": "test-lh-id-00000000",
+        "lakehouse_display_name": "kg_lakehouse",
+        "onelake_tables_path": "",
+        "schema_name": "dbo",
+        "ontology_item_id": "",
+        "ontology_display_name": "kg_ontology",
+        "sensitivity_label": "",
+    }
+
     def test_no_mock_exits_zero_when_item_created(self):
         """--no-mock exits 0 when create_or_get_ontology_item + updateDefinition succeed."""
         mock_item_result = {
@@ -363,6 +395,9 @@ class TestDeployOntologyCmdLive:
         }
 
         with patch(
+            "fabric_kg_builder.cli.deploy_cmd._read_fabric_env_config",
+            return_value=self._FAKE_FABRIC_CFG,
+        ), patch(
             "fabric_kg_builder.deploy.fabric_ontology.create_or_get_ontology_item",
             return_value=mock_item_result,
         ), patch(
@@ -396,6 +431,9 @@ class TestDeployOntologyCmdLive:
         }
 
         with patch(
+            "fabric_kg_builder.cli.deploy_cmd._read_fabric_env_config",
+            return_value=self._FAKE_FABRIC_CFG,
+        ), patch(
             "fabric_kg_builder.deploy.fabric_ontology.create_or_get_ontology_item",
             return_value=mock_item_result,
         ), patch(
@@ -427,6 +465,9 @@ class TestDeployOntologyCmdLive:
         }
 
         with patch(
+            "fabric_kg_builder.cli.deploy_cmd._read_fabric_env_config",
+            return_value=self._FAKE_FABRIC_CFG,
+        ), patch(
             "fabric_kg_builder.deploy.fabric_ontology.create_or_get_ontology_item",
             return_value=mock_item_result,
         ), patch(

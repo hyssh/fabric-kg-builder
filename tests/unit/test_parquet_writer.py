@@ -27,6 +27,18 @@ from fabric_kg_builder.parquet.writer import (
 _UTC = timezone.utc
 _NOW = datetime(2026, 6, 24, 12, 0, 0, tzinfo=_UTC)
 
+# Common lineage sentinel values required by NOT NULL constraints.
+_LINEAGE = {
+    "project_id": "test-project",
+    "asset_id": "test-asset",
+    "asset_version_id": "test-asset-v1",
+    "run_id": "test-run",
+    "parent_record_id": None,
+    "source_locator_json": None,
+    "schema_version": "2.0",
+    "domain_hash": None,
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,6 +67,7 @@ def _make_entity(
         "content_hash": ch,
         "created_at": _NOW,
         "updated_at": _NOW,
+        **_LINEAGE,
     }
 
 
@@ -74,6 +87,7 @@ def _make_relationship(
         "is_placeholder": False,
         "content_hash": ch,
         "created_at": _NOW,
+        **_LINEAGE,
     }
 
 
@@ -99,6 +113,7 @@ def _make_chunk(source_file_id: str = "src:abc123") -> dict:
         "entity_search_keys": ["surface laptop 5", "battery"],
         "content_hash": ch,
         "created_at": _NOW,
+        **_LINEAGE,
     }
 
 
@@ -239,6 +254,7 @@ def test_round_trip_source_files(tmp_path: Path) -> None:
         "schema_profile_path": "build/enriched/sample_profile.json",
         "row_count": 6,
         "notes": None,
+        **_LINEAGE,
     }
     write_table("source_files", [row], tmp_path)
     table = pq.read_table(tmp_path / "source_files.parquet")

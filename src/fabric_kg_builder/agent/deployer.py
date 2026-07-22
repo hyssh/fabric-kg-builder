@@ -88,7 +88,7 @@ class DeploymentContext:
 
 
 def _timestamp_tag() -> str:
-    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S")
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
 
 
 def _hash_instructions(text: str) -> str:
@@ -363,7 +363,7 @@ def deploy_agent(
     ctx = DeploymentContext(
         environment=env,
         agent_name=metadata.agentName,
-        deployed_at=datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+        deployed_at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         model_deployment=model_deployment,
         instructions_version=INSTRUCTIONS_VERSION,
         instructions_hash=instructions_hash,

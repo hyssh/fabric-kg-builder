@@ -29,7 +29,7 @@ from fabric_kg_builder.enrichment.orchestrator import (
     canonicalize_llm_output,
 )
 from fabric_kg_builder.enrichment.output_schema import LLMOutput
-from tests.conftest import make_document_intelligence_client_with_tables
+from tests.conftest import make_document_intelligence_client_with_tables, write_approved_domain_contract
 
 # ---------------------------------------------------------------------------
 # Minimal PDF bytes (one page, "Hello World")
@@ -166,6 +166,7 @@ def test_di_table_wire_produces_table_html_chunk(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client()
@@ -201,6 +202,7 @@ def test_di_table_wire_produces_table_document_element(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client()
@@ -231,6 +233,7 @@ def test_di_table_chunk_has_content_html(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client(_MOCK_LLM_OUTPUT)
     di_layout_client = _make_di_layout_client()
@@ -269,6 +272,7 @@ def test_di_not_configured_pipeline_still_works(tmp_path: Path) -> None:
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
+    write_approved_domain_contract(out_dir / "domain.yaml")
 
     foundry_client = _make_foundry_client(_MOCK_LLM_OUTPUT)
 

@@ -238,6 +238,8 @@ def load_densify_config(path: str | Path) -> DensifyConfig:
 _GENERIC_NAMES = {
     "concept",
     "concepts",
+    "device",
+    "devices",
     "entity",
     "entities",
     "item",
@@ -246,10 +248,14 @@ _GENERIC_NAMES = {
     "models",
     "object",
     "objects",
+    "product",
+    "products",
     "record",
     "records",
     "thing",
     "things",
+    "unit",
+    "units",
     "unknown",
     "unspecified",
 }

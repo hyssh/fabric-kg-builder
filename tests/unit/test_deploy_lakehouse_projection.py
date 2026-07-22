@@ -86,8 +86,8 @@ class TestLakehouseProjectionConstants:
         assert "chunks" not in LAKEHOUSE_TABLES
 
     def test_lakehouse_tables_has_seven_tables(self) -> None:
-        """Default scope is 7 tables (all 8 canonical minus chunks)."""
-        assert len(LAKEHOUSE_TABLES) == 7
+        """Default scope covers all canonical tables (chunks excluded)."""
+        assert len(LAKEHOUSE_TABLES) == 19
 
     def test_graph_tables_have_none_projection(self) -> None:
         """source_files, entities, relationships, evidence, visual_assets, visual_regions use None (all cols)."""
@@ -174,7 +174,7 @@ class TestOneLakeWriterProjection:
             projection=LAKEHOUSE_TABLE_PROJECTION,
             mock=True,
         )
-        assert len(results) == 7
+        assert len(results) == 19
         assert all(v == STATUS_PLANNED for v in results.values()), results
 
     def test_live_projection_drops_text_cols_from_document_elements(

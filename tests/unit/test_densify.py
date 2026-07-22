@@ -6,7 +6,7 @@ from fabric_kg_builder.enrichment.densify import (
     DensifyConfig,
     densify_document,
     is_diagnostic_procedure,
-    is_specific_device_model,
+    is_specific_hub_name,
     is_umbrella_procedure,
     link_procedure_steps,
     link_rca_paths,
@@ -16,18 +16,53 @@ from fabric_kg_builder.enrichment.densify import (
 )
 
 
-def test_is_specific_device_model():
-    assert is_specific_device_model("Surface Laptop 5")
-    assert is_specific_device_model("Microsoft Surface Pro 10th Edition for Business")
-    assert is_specific_device_model("Surface Studio 2")
+_SAMPLE_CONFIG = DensifyConfig.from_mapping({
+    "hub": {
+        "source_types": ["DeviceModel"],
+        "target_relationships": {
+            "Component": "has_component",
+            "Part": "has_part",
+            "Procedure": "has_procedure",
+            "Symptom": "has_symptom",
+        },
+    },
+    "scr": {
+        "cause_types": ["Cause"],
+        "symptom_types": ["Symptom"],
+        "resolution_types": ["Resolution"],
+        "cause_symptom_relationship": "causes",
+        "symptom_resolution_relationship": "resolved_by",
+        "cause_resolution_relationship": "addressed_by",
+    },
+    "procedure_steps": {
+        "procedure_types": ["Procedure"],
+        "step_types": ["Step"],
+        "relationship": "has_step",
+    },
+    "rca": {
+        "symptom_types": ["Symptom"],
+        "procedure_types": ["Procedure"],
+        "diagnosed_by_relationship": "diagnosed_by",
+        "remediated_by_relationship": "remediated_by",
+    },
+    "umbrella": {
+        "patterns": [r"replacement process$", r"\breplacement$", r"\bprocess$"],
+    },
+})
+
+
+def test_is_specific_hub_name():
+    assert is_specific_hub_name("Surface Laptop 5")
+    assert is_specific_hub_name("Microsoft Surface Pro 10th Edition for Business")
+    assert is_specific_hub_name("Surface Studio 2")
     # Generic / placeholder names rejected.
-    assert not is_specific_device_model("model")
-    assert not is_specific_device_model("this device model")
-    assert not is_specific_device_model("device")
-    assert not is_specific_device_model(None)
-    assert not is_specific_device_model("")
-    # Product keyword but no digit/edition → not specific enough.
-    assert not is_specific_device_model("Surface devices")
+    assert not is_specific_hub_name("model")
+    assert not is_specific_hub_name("this device model")
+    assert not is_specific_hub_name("device")
+    assert not is_specific_hub_name(None)
+    assert not is_specific_hub_name("")
+    # Domain-neutral qualification does not impose product-family syntax.
+    assert is_specific_hub_name("Surface devices")
 
 
 def _doc():
@@ -57,7 +92,7 @@ def _doc():
 
 
 def test_densify_adds_hub_edges():
-    doc, added = densify_document(_doc())
+    doc, added = densify_document(_doc(), config=_SAMPLE_CONFIG)
     # New edges: m1→p1 (Part), m1→pr1 (Procedure), m1→s1 (Symptom).
     # m1→c1 already exists (skipped); Step is not a hub target.
     assert added == 3
@@ -73,8 +108,8 @@ def test_densify_adds_hub_edges():
 
 
 def test_densify_is_idempotent():
-    doc, added1 = densify_document(_doc())
-    doc, added2 = densify_document(doc)
+    doc, added1 = densify_document(_doc(), config=_SAMPLE_CONFIG)
+    doc, added2 = densify_document(doc, config=_SAMPLE_CONFIG)
     assert added1 == 3
     assert added2 == 0  # second pass adds nothing
 
@@ -86,13 +121,13 @@ def test_densify_no_models_is_noop():
         ],
         "relationships": [],
     }
-    doc, added = densify_document(doc)
+    doc, added = densify_document(doc, config=_SAMPLE_CONFIG)
     assert added == 0
     assert doc["relationships"] == []
 
 
 def test_densify_synthetic_edges_well_formed():
-    doc, _ = densify_document(_doc())
+    doc, _ = densify_document(_doc(), config=_SAMPLE_CONFIG)
     syn = [r for r in doc["relationships"] if r["relationship_id"] != "rel:existing"]
     for r in syn:
         assert r["relationship_id"].startswith("rel:")
@@ -141,7 +176,7 @@ def _scr_doc():
 
 
 def test_scr_links_by_discriminating_keyword():
-    doc, added = link_symptom_cause_resolution(_scr_doc())
+    doc, added = link_symptom_cause_resolution(_scr_doc(), config=_SAMPLE_CONFIG)
     pairs = {
         (r["source_entity_id"], r["target_entity_id"], r["relationship_type"])
         for r in doc["relationships"]
@@ -157,7 +192,7 @@ def test_scr_links_by_discriminating_keyword():
 
 
 def test_scr_does_not_cross_link_unrelated_clusters():
-    doc, _ = link_symptom_cause_resolution(_scr_doc())
+    doc, _ = link_symptom_cause_resolution(_scr_doc(), config=_SAMPLE_CONFIG)
     pairs = {(r["source_entity_id"], r["target_entity_id"]) for r in doc["relationships"]}
     # "battery" is ubiquitous (in all 6) so it must NOT bridge thermal↔leak.
     assert ("entity:c_thermal", "entity:s_leak") not in pairs
@@ -165,7 +200,7 @@ def test_scr_does_not_cross_link_unrelated_clusters():
 
 
 def test_scr_inferred_edges_tagged_and_low_confidence():
-    doc, _ = link_symptom_cause_resolution(_scr_doc())
+    doc, _ = link_symptom_cause_resolution(_scr_doc(), config=_SAMPLE_CONFIG)
     for r in doc["relationships"]:
         assert r["confidence"] == 0.45
         assert "densify:scr" in r["properties_json"]
@@ -173,8 +208,8 @@ def test_scr_inferred_edges_tagged_and_low_confidence():
 
 
 def test_scr_idempotent():
-    doc, a1 = link_symptom_cause_resolution(_scr_doc())
-    doc, a2 = link_symptom_cause_resolution(doc)
+    doc, a1 = link_symptom_cause_resolution(_scr_doc(), config=_SAMPLE_CONFIG)
+    doc, a2 = link_symptom_cause_resolution(doc, config=_SAMPLE_CONFIG)
     assert a1 > 0
     assert a2 == 0
 
@@ -186,7 +221,7 @@ def test_scr_noop_without_symptoms():
         ],
         "relationships": [],
     }
-    doc, added = link_symptom_cause_resolution(doc)
+    doc, added = link_symptom_cause_resolution(doc, config=_SAMPLE_CONFIG)
     assert added == 0
 
 
@@ -219,7 +254,7 @@ def _procstep_doc():
 
 
 def test_procstep_links_steps_to_preceding_procedure():
-    doc, added = link_procedure_steps(_procstep_doc())
+    doc, added = link_procedure_steps(_procstep_doc(), config=_SAMPLE_CONFIG)
     pairs = {(r["source_entity_id"], r["target_entity_id"]) for r in doc["relationships"]
              if r["relationship_type"] == "has_step"}
     assert ("entity:p_batt", "entity:s_b1") in pairs
@@ -231,12 +266,12 @@ def test_procstep_links_steps_to_preceding_procedure():
 
 
 def test_procstep_edges_tagged_and_idempotent():
-    doc, a1 = link_procedure_steps(_procstep_doc())
+    doc, a1 = link_procedure_steps(_procstep_doc(), config=_SAMPLE_CONFIG)
     for r in doc["relationships"]:
         assert r["confidence"] == 0.5
-        assert "proc-step" in r["properties_json"]
+        assert "densify:sequence-reading-order" in r["properties_json"]
         assert r["content_hash"]
-    doc, a2 = link_procedure_steps(doc)
+    doc, a2 = link_procedure_steps(doc, config=_SAMPLE_CONFIG)
     assert a1 == 3
     assert a2 == 0
 
@@ -250,7 +285,7 @@ def test_procstep_noop_without_elements():
         "relationships": [],
         "document_elements": [],
     }
-    doc, added = link_procedure_steps(doc)
+    doc, added = link_procedure_steps(doc, config=_SAMPLE_CONFIG)
     assert added == 0
 
 def _rca_doc():
@@ -283,7 +318,7 @@ def test_is_diagnostic_procedure():
 
 
 def test_rca_links_diagnostic_and_remediation():
-    doc, added = link_rca_paths(_rca_doc())
+    doc, added = link_rca_paths(_rca_doc(), config=_SAMPLE_CONFIG)
     edges = {(r["source_entity_id"], r["target_entity_id"], r["relationship_type"])
              for r in doc["relationships"]}
     assert ("entity:sym", "entity:diag", "diagnosed_by") in edges
@@ -292,12 +327,12 @@ def test_rca_links_diagnostic_and_remediation():
 
 
 def test_rca_edges_tagged_and_idempotent():
-    doc, a1 = link_rca_paths(_rca_doc())
+    doc, a1 = link_rca_paths(_rca_doc(), config=_SAMPLE_CONFIG)
     for r in doc["relationships"]:
         assert r["confidence"] == 0.4
-        assert "rca-" in r["properties_json"]
+        assert "densify:diagnostic-path-" in r["properties_json"]
         assert r["content_hash"]
-    doc, a2 = link_rca_paths(doc)
+    doc, a2 = link_rca_paths(doc, config=_SAMPLE_CONFIG)
     assert a1 >= 2
     assert a2 == 0
 
@@ -309,7 +344,7 @@ def test_rca_noop_without_procedures():
         ],
         "relationships": [],
     }
-    doc, added = link_rca_paths(doc)
+    doc, added = link_rca_paths(doc, config=_SAMPLE_CONFIG)
     assert added == 0
 
 def _umbrella_doc():
@@ -342,15 +377,16 @@ def _umbrella_doc():
 
 
 def test_is_umbrella_procedure():
-    assert is_umbrella_procedure("Battery Replacement Process")
-    assert is_umbrella_procedure("Display Module Replacement Process")
-    assert is_umbrella_procedure("Kickstand Replacement")
-    assert not is_umbrella_procedure("Remove the Battery")
-    assert not is_umbrella_procedure(None)
+    patterns = _SAMPLE_CONFIG.umbrella_patterns
+    assert is_umbrella_procedure("Battery Replacement Process", patterns)
+    assert is_umbrella_procedure("Display Module Replacement Process", patterns)
+    assert is_umbrella_procedure("Kickstand Replacement", patterns)
+    assert not is_umbrella_procedure("Remove the Battery", patterns)
+    assert not is_umbrella_procedure(None, patterns)
 
 
 def test_umbrella_rolls_up_fragment_steps():
-    doc, added = link_umbrella_steps(_umbrella_doc())
+    doc, added = link_umbrella_steps(_umbrella_doc(), config=_SAMPLE_CONFIG)
     pairs = {(r["source_entity_id"], r["target_entity_id"]) for r in doc["relationships"]
              if r["relationship_type"] == "has_step"}
     # Umbrella now reaches battery fragment steps s1,s2,s3
@@ -363,8 +399,8 @@ def test_umbrella_rolls_up_fragment_steps():
 
 
 def test_umbrella_idempotent():
-    doc, a1 = link_umbrella_steps(_umbrella_doc())
-    doc, a2 = link_umbrella_steps(doc)
+    doc, a1 = link_umbrella_steps(_umbrella_doc(), config=_SAMPLE_CONFIG)
+    doc, a2 = link_umbrella_steps(doc, config=_SAMPLE_CONFIG)
     assert a1 == 3
     assert a2 == 0
 

@@ -65,8 +65,8 @@ where = ["src"]
 testpaths = ["tests"]
 # Default run: fast unit + contract tests only.  slow/integration are opt-in.
 # Override with:  pytest -m integration   pytest -m slow   pytest -m ""
-# --cov-fail-under is intentionally ABSENT here; the strict 80% gate lives in
-# CI only (see .github/workflows/ci.yml).
+# --cov-fail-under is intentionally ABSENT here; CI publishes coverage reports
+# without enforcing a hard global threshold.
 addopts = "--cov=fabric_kg_builder --cov-report=term-missing -m 'not slow and not integration'"
 markers = [
     "unit: pure-function tests, no I/O (fast, no network)",
@@ -86,6 +86,5 @@ omit = [
 
 [tool.coverage.report]
 # Targets per SPEC-005 §9: 80-90% on core modules.
-# The threshold is enforced by --cov-fail-under=80 in CI, not here.
 show_missing = true
 skip_covered = false

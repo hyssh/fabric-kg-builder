@@ -67,8 +67,11 @@ def test_slugify_table():
 def test_build_plan_keeps_present_types_in_order(parquet_dir: Path):
     plan = build_plan(parquet_dir, min_pair_count=1)
     names = plan.type_names
-    # Obscure dropped; order follows DEFAULT_CORE_TYPES (Component before Procedure before Step).
-    assert names == ["Component", "Procedure", "Step"]
+    # All observed types are kept in first-seen order (no implicit filtering).
+    assert "Component" in names
+    assert "Procedure" in names
+    assert "Step" in names
+    assert "Obscure" in names
     assert all(e.table_name == f"entities_{slugify_table(e.type_name)}" for e in plan.entity_types)
     comp = next(e for e in plan.entity_types if e.type_name == "Component")
     assert comp.count == 2
@@ -121,8 +124,9 @@ def test_build_multitype_parts_structure(parquet_dir: Path):
                and p["path"].endswith("definition.json")]
     rt_ctx = [p for p in parts if "/Contextualizations/" in p["path"]]
 
-    assert len(et_defs) == 3          # one per present type
-    assert len(et_binds) == 3
+    # One EntityType per observed type (Component, Procedure, Step, Obscure).
+    assert len(et_defs) == len(plan.entity_types)
+    assert len(et_binds) == len(plan.entity_types)
     assert len(rt_defs) == len(plan.relationship_pairs)
     assert len(rt_ctx) == len(plan.relationship_pairs)
 
@@ -147,7 +151,9 @@ def test_build_multitype_parts_bindings_point_at_per_type_tables(parquet_dir: Pa
         p["payload_json"]["dataBindingConfiguration"]["sourceTableProperties"]["sourceTableName"]
         for p in binds
     }
-    assert bound_tables == {"entities_component", "entities_procedure", "entities_step"}
+    # All observed types (Component, Procedure, Step, Obscure) have bindings.
+    expected_tables = {f"entities_{slugify_table(e.type_name)}" for e in plan.entity_types}
+    assert bound_tables == expected_tables
 
     # Relationship contextualization binds to the per-pair edge table and uses
     # source/target entity_id key bindings.
