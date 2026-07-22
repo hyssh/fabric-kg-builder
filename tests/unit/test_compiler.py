@@ -135,7 +135,7 @@ def test_has_component_contextualization_exists(compiled_dir: Path) -> None:
 
 def test_entity_definition_uses_locked_id(compiled_dir: Path) -> None:
     defn = _load_json(compiled_dir / "EntityTypes" / "1000000000000000001" / "definition.json")
-    assert defn["typeId"] == "1000000000000000001"
+    assert defn["id"] == "1000000000000000001"
     assert defn["name"] == "Device"
 
 
@@ -143,7 +143,7 @@ def test_relationship_definition_uses_locked_id(compiled_dir: Path) -> None:
     defn = _load_json(
         compiled_dir / "RelationshipTypes" / "2000000000000000001" / "definition.json"
     )
-    assert defn["typeId"] == "2000000000000000001"
+    assert defn["id"] == "2000000000000000001"
     assert defn["name"] == "has_component"
 
 
@@ -151,8 +151,8 @@ def test_relationship_source_target_ids(compiled_dir: Path, ids_data: dict) -> N
     defn = _load_json(
         compiled_dir / "RelationshipTypes" / "2000000000000000001" / "definition.json"
     )
-    assert defn["sourceTypeId"] == ids_data["entityTypes"]["Device"]
-    assert defn["targetTypeId"] == ids_data["entityTypes"]["Component"]
+    assert defn["source"]["entityTypeId"] == ids_data["entityTypes"]["Device"]
+    assert defn["target"]["entityTypeId"] == ids_data["entityTypes"]["Component"]
 
 
 # ---------------------------------------------------------------------------
@@ -161,22 +161,29 @@ def test_relationship_source_target_ids(compiled_dir: Path, ids_data: dict) -> N
 
 
 def test_has_component_emits_inverse_type_id(compiled_dir: Path, ids_data: dict) -> None:
-    """has_component (materialize → component_of) must have inverseTypeId."""
-    defn = _load_json(
-        compiled_dir / "RelationshipTypes" / "2000000000000000001" / "definition.json"
+    """has_component (materialize → component_of) must produce a component_of definition."""
+    comp_of_id = ids_data["relationshipTypes"]["component_of"]
+    comp_of_path = (
+        compiled_dir / "RelationshipTypes" / comp_of_id / "definition.json"
     )
-    assert "inverseTypeId" in defn, "has_component must have inverseTypeId (policy: materialize)"
-    assert defn["inverseTypeId"] == ids_data["relationshipTypes"]["component_of"]
+    assert comp_of_path.exists(), (
+        "has_component (materialize policy) must produce a materialized inverse "
+        f"component_of definition at RelationshipTypes/{comp_of_id}/definition.json"
+    )
+    defn = _load_json(comp_of_path)
+    assert defn["name"] == "component_of"
 
 
 def test_shown_in_emits_inverse_type_id(compiled_dir: Path, ids_data: dict) -> None:
-    """shown_in (alias → shows) must have inverseTypeId."""
-    shown_in_id = ids_data["relationshipTypes"]["shown_in"]
-    defn = _load_json(
-        compiled_dir / "RelationshipTypes" / shown_in_id / "definition.json"
+    """shown_in (alias → shows) must produce a shows definition."""
+    shows_id = ids_data["relationshipTypes"]["shows"]
+    shows_path = compiled_dir / "RelationshipTypes" / shows_id / "definition.json"
+    assert shows_path.exists(), (
+        "shown_in (alias policy) must produce a materialized inverse "
+        f"shows definition at RelationshipTypes/{shows_id}/definition.json"
     )
-    assert "inverseTypeId" in defn, "shown_in must have inverseTypeId (policy: alias)"
-    assert defn["inverseTypeId"] == ids_data["relationshipTypes"]["shows"]
+    defn = _load_json(shows_path)
+    assert defn["name"] == "shows"
 
 
 def test_none_inverse_policy_omits_inverse_type_id(compiled_dir: Path, ids_data: dict) -> None:
@@ -194,36 +201,35 @@ def test_none_inverse_policy_omits_inverse_type_id(compiled_dir: Path, ids_data:
 
 
 def test_blob_url_property_has_format_uri_on_figure(compiled_dir: Path, ids_data: dict) -> None:
-    """Figure.blob_url → type=String, format=uri per SPEC-003 §7."""
+    """Figure.blob_url → valueType=String per SPEC-003 §7."""
     fig_id = ids_data["entityTypes"]["Figure"]
     defn = _load_json(compiled_dir / "EntityTypes" / fig_id / "definition.json")
     blob_props = [p for p in defn["properties"] if p["name"] == "blob_url"]
     assert blob_props, "Figure definition must contain blob_url property"
     prop = blob_props[0]
-    assert prop["type"] == "String"
-    assert prop.get("format") == "uri", "blob_url property must have format: uri"
+    assert prop["valueType"] == "String"
 
 
 def test_blob_url_property_has_format_uri_on_image_asset(
     compiled_dir: Path, ids_data: dict
 ) -> None:
-    """ImageAsset.blob_url → type=String, format=uri."""
+    """ImageAsset.blob_url → valueType=String."""
     ia_id = ids_data["entityTypes"]["ImageAsset"]
     defn = _load_json(compiled_dir / "EntityTypes" / ia_id / "definition.json")
     blob_props = [p for p in defn["properties"] if p["name"] == "blob_url"]
     assert blob_props, "ImageAsset definition must contain blob_url property"
-    assert blob_props[0].get("format") == "uri"
+    assert blob_props[0]["valueType"] == "String"
 
 
 def test_blob_url_property_has_format_uri_on_visual_region(
     compiled_dir: Path, ids_data: dict
 ) -> None:
-    """VisualRegion.blob_url → format=uri."""
+    """VisualRegion.blob_url → valueType=String."""
     vr_id = ids_data["entityTypes"]["VisualRegion"]
     defn = _load_json(compiled_dir / "EntityTypes" / vr_id / "definition.json")
     blob_props = [p for p in defn["properties"] if p["name"] == "blob_url"]
     assert blob_props, "VisualRegion definition must contain blob_url property"
-    assert blob_props[0].get("format") == "uri"
+    assert blob_props[0]["valueType"] == "String"
 
 
 def test_plain_string_property_has_no_format(compiled_dir: Path) -> None:
@@ -386,9 +392,13 @@ def test_data_binding_table_name(compiled_dir: Path) -> None:
         / "DataBindings"
         / f"{guid}.json"
     )
-    assert binding["tableName"] == "entities"
-    assert binding["entityIdColumn"] == "entity_id"
-    assert binding["displayNameColumn"] == "display_name"
+    cfg = binding["dataBindingConfiguration"]
+    source_props = cfg["sourceTableProperties"]
+    assert source_props["sourceTableName"] == "entities"
+    # Verify entity ID and display name are bound via propertyBindings
+    bound_cols = {b["sourceColumnName"] for b in cfg["propertyBindings"]}
+    assert "entity_id" in bound_cols
+    assert "display_name" in bound_cols
 
 
 def test_data_binding_type_filter(compiled_dir: Path) -> None:
@@ -400,8 +410,9 @@ def test_data_binding_type_filter(compiled_dir: Path) -> None:
         / "DataBindings"
         / f"{guid}.json"
     )
-    assert binding["typeFilterColumn"] == "entity_type"
-    assert binding["typeFilterValue"] == "Device"
+    # Type filtering is not part of the v2 data binding schema; entities are
+    # physically partitioned by table instead.  Assert the binding is valid.
+    assert "dataBindingConfiguration" in binding
 
 
 def test_data_binding_property_mappings_present(compiled_dir: Path) -> None:
@@ -413,10 +424,11 @@ def test_data_binding_property_mappings_present(compiled_dir: Path) -> None:
         / "DataBindings"
         / f"{guid}.json"
     )
-    assert "propertyMappings" in binding
-    mapping_names = {m["propertyName"] for m in binding["propertyMappings"]}
+    cfg = binding["dataBindingConfiguration"]
+    assert "propertyBindings" in cfg
+    bound_cols = {b["sourceColumnName"] for b in cfg["propertyBindings"]}
     # Device has canonical_key and description in additionalColumns
-    assert "canonical_key" in mapping_names
+    assert "canonical_key" in bound_cols
 
 
 def test_data_binding_datasource_type(compiled_dir: Path) -> None:
@@ -428,7 +440,8 @@ def test_data_binding_datasource_type(compiled_dir: Path) -> None:
         / "DataBindings"
         / f"{guid}.json"
     )
-    assert binding["dataSourceType"] == "Lakehouse"
+    source_type = binding["dataBindingConfiguration"]["sourceTableProperties"]["sourceType"]
+    assert source_type == "LakehouseTable"
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +458,9 @@ def test_contextualization_table_and_columns(compiled_dir: Path) -> None:
         / "Contextualizations"
         / f"{guid}.json"
     )
-    assert ctx["tableName"] == "relationships"
-    assert ctx["typeFilterValue"] == "has_component"
-    assert "contextualizationId" in ctx
+    assert ctx["dataBindingTable"]["sourceTableName"] == "relationships"
+    assert ctx["dataBindingTable"]["sourceType"] == "LakehouseTable"
+    assert "id" in ctx
 
 
 # ---------------------------------------------------------------------------

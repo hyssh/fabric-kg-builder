@@ -1,0 +1,88 @@
+schema_version: '1.0'
+domain:
+  name: supply-chain-risk
+  description: >-
+    Tracks suppliers, products, and risk events across a manufacturing supply
+    chain to surface disruption exposure and concentration risk.
+  subdomains:
+    - sourcing
+    - logistics
+    - compliance
+business:
+  organization_context: >-
+    A global manufacturer that sources components from hundreds of tier-1 and
+    tier-2 suppliers across multiple regions.
+  users:
+    - supply-chain analyst
+    - procurement manager
+    - risk officer
+  decisions:
+    - Which suppliers pose the highest concentration risk?
+    - Which components have the longest lead time?
+    - Which regions carry the highest disruption exposure?
+problem:
+  statement: >-
+    Identify and track supply chain risks by modeling suppliers, components,
+    and disruptive events as a connected knowledge graph.
+  desired_outcomes:
+    - Visibility into supplier-to-component dependencies
+    - Early warning of supply disruptions
+    - Regulatory and ESG compliance tracking
+  in_scope:
+    - Tier-1 and tier-2 suppliers
+    - Manufactured components
+    - Risk and disruption events
+    - Certifications and compliance documents
+  out_of_scope:
+    - Retail pricing
+    - Customer demand forecasting
+competency_questions:
+  - What components are sourced from high-risk suppliers?
+  - Which suppliers have outstanding compliance gaps?
+  - What is the lead time for critical components?
+terminology:
+  canonical_terms:
+    - term: supplier
+      definition: An organization that provides components or materials.
+      synonyms:
+        - vendor
+        - manufacturer
+    - term: component
+      definition: A physical part or material used in production.
+      synonyms:
+        - part
+        - material
+  ambiguous_terms:
+    - term: risk
+      meanings:
+        - financial risk
+        - operational risk
+        - compliance risk
+candidate_model:
+  entity_categories:
+    - Supplier
+    - Component
+    - RiskEvent
+    - Certification
+  relationship_categories:
+    - supplies
+    - triggers
+    - certifies
+constraints:
+  temporal: Events are tracked with an effective date; snapshots are immutable.
+  regulatory: Must comply with GDPR for any supplier personal data.
+  privacy: Do not store individual employee data from suppliers.
+  safety: null
+examples:
+  positive:
+    - text: Supplier "Acme Corp" supplies Component "Capacitor-100uF"
+      expected: entity extraction for Supplier and Component
+    - text: RiskEvent "Port Strike 2026" triggers disruption for Supplier "ShipCo"
+      expected: entity extraction for RiskEvent and Supplier
+  negative:
+    - text: Customer purchase orders
+      reason: Out of scope; demand-side data not modeled
+    - text: Retail inventory levels
+      reason: Out of scope; retail pricing not modeled
+approval:
+  status: draft

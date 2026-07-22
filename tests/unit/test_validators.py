@@ -353,10 +353,11 @@ class TestVal025:
         v = _single_fail(_val025_required_env_vars(env), "VAL-025")
         assert "AZURE_AI_FOUNDRY_ENDPOINT" in v.message
 
-    def test_missing_api_key_fails(self):
+    def test_missing_api_key_does_not_fail(self):
+        # API keys are optional — Entra identity is the preferred auth path.
+        # Only the service endpoint, workspace ID, and blob locator are required.
         env = {k: v for k, v in self._FULL_ENV.items() if k != "AZURE_AI_FOUNDRY_API_KEY"}
-        v = _single_fail(_val025_required_env_vars(env), "VAL-025")
-        assert "AZURE_AI_FOUNDRY_API_KEY" in v.message
+        _no_violations(_val025_required_env_vars(env))
 
     def test_empty_string_counts_as_missing(self):
         env = {**self._FULL_ENV, "FABRIC_WORKSPACE_ID": ""}
@@ -609,6 +610,15 @@ class TestValidateAll:
             "confidence": None,
             "is_placeholder": False,
             "created_at": now,
+            # Required NOT NULL lineage fields.
+            "project_id": "test-project",
+            "asset_id": "test-asset",
+            "asset_version_id": "test-asset-v1",
+            "run_id": "test-run",
+            "parent_record_id": None,
+            "source_locator_json": None,
+            "schema_version": "2.0",
+            "domain_hash": None,
         }
         table = pa.Table.from_pylist([row], schema=schema)
         pq.write_table(table, tmp_path / "visual_assets.parquet")
