@@ -146,7 +146,7 @@ def _record_agent_lineage(
         store = registry.load()
         record_deployment(
             store.setdefault("deployments", []),
-            run_id="agent-deploy-" + datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S"),
+            run_id="agent-deploy-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S"),
             environment=environment,
             artifact_type="prompt-agent",
             artifact_version=ctx.agent_version or ctx.instructions_version,
@@ -402,7 +402,7 @@ def deploy_app_cmd(
     _runner: Callable | None = None,
 ) -> None:
     """Build + push + Bicep-deploy the reference app to Container Apps."""
-    tag = image_tag or datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S")
+    tag = image_tag or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
     reg_path = Path(registry_path) if registry_path else _DEFAULT_REGISTRY_PATH
     runner = _runner or _default_runner
     run_token = ""
