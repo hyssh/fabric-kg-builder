@@ -323,21 +323,35 @@ def test_enrich_documents_writes_checkpoint(tmp_path: Path):
 def test_enrich_documents_resume_skips_completed(tmp_path: Path):
     out_dir = tmp_path / "enriched"
     out_dir.mkdir(parents=True)
-    checkpoint = out_dir / ".checkpoint.json"
-    checkpoint.write_text(json.dumps({"completed": [_SOURCE_FILE_ID]}), encoding="utf-8")
 
-    mock_sdk = MagicMock()
-    mock_sdk.chat.completions.create.side_effect = AssertionError(
-        "LLM must not be called for completed source_file_id"
-    )
-    client = FoundryClient(_DUMMY_CONFIG, _sdk_client=mock_sdk)
-
-    result = enrich_documents(
+    # Pass 1: complete the document so the v3 checkpoint is written.
+    first_client = _make_client(_MOCK_LLM_OUTPUT)
+    enrich_documents(
         document_elements=_make_elements(),
         source_file_id=_SOURCE_FILE_ID,
-        client=client,
+        client=first_client,
         domain_brief=None,
         output_dir=out_dir,
         resume=True,
     )
-    assert result.entities == []
+
+    # Pass 2: same execution identity, resume=True.
+    # Every work-unit in the checkpoint is already succeeded → LLM not called.
+    mock_sdk = MagicMock()
+    mock_sdk.chat.completions.create.side_effect = AssertionError(
+        "LLM must not be called for completed source_file_id"
+    )
+    second_client = FoundryClient(_DUMMY_CONFIG, _sdk_client=mock_sdk)
+
+    result = enrich_documents(
+        document_elements=_make_elements(),
+        source_file_id=_SOURCE_FILE_ID,
+        client=second_client,
+        domain_brief=None,
+        output_dir=out_dir,
+        resume=True,
+    )
+    # The v3 checkpoint resumes from cached work-unit results — entities are
+    # returned from the prior run's output, not recomputed via LLM.
+    # Key invariant: LLM was not called (mock would raise AssertionError if it were).
+    assert result.failed_work_units == []

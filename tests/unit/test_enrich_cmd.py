@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.config.schema import FoundryConfig
 from fabric_kg_builder.enrichment.foundry_client import FoundryClient
+from tests.conftest import write_approved_domain_contract
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +146,10 @@ class TestEnrichCmd:
     def test_exits_0_with_mock(self, tmp_path: Path, sample_csv_path: Path):
         """enrich --input <csv> exits 0 with a mock LLM client."""
         out_dir = tmp_path / "enriched"
-
-        # Pre-write domain.json so the rephrase pass is skipped.
         out_dir.mkdir(parents=True)
-        domain_file = out_dir / "domain.json"
-        domain_file.write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+
+        # Enrichment now requires an approved domain.yaml contract.
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
 
@@ -169,27 +169,14 @@ class TestEnrichCmd:
         )
 
     def test_exits_0_with_domain_prompt(self, tmp_path: Path, sample_csv_path: Path):
-        """enrich --domain-prompt runs rephrase then entity extraction; exits 0."""
+        """enrich with an approved domain.yaml and mock client exits 0."""
         out_dir = tmp_path / "enriched"
+        out_dir.mkdir(parents=True)
 
-        # The mock client will be called twice:
-        # 1st call → domain rephrase → returns _MOCK_DOMAIN_BRIEF
-        # 2nd call → entity extraction → returns _MOCK_LLM_OUTPUT
-        mock_sdk = MagicMock()
-        responses = [
-            json.dumps(_MOCK_DOMAIN_BRIEF),
-            json.dumps(_MOCK_LLM_OUTPUT),
-        ]
-        call_index = {"i": 0}
+        # Enrichment requires an approved domain.yaml; --domain-prompt is deprecated.
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
-        def complete_side_effect(**kwargs):
-            idx = call_index["i"]
-            call_index["i"] += 1
-            resp_str = responses[idx] if idx < len(responses) else json.dumps(_MOCK_LLM_OUTPUT)
-            return MagicMock(choices=[MagicMock(message=MagicMock(content=resp_str))])
-
-        mock_sdk.chat.completions.create.side_effect = complete_side_effect
-        mock_client = FoundryClient(_DUMMY_CONFIG, _sdk_client=mock_sdk)
+        mock_client = _make_client(_MOCK_LLM_OUTPUT)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -197,7 +184,6 @@ class TestEnrichCmd:
             [
                 "enrich",
                 "--input", str(sample_csv_path),
-                "--domain-prompt", "Surface laptop service docs",
                 "--out", str(out_dir),
             ],
             obj={"_foundry_client": mock_client},
@@ -211,7 +197,7 @@ class TestEnrichCmd:
         """enrich writes at least one output JSON file to --out directory."""
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
-        (out_dir / "domain.json").write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
         runner = CliRunner()
@@ -220,5 +206,5 @@ class TestEnrichCmd:
             ["enrich", "--input", str(sample_csv_path), "--out", str(out_dir)],
             obj={"_foundry_client": mock_client},
         )
-        output_files = [f for f in out_dir.glob("*.json") if f.name not in ("domain.json", ".checkpoint.json")]
+        output_files = [f for f in out_dir.glob("*.json") if f.name not in ("domain.yaml", ".checkpoint.json")]
         assert len(output_files) >= 1, "No output JSON files written"

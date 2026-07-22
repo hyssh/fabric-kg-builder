@@ -28,6 +28,7 @@ from fabric_kg_builder.enrichment.orchestrator import (
 )
 from fabric_kg_builder.enrichment.output_schema import validate
 from fabric_kg_builder.model.ids import content_hash, make_evidence_id
+from tests.conftest import write_approved_domain_contract
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +418,7 @@ class TestEnrichCmdSurfacePdfPattern:
         pdf_path.write_bytes(MINIMAL_PDF)
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         client = _make_client(_SURFACE_PDF_LLM_OUTPUT)
         runner = CliRunner()

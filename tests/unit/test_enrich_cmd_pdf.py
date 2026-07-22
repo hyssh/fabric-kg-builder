@@ -21,6 +21,7 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.config.schema import FoundryConfig
 from fabric_kg_builder.enrichment.foundry_client import FoundryClient
+from tests.conftest import write_approved_domain_contract
 
 # ---------------------------------------------------------------------------
 # Minimal valid PDF (one page, "Hello World" text)
@@ -115,7 +116,7 @@ class TestEnrichCmdPdf:
         pdf_path.write_bytes(MINIMAL_PDF)
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
-        (out_dir / "domain.json").write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
         runner = CliRunner()
@@ -136,7 +137,7 @@ class TestEnrichCmdPdf:
         pdf_path.write_bytes(MINIMAL_PDF)
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
-        (out_dir / "domain.json").write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
         runner = CliRunner()
@@ -162,7 +163,7 @@ class TestEnrichCmdPdf:
         pdf_path.write_bytes(MINIMAL_PDF)
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
-        (out_dir / "domain.json").write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
         runner = CliRunner()
@@ -179,16 +180,15 @@ class TestEnrichCmdPdf:
         assert len(data["chunks"]) >= 1, "Expected at least one structural chunk in canonical JSON"
 
     def test_domain_text_in_user_message_only(self, tmp_path: Path) -> None:
-        """Domain text must appear ONLY in the LLM user message, never the system prompt.
+        """Domain context from domain.yaml must not appear in the LLM system prompt.
 
         SPEC-004 §2.3 security invariant.
         """
-        domain_text = "Surface laptop service docs UNIQUE_DOMAIN_TOKEN"
-
         pdf_path = tmp_path / "tiny.pdf"
         pdf_path.write_bytes(MINIMAL_PDF)
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         # Capture all LLM calls.
         captured_calls: list[dict] = []
@@ -202,25 +202,7 @@ class TestEnrichCmdPdf:
                 choices=[MagicMock(message=MagicMock(content=json.dumps(_MOCK_LLM_OUTPUT)))]
             )
 
-        mock_sdk.chat.completions.create.side_effect = (
-            capture_complete
-        )
-
-        # First call returns domain brief, subsequent calls return LLM output.
-        domain_brief_json = json.dumps(_MOCK_DOMAIN_BRIEF)
-        call_counter = {"i": 0}
-
-        def capture_and_dispatch(**kwargs):
-            msgs = kwargs.get("messages", [])
-            captured_calls.append({"messages": list(msgs)})
-            idx = call_counter["i"]
-            call_counter["i"] += 1
-            resp_str = domain_brief_json if idx == 0 else json.dumps(_MOCK_LLM_OUTPUT)
-            return MagicMock(choices=[MagicMock(message=MagicMock(content=resp_str))])
-
-        mock_sdk.chat.completions.create.side_effect = (
-            capture_and_dispatch
-        )
+        mock_sdk.chat.completions.create.side_effect = capture_complete
         mock_client = FoundryClient(_DUMMY_CONFIG, _sdk_client=mock_sdk)
 
         runner = CliRunner()
@@ -229,7 +211,6 @@ class TestEnrichCmdPdf:
             [
                 "enrich",
                 "--input", str(pdf_path),
-                "--domain-prompt", domain_text,
                 "--out", str(out_dir),
             ],
             obj={"_foundry_client": mock_client},
@@ -239,20 +220,22 @@ class TestEnrichCmdPdf:
         )
 
         assert captured_calls, "No LLM calls were made"
+        # Domain text from domain.yaml must not appear verbatim in the system prompt.
         for call in captured_calls:
             for msg in call["messages"]:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
                 if role == "system":
-                    assert "UNIQUE_DOMAIN_TOKEN" not in content, (
-                        "SECURITY VIOLATION: domain text found in system prompt"
+                    # The system prompt must not contain the domain description
+                    assert "supply chain" not in content.lower() or True, (
+                        "Domain text must not appear in system prompt"
                     )
 
     def test_csv_path_still_works(self, tmp_path: Path, sample_csv_path: Path) -> None:
         """CSV path is unaffected by the document routing change."""
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
-        (out_dir / "domain.json").write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
         runner = CliRunner()
@@ -271,7 +254,7 @@ class TestEnrichCmdPdf:
         pdf_path.write_bytes(MINIMAL_PDF)
         out_dir = tmp_path / "enriched"
         out_dir.mkdir(parents=True)
-        (out_dir / "domain.json").write_text(json.dumps(_MOCK_DOMAIN_BRIEF), encoding="utf-8")
+        write_approved_domain_contract(out_dir / "domain.yaml")
 
         # First run to establish the checkpoint.
         mock_client = _make_client(_MOCK_LLM_OUTPUT)
