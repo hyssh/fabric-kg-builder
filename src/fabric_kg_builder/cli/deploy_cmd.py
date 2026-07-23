@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import click
+import yaml
 
 from fabric_kg_builder.deploy.onelake_writer import (
     LAKEHOUSE_TABLE_PROJECTION,
@@ -494,6 +495,134 @@ def _write_agent_instructions(
     click.echo(f"[deploy-ontology] Data Agent instructions written → {target}")
 
 
+def _load_model_yaml(cwd: Path | None = None) -> dict:
+    """Load ontology/model.yaml if present; return empty dict on failure."""
+    root = cwd or Path.cwd()
+    path = root / "ontology" / "model.yaml"
+    if not path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return raw.get("ontology", raw)
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _validate_parquet_date_precision(
+    parquet_dir: Path,
+    model: dict,
+) -> list[str]:
+    """Scan Parquet data for partial dates on timestamp-typed model properties.
+
+    Returns a list of PARTIAL_DATE_INCOMPATIBLE error strings.  An empty list
+    means no incompatible values were found (or no timestamp properties exist).
+
+    Each error includes the exact rejected-value count, the affected entity count,
+    and a sample of the offending values for actionable context.
+    """
+    import re  # noqa: PLC0415
+
+    _YEAR_ONLY = re.compile(r"^\d{4}$")
+    _YEAR_MONTH = re.compile(r"^\d{4}-\d{2}$")
+
+    timestamp_props: list[tuple[str, str]] = []
+    for et in model.get("entityTypes", []):
+        et_name = str(et.get("name", ""))
+        for prop in et.get("properties", []):
+            if str(prop.get("type", "")) == "timestamp":
+                timestamp_props.append((et_name, str(prop.get("name", ""))))
+
+    if not timestamp_props:
+        return []
+
+    try:
+        import pyarrow.parquet as pq  # noqa: PLC0415
+    except ImportError:
+        return []
+
+    entities_file = parquet_dir / "entities.parquet"
+    if not entities_file.exists():
+        return []
+
+    try:
+        table = pq.read_table(entities_file)
+    except Exception:  # noqa: BLE001
+        return []
+
+    errors: list[str] = []
+    affected_entity_names: set[str] = set()
+    for et_name, prop_name in timestamp_props:
+        if prop_name not in table.schema.names:
+            continue
+        col = table.column(prop_name)
+        col_type = str(col.type)
+        if "timestamp" in col_type or "date" in col_type:
+            continue
+        rejected_count = 0
+        sample_values: list[str] = []
+        for chunk in col.chunks:
+            for val in chunk.to_pylist():
+                if val is None:
+                    continue
+                s = str(val)
+                if _YEAR_ONLY.match(s) or _YEAR_MONTH.match(s):
+                    rejected_count += 1
+                    if len(sample_values) < 3:
+                        sample_values.append(s)
+        if rejected_count > 0:
+            affected_entity_names.add(et_name)
+            errors.append(
+                f"PARTIAL_DATE_INCOMPATIBLE: entity type '{et_name}', "
+                f"property '{prop_name}' is declared 'timestamp' (Fabric DateTime) "
+                f"but data contains {rejected_count} partial date value(s) "
+                f"across 1 entity type. "
+                f"Sample values: {sample_values}. "
+                "Use type 'string' and a separate precision column to preserve "
+                "year-only or year-month dates without inventing missing components."
+            )
+    # Annotate total affected entity count across all errors when more than one entity is affected
+    if len(affected_entity_names) > 1:
+        affected_count = len(affected_entity_names)
+        errors = [
+            e.replace("across 1 entity type", f"across {affected_count} entity type(s)")
+            for e in errors
+        ]
+    return errors
+
+
+def _check_zero_edge_types(
+    model: dict,
+    edges_by_type: dict[str, int],
+    total_edges: int,
+) -> list[str]:
+    """Return error strings for required relationship types with zero edges.
+
+    Only fires when the Lakehouse has edges at all (total_edges > 0) — an
+    empty Lakehouse is not a deployment error.
+    """
+    if total_edges <= 0:
+        return []
+
+    errors: list[str] = []
+    for rt in model.get("relationshipTypes", []):
+        name = str(rt.get("name", ""))
+        if not name:
+            continue
+        if edges_by_type.get(name, 0) == 0:
+            src = rt.get("sourceType", "?")
+            tgt = rt.get("targetType", "?")
+            errors.append(
+                f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{name}' "
+                f"({src} → {tgt}) has zero edges in the deployed relationships "
+                "table. Publishing a disconnected ontology is not allowed. "
+                "Populate the relationships table or remove this relationship "
+                "type from the model before deploying."
+            )
+    return errors
+
+
 def _load_compiled_ontology_parts(dist_path: str) -> list[dict]:
     """Load compiler-owned Ontology parts without rebuilding legacy semantics."""
     definition_path = Path(dist_path) / "definition.json"
@@ -853,9 +982,63 @@ def deploy_ontology_cmd(
         if "RelationshipTypes" in p["path"] and p["path"].endswith("definition.json")
     ]
 
+    # Load model for identity mappings and date/key validation
+    _model = _load_model_yaml()
+
+    # Model-level identity and partial-date pre-deployment validation (OKV-001 / OKV-002).
+    # Fires without requiring a manual datePrecision annotation.
+    if _model:
+        from fabric_kg_builder.ontology.identity_validation import (  # noqa: PLC0415
+            validate_identity,
+        )
+        _okv_violations = validate_identity(_model)
+        _okv_errors = [v for v in _okv_violations if v.severity == "error"]
+        if _okv_errors:
+            for _v in _okv_errors:
+                click.echo(
+                    f"[deploy-ontology] [{_v.gate_id} ERROR] {_v.message}", err=True
+                )
+            click.echo(
+                "[deploy-ontology] ERROR: Ontology identity validation failed — "
+                "fix the model.yaml violations before deploying.",
+                err=True,
+            )
+            sys.exit(5)
+
+    # Partial date pre-deployment validation (when parquet data is available)
+    if parquet_dir and _model:
+        _date_errors = _validate_parquet_date_precision(Path(parquet_dir), _model)
+        if _date_errors:
+            for _err in _date_errors:
+                click.echo(f"[deploy-ontology] PARTIAL_DATE_INCOMPATIBLE: {_err}", err=True)
+            click.echo(
+                "[deploy-ontology] ERROR: Partial date incompatibility detected — "
+                "fix the property type in model.yaml before deploying.",
+                err=True,
+            )
+            sys.exit(5)
+
+    # Build entity and relationship identity mappings for dry-run output
+    from fabric_kg_builder.ontology.compiler import (  # noqa: PLC0415
+        resolve_entity_identity_columns,
+    )
+    _entity_identity = resolve_entity_identity_columns(_model) if _model else {}
+    _rel_identity: dict[str, dict] = {}
+    for _rt in _model.get("relationshipTypes", []):
+        _rt_name = str(_rt.get("name", ""))
+        _rt_db = _rt.get("dataBinding", {}) or {}
+        _rel_identity[_rt_name] = {
+            "table": str(_rt_db.get("table", "")),
+            "source_type": str(_rt.get("sourceType") or ""),
+            "source_fk_column": str(_rt_db.get("sourceEntityIdColumn") or ""),
+            "target_type": str(_rt.get("targetType") or ""),
+            "target_fk_column": str(_rt_db.get("targetEntityIdColumn") or ""),
+        }
+
     click.echo(f"[deploy-ontology] parts built     : {parts_count}")
     click.echo(f"[deploy-ontology] entity types    : {entity_type_names}")
     click.echo(f"[deploy-ontology] relationship types: {rel_type_names}")
+
 
     if use_mock:
         click.echo("")
@@ -868,6 +1051,24 @@ def deploy_ontology_cmd(
         click.echo(f"  Relationship types             : {rel_type_names}")
         for p in parts:
             click.echo(f"    part: {p['path']}")
+
+        # Identity mappings
+        if _entity_identity:
+            click.echo("")
+            click.echo("[deploy-ontology] ENTITY IDENTITY MAPPINGS")
+            for _ent_name, (_tbl, _id_col) in _entity_identity.items():
+                click.echo(f"  {_ent_name}: table={_tbl}, identity_column={_id_col}")
+        if _rel_identity:
+            click.echo("")
+            click.echo("[deploy-ontology] RELATIONSHIP IDENTITY MAPPINGS")
+            for _rel_name, _rinfo in _rel_identity.items():
+                click.echo(
+                    f"  {_rel_name}: {_rinfo['source_type']}."
+                    f"{_rinfo['source_fk_column']} → "
+                    f"{_rinfo['target_type']}.{_rinfo['target_fk_column']} "
+                    f"(table={_rinfo['table']})"
+                )
+
         click.echo("-" * 60)
 
         # Mock item creation
@@ -1017,6 +1218,65 @@ def deploy_ontology_cmd(
         mock=False,
         _lro_timeout_s=poll_timeout,
     )
+
+    # Post-deployment read-back: node and edge counts
+    graph_counts: dict = {}
+    if lakehouse_item_id:
+        from fabric_kg_builder.deploy.fabric_ontology import (  # noqa: PLC0415
+            read_graph_counts,
+        )
+        click.echo("[deploy-ontology] LIVE: reading back graph counts ...")
+        try:
+            graph_counts = read_graph_counts(
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+            )
+        except ImportError as exc:
+            click.echo(
+                f"[deploy-ontology] ERROR: cannot load graph read-back dependency: {exc}",
+                err=True,
+            )
+            sys.exit(1)
+        # read_graph_counts returns total_edges=-1 / total_nodes=-1 when internal
+        # table reads fail.  Treat incomplete read-back as a hard deployment error so
+        # zero-edge validation cannot be silently skipped.
+        if graph_counts.get("total_edges", -1) < 0 or graph_counts.get("total_nodes", -1) < 0:
+            click.echo(
+                "[deploy-ontology] ERROR: post-deployment graph count read-back failed "
+                f"(counts: nodes={graph_counts.get('total_nodes')}, "
+                f"edges={graph_counts.get('total_edges')}). "
+                "Cannot verify zero-edge validation — aborting publication.",
+                err=True,
+            )
+            sys.exit(1)
+        click.echo(
+            f"[deploy-ontology] graph counts: {graph_counts['note']}"
+        )
+        click.echo(
+            f"[deploy-ontology] nodes by type: {graph_counts['nodes_by_type']}"
+        )
+        click.echo(
+            f"[deploy-ontology] edges by type: {graph_counts['edges_by_type']}"
+        )
+        # Zero-edge detection: fail if any declared relationship type has no edges
+        if _model:
+            _zero_errors = _check_zero_edge_types(
+                _model,
+                graph_counts["edges_by_type"],
+                graph_counts["total_edges"],
+            )
+            if _zero_errors:
+                for _zerr in _zero_errors:
+                    click.echo(f"[deploy-ontology] ERROR: {_zerr}", err=True)
+                click.echo(
+                    "[deploy-ontology] ERROR: Disconnected ontology detected "
+                    "— aborting publication. Populate the relationships table "
+                    "or remove zero-edge types from the model.",
+                    err=True,
+                )
+                sys.exit(1)
+
     ontology_persisted_evidence = None
     bound_table_counts: dict[str, int] = {}
     if semantic_loaded is not None:
@@ -1112,6 +1372,12 @@ def deploy_ontology_cmd(
                 else {}
             ),
             "bound_table_counts": bound_table_counts,
+            "graph_counts": {
+                "total_nodes": graph_counts.get("total_nodes", -1),
+                "total_edges": graph_counts.get("total_edges", -1),
+                "nodes_by_type": graph_counts.get("nodes_by_type", {}),
+                "edges_by_type": graph_counts.get("edges_by_type", {}),
+            },
             "materialized_tables": {
                 table_name: {
                     "status": evidence.status,

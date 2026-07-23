@@ -28,6 +28,8 @@ from typing import Any
 
 import yaml
 
+from fabric_kg_builder.ontology.identity_validation import validate_identity
+
 # ---------------------------------------------------------------------------
 # Schema URL constants
 # ---------------------------------------------------------------------------
@@ -212,6 +214,143 @@ def _physical_type_ids(
     return _extract("entity_types"), _extract("relationship_types")
 
 
+def resolve_entity_identity_columns(
+    model: dict[str, Any],
+) -> dict[str, tuple[str, str]]:
+    """Return the physical identity column for every entity binding.
+
+    Returns a mapping of ``{entity_name: (binding_table, entityIdColumn)}``.
+    Falls back to ``"entity_id"`` when no explicit ``entityIdColumn`` is
+    declared — consistent with the rest of the compiler.
+    """
+    result: dict[str, tuple[str, str]] = {}
+    for et in model.get("entityTypes", []):
+        name = str(et.get("name", ""))
+        if not name:
+            continue
+        db = et.get("dataBinding", {}) or {}
+        table = str(db.get("table", ""))
+        id_col = str(db.get("entityIdColumn") or "entity_id")
+        result[name] = (table, id_col)
+    return result
+
+
+def validate_relationship_keys(
+    model: dict[str, Any],
+) -> list[str]:
+    """Validate relationship FK endpoint columns against entity identity columns.
+
+    Rules:
+    - ``sourceEntityIdColumn`` must be non-empty when ``sourceType`` is declared.
+    - ``targetEntityIdColumn`` must be non-empty when ``targetType`` is declared.
+    - When the relationship binding table equals the entity binding table, the
+      FK column must equal the entity's declared ``entityIdColumn``.
+
+    Returns a list of ``ONTOLOGY_RELATIONSHIP_KEY_MISMATCH`` error message strings.
+    A non-empty list should be treated as a compilation error by callers.
+    """
+    entity_identity = resolve_entity_identity_columns(model)
+    errors: list[str] = []
+
+    for rt in model.get("relationshipTypes", []):
+        name = str(rt.get("name", ""))
+        src_type = rt.get("sourceType") or ""
+        tgt_type = rt.get("targetType") or ""
+        db = rt.get("dataBinding", {}) or {}
+        rel_table = str(db.get("table", ""))
+        src_col = str(db.get("sourceEntityIdColumn") or "")
+        tgt_col = str(db.get("targetEntityIdColumn") or "")
+
+        if not src_type and not tgt_type:
+            continue
+
+        if src_type and not src_col:
+            _, src_id = entity_identity.get(str(src_type), ("", "entity_id"))
+            errors.append(
+                f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{name}', "
+                f"source endpoint column is empty/missing, "
+                f"expected entity identity column '{src_id}' "
+                f"(entity type: {src_type})"
+            )
+
+        if tgt_type and not tgt_col:
+            _, tgt_id = entity_identity.get(str(tgt_type), ("", "entity_id"))
+            errors.append(
+                f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{name}', "
+                f"target endpoint column is empty/missing, "
+                f"expected entity identity column '{tgt_id}' "
+                f"(entity type: {tgt_type})"
+            )
+
+        # Same-table binding: FK column name must equal entity identity column.
+        # Cross-table bindings (the common case) are FK references and do NOT
+        # require name equality — only that the column is declared.
+        if src_type and src_col and str(src_type) in entity_identity:
+            src_table, src_id = entity_identity[str(src_type)]
+            if (
+                rel_table
+                and src_table
+                and rel_table == src_table
+                and src_col != src_id
+            ):
+                errors.append(
+                    f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{name}', "
+                    f"source endpoint column '{src_col}' does not match "
+                    f"entity identity column '{src_id}' "
+                    f"(entity type: {src_type}, shared table: {rel_table})"
+                )
+
+        if tgt_type and tgt_col and str(tgt_type) in entity_identity:
+            tgt_table, tgt_id = entity_identity[str(tgt_type)]
+            if (
+                rel_table
+                and tgt_table
+                and rel_table == tgt_table
+                and tgt_col != tgt_id
+            ):
+                errors.append(
+                    f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{name}', "
+                    f"target endpoint column '{tgt_col}' does not match "
+                    f"entity identity column '{tgt_id}' "
+                    f"(entity type: {tgt_type}, shared table: {rel_table})"
+                )
+
+    return errors
+
+
+def validate_date_types(
+    model: dict[str, Any],
+) -> list[str]:
+    """Validate that timestamp-typed properties are not declared as partial dates.
+
+    A property typed ``timestamp`` maps to Fabric ``DateTime``, which requires
+    full ISO-8601 precision.  If a property is annotated with
+    ``datePrecision: year``, ``datePrecision: year-month``, or
+    ``datePrecision: partial``, it is incompatible with the strict DateTime
+    mapping and must use ``string`` instead.
+
+    Returns a list of ``PARTIAL_DATE_INCOMPATIBLE`` error message strings.
+    """
+    errors: list[str] = []
+    for et in model.get("entityTypes", []):
+        et_name = str(et.get("name", ""))
+        for prop in et.get("properties", []):
+            prop_type = str(prop.get("type", ""))
+            if prop_type != "timestamp":
+                continue
+            prop_name = str(prop.get("name", ""))
+            precision = prop.get("datePrecision") or prop.get("date_precision") or ""
+            if str(precision).lower() in ("year", "year-month", "partial"):
+                errors.append(
+                    f"PARTIAL_DATE_INCOMPATIBLE: entity type '{et_name}', "
+                    f"property '{prop_name}' declared as 'timestamp' (Fabric DateTime) "
+                    f"but datePrecision='{precision}' indicates partial dates. "
+                    "Use type 'string' to preserve year-only or year-month values "
+                    "without inventing missing precision."
+                )
+    return errors
+
+
 def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
     """Raise :class:`OntologyCompilerError` if the model or ID lock is invalid.
 
@@ -220,6 +359,8 @@ def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
     2. Every relationship type in model.yaml has an ID in ids.lock.json.
     3. No duplicate IDs across entity and relationship type maps.
     4. Every relationship type references known entity type names.
+    5. Relationship FK endpoint columns are compatible with entity identity columns.
+    6. Timestamp-typed properties are not annotated as partial-precision dates.
     """
     entity_ids, rel_ids = _physical_type_ids(ids)
 
@@ -310,6 +451,34 @@ def _validate(model: dict[str, Any], ids: dict[str, Any]) -> None:
             raise OntologyCompilerError(
                 f"Relationship type '{rt['name']}' references unknown targetType '{tgt}'"
             )
+
+    # 5. Relationship FK endpoint columns must be compatible with entity identity columns
+    key_errors = validate_relationship_keys(model)
+    if key_errors:
+        raise OntologyCompilerError(
+            "Relationship endpoint key validation failed:\n"
+            + "\n".join(f"  {e}" for e in key_errors)
+        )
+
+    # 6. Timestamp properties must not declare partial-date precision
+    date_errors = validate_date_types(model)
+    if date_errors:
+        raise OntologyCompilerError(
+            "Date type validation failed:\n"
+            + "\n".join(f"  {e}" for e in date_errors)
+        )
+
+    # 7. OKV-001 / OKV-002 identity domain and partial-date gates.
+    #    validate_identity() detects cross-table domain mismatches (OKV-001) and
+    #    timestamp-typed properties whose name suggests partial dates (OKV-002)
+    #    WITHOUT requiring a manual datePrecision annotation.
+    okv_violations = validate_identity(model)
+    okv_errors = [v for v in okv_violations if v.severity == "error"]
+    if okv_errors:
+        raise OntologyCompilerError(
+            "Identity validation failed:\n"
+            + "\n".join(f"  [{v.gate_id}] {v.message}" for v in okv_errors)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -722,3 +891,40 @@ class OntologyCompiler:
         )
 
         return out
+
+    def get_identity_mappings(self) -> dict[str, Any]:
+        """Return entity and relationship identity mappings for dry-run output.
+
+        Returns a dict with two keys:
+
+        ``entities``
+            ``{entity_name: {"table": str, "identity_column": str}}``
+        ``relationships``
+            ``{rel_name: {"table": str, "source_type": str,
+                          "source_fk_column": str,
+                          "target_type": str, "target_fk_column": str}}``
+
+        These mappings expose the physical column resolution so that dry-run
+        output can show how every endpoint is bound, and so that
+        ONTOLOGY_RELATIONSHIP_KEY_MISMATCH errors can be traced to the
+        correct column.
+        """
+        entity_identity = resolve_entity_identity_columns(self.model)
+        entities_out: dict[str, Any] = {
+            name: {"table": table, "identity_column": col}
+            for name, (table, col) in entity_identity.items()
+        }
+
+        relationships_out: dict[str, Any] = {}
+        for rt in self.model.get("relationshipTypes", []):
+            name = str(rt.get("name", ""))
+            db = rt.get("dataBinding", {}) or {}
+            relationships_out[name] = {
+                "table": str(db.get("table", "")),
+                "source_type": str(rt.get("sourceType") or ""),
+                "source_fk_column": str(db.get("sourceEntityIdColumn") or ""),
+                "target_type": str(rt.get("targetType") or ""),
+                "target_fk_column": str(db.get("targetEntityIdColumn") or ""),
+            }
+
+        return {"entities": entities_out, "relationships": relationships_out}

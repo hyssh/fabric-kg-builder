@@ -514,6 +514,10 @@ ontology:
           type: string
           required: true
           description: "Document path or filename"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for source_file_id)"
         - name: canonical_key
           type: string
           required: false
@@ -523,6 +527,8 @@ ontology:
         entityIdColumn: source_file_id
         displayNameColumn: path
         additionalColumns:
+          - property: entity_id
+            column: source_file_id
           - property: canonical_key
             column: filename
 
@@ -576,6 +582,10 @@ ontology:
           type: string
           required: true
           description: "Section heading"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: section_path
           type: string
           required: false
@@ -591,6 +601,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: section
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: section_path
             column: section_path
           - property: page_number
@@ -626,6 +638,10 @@ ontology:
           type: string
           required: true
           description: "Table title or caption"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: page_number
           type: int
           required: false
@@ -641,6 +657,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: table
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: page_number
             column: page_number
           - property: section_path
@@ -654,6 +672,10 @@ ontology:
           type: string
           required: true
           description: "Row label or first-cell content"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: row_index
           type: int
           required: false
@@ -665,6 +687,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: table_row
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: row_index
             column: row_index
 
@@ -676,6 +700,10 @@ ontology:
           type: string
           required: true
           description: "Column header text"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: col_index
           type: int
           required: false
@@ -687,6 +715,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: table_cell
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: col_index
             column: col_index
 
@@ -698,6 +728,10 @@ ontology:
           type: string
           required: true
           description: "Cell text content"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: row_index
           type: int
           required: false
@@ -713,6 +747,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: table_cell
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: row_index
             column: row_index
           - property: col_index
@@ -726,6 +762,10 @@ ontology:
           type: string
           required: true
           description: "Figure title or caption"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: blob_url
           type: blob_url
           required: true
@@ -745,6 +785,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: figure
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: blob_url
             column: blob_url
           - property: caption
@@ -788,12 +830,19 @@ ontology:
           type: string
           required: true
           description: "Caption text"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
       dataBinding:
         table: document_elements
         entityIdColumn: document_element_id
         displayNameColumn: content
         typeFilterColumn: element_type
         typeFilterValue: caption
+        additionalColumns:
+          - property: entity_id
+            column: document_element_id
 
     - name: Callout
       description: "A callout label in a service guide diagram pointing to a part or component"
@@ -803,6 +852,10 @@ ontology:
           type: string
           required: true
           description: "Callout label text (e.g. 'B – Battery connector')"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for document_element_id)"
         - name: label
           type: string
           required: false
@@ -814,6 +867,8 @@ ontology:
         typeFilterColumn: element_type
         typeFilterValue: callout
         additionalColumns:
+          - property: entity_id
+            column: document_element_id
           - property: label
             column: title
 
@@ -963,6 +1018,10 @@ ontology:
           type: string
           required: true
           description: "Region label or detected object label"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for visual_region_id)"
         - name: blob_url
           type: blob_url
           required: true
@@ -984,6 +1043,8 @@ ontology:
         entityIdColumn: visual_region_id
         displayNameColumn: label
         additionalColumns:
+          - property: entity_id
+            column: visual_region_id
           - property: blob_url
             column: blob_url
           - property: region_type
@@ -1001,6 +1062,10 @@ ontology:
           type: string
           required: true
           description: "OCR text content (first 200 chars)"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for visual_region_id)"
         - name: text
           type: string
           required: false
@@ -1012,6 +1077,8 @@ ontology:
         typeFilterColumn: region_type
         typeFilterValue: ocr_text
         additionalColumns:
+          - property: entity_id
+            column: visual_region_id
           - property: text
             column: text
 
@@ -1073,6 +1140,10 @@ ontology:
           type: string
           required: true
           description: "Chunk content preview"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for chunk_id)"
         - name: content
           type: string
           required: false
@@ -1081,6 +1152,9 @@ ontology:
         table: chunks
         entityIdColumn: chunk_id
         displayNameColumn: content
+        additionalColumns:
+          - property: entity_id
+            column: chunk_id
 
     - name: ChunkEmbedding
       description: "An embedding vector associated with a chunk (1536-dim text-embedding-3-large)"
@@ -1090,10 +1164,17 @@ ontology:
           type: string
           required: true
           description: "Embedding label (chunk_id reference)"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for chunk_id)"
       dataBinding:
         table: chunks
         entityIdColumn: chunk_id
         displayNameColumn: chunk_id
+        additionalColumns:
+          - property: entity_id
+            column: chunk_id
 
     - name: SearchDocument
       description: "A document stored in an Azure AI Search index"
@@ -1103,10 +1184,17 @@ ontology:
           type: string
           required: true
           description: "Search document key"
+        - name: entity_id
+          type: string
+          required: true
+          description: "Stable opaque entity ID (SHA-256-derived; alias for chunk_id)"
       dataBinding:
         table: chunks
         entityIdColumn: chunk_id
         displayNameColumn: chunk_id
+        additionalColumns:
+          - property: entity_id
+            column: chunk_id
 
     - name: SearchIndexRecord
       description: "A record in a specific Azure AI Search index — keyed by chunk_id; bridge node for Phase 2 retrieval"

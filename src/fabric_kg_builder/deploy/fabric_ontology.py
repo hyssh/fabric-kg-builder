@@ -880,3 +880,122 @@ def get_ontology_refresh_state(
         resp.status_code,
     )
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Post-deployment read-back: node and edge counts from Lakehouse
+# ---------------------------------------------------------------------------
+
+
+def read_graph_counts(
+    workspace_id: str,
+    lakehouse_item_id: str,
+    schema: str,
+    *,
+    entities_table: str = "entities",
+    relationships_table: str = "relationships",
+    table_reader: Any | None = None,
+) -> dict[str, Any]:
+    """Read node and edge counts from the deployed Lakehouse tables.
+
+    Queries the canonical ``entities`` and ``relationships`` Delta tables and
+    returns per-type row counts.  Used for post-deployment structural
+    validation — a non-zero total with zero-count relationship types indicates
+    a disconnected ontology.
+
+    Parameters
+    ----------
+    workspace_id, lakehouse_item_id, schema:
+        Lakehouse binding coordinates.
+    entities_table / relationships_table:
+        Override table names (defaults: ``entities`` / ``relationships``).
+    table_reader:
+        Injectable :class:`~fabric_kg_builder.serving.competency.OneLakeDeltaClient`
+        (for testing).  When ``None``, one is constructed at call time.
+
+    Returns
+    -------
+    dict with keys:
+        ``total_nodes``      — total row count in the entities table.
+        ``total_edges``      — total row count in the relationships table.
+        ``nodes_by_type``    — ``{entity_type: count}`` breakdown.
+        ``edges_by_type``    — ``{relationship_type: count}`` breakdown.
+        ``note``             — human-readable summary line.
+    """
+    if table_reader is None:
+        from fabric_kg_builder.serving.competency import (  # noqa: PLC0415
+            OneLakeDeltaClient,
+        )
+        table_reader = OneLakeDeltaClient()
+
+    import pyarrow.compute as pc  # noqa: PLC0415
+
+    # Read entities table
+    try:
+        entities_arrow = table_reader.read_table(
+            workspace_id,
+            lakehouse_item_id,
+            schema,
+            entities_table,
+            columns=["entity_type"],
+        )
+        total_nodes = entities_arrow.num_rows
+        if total_nodes > 0:
+            entity_type_col = entities_arrow.column("entity_type")
+            unique_types = entity_type_col.unique().to_pylist()
+            nodes_by_type = {
+                str(t): int(pc.sum(pc.equal(entity_type_col, t)).as_py() or 0)
+                for t in unique_types
+                if t is not None
+            }
+        else:
+            nodes_by_type = {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[fabric_ontology] Could not read entities table for count: %s", exc
+        )
+        total_nodes = -1
+        nodes_by_type = {}
+
+    # Read relationships table
+    try:
+        rels_arrow = table_reader.read_table(
+            workspace_id,
+            lakehouse_item_id,
+            schema,
+            relationships_table,
+            columns=["relationship_type"],
+        )
+        total_edges = rels_arrow.num_rows
+        if total_edges > 0:
+            rel_type_col = rels_arrow.column("relationship_type")
+            unique_rel_types = rel_type_col.unique().to_pylist()
+            edges_by_type = {
+                str(t): int(pc.sum(pc.equal(rel_type_col, t)).as_py() or 0)
+                for t in unique_rel_types
+                if t is not None
+            }
+        else:
+            edges_by_type = {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[fabric_ontology] Could not read relationships table for count: %s", exc
+        )
+        total_edges = -1
+        edges_by_type = {}
+
+    note = (
+        f"Nodes: {total_nodes} total "
+        f"({len(nodes_by_type)} type(s)); "
+        f"Edges: {total_edges} total "
+        f"({len(edges_by_type)} relationship type(s))"
+    )
+    logger.info("[fabric_ontology] graph counts: %s", note)
+    return {
+        "total_nodes": total_nodes,
+        "total_edges": total_edges,
+        "nodes_by_type": nodes_by_type,
+        "edges_by_type": edges_by_type,
+        "note": note,
+    }
+
