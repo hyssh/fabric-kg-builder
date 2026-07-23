@@ -885,6 +885,7 @@ def _deploy_knowledge(
     source_name = f"fkg-{run_token}-search-source"
     kb_name = f"fkg-{run_token}-knowledge-base"
     data_agent_name = configured_name
+    _bd_competency_contract_exists = False
     try:
         loaded_semantic = load_semantic_model_artifacts(semantic_dir)
         projection_receipt = PersistedProjectionReceipt.model_validate_json(
@@ -936,9 +937,10 @@ def _deploy_knowledge(
             build_public_graph_source_projection(grounding)
         )
         competency_path = semantic_context_path.parent / "competency-contract.json"
+        _bd_competency_contract_exists = competency_path.exists()
         graph_few_shots = graph_few_shots_from_competency_contract(
             json.loads(competency_path.read_text(encoding="utf-8"))
-            if competency_path.exists()
+            if _bd_competency_contract_exists
             else {}
         )
         data_agent_spec = DataAgentSpec(
@@ -1000,6 +1002,51 @@ def _deploy_knowledge(
             f"Data Agent grounding preparation failed: {exc}"
         ) from exc
 
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        FewShotContractViolation,
+        SourcePolicy,
+        SourcePolicyViolation,
+        TextLimitViolation,
+        validate_data_agent_text,
+        validate_graph_few_shots,
+        validate_instruction_deduplication,
+        validate_source_policy,
+    )
+
+    _bd_source_policy = SourcePolicy(
+        required=frozenset({"ontology", "graph"}),
+    )
+    try:
+        validate_source_policy(data_agent_spec, _bd_source_policy)
+    except SourcePolicyViolation as exc:
+        raise BuildDeployError(str(exc)) from exc
+
+    try:
+        validate_graph_few_shots(
+            data_agent_spec, contract_exists=_bd_competency_contract_exists
+        )
+    except FewShotContractViolation as exc:
+        raise BuildDeployError(str(exc)) from exc
+
+    text_results = validate_data_agent_text(data_agent_spec)
+    dedup_violations = validate_instruction_deduplication(data_agent_spec)
+    text_failures = [r for r in text_results if not r.passed]
+    if text_failures:
+        first = text_failures[0]
+        raise BuildDeployError(
+            TextLimitViolation(
+                field=first.field,
+                actual=first.actual,
+                limit=first.limit,
+                remediation=first.remediation,
+            ).args[0]
+        )
+    if dedup_violations:
+        raise BuildDeployError(
+            "Duplicate instruction blocks detected:\n"
+            + "\n".join(f"  - {v}" for v in dedup_violations)
+        )
+
     click.echo(
         "[build-deploy] Data Agent target: "
         f"workspace={workspace_name} ({workspace_id}), "
@@ -1009,6 +1056,19 @@ def _deploy_knowledge(
         f"instruction={package_instruction_hash}, "
         f"selection={stage_snapshot_from_spec(data_agent_spec).source_selection_hash}"
     )
+
+    # Report source policy and text validation counts
+    _source_type_label_bd = {"ontology": "required ✓", "graph": "required ✓"}
+    click.echo("[build-deploy] Source policy:")
+    for _src in data_agent_spec.sources:
+        _label = _source_type_label_bd.get(_src.source_type, "present")
+        click.echo(f"  {_src.source_type}: {_label}")
+    click.echo("[build-deploy] Source policy: PASS")
+    click.echo("[build-deploy] Definition text validation:")
+    for _r in text_results:
+        click.echo(f"  {_r.field}: {_r.actual:,} / {_r.limit:,}")
+    click.echo(f"  duplicate instruction blocks: {len(dedup_violations)}")
+    click.echo("[build-deploy] Definition text policy: PASS")
 
     capability = CapabilityResult(
         endpoint=search_endpoint,
@@ -1079,6 +1139,7 @@ def _deploy_knowledge(
                 f"{data_agent_name} semantic release for run {run_token}."
             ),
             required_source_type="graph",
+            source_policy=_bd_source_policy,
         )
     except (
         AgentPublicationError,

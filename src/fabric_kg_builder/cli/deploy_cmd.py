@@ -1812,6 +1812,7 @@ def deploy_data_agent_cmd(
         build_ontology_source_instructions,
         load_semantic_model_artifacts,
     )
+    _competency_contract_exists = False
     try:
         loaded = load_semantic_model_artifacts(semantic_dir)
         persisted = PersistedProjectionReceipt.model_validate_json(
@@ -1863,9 +1864,10 @@ def deploy_data_agent_cmd(
             build_public_graph_source_projection(grounding)
         )
         competency_path = agent_dir / "competency-contract.json"
+        _competency_contract_exists = competency_path.exists()
         graph_few_shots = graph_few_shots_from_competency_contract(
             json.loads(competency_path.read_text(encoding="utf-8"))
-            if competency_path.exists()
+            if _competency_contract_exists
             else {}
         )
         spec = DataAgentSpec(
@@ -1924,6 +1926,49 @@ def deploy_data_agent_cmd(
             f"Data Agent grounding preparation failed: {exc}"
         ) from exc
 
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        FewShotContractViolation,
+        SourcePolicy,
+        SourcePolicyViolation,
+        TextLimitViolation,
+        validate_data_agent_text,
+        validate_graph_few_shots,
+        validate_instruction_deduplication,
+        validate_source_policy,
+    )
+
+    _data_agent_source_policy = SourcePolicy(
+        required=frozenset({"ontology", "graph"}),
+    )
+    try:
+        validate_source_policy(spec, _data_agent_source_policy)
+    except SourcePolicyViolation as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        validate_graph_few_shots(spec, contract_exists=_competency_contract_exists)
+    except FewShotContractViolation as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    text_results = validate_data_agent_text(spec)
+    dedup_violations = validate_instruction_deduplication(spec)
+    text_failures = [r for r in text_results if not r.passed]
+    if text_failures:
+        first = text_failures[0]
+        raise click.ClickException(
+            TextLimitViolation(
+                field=first.field,
+                actual=first.actual,
+                limit=first.limit,
+                remediation=first.remediation,
+            ).args[0]
+        )
+    if dedup_violations:
+        raise click.ClickException(
+            "Duplicate instruction blocks detected:\n"
+            + "\n".join(f"  - {v}" for v in dedup_violations)
+        )
+
     click.echo(
         f"[deploy-data-agent] workspace: "
         f"{fabric_cfg['workspace_display_name']} ({workspace_id})\n"
@@ -1938,6 +1983,21 @@ def deploy_data_agent_cmd(
         f"[deploy-data-agent] source-selection hash: "
         f"{expected.source_selection_hash}"
     )
+
+    # Report source policy and text validation counts in dry-run
+    _source_type_label = {"ontology": "required ✓", "graph": "required ✓"}
+    click.echo("\nSource policy:")
+    for src in spec.sources:
+        label = _source_type_label.get(src.source_type, "present")
+        click.echo(f"  {src.source_type}: {label}")
+    click.echo("  Source policy: PASS")
+    click.echo("\nDefinition text validation:")
+    for r in text_results:
+        click.echo(f"  {r.field}: {r.actual:,} / {r.limit:,}")
+    dup_count = len(dedup_violations)
+    click.echo(f"  duplicate instruction blocks: {dup_count}")
+    click.echo("  Definition text policy: PASS")
+
     if dry_run:
         click.echo("[deploy-data-agent] SUCCESS (dry-run)")
         return
@@ -1969,6 +2029,7 @@ def deploy_data_agent_cmd(
                 f"{data_agent_name} persisted semantic release."
             ),
             required_source_type="graph",
+            source_policy=_data_agent_source_policy,
         )
     except (
         AgentPublicationError,

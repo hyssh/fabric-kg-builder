@@ -669,12 +669,25 @@ def deploy_and_validate_data_agent(
     projection_receipt_hash: str,
     published_description: str,
     required_source_type: Literal["graph", "ontology"] = "graph",
+    source_policy: Any | None = None,
 ) -> tuple[
     DataAgentUpsertResult,
     DataAgentPublishResult,
     AgentPublicationReceipt,
 ]:
-    """Mutate one exact target, publish it, and validate persisted read-back."""
+    """Mutate one exact target, publish it, and validate persisted read-back.
+
+    Parameters
+    ----------
+    source_policy : SourcePolicy | None
+        Optional :class:`~fabric_kg_builder.knowledge.validation.SourcePolicy`
+        to enforce against the published read-back.  When provided, a
+        :class:`~fabric_kg_builder.knowledge.validation.SourcePolicyViolation`
+        is raised if the published source types diverge.
+    """
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        validate_published_source_policy,
+    )
     expected = stage_snapshot_from_spec(spec)
     result = client.deploy_target(
         spec,
@@ -687,6 +700,8 @@ def deploy_and_validate_data_agent(
         description=published_description,
     )
     draft, published = client.get_stage_snapshots(result.item_id)
+    if source_policy is not None:
+        validate_published_source_policy(published, source_policy)
     receipt = build_agent_publication_receipt(
         target_mode=target_mode,
         configured_target_item_id=configured_target_item_id,
