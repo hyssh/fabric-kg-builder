@@ -648,3 +648,233 @@ def test_duplicate_id_raises(tmp_path: Path) -> None:
 
     with pytest.raises(OntologyCompilerError, match="Duplicate.*ID"):
         OntologyCompiler(model_p, ids_p)
+
+
+# ---------------------------------------------------------------------------
+# D1 regression: OKV-001 must propagate through OntologyCompiler.__init__
+# (identity_validation.validate_identity() is now wired into _validate())
+# ---------------------------------------------------------------------------
+
+def test_okv001_domain_mismatch_raises_via_compiler(tmp_path: Path) -> None:
+    """Compiler raises OntologyCompilerError when relationship FK is domain-incompatible.
+
+    This is the active-pipeline regression for D1: a cross-table relationship
+    where sourceEntityIdColumn='source_entity_id' points at an entity whose
+    identity column is 'chunk_id' (no entity_id alias) must fail compilation
+    with ONTOLOGY_RELATIONSHIP_KEY_MISMATCH, not silently pass.
+    """
+    model = {
+        "ontology": {
+            "name": "TestOntology",
+            "entityTypes": [
+                {
+                    "name": "ChunkEntity",
+                    "description": "Uses chunk_id as identity",
+                    "module": "m",
+                    "properties": [
+                        {"name": "chunk_id", "type": "string", "required": True},
+                        {"name": "display_name", "type": "string", "required": True},
+                    ],
+                    "dataBinding": {
+                        "table": "chunks",
+                        "entityIdColumn": "chunk_id",
+                        "displayNameColumn": "display_name",
+                    },
+                },
+                {
+                    "name": "IndexRecord",
+                    "description": "Uses entity_id as identity",
+                    "module": "m",
+                    "properties": [
+                        {"name": "entity_id", "type": "string", "required": True},
+                        {"name": "display_name", "type": "string", "required": True},
+                    ],
+                    "dataBinding": {
+                        "table": "entities",
+                        "entityIdColumn": "entity_id",
+                        "displayNameColumn": "display_name",
+                    },
+                },
+            ],
+            "relationshipTypes": [
+                {
+                    "name": "indexed_as_test",
+                    "description": "",
+                    "module": "m",
+                    "sourceType": "ChunkEntity",
+                    "targetType": "IndexRecord",
+                    "inversePolicy": "none",
+                    "evidenceLink": False,
+                    "dataBinding": {
+                        "table": "relationships",
+                        "relationshipIdColumn": "id",
+                        # source_entity_id → entity_id domain, but ChunkEntity uses chunk_id
+                        # → OKV-001 domain mismatch (no entity_id alias on ChunkEntity)
+                        "sourceEntityIdColumn": "source_entity_id",
+                        "targetEntityIdColumn": "target_entity_id",
+                    },
+                }
+            ],
+        }
+    }
+    model_p = _write_yaml(tmp_path / "model.yaml", model)
+    ids_p = _write_json(
+        tmp_path / "ids.lock.json",
+        _minimal_ids(
+            entity_ids={
+                "ChunkEntity": "1000000000000000001",
+                "IndexRecord": "1000000000000000002",
+            },
+            rel_ids={"indexed_as_test": "2000000000000000001"},
+        ),
+    )
+
+    with pytest.raises(OntologyCompilerError, match="Identity validation failed"):
+        OntologyCompiler(model_p, ids_p)
+
+
+def test_okv001_valid_entity_id_alias_passes_compiler(tmp_path: Path) -> None:
+    """FK alias source_entity_id → entity_id does NOT raise when entity identity IS entity_id."""
+    model = {
+        "ontology": {
+            "name": "TestOntology",
+            "entityTypes": [
+                {
+                    "name": "Device",
+                    "description": "",
+                    "module": "m",
+                    "properties": [
+                        {"name": "entity_id", "type": "string", "required": True},
+                        {"name": "display_name", "type": "string", "required": True},
+                    ],
+                    "dataBinding": {
+                        "table": "entities",
+                        "entityIdColumn": "entity_id",
+                        "displayNameColumn": "display_name",
+                    },
+                },
+                {
+                    "name": "Component",
+                    "description": "",
+                    "module": "m",
+                    "properties": [
+                        {"name": "entity_id", "type": "string", "required": True},
+                        {"name": "display_name", "type": "string", "required": True},
+                    ],
+                    "dataBinding": {
+                        "table": "entities",
+                        "entityIdColumn": "entity_id",
+                        "displayNameColumn": "display_name",
+                    },
+                },
+            ],
+            "relationshipTypes": [
+                {
+                    "name": "has_component_test",
+                    "description": "",
+                    "module": "m",
+                    "sourceType": "Device",
+                    "targetType": "Component",
+                    "inversePolicy": "none",
+                    "evidenceLink": False,
+                    "dataBinding": {
+                        "table": "relationships",
+                        "relationshipIdColumn": "id",
+                        "sourceEntityIdColumn": "source_entity_id",
+                        "targetEntityIdColumn": "target_entity_id",
+                    },
+                }
+            ],
+        }
+    }
+    model_p = _write_yaml(tmp_path / "model.yaml", model)
+    ids_p = _write_json(
+        tmp_path / "ids.lock.json",
+        _minimal_ids(
+            entity_ids={"Device": "1000000000000000001", "Component": "1000000000000000002"},
+            rel_ids={"has_component_test": "2000000000000000001"},
+        ),
+    )
+    # Must not raise: entity_id → entity_id is the canonical valid alias
+    compiler_obj = OntologyCompiler(model_p, ids_p)
+    assert compiler_obj is not None
+
+
+# ---------------------------------------------------------------------------
+# D2 regression: OKV-002 must propagate through compiler WITHOUT annotation
+# ---------------------------------------------------------------------------
+
+def test_okv002_timestamp_date_property_raises_without_annotation(tmp_path: Path) -> None:
+    """Compiler raises OntologyCompilerError for event_date:timestamp without datePrecision.
+
+    D2 active-pipeline regression: OKV-002 fires on name heuristic alone —
+    no manual datePrecision annotation required.
+    """
+    model = {
+        "ontology": {
+            "name": "TestOntology",
+            "entityTypes": [
+                {
+                    "name": "ServiceEvent",
+                    "description": "",
+                    "module": "m",
+                    "properties": [
+                        {"name": "entity_id", "type": "string", "required": True},
+                        {"name": "display_name", "type": "string", "required": True},
+                        # timestamp + name contains "date" → OKV-002, no annotation needed
+                        {"name": "event_date", "type": "timestamp", "required": False},
+                    ],
+                    "dataBinding": {
+                        "table": "events",
+                        "entityIdColumn": "entity_id",
+                        "displayNameColumn": "display_name",
+                    },
+                }
+            ],
+            "relationshipTypes": [],
+        }
+    }
+    model_p = _write_yaml(tmp_path / "model.yaml", model)
+    ids_p = _write_json(
+        tmp_path / "ids.lock.json",
+        _minimal_ids(entity_ids={"ServiceEvent": "1000000000000000001"}),
+    )
+
+    with pytest.raises(OntologyCompilerError, match="Identity validation failed"):
+        OntologyCompiler(model_p, ids_p)
+
+
+def test_okv002_timestamp_non_date_name_passes_compiler(tmp_path: Path) -> None:
+    """Compiler does NOT raise for a timestamp property whose name lacks 'date'."""
+    model = {
+        "ontology": {
+            "name": "TestOntology",
+            "entityTypes": [
+                {
+                    "name": "Event",
+                    "description": "",
+                    "module": "m",
+                    "properties": [
+                        {"name": "entity_id", "type": "string", "required": True},
+                        {"name": "display_name", "type": "string", "required": True},
+                        # 'created_at' does not contain 'date' → no OKV-002
+                        {"name": "created_at", "type": "timestamp", "required": False},
+                    ],
+                    "dataBinding": {
+                        "table": "events",
+                        "entityIdColumn": "entity_id",
+                        "displayNameColumn": "display_name",
+                    },
+                }
+            ],
+            "relationshipTypes": [],
+        }
+    }
+    model_p = _write_yaml(tmp_path / "model.yaml", model)
+    ids_p = _write_json(
+        tmp_path / "ids.lock.json",
+        _minimal_ids(entity_ids={"Event": "1000000000000000001"}),
+    )
+    # Must not raise
+    compiler_obj = OntologyCompiler(model_p, ids_p)
+    assert compiler_obj is not None

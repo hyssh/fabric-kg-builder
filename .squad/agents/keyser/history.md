@@ -16,6 +16,11 @@ Sprint 1: Repository scaffold, pyproject.toml, Click CLI framework with 13 subco
 
 Full history and details in history-archive.md.
 
+## Sprint 3: Ontology Identity Integrity (Issues #7 + #8)
+
+- **Design review completed (2026-07-22):** Issues #7 (relationship key validation) and #8 (partial dates) combined into one branch `scope/ontology-integrity`. Key architecture: new `ontology/identity_validation.py` module with gate IDs `OKV-001` (identity column mismatch) and `OKV-002` (date type incompatibility). `event_date` stays as String, not DateTime — partial dates preserved by design. Post-deployment validation uses structural definition read-back via existing `get_ontology_definition()`, not graph-level row counts (Fabric API limitation).
+- **Validation layering pattern confirmed:** `compiler.py._validate()` = "can we build parts" (type-name existence, ID uniqueness). `bridge_validation.py` = "will retrieval traversal work" (BRG gates). New `identity_validation.py` = "will the graph connect at the column level" (OKV gates). `validate/data_gates.py` = "is the data internally consistent" (VAL gates on rows). Four layers, distinct concerns, all composable.
+
 ## Learnings
 
 - **README authored** (`README.md` at repo root) — canonical onboarding document covering goal, prerequisites, installation, configuration layers (`.env` / `fabric-kg.yaml` / `ontology/environments/{env}.json`), full end-to-end quickstart against `sample_data\Surface_Troubleshootings`, and a command reference table for all 13 subcommands.

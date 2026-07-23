@@ -379,6 +379,7 @@ def compile_ontology_cmd(
     entity_types = compiler.model.get("entityTypes", [])
     rel_types = compiler.model.get("relationshipTypes", [])
     parts = compiler.get_rest_parts()
+    identity_mappings = compiler.get_identity_mappings()
 
     click.echo("")
     click.echo("-" * 60)
@@ -388,5 +389,26 @@ def compile_ontology_cmd(
     click.echo(f"  Parts written     : {len(parts) + 1}")  # +1 for definition.json manifest
     click.echo(f"  Bridge validation : 0 errors, {len(warnings)} warning(s)")
     click.echo(f"  Output directory  : {out_dir.resolve()}")
+
+    # Entity identity mappings
+    click.echo("")
+    click.echo("[compile-ontology] ENTITY IDENTITY MAPPINGS")
+    for ent_name, ent_info in identity_mappings["entities"].items():
+        click.echo(
+            f"  {ent_name}: table={ent_info['table']}, "
+            f"identity_column={ent_info['identity_column']}"
+        )
+
+    # Relationship identity mappings
+    click.echo("")
+    click.echo("[compile-ontology] RELATIONSHIP IDENTITY MAPPINGS")
+    for rel_name, rel_info in identity_mappings["relationships"].items():
+        click.echo(
+            f"  {rel_name}: {rel_info['source_type']}."
+            f"{rel_info['source_fk_column']} → "
+            f"{rel_info['target_type']}.{rel_info['target_fk_column']} "
+            f"(table={rel_info['table']})"
+        )
+
     click.echo("-" * 60)
     click.echo("[compile-ontology] Done. Exit 0.")

@@ -8,13 +8,13 @@
 
 ## Summary
 
-Sprint 1: Ontology compiler (Fabric tree generation), model.yaml design (35 entity types, 36 relationship types), ids.lock.json management. Sprint 2: Bridge validation (10 BRG gates: entity type definitions, relationship properties, search linkage binding, column mapping). Exit code 5 for bridge errors (same as model validation). Pure function design (compile-ontology owns severity policy).
+Sprint 1: Ontology compiler (Fabric tree generation), model.yaml design (35 entity types, 36 relationship types), ids.lock.json management. Sprint 2: Bridge validation (10 BRG gates: entity type definitions, relationship properties, search linkage binding, column mapping). Exit code 5 for bridge errors (same as model validation). Pure function design (compile-ontology owns severity policy). Sprint 3 (scope/ontology-integrity): Issues #7 + #8 — relationship key validation (OKV-001) + partial date handling (OKV-002) + identity_validation.py module + model.yaml entity_id property additions + post-deploy graph count readback.
 
-**Key patterns:** Bridge validation runs after full compiler.compile() — tree written regardless, errors surface after. BRG gates cover: entity declarations, relationships, search index record bindings, document chunk linkage, image asset linkage. Warnings (BRG-009) for entities with no outbound bridge edges.
+**Key patterns:** Bridge validation runs after full compiler.compile() — tree written regardless, errors surface after. BRG gates cover: entity declarations, relationships, search index record bindings, document chunk linkage, image asset linkage. Warnings (BRG-009) for entities with no outbound bridge edges. OKV-001 uses 3-rule compatibility check (exact FK match, implied-domain match, or explicit entity_id property). 14 model entities needed entity_id property alias added to satisfy OKV-001 for their relationships.
 
-**Verification:** Real model.yaml compiles 0 errors, 9 warnings (expected—partial coverage).
+**Verification:** Real model.yaml compiles 0 errors, 9 warnings (expected—partial coverage). identity_validation.validate_identity(real_model) → 0 errors.
 
-**Tests:** 35 new bridge validation tests (10 gates + real model + CLI integration). **Total:** 529 unit tests passing.
+**Tests:** 35 new bridge validation tests. 70 new identity_validation acceptance tests (Hockney contract). **Total:** 182 targeted tests passing.
 
 Full history and details in history-archive.md.
 
@@ -109,3 +109,39 @@ The deployed Fabric Ontology item showed EMPTY (Nodes 0, Edges 0). Root cause: o
 - The compile-ontology artifact (build/ontology/) is a separate concern from deploy format. The old format in compiler.py serves compile-ontology; fabric_def.py serves deploy-ontology. Both coexist.
 - BigInt IDs must be distinct across entity_type_id, ALL property_ids, and rel_type_id. Verified via test.
 
+
+---
+
+## 2026-07-22 — Issues #7 + #8: Ontology Integrity (scope/ontology-integrity)
+
+**Branch:** `scope/ontology-integrity`
+
+### What was implemented
+
+**Issue #7 — Relationship Key Validation (OKV-001)**
+- Added `resolve_entity_identity_columns()`, `validate_relationship_keys()`, `get_identity_mappings()` to `compiler.py` — same-table FK mismatch raises `OntologyCompilerError` at compile time.
+- Added `read_graph_counts()` to `fabric_ontology.py` — post-deployment node/edge count readback via OneLakeDeltaClient.
+- Updated `deploy_cmd.py` to print identity mappings in dry-run, call graph count readback in live path, and detect zero-edge relationship types.
+- Updated `compile_ontology_cmd.py` to emit entity + relationship identity mappings in SUMMARY.
+- Created `src/fabric_kg_builder/ontology/identity_validation.py` — full OKV-001/OKV-002 public API per Hockney's acceptance test contract.
+
+**Issue #8 — Partial Date Handling (OKV-002)**
+- `validate_date_types()` in `compiler.py` — model-level timestamp + datePrecision check.
+- `identity_validation.detect_date_precision()` — coarsest-wins classification (YEAR < YEAR_MONTH < FULL_DATE < TIMESTAMP).
+- `identity_validation._check_okv002()` — flags `timestamp`-typed properties whose name contains "date".
+- `_validate_parquet_date_precision()` in `deploy_cmd.py` — Parquet scan for partial date strings.
+
+**model.yaml changes**
+- Added `entity_id` property (type: string, required: true) + `additionalColumns` alias to 14 entity types: Document, Section, Table, TableRow, TableColumn, TableCell, Figure, Caption, Callout, VisualRegion, OCRText, Chunk, ChunkEmbedding, SearchDocument.
+- No new Parquet columns; entity_id reads from each entity's existing physical identity column.
+
+### Key decisions
+- OKV-001 compatibility: exact FK match OR implied-domain match OR explicit entity_id property.
+- 14 entities needed entity_id alias to satisfy OKV-001 (they participate in source_entity_id/target_entity_id FK relationships but lacked entity_id property).
+- OKV-002 trigger: type=timestamp + name contains "date". Does not affect created_at/updated_at.
+- validate_post_deploy_definition is structural (definition parts), not data row counts.
+- identity_validation never raises; returns list[IdentityViolation].
+
+### Tests
+- 70 new identity_validation acceptance tests (all pass, Hockney contract).
+- 112 existing targeted tests (compiler, deploy_ontology_cmd, bridge_validation, compile_ontology_cmd) continue passing.

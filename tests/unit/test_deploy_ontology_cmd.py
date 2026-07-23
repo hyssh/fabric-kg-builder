@@ -393,6 +393,13 @@ class TestDeployOntologyCmdLive:
             "status": "ok-200",
             "note": "updateDefinition succeeded (200). Graph populated.",
         }
+        mock_graph_counts = {
+            "total_nodes": 0,
+            "total_edges": 0,
+            "nodes_by_type": {},
+            "edges_by_type": {},
+            "note": "Nodes: 0 total (0 type(s)); Edges: 0 total (0 relationship type(s))",
+        }
 
         with patch(
             "fabric_kg_builder.cli.deploy_cmd._read_fabric_env_config",
@@ -403,6 +410,9 @@ class TestDeployOntologyCmdLive:
         ), patch(
             "fabric_kg_builder.deploy.fabric_ontology.update_ontology_definition",
             return_value=mock_upd_result,
+        ), patch(
+            "fabric_kg_builder.deploy.fabric_ontology.read_graph_counts",
+            return_value=mock_graph_counts,
         ):
             runner = CliRunner()
             result = runner.invoke(cli, [
@@ -429,6 +439,13 @@ class TestDeployOntologyCmdLive:
             "status": "ok-200",
             "note": "updateDefinition succeeded (200).",
         }
+        mock_graph_counts = {
+            "total_nodes": 0,
+            "total_edges": 0,
+            "nodes_by_type": {},
+            "edges_by_type": {},
+            "note": "Nodes: 0; Edges: 0",
+        }
 
         with patch(
             "fabric_kg_builder.cli.deploy_cmd._read_fabric_env_config",
@@ -439,6 +456,9 @@ class TestDeployOntologyCmdLive:
         ), patch(
             "fabric_kg_builder.deploy.fabric_ontology.update_ontology_definition",
             return_value=mock_upd_result,
+        ), patch(
+            "fabric_kg_builder.deploy.fabric_ontology.read_graph_counts",
+            return_value=mock_graph_counts,
         ):
             runner = CliRunner()
             result = runner.invoke(cli, [
@@ -463,6 +483,13 @@ class TestDeployOntologyCmdLive:
             "status": "ok-200",
             "note": "updateDefinition succeeded (200). Graph populated.",
         }
+        mock_graph_counts = {
+            "total_nodes": 0,
+            "total_edges": 0,
+            "nodes_by_type": {},
+            "edges_by_type": {},
+            "note": "Nodes: 0; Edges: 0",
+        }
 
         with patch(
             "fabric_kg_builder.cli.deploy_cmd._read_fabric_env_config",
@@ -473,6 +500,9 @@ class TestDeployOntologyCmdLive:
         ), patch(
             "fabric_kg_builder.deploy.fabric_ontology.update_ontology_definition",
             return_value=mock_upd_result,
+        ), patch(
+            "fabric_kg_builder.deploy.fabric_ontology.read_graph_counts",
+            return_value=mock_graph_counts,
         ):
             runner = CliRunner()
             result = runner.invoke(cli, [

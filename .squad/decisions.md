@@ -3743,3 +3743,130 @@ git worktree add ../fabric-kg-builder-wt-agent-livevalidation scope/agent-liveva
 git worktree remove ../fabric-kg-builder-wt-<scope-name>
 git branch -d scope/<scope-name>
 ```
+
+---
+
+## Ontology Identity & Partial-Date Integrity (#7, #8)
+
+### Keyser ADR: Ontology Identity-Key Integrity & Partial Date Preservation
+**Date:** 2026-07-22  
+**Status:** Approved  
+**Author:** Keyser (Lead/Architect)  
+**Scope:** Issues #7 + #8, branch `scope/ontology-integrity`
+
+**Decision:** Issues #7 and #8 implemented as one coherent change sharing validation surface. New module `ontology/identity_validation.py` with gate IDs OKV-001 (relationship identity mismatch) and OKV-002 (partial-date type incompatibility). Identity resolution checks that relationship endpoint FK columns are compatible with their entity's identity domain. Partial dates remain as String (not DateTime) with validation gate detecting `timestamp` type properties containing "date" substring. Post-deployment validation is structural (counts definition parts, not graph row counts).
+
+**Key architecture:**
+- New module `src/fabric_kg_builder/ontology/identity_validation.py` (not in compiler or validate/data_gates.py)
+- Gate IDs: OKV-001 (identity column mismatch), OKV-002 (date type incompatibility)
+- Error code: `ONTOLOGY_RELATIONSHIP_KEY_MISMATCH`
+- Dry-run output: identity mapping summary table (logging only, not new file format)
+- Post-deploy structural completeness check via `validate_post_deploy_definition()`
+
+---
+
+### McManus — Ontology Integrity Implementation (Initial)
+**Date:** 2026-07-22  
+**Issues:** #7 (Relationship Key Validation) + #8 (Partial Date Handling)  
+**Status:** Implementation delivered (rejected by Hockney for missing pipeline integration)
+
+**Decisions:**
+1. **OKV-001 Compatibility Rule**: FK endpoint compatible when: (a) FK column name equals entityIdColumn, (b) stripping `source_`/`target_` prefix equals entityIdColumn, (c) entity declares property with implied domain name, or (d) FK absent = error
+2. **Model additions**: 14 entity types (Document, Section, Table, TableRow, TableColumn, TableCell, Figure, Caption, Callout, VisualRegion, OCRText, Chunk, ChunkEmbedding, SearchDocument) added `entity_id` property declarations + `additionalColumns` mappings (Parquet schema unchanged; reads from existing physical columns)
+3. **OKV-002 Trigger**: Property triggers gate when type is `"timestamp"` AND name contains "date" (case-insensitive); properties named `created_at`, `updated_at` exempt
+4. **Module boundary**: `identity_validation.py` returns `IdentityViolation` dataclass list, does not raise exceptions
+5. **Post-deploy**: Structural validation only (definition part counts), not data-count based
+
+**Root issue identified by Hockney's first review:** Module created but never wired into compiler or deploy pipeline. Acceptance tests all passed (exercised module API in isolation), but production gates never called the module.
+
+---
+
+### Hockney — Test Policy & Acceptance Contract (Initial Review)
+**Date:** 2026-07-22  
+**Status:** First review—REJECTED (70 tests passing but defects D1-D4 identified)  
+**Author:** Hockney (Test Engineer)  
+**Test count:** 70 total (all green at time of review)
+
+**Defects identified:**
+
+| Ref | Defect | Severity | Cause | Status |
+|-----|--------|----------|-------|--------|
+| D1 | `validate_identity()` not wired into compiler._validate() or deploy_cmd pipeline | CRITICAL | Orphaned module with zero call sites | Fixed by Keyser: now imported and called in compiler._validate() |
+| D2 | OKV-002 not fired without explicit `datePrecision` annotation | CRITICAL | Gate requires annotation; name heuristic not used | Fixed by Keyser: now wired into compile-time path (no annotation needed) |
+| D3 | `_validate_parquet_date_precision` reports samples only, no counts | SIGNIFICANT | Missing rejected-value count and affected entity count | Fixed by Keyser: added counts tracking |
+| D4 | Broad `except Exception` around `read_graph_counts()` silently skips zero-edge validation | MODERATE | Exception swallowed, validation skipped | Fixed by Keyser: narrowed exception, added explicit failure check |
+
+**Policy decisions:**
+- Test scope: public contract only (no internal helper inspection)
+- FK alias `source_entity_id` → `entity_id` is explicitly VALID
+- Mismatch defined as FK population belonging to different entity identity domain
+- OKV-002 is structural gate (model-level), not data gate
+- Post-deploy uses part-count (EntityType/RelationshipType definitions), not row counts
+- `detect_date_precision`: coarsest-wins (mixed precision returns coarsest bucket)
+- Fixtures use minimal in-memory dicts; real model.yaml in module-scoped tests
+
+**Locked out:** McManus (per reviewer-protocol strict lockout). Revision assigned to Keyser.
+
+---
+
+### Keyser — Revision: All Defects Fixed & Regression Coverage Added
+**Date:** 2026-07-22 → 2026-07-23  
+**Status:** ✅ APPROVED (263 targeted tests, 2264 full suite, 0 failures)  
+**Revision owner:** Keyser (Lead/Architect, under strict lockout)  
+
+**Defect resolutions:**
+
+**D1 — CRITICAL: Active identity pipeline wired (OKV-001)**
+- Added import `from fabric_kg_builder.ontology.identity_validation import validate_identity` to compiler.py (module-level)
+- Step 7 in `_validate()`: calls `validate_identity(model)`, raises `OntologyCompilerError` on OKV-001 errors
+- OntologyCompiler.__init__ now fails compilation with clear `ONTOLOGY_RELATIONSHIP_KEY_MISMATCH` for cross-table domain mismatches
+- Tests: `test_okv001_domain_mismatch_raises_via_compiler`, `test_okv001_valid_entity_id_alias_passes_compiler` added to test_compiler.py
+
+**D2 — CRITICAL: Partial-date gate fires without annotation (OKV-002)**
+- Same `validate_identity()` call (D1 step 7) runs OKV-002
+- Properties typed `timestamp` with "date" in name now fail compilation without annotation
+- Also wired into deploy_cmd.py pre-deployment gate (model-level structural check before Parquet data scan)
+- Tests: `test_okv002_timestamp_date_property_raises_without_annotation`, `test_okv002_timestamp_non_date_name_passes_compiler` added to test_compiler.py
+
+**D3 — SIGNIFICANT: Diagnostic counts added**
+- Rewrote `_validate_parquet_date_precision` to count all rejected values per property (`rejected_count`)
+- Track affected entity types (`affected_entity_names`)
+- Error message: `{rejected_count} partial date value(s) across {N} entity type(s). Sample values: [...]`
+- Tests: TestValidateParquetDatePrecisionCounts (5 tests) added to test_ontology_integrity_pipeline.py
+
+**D4 — MODERATE: Read-back failure now blocks publication**
+- Removed broad `except Exception`; only `ImportError` caught narrowly (optional dependency protection)
+- Added explicit guard: if `total_edges < 0` OR `total_nodes < 0` (internal failure markers), abort with sys.exit(1)
+- Zero-edge check only runs when read-back succeeded
+- Tests: TestReadGraphCountsFailureBlocking (2 tests) added to test_ontology_integrity_pipeline.py
+
+**Additional fixes:**
+- pyproject.toml: Reverted duplicate `[dependency-groups] dev` block
+- uv.lock: Reverted generated-artifact changes
+- test_deploy_ontology_cmd.py: 3 tests updated to mock `read_graph_counts` with valid result
+
+**Test results (Hockney re-review):**
+- test_identity_validation.py (70 Hockney tests): 70 passed
+- test_compiler.py (52 existing + 4 new): 52 passed
+- test_ontology_integrity_pipeline.py (7 new): 7 passed
+- Full non-integration suite: 2264 passed, 0 failed
+
+**Status:** APPROVED for merge
+
+---
+
+### Hockney — Final Independent Re-Review
+**Date:** 2026-07-23  
+**Status:** ✅ APPROVED (263 targeted, 2264 full suite, 0 failures)  
+**Reviewer:** Hockney (Test Engineer, independent re-review role)
+
+**Probe coverage:**
+- Targeted tests (issues #7, #8): 263 passed
+- Full relevant suite: 2264 passed, 4 deselected, 5 warnings, 0 failed
+
+**Acceptance verified:**
+- Issue #7 contract: Relationship identity validation gate (OKV-001) fires at compile time for cross-table domain mismatches; post-deploy structural check counts definition parts
+- Issue #8 contract: Partial-date detection (OKV-002) fires without annotation; pre-deploy data validation includes rejected-value and entity counts; dry-run output includes identity/partial-date diagnostics
+
+**Ready for merge:** YES
+
