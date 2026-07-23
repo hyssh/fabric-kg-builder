@@ -3870,3 +3870,138 @@ git branch -d scope/<scope-name>
 
 **Ready for merge:** YES
 
+
+---
+
+## Agent Capability Implementation (Issues #12, #13, #14)
+
+### Keyser — ADR: Capability-Aware Data Agent Grounding, Example Gating, and Property Assurance
+**Date:** 2026-07-23  
+**Author:** Keyser (Lead / Architect)  
+**Scope:** scope/agent-capability (Issues #12, #13, #14)  
+**Reviewer gate:** Hockney (independent — rejection requires a different revision author)  
+**Builds on:** scope/agent-contract ADR (#9, #10)
+
+**Key findings:** Three coupled issues require capability-bound grounding:
+- **#12** Generate instructions/descriptions from intersection of contract + persisted projection + live Graph validation
+- **#13** Gate few-shot examples on observed relationship row counts
+- **#14** Preserve Fabric-supported Graph property selection through publication; validate against original requirement
+
+**Decisions (D1-D8):**
+- D1: Reuse existing publication path; no new deploy pipeline
+- D2: Module ownership: Pydantic models in `semantic/schemas.py`, validation functions in `knowledge/validation.py`, grounding in `knowledge/agent_validation.py`, text rendering in `semantic/instructions.py`
+- D3: New shared vocabulary (immutable): relationship availability classification, `CompetencyExampleReceipt`, extend `QueryReadiness` with per-relationship observed rows, extend `AgentPublicationReceipt` with property/text-count fields
+- D4: New error codes: `DATA_AGENT_PROPERTY_OMITTED`, `DATA_AGENT_REQUIRED_EXAMPLE_EMPTY`, `DATA_AGENT_UNAVAILABLE_RELATIONSHIP_CLAIMED`
+- D5: `build_public_graph_source_projection` must project selected graph properties instead of stripping; three-way comparison (required vs draft vs published)
+- D6: `gate_competency_examples` stays pure function; wire into both CLI pre-flights
+- D7: Parameterize text builders with availability view; descriptions enumerate only observed-available paths
+- D8: Extend dry-run reporting with property selection, grounding text, and example gating status
+
+**Implementation sequence:** Schemas → property preservation → example gating → capability-aware text → CLI wiring. Single author (Verbal) owns all production code; Hockney writes independent tests.
+
+**Test commands:**
+- Targeted: `pytest tests/unit/test_deploy_data_agent.py tests/unit/test_agent_instructions.py tests/unit/test_agent_contract_validation.py tests/unit/test_data_agent_grounding.py tests/unit/test_knowledge_data_agent_helpers.py`
+- Full gate: `pytest`
+
+---
+
+### Verbal — Team: Agent Capability Implementation Decisions
+**Date:** 2026-07-23  
+**Author:** Verbal  
+**For:** Hockney (test ownership), Keyser (ADR author)
+
+**Interface changes for testing:**
+- `gate_competency_examples(contract, availability, *, min_required_rows=1)` accepts both `list[DataAvailability]` and `dict[str, DataAvailability]`
+- `graph_few_shots_from_competency_contract(contract, *, limit=5, availability=None)` skips cases not in published receipt set when availability provided
+- `build_agent_publication_receipt(...)` accepts optional char-count params; populates property/text-count fields
+- `deploy_and_validate_data_agent(...)` passes char-count params through
+- Error classes: `DataAgentPropertyOmitted`, `DataAgentRequiredExampleEmpty`, `DataAgentUnavailableRelationshipClaimed`
+- `CompetencyExampleReceipt` and `CompetencyExampleStatus` with five status values
+- `AgentPublicationReceipt` extended with property/text-count fields
+- `QueryReadiness` extended with `observed_relationship_rows` dict
+- Text builders (`build_graph_source_description`, `build_graph_source_instructions`, `build_ontology_source_*`) accept `availability` parameter; unavailable relationships omitted from descriptions
+
+**Property child preservation (#14):** `build_public_graph_source_projection` no longer strips `children`; draft payload reflects real property counts
+
+**CLI parity (D1):** Both `deploy_cmd.py` and `build_deploy_cmd.py` compute availability dict, pass to `graph_few_shots_from_competency_contract`, and pass char counts to `deploy_and_validate_data_agent`
+
+---
+
+### Hockney — Agent Capability Test Coverage Note
+**Date:** 2026-07-23  
+**Author:** Hockney (Test Engineer)  
+**Sprint:** scope/agent-capability (issues #12, #13, #14)  
+**Status:** Tests authored. 182 passed, **2 RED** production gaps initially.
+
+**Production gap:** `graph_few_shots_from_competency_contract` did not use receipts to filter optional-absent cases.
+
+**Failing tests:**
+- `test_optional_case_with_zero_rows_is_silently_omitted`
+- `test_unrelated_required_case_unaffected_by_unavailable_optional`
+
+**Root cause:** `gate_competency_examples` called for raise-on-required side effect; receipts discarded. Optional-absent cases leaked into output.
+
+**Fix required:** Use receipts to build allowed set; skip cases not in published receipt set.
+
+**Coverage completeness:** All other requirements from ADR passing:
+- classify_relationship_availability (4 states): 7 tests PASS
+- New validation errors: 3 tests PASS
+- CompetencyExampleReceipt: 3 tests PASS
+- gate_competency_examples: 9 tests PASS (except 2 RED noted above)
+- observed_relationship_rows in receipt: 1 test PASS
+- QueryReadiness.observed_relationship_rows: 2 tests PASS
+- AgentPublicationReceipt char-count fields: 7 tests PASS
+- Property children preserved: 3 tests PASS
+- Property selection hash/char counts deterministic: 2 tests PASS
+- Capability-aware descriptions (#12): 5 tests PASS
+- Global instruction boundary (#12): 3 tests PASS
+- Property omission not self-referential (#14): 3 tests PASS
+- graph_few_shots required-absent raises: 1 test PASS
+- graph_few_shots backward compat: 1 test PASS
+
+**Backward compatibility:** gate_competency_examples(None, {}) returns []; graph_few_shots without availability uses existing filtering
+
+---
+
+### McManus — Agent Capability Revision Decision Note
+**Date:** 2026-07-23  
+**Author:** McManus (KG/Ontology Dev)  
+**Branch:** `scope/agent-capability`  
+**Status:** Complete — all formal blockers resolved, 2409 tests passing  
+**Context:** Verbal locked out following Hockney rejection; McManus independently owns all production changes
+
+**Blockers fixed:**
+
+**Blocker 1 — `DataAgentRequiredExampleEmpty` escapes uncaught at CLI boundaries**
+- Added early deferred import of `DataAgentRequiredExampleEmpty` before grounding try block in both CLI files
+- Added dedicated except clause before general catch; raises `ClickException`/`BuildDeployError`
+- Applies in dry-run and live paths
+
+**Blocker 2 — `_capability_availability` not wired into graph builders**
+- Added `availability=_capability_availability or None` to `build_graph_source_instructions` and `build_graph_source_description` call sites
+- Both CLI paths now pass availability to builders
+
+**Blocker 3 — Count-only property selection hashes**
+- Added `selected_property_ids` property to `DataAgentStageSnapshot`; returns sorted canonical property IDs
+- Changed hash computation to use `{"property_ids": selected_property_ids}` instead of count only
+- Two selections with same count but different IDs now produce different hashes
+
+**Blocker 4 — Compiled property count not validated before draft/published**
+- Added compiled property count check immediately after counts set
+- Raises if compiled_count != required_count before draft/published checks
+
+**Dependency cleanup:** Reverted duplicate `[dependency-groups]` in `pyproject.toml` and `uv.lock`
+
+**Test results:**
+- Five-file targeted suite: 202 passed (184 existing + 18 new)
+- Full suite: 2409 passed, 4 deselected, 5 warnings
+- All Hockney RED tests now GREEN (optional filtering fix in graph_few_shots)
+
+**New regression tests (18 in `test_agent_contract_validation.py`):**
+- `TestPropertySelectionHashContentBased` (5): sorted IDs, empty list, different-IDs-different-hashes, same-IDs-same-hash, valid SHA256
+- `TestCompiledPropertyOmissionBlocks` (2): compiled omission raises, equal counts pass
+- `TestRequiredExampleEmptyBoundaryClassification` (4): error type, actionable message, structured attributes accessible
+- `TestGraphSourceAvailabilityWiring` (6): both builders accept availability, unavailable relationships named, available named in description, no-availability fallback, unavailable-only warning
+
+**Status:** Ready for merge
+
