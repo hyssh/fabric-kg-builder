@@ -1,4 +1,16 @@
-"""Tests for deploy/data_agent.py — build_semantic_data_agent_spec helpers."""
+"""Tests for deploy/data_agent.py — build_semantic_data_agent_spec helpers
+and AgentPublicationReceipt property count fields (issues #14, #12).
+
+Covers (original):
+- _graph_type, _node_elements, _edge_elements, _edge_triples
+- build_semantic_data_agent_spec: spec structure, source types, element types
+
+Covers (new #14/#12):
+- AgentPublicationReceipt: required/compiled/draft/published property counts
+- AgentPublicationReceipt: compiled/published property selection hashes
+- AgentPublicationReceipt: global_instruction_chars, instruction_chars, description_chars
+- Backward compat: zero agent-visible properties by contract → required_count=0, no false-fail
+"""
 from __future__ import annotations
 
 import pytest
@@ -249,3 +261,106 @@ class TestBuildSemanticDataAgentSpec:
         element_types = {el.type for el in graph_source.elements}
         assert "graph.nodeType" in element_types
         assert "graph.edgeType" in element_types
+
+
+# ===========================================================================
+# Issues #14, #12 — AgentPublicationReceipt property count fields
+# (pre-implementation tests — fail RED until Verbal adds the new schema fields)
+# ===========================================================================
+
+_H = "sha256:" + "a" * 64
+_H2 = "sha256:" + "b" * 64
+
+
+def _base_receipt_kwargs() -> dict:
+    """Minimal valid kwargs for AgentPublicationReceipt including planned #14/#12 fields."""
+    return dict(
+        semantic_model_manifest_hash=_H,
+        persisted_projection_receipt_hash=_H,
+        ontology_persisted_projection_hash=_H,
+        graph_persisted_projection_hash=_H,
+        workspace_name="ws-name",
+        workspace_id="ws-001",
+        data_agent_name="My Agent",
+        data_agent_item_id="item-001",
+        target_mode="create",
+        actions=["create", "publish"],
+        selected_sources=[{
+            "source_type": "graph",
+            "source_name": "g",
+            "workspace_id": "ws-001",
+            "artifact_id": "art-001",
+            "selected_element_count": 3,
+            "property_child_count": 2,
+        }],
+        package_instruction_hash=_H,
+        compiled_instruction_hash=_H,
+        draft_instruction_hash=_H,
+        published_instruction_hash=_H,
+        compiled_source_selection_hash=_H,
+        draft_source_selection_hash=_H,
+        published_source_selection_hash=_H,
+        compiled_selected_element_hash=_H,
+        published_selected_element_hash=_H,
+        agent_schema_sidecar_hash=_H,
+        property_child_coverage=1.0,
+        publication_status="published",
+        validated_at_utc="2026-07-23T12:00:00Z",
+        # New #14 property count fields:
+        required_property_count=8,
+        compiled_property_count=8,
+        draft_property_count=8,
+        published_property_count=8,
+        compiled_property_selection_hash=_H2,
+        published_property_selection_hash=_H2,
+        # New #12 grounding text count fields:
+        global_instruction_chars=1420,
+        instruction_chars={"graph": 800, "ontology": 500},
+        description_chars={"graph": 165, "ontology": 180},
+    )
+
+
+class TestPublicationReceiptPropertyCountFields:
+    """AgentPublicationReceipt must carry required/compiled/draft/published property counts
+    and property selection hashes for #14 three-way comparison and dry-run reporting.
+
+    Tests fail with pydantic ValidationError (extra="forbid") until Verbal adds the fields.
+    """
+
+    def test_receipt_accepts_property_count_fields(self):
+        """Receipt must accept and store the four property count fields."""
+        from fabric_kg_builder.semantic.schemas import AgentPublicationReceipt
+        receipt = AgentPublicationReceipt.model_validate(_base_receipt_kwargs())
+        assert receipt.required_property_count == 8
+        assert receipt.compiled_property_count == 8
+        assert receipt.draft_property_count == 8
+        assert receipt.published_property_count == 8
+
+    def test_receipt_accepts_property_selection_hashes(self):
+        """Receipt must accept compiled_ and published_property_selection_hash fields."""
+        from fabric_kg_builder.semantic.schemas import AgentPublicationReceipt
+        receipt = AgentPublicationReceipt.model_validate(_base_receipt_kwargs())
+        assert receipt.compiled_property_selection_hash.startswith("sha256:")
+        assert receipt.published_property_selection_hash.startswith("sha256:")
+
+    def test_receipt_accepts_grounding_text_char_counts(self):
+        """Receipt must accept global_instruction_chars, instruction_chars, description_chars."""
+        from fabric_kg_builder.semantic.schemas import AgentPublicationReceipt
+        receipt = AgentPublicationReceipt.model_validate(_base_receipt_kwargs())
+        assert receipt.global_instruction_chars == 1420
+        assert receipt.instruction_chars["graph"] == 800
+        assert receipt.description_chars["ontology"] == 180
+
+    def test_zero_agent_visible_properties_required_count_is_zero(self):
+        """When no agent-visible properties exist in the contract (required=0),
+        the check trivially passes — must not raise or false-fail."""
+        from fabric_kg_builder.semantic.schemas import AgentPublicationReceipt
+        kwargs = _base_receipt_kwargs()
+        kwargs["required_property_count"] = 0
+        kwargs["compiled_property_count"] = 0
+        kwargs["draft_property_count"] = 0
+        kwargs["published_property_count"] = 0
+        # Must not raise — zero properties is a valid backward-compat state
+        receipt = AgentPublicationReceipt.model_validate(kwargs)
+        assert receipt.required_property_count == 0
+        assert receipt.published_property_count == 0

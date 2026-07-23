@@ -286,16 +286,42 @@ def graph_few_shots_from_competency_contract(
     contract: dict[str, Any],
     *,
     limit: int = 5,
+    availability: "dict[str, Any] | None" = None,
 ) -> list[FewShotExample]:
-    """Return validated Graph question/query examples from a compiled contract."""
+    """Return validated Graph question/query examples from a compiled contract.
+
+    When *availability* is provided (a mapping of semantic_id →
+    :class:`~fabric_kg_builder.semantic.schemas.DataAvailability`), each
+    case's required relationship IDs are checked against observed row counts
+    via :func:`~fabric_kg_builder.knowledge.validation.gate_competency_examples`.
+    Optional-absent cases are silently dropped; required-absent cases raise
+    :class:`~fabric_kg_builder.knowledge.validation.DataAgentRequiredExampleEmpty`.
+
+    When *availability* is ``None`` the function falls back to the original
+    static-validation-only path for backward compatibility.
+    """
     if limit < 1 or not isinstance(contract, dict):
         return []
+    # When availability is provided, gate first — raises on required-absent.
+    # Retain receipts to derive which case IDs are published; optional-absent
+    # cases return published=False and must be excluded from examples.
+    published_case_ids: set[str] | None = None
+    if availability is not None:
+        from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+            gate_competency_examples,
+        )
+        receipts = gate_competency_examples(contract, availability)
+        published_case_ids = {r.competency_id for r in receipts if r.published}
     examples: list[FewShotExample] = []
     cases = contract.get("cases")
     if not isinstance(cases, list):
         return examples
     for case in cases:
         if not isinstance(case, dict):
+            continue
+        case_id = str(case.get("id") or "").strip()
+        # Skip cases that gate_competency_examples marked as not published.
+        if published_case_ids is not None and case_id not in published_case_ids:
             continue
         question = str(case.get("question") or "").strip()
         probes = case.get("probes")
@@ -595,6 +621,20 @@ class DataAgentStageSnapshot:
             len(_selected_children(element))
             for source in self.sources
             for element in _selected_elements(source)
+        )
+
+    @property
+    def selected_property_ids(self) -> list[str]:
+        """Sorted canonical property child IDs across all selected elements.
+
+        Used to compute content-based property selection hashes that distinguish
+        equal-size but different selections (fix for #14).
+        """
+        return sorted(
+            str(child.get("id") or "")
+            for source in self.sources
+            for element in _selected_elements(source)
+            for child in _selected_children(element)
         )
 
     @property

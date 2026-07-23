@@ -2078,6 +2078,8 @@ def deploy_data_agent_cmd(
         build_ontology_source_instructions,
         load_semantic_model_artifacts,
     )
+    # Import early so the except clause below can reference the type (#13 blocker fix).
+    from fabric_kg_builder.knowledge.validation import DataAgentRequiredExampleEmpty  # noqa: PLC0415
     _competency_contract_exists = False
     try:
         loaded = load_semantic_model_artifacts(semantic_dir)
@@ -2131,10 +2133,17 @@ def deploy_data_agent_cmd(
         )
         competency_path = agent_dir / "competency-contract.json"
         _competency_contract_exists = competency_path.exists()
+        # Build availability dict from the persisted materialization plan for
+        # capability-aware example gating (#13).
+        _capability_availability = {
+            item.semantic_id: item
+            for item in loaded.materialization_plan.data_availability
+        }
         graph_few_shots = graph_few_shots_from_competency_contract(
             json.loads(competency_path.read_text(encoding="utf-8"))
             if _competency_contract_exists
-            else {}
+            else {},
+            availability=_capability_availability if _capability_availability else None,
         )
         spec = DataAgentSpec(
             display_name=data_agent_name,
@@ -2175,10 +2184,12 @@ def deploy_data_agent_cmd(
                         or graph_model_id
                     ),
                     instructions=build_graph_source_instructions(
-                        semantic_context
+                        semantic_context,
+                        availability=_capability_availability or None,
                     ),
                     description=build_graph_source_description(
-                        semantic_context
+                        semantic_context,
+                        availability=_capability_availability or None,
                     ),
                     metadata=graph_metadata,
                     elements=list(graph_elements),
@@ -2187,6 +2198,8 @@ def deploy_data_agent_cmd(
             ],
         )
         expected = stage_snapshot_from_spec(spec)
+    except DataAgentRequiredExampleEmpty as exc:
+        raise click.ClickException(str(exc)) from exc
     except (AgentPublicationError, OSError, ValueError) as exc:
         raise click.ClickException(
             f"Data Agent grounding preparation failed: {exc}"
@@ -2264,6 +2277,61 @@ def deploy_data_agent_cmd(
     click.echo(f"  duplicate instruction blocks: {dup_count}")
     click.echo("  Definition text policy: PASS")
 
+    # Capability reporting (#12 — property selection + grounding text counts)
+    _req_prop = grounding.expected_property_child_count
+    _comp_prop = expected.property_child_count
+    _prop_coverage_pct = (
+        int(_comp_prop / _req_prop * 100) if _req_prop > 0 else 100
+    )
+    click.echo("\nProperty selection:")
+    click.echo(f"  required by semantic contract: {_req_prop:,}")
+    click.echo(f"  selected in compiled spec:     {_comp_prop:,}")
+    click.echo(f"  Property coverage: {_prop_coverage_pct}%")
+    _da_global_instr_chars = len(str(spec.instruction or ""))
+    _da_graph_src = next(
+        (s for s in spec.sources if str(s.source_type) == "graph"), None
+    )
+    _da_ontology_src = next(
+        (s for s in spec.sources if str(s.source_type) == "ontology"), None
+    )
+    _da_graph_instr_chars = (
+        len(str(_da_graph_src.instructions or "")) if _da_graph_src else 0
+    )
+    _da_graph_desc_chars = (
+        len(str(_da_graph_src.description or "")) if _da_graph_src else 0
+    )
+    _da_ontology_instr_chars = (
+        len(str(_da_ontology_src.instructions or "")) if _da_ontology_src else 0
+    )
+    _da_ontology_desc_chars = (
+        len(str(_da_ontology_src.description or "")) if _da_ontology_src else 0
+    )
+    _da_instruction_chars: dict[str, int] = {}
+    _da_description_chars: dict[str, int] = {}
+    if _da_graph_src:
+        _da_instruction_chars["graph"] = _da_graph_instr_chars
+        _da_description_chars["graph"] = _da_graph_desc_chars
+    if _da_ontology_src:
+        _da_instruction_chars["ontology"] = _da_ontology_instr_chars
+        _da_description_chars["ontology"] = _da_ontology_desc_chars
+    click.echo("\nGrounding text:")
+    click.echo(f"  global instructions:      {_da_global_instr_chars:,} chars")
+    click.echo(
+        f"  ontology description:     {_da_ontology_desc_chars:,} chars"
+    )
+    click.echo(f"  graph description:        {_da_graph_desc_chars:,} chars")
+
+    # Example gating reporting (#13)
+    if _competency_contract_exists:
+        _da_few_shot_count = sum(
+            len(s.few_shots or [])
+            for s in spec.sources
+            if str(s.source_type) == "graph"
+        )
+        click.echo("\nExample gating:")
+        click.echo(f"  examples published: {_da_few_shot_count}")
+        click.echo("  Example gating: PASS")
+
     if dry_run:
         click.echo("[deploy-data-agent] SUCCESS (dry-run)")
         return
@@ -2296,6 +2364,9 @@ def deploy_data_agent_cmd(
             ),
             required_source_type="graph",
             source_policy=_data_agent_source_policy,
+            global_instruction_chars=_da_global_instr_chars,
+            instruction_chars=_da_instruction_chars,
+            description_chars=_da_description_chars,
         )
     except (
         AgentPublicationError,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping
 
@@ -55,9 +55,17 @@ class PersistedAgentGrounding:
 def build_public_graph_source_projection(
     grounding: PersistedAgentGrounding,
 ) -> tuple[tuple[DataSourceElement, ...], dict[str, str]]:
-    """Project semantic grounding into the Graph elements Fabric accepts."""
+    """Project semantic grounding into the Graph elements Fabric accepts.
+
+    Property children are preserved in the Fabric-supported
+    ``graph.property`` shape so that the published definition carries the
+    full agent-visible property selection.  Un-stripping here ensures
+    ``stage_snapshot_from_spec`` yields a nonzero ``property_child_count``
+    and the three-way property comparison in
+    ``build_agent_publication_receipt`` is meaningful (fix for #14).
+    """
     elements = tuple(
-        replace(element, children=None)
+        element
         for element in grounding.elements
     )
     metadata = {
@@ -471,6 +479,10 @@ def build_agent_publication_receipt(
     projection_receipt_hash: str,
     publication_status: str,
     required_source_type: Literal["graph", "ontology"] = "graph",
+    # Optional grounding text char counts (#12) — zero/empty when not provided.
+    global_instruction_chars: int = 0,
+    instruction_chars: "dict[str, int] | None" = None,
+    description_chars: "dict[str, int] | None" = None,
 ) -> AgentPublicationReceipt:
     """Fail closed on stale, empty, draft-only, or mismatched publication."""
     if target_mode == "update" and configured_target_item_id != data_agent_item_id:
@@ -531,11 +543,35 @@ def build_agent_publication_receipt(
             "AGENT_DRAFT_SOURCE_SELECTION_DRIFT",
             "Persisted draft source selection differs from the compiled selection.",
         )
-    if published.property_child_count != expected.property_child_count:
+    # Three-way property assurance (#14): compare compiled/draft/published against
+    # the *original semantic requirement* (grounding.expected_property_child_count),
+    # not against the already-compiled snapshot which was previously stripped.
+    required_prop_count = grounding.expected_property_child_count
+    compiled_prop_count = expected.property_child_count
+    draft_prop_count = draft.property_child_count
+    published_prop_count = published.property_child_count
+    # Check compiled before draft/published so omissions are caught earliest.
+    if compiled_prop_count != required_prop_count:
         raise AgentPublicationError(
-            "AGENT_PROPERTY_CHILD_OMITTED",
-            "Published source property selection differs from the compiled "
-            "public definition.",
+            "DATA_AGENT_PROPERTY_OMITTED",
+            f"Compiled source property count ({compiled_prop_count}) differs "
+            f"from the semantic contract requirement ({required_prop_count}). "
+            "Ensure all agent-visible properties are selected before deploying.",
+        )
+    if published_prop_count != required_prop_count:
+        raise AgentPublicationError(
+            "DATA_AGENT_PROPERTY_OMITTED",
+            f"Published source property count ({published_prop_count}) differs "
+            f"from the semantic contract requirement ({required_prop_count}). "
+            "Ensure all agent-visible properties are preserved through the "
+            "Fabric publish pipeline.",
+        )
+    if draft_prop_count != required_prop_count:
+        raise AgentPublicationError(
+            "DATA_AGENT_PROPERTY_OMITTED",
+            f"Draft source property count ({draft_prop_count}) differs "
+            f"from the semantic contract requirement ({required_prop_count}). "
+            "Fabric may have stripped property children from the draft definition.",
         )
     if published.source_selection_hash != expected.source_selection_hash:
         raise AgentPublicationError(
@@ -616,6 +652,19 @@ def build_agent_publication_receipt(
             f"Published Data Agent has no required {physical_label} source.",
         )
 
+    # Compute content-based property selection hashes for the receipt (#14).
+    # Using sorted property IDs rather than count-only so equal-size different
+    # selections produce different hashes.
+    compiled_prop_sel_hash = _canonical_hash({"property_ids": expected.selected_property_ids})
+    published_prop_sel_hash = _canonical_hash({"property_ids": published.selected_property_ids})
+
+    # Compute property_child_coverage from published vs required (#14).
+    receipt_property_coverage = (
+        published_prop_count / required_prop_count
+        if required_prop_count > 0
+        else 1.0
+    )
+
     return AgentPublicationReceipt(
         semantic_model_manifest_hash=(
             projection_receipt.semantic_model_manifest_hash
@@ -648,9 +697,20 @@ def build_agent_publication_receipt(
         compiled_selected_element_hash=expected.selected_element_hash,
         published_selected_element_hash=published.selected_element_hash,
         agent_schema_sidecar_hash=grounding.sidecar_hash,
-        property_child_coverage=grounding.property_child_coverage,
+        property_child_coverage=receipt_property_coverage,
         publication_status="published",
         validated_at_utc=_utc_now(),
+        # Property assurance fields (#14)
+        required_property_count=required_prop_count,
+        compiled_property_count=compiled_prop_count,
+        draft_property_count=draft_prop_count,
+        published_property_count=published_prop_count,
+        compiled_property_selection_hash=compiled_prop_sel_hash,
+        published_property_selection_hash=published_prop_sel_hash,
+        # Grounding text counts (#12)
+        global_instruction_chars=global_instruction_chars,
+        instruction_chars=instruction_chars or {},
+        description_chars=description_chars or {},
     )
 
 
@@ -670,6 +730,10 @@ def deploy_and_validate_data_agent(
     published_description: str,
     required_source_type: Literal["graph", "ontology"] = "graph",
     source_policy: Any | None = None,
+    # Optional grounding text char counts (#12) — zero/empty when not provided.
+    global_instruction_chars: int = 0,
+    instruction_chars: "dict[str, int] | None" = None,
+    description_chars: "dict[str, int] | None" = None,
 ) -> tuple[
     DataAgentUpsertResult,
     DataAgentPublishResult,
@@ -684,6 +748,12 @@ def deploy_and_validate_data_agent(
         to enforce against the published read-back.  When provided, a
         :class:`~fabric_kg_builder.knowledge.validation.SourcePolicyViolation`
         is raised if the published source types diverge.
+    global_instruction_chars : int
+        Char count of the global instruction (#12 audit trail).
+    instruction_chars : dict[str, int] | None
+        Per-source instruction char counts, keyed by source type (#12 audit trail).
+    description_chars : dict[str, int] | None
+        Per-source description char counts, keyed by source type (#12 audit trail).
     """
     from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
         validate_published_source_policy,
@@ -718,5 +788,8 @@ def deploy_and_validate_data_agent(
         projection_receipt_hash=projection_receipt_hash,
         publication_status=publish_result.status,
         required_source_type=required_source_type,
+        global_instruction_chars=global_instruction_chars,
+        instruction_chars=instruction_chars,
+        description_chars=description_chars,
     )
     return result, publish_result, receipt

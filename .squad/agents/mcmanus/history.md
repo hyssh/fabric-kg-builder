@@ -6,17 +6,51 @@
 - **Role:** KG / Ontology Dev
 - **Joined:** 2026-06-24T17:38:25.161Z
 
-## Summary
+## 2026-07-23 — scope/agent-capability: Formal Blocker Revision (Issues #12, #13, #14)
 
-Sprint 1: Ontology compiler (Fabric tree generation), model.yaml design (35 entity types, 36 relationship types), ids.lock.json management. Sprint 2: Bridge validation (10 BRG gates: entity type definitions, relationship properties, search linkage binding, column mapping). Exit code 5 for bridge errors (same as model validation). Pure function design (compile-ontology owns severity policy). Sprint 3 (scope/ontology-integrity): Issues #7 + #8 — relationship key validation (OKV-001) + partial date handling (OKV-002) + identity_validation.py module + model.yaml entity_id property additions + post-deploy graph count readback.
+**Branch:** `scope/agent-capability`
+**Context:** Verbal was locked out of this revision. McManus independently owns all changes.
+**Prior state:** Verbal implemented the scaffolding (184 tests passing, 2 RED). Hockney's review surfaced 2 RED tests and 4 formal blockers requiring this revision.
 
-**Key patterns:** Bridge validation runs after full compiler.compile() — tree written regardless, errors surface after. BRG gates cover: entity declarations, relationships, search index record bindings, document chunk linkage, image asset linkage. Warnings (BRG-009) for entities with no outbound bridge edges. OKV-001 uses 3-rule compatibility check (exact FK match, implied-domain match, or explicit entity_id property). 14 model entities needed entity_id property alias added to satisfy OKV-001 for their relationships.
+### Formal Blockers Fixed
 
-**Verification:** Real model.yaml compiles 0 errors, 9 warnings (expected—partial coverage). identity_validation.validate_identity(real_model) → 0 errors.
+**Blocker 1 — `DataAgentRequiredExampleEmpty` escapes uncaught from both CLI paths:**
+- Root cause: `graph_few_shots_from_competency_contract` is called inside the grounding `try` block; the `except` clause only caught `(AgentPublicationError, OSError, ValueError)`. The `DataAgentRequiredExampleEmpty` import was deferred AFTER the try/except, making it unreferenceable in the except clause.
+- Fix: Added early deferred import of `DataAgentRequiredExampleEmpty` from `knowledge.validation` BEFORE the grounding try block in both `deploy_cmd.py` and `build_deploy_cmd.py`. Added dedicated `except DataAgentRequiredExampleEmpty` clause surfacing `ClickException` (deploy path) / `BuildDeployError` (build-deploy path). Removed the duplicate import from the second deferred block.
 
-**Tests:** 35 new bridge validation tests. 70 new identity_validation acceptance tests (Hockney contract). **Total:** 182 targeted tests passing.
+**Blocker 2 — `_capability_availability` / `_bd_availability` not wired into graph builders:**
+- Both CLI paths built the availability dict but then called `build_graph_source_instructions(semantic_context)` and `build_graph_source_description(semantic_context)` WITHOUT passing `availability=`. The functions accepted the kwarg but received None.
+- Fix: Added `availability=_capability_availability or None` / `availability=_bd_availability or None` to both call sites in both CLI files.
 
-Full history and details in history-archive.md.
+**Blocker 3 — Count-only property selection hashes:**
+- `compiled_property_selection_hash` and `published_property_selection_hash` were computed as `_canonical_hash({"property_child_count": N})` — a count-only hash that cannot distinguish equal-size different selections.
+- Fix: Added `selected_property_ids: list[str]` property to `DataAgentStageSnapshot` in `data_agent.py` — returns sorted canonical property child IDs across all selected elements. Changed hash computation in `agent_validation.py` to `_canonical_hash({"property_ids": snap.selected_property_ids})`.
+
+**Blocker 4 — Compiled property count not validated before draft/published:**
+- The three-way property check only compared draft and published against `grounding.expected_property_child_count`. A compiled omission would pass uncaught until draft/publish time.
+- Fix: Added compiled property count check in `build_agent_publication_receipt` BEFORE the existing draft/published checks. Raises `AgentPublicationError("DATA_AGENT_PROPERTY_OMITTED", ...)` at the earliest possible boundary.
+
+### Dependency File Determination
+`pyproject.toml` and `uv.lock` had accidental `[dependency-groups]` additions from Verbal's implementation (duplicating existing `[project.optional-dependencies]` dev deps). Reverted both to baseline — tests run correctly without them.
+
+### Test Results
+- Five-file targeted suite: **202 passed** (184 existing + 18 new regression tests)
+- Full suite: **2409 passed, 4 deselected, 5 warnings** (SwigPy deprecation — pre-existing, unrelated)
+- Zero new failures introduced.
+
+### New Regression Tests (18 tests in `test_agent_contract_validation.py`)
+- `TestPropertySelectionHashContentBased` (5): selected_property_ids sorted, empty, equal-count-different hashes differ, same IDs → same hash, valid sha256 format
+- `TestCompiledPropertyOmissionBlocks` (2): compiled omission raises DATA_AGENT_PROPERTY_OMITTED, equal count passes check
+- `TestRequiredExampleEmptyBoundaryClassification` (4): importable, not OSError, not ValueError, actionable str repr, structured attrs
+- `TestGraphSourceAvailabilityWiring` (6): instructions/description accept kwarg, unavailable rel named in instructions, available rel named in description, no-availability generic, only-unavailable notes no data
+
+### Key Learnings
+- Deferred imports inside CLI functions must be ordered so the earliest `except` clause referencing a type appears AFTER that type's import, even within the same function scope. The pattern "import at function top, use in except" is safer than "import after try block".
+- `DataAgentStageSnapshot` is a frozen dataclass with `sources: tuple[dict, ...]` — the `_selected_elements` and `_selected_children` module-private functions are in `data_agent.py` and can be used within the class's own property methods. Adding `selected_property_ids` to the class is the correct extension point for content-based hashing.
+- `DataAvailability` schema has strict status-observedRows consistency rules: `unavailable`/`not_observed` requires `observed_rows=None`; `insufficient` requires a set value `< required_rows`; `sufficient` requires a set value `>= required_rows`.
+- `build_agent_publication_receipt` is tested indirectly (no direct test exists) — testing it requires constructing fully consistent `DataAgentStageSnapshot` objects with matching instruction hashes, sidecar hashes, and source selection hashes. Using `stage_snapshot_from_spec` + the same spec for all three stages is the cleanest way to get past the earlier checks.
+- Always verify `pyproject.toml`/`uv.lock` changes are intentional — accidental dependency-groups additions from uv scaffolding can sneak into diffs.
+
 
 ---
 
