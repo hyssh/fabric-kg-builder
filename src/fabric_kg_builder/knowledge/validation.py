@@ -38,10 +38,11 @@ import json
 import logging
 import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from .data_agent import DataAgentSpec, DataAgentStageSnapshot
+    from fabric_kg_builder.semantic.schemas import DataAvailability
 
 logger = logging.getLogger(__name__)
 
@@ -755,3 +756,371 @@ def validate_graph_few_shots(
                     "and a non-empty query."
                 )
             return
+
+
+# ---------------------------------------------------------------------------
+# Capability-aware error types (#12, #13, #14 — D4)
+# ---------------------------------------------------------------------------
+
+
+class DataAgentPropertyOmitted(ValidationError):
+    """Raised when a required property is missing from persisted/draft/published.
+
+    Also raised when a few-shot example references a property that is not
+    in the selected element set.
+
+    Attributes
+    ----------
+    code : str
+        ``"DATA_AGENT_PROPERTY_OMITTED"``.
+    property_id : str
+        Semantic property identifier that is missing.
+    stage : str
+        Deployment stage where the omission was detected
+        (``"persisted"``, ``"draft"``, or ``"published"``).
+    required_count : int
+        Number of properties required by the semantic contract.
+    actual_count : int
+        Number of properties actually present at *stage*.
+    """
+
+    def __init__(
+        self,
+        property_id: str,
+        stage: str,
+        required_count: int = 0,
+        actual_count: int = 0,
+        remediation: str = "",
+    ) -> None:
+        self.code = "DATA_AGENT_PROPERTY_OMITTED"
+        self.property_id = property_id
+        self.stage = stage
+        self.required_count = required_count
+        self.actual_count = actual_count
+        self.remediation = remediation
+        detail = (
+            f" (required={required_count}, present={actual_count})"
+            if required_count or actual_count
+            else ""
+        )
+        super().__init__(
+            f"ERROR DATA_AGENT_PROPERTY_OMITTED:\n"
+            f"Property '{property_id}' is absent from the {stage} Data Agent "
+            f"definition{detail}.\n"
+            + (remediation if remediation else "")
+        )
+
+
+class DataAgentRequiredExampleEmpty(ValidationError):
+    """Raised when a required competency example has insufficient observed rows.
+
+    Attributes
+    ----------
+    code : str
+        ``"DATA_AGENT_REQUIRED_EXAMPLE_EMPTY"``.
+    competency_id : str
+        Identifier of the blocked competency case.
+    relationship_id : str
+        Semantic relationship ID with zero observed rows.
+    observed_rows : int
+        Rows currently observed in the Graph for *relationship_id*.
+    expected_minimum : int
+        Minimum rows required to publish the example.
+    stage : str
+        Deployment stage (``"pre-flight"`` before publish, or ``"published"``).
+    remediation : str
+        Actionable suggestion for the operator.
+    """
+
+    def __init__(
+        self,
+        competency_id: str,
+        relationship_id: str,
+        observed_rows: int,
+        expected_minimum: int,
+        stage: str = "pre-flight",
+        remediation: str = "",
+    ) -> None:
+        self.code = "DATA_AGENT_REQUIRED_EXAMPLE_EMPTY"
+        self.competency_id = competency_id
+        self.relationship_id = relationship_id
+        self.observed_rows = observed_rows
+        self.expected_minimum = expected_minimum
+        self.stage = stage
+        self.remediation = remediation
+        if not remediation:
+            remediation = (
+                f"Ingest data for relationship '{relationship_id}' before "
+                f"deploying competency example '{competency_id}'.  "
+                f"Required minimum rows: {expected_minimum}; "
+                f"currently observed: {observed_rows}."
+            )
+        super().__init__(
+            f"ERROR DATA_AGENT_REQUIRED_EXAMPLE_EMPTY:\n"
+            f"Competency '{competency_id}' requires relationship "
+            f"'{relationship_id}' to have ≥{expected_minimum} row(s) "
+            f"(observed: {observed_rows}) at stage '{stage}'.\n"
+            + remediation
+        )
+
+
+class DataAgentUnavailableRelationshipClaimed(ValidationError):
+    """Raised when a description/instruction references an unavailable relationship.
+
+    Attributes
+    ----------
+    code : str
+        ``"DATA_AGENT_UNAVAILABLE_RELATIONSHIP_CLAIMED"``.
+    relationship_id : str
+        Semantic ID of the relationship being claimed.
+    availability_class : str
+        Classification of the relationship's availability.
+    context : str
+        Human-readable description of where the claim appears.
+    """
+
+    def __init__(
+        self,
+        relationship_id: str,
+        availability_class: str = "",
+        context: str = "",
+    ) -> None:
+        self.code = "DATA_AGENT_UNAVAILABLE_RELATIONSHIP_CLAIMED"
+        self.relationship_id = relationship_id
+        self.availability_class = availability_class
+        self.context = context
+        super().__init__(
+            f"ERROR DATA_AGENT_UNAVAILABLE_RELATIONSHIP_CLAIMED:\n"
+            f"Relationship '{relationship_id}' is claimed in {context or 'agent text'} "
+            f"but is not in the observed availability set "
+            + (f"(class={availability_class!r})." if availability_class else ".")
+        )
+
+
+# ---------------------------------------------------------------------------
+# Relationship availability classification (#13 — D3/D4)
+# ---------------------------------------------------------------------------
+
+RelationshipAvailabilityClass = Literal[
+    "schema_supported_unobserved",
+    "optional_absent",
+    "required_absent",
+    "executable_nonempty",
+]
+
+
+def classify_relationship_availability(
+    availability: "DataAvailability | None",
+    *,
+    required: bool,
+) -> RelationshipAvailabilityClass:
+    """Map a :class:`~fabric_kg_builder.semantic.schemas.DataAvailability`
+    record + required flag to one of the four #13 availability classes.
+
+    Does **not** modify or persist ``DataAvailabilityStatus``; the four-state
+    classification is a derived view only.
+
+    Parameters
+    ----------
+    availability:
+        The :class:`DataAvailability` record from the materialization plan,
+        or ``None`` when the semantic ID has no availability entry.
+    required:
+        ``True`` when the relationship is required for at least one competency
+        example; ``False`` when it is optional.
+
+    Returns
+    -------
+    RelationshipAvailabilityClass
+        One of ``"schema_supported_unobserved"``, ``"optional_absent"``,
+        ``"required_absent"``, or ``"executable_nonempty"``.
+    """
+    if availability is None or availability.status == "not_observed":
+        return "schema_supported_unobserved"
+    if availability.status == "sufficient":
+        return "executable_nonempty"
+    # status in {"unavailable", "insufficient"}
+    return "required_absent" if required else "optional_absent"
+
+
+# ---------------------------------------------------------------------------
+# Competency example gating (#13 — D6)
+# ---------------------------------------------------------------------------
+
+
+def gate_competency_examples(
+    contract: dict[str, Any],
+    availability: "dict[str, DataAvailability]",
+    *,
+    min_required_rows: int = 1,
+) -> "list[Any]":
+    """Gate few-shot competency examples against observed relationship availability.
+
+    Returns one :class:`~fabric_kg_builder.semantic.schemas.CompetencyExampleReceipt`
+    per case.  Raises :class:`DataAgentRequiredExampleEmpty` for any case that
+    is required but has an unavailable required relationship.
+
+    Parameters
+    ----------
+    contract:
+        The compiled competency contract dict (must have a ``"cases"`` list).
+    availability:
+        Mapping of semantic_id → :class:`DataAvailability` from the
+        materialization plan.
+    min_required_rows:
+        Minimum observed rows for a relationship to be considered
+        ``executable_nonempty``.  Defaults to 1.
+
+    Returns
+    -------
+    list[CompetencyExampleReceipt]
+        One receipt per case, in contract order.
+
+    Raises
+    ------
+    DataAgentRequiredExampleEmpty
+        A required competency example depends on a relationship with fewer
+        than *min_required_rows* observed rows.
+    """
+    from fabric_kg_builder.semantic.schemas import CompetencyExampleReceipt  # noqa: PLC0415
+    from fabric_kg_builder.runtime.acceptance import _required_relationships  # noqa: PLC0415
+
+    if not isinstance(contract, dict):
+        return []
+    cases = contract.get("cases")
+    if not isinstance(cases, list):
+        return []
+
+    # Normalize availability: accept list[DataAvailability] or dict[str, DataAvailability].
+    if isinstance(availability, dict):
+        avail_dict: dict[str, Any] = availability  # type: ignore[assignment]
+    else:
+        avail_dict = {
+            avail.semantic_id: avail
+            for avail in (availability or [])
+            if hasattr(avail, "semantic_id")
+        }
+
+    receipts: list[CompetencyExampleReceipt] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        case_id = str(case.get("id") or "").strip()
+        if not case_id:
+            continue
+
+        # Determine if the CASE itself is required or optional.
+        # Support both "routes.direct_graph" (test format) and the default (required).
+        routes = case.get("routes")
+        if isinstance(routes, dict):
+            route_req = routes.get("direct_graph", "required")
+            case_required = route_req != "optional"
+        else:
+            case_required = True
+
+        # Extract required relationship IDs from two sources:
+        # 1. probes.direct_graph.required_relationship_ids (test / compiled contract)
+        # 2. expected.relationship_types (runtime contract via _required_relationships)
+        rel_ids_from_probes: list[str] = []
+        probes = case.get("probes")
+        if isinstance(probes, dict):
+            graph_probe = probes.get("direct_graph")
+            if isinstance(graph_probe, dict):
+                probe_rel_ids = graph_probe.get("required_relationship_ids")
+                if isinstance(probe_rel_ids, list):
+                    rel_ids_from_probes = [
+                        str(r) for r in probe_rel_ids if r
+                    ]
+
+        rel_ids_from_expected: list[str] = []
+        expected_dict = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+        rel_specs = _required_relationships(expected_dict.get("relationship_types"))
+        rel_ids_from_expected = list(rel_specs.keys())
+
+        # Merge deduplicated; probe IDs take precedence.
+        seen: set[str] = set()
+        required_rel_ids: list[str] = []
+        for rel_id in (rel_ids_from_probes + rel_ids_from_expected):
+            if rel_id not in seen:
+                seen.add(rel_id)
+                required_rel_ids.append(rel_id)
+
+        observed_rows: dict[str, int] = {}
+        blocked_rel_id: str | None = None
+        optional_absent = False
+        remediation = ""
+
+        for rel_id in required_rel_ids:
+            avail = avail_dict.get(rel_id)
+            rows = (
+                avail.observed_rows
+                if avail is not None and avail.observed_rows is not None
+                else 0
+            )
+            observed_rows[rel_id] = rows
+
+            # All relationship IDs in this case are required if the case is required.
+            classification = classify_relationship_availability(
+                avail, required=case_required
+            )
+
+            if classification == "required_absent" and blocked_rel_id is None:
+                blocked_rel_id = rel_id
+                remediation = (
+                    f"Relationship '{rel_id}' has {rows} observed row(s); "
+                    f"minimum required is {min_required_rows}. "
+                    f"Ingest data for '{rel_id}' before deploying example "
+                    f"'{case_id}'."
+                )
+            elif classification == "optional_absent":
+                optional_absent = True
+            elif classification == "executable_nonempty" and rows < min_required_rows:
+                if blocked_rel_id is None and case_required:
+                    blocked_rel_id = rel_id
+                    remediation = (
+                        f"Relationship '{rel_id}' has {rows} observed row(s); "
+                        f"minimum required is {min_required_rows}. "
+                        f"Ingest data for '{rel_id}' before deploying example "
+                        f"'{case_id}'."
+                    )
+                elif not case_required:
+                    optional_absent = True
+
+        if blocked_rel_id is not None:
+            if case_required:
+                raise DataAgentRequiredExampleEmpty(
+                    competency_id=case_id,
+                    relationship_id=blocked_rel_id,
+                    observed_rows=observed_rows.get(blocked_rel_id, 0),
+                    expected_minimum=min_required_rows,
+                    stage="pre-flight",
+                    remediation=remediation,
+                )
+            # optional case with a blocked rel: treat as omitted
+            optional_absent = True
+
+        if optional_absent and not case_required:
+            receipts.append(CompetencyExampleReceipt(
+                competency_id=case_id,
+                required=False,
+                required_relationship_ids=required_rel_ids,
+                observed_rows=observed_rows,
+                min_required_rows=min_required_rows,
+                status="omitted",
+                remediation="",
+                published=False,
+            ))
+            continue
+
+        receipts.append(CompetencyExampleReceipt(
+            competency_id=case_id,
+            required=case_required,
+            required_relationship_ids=required_rel_ids,
+            observed_rows=observed_rows,
+            min_required_rows=min_required_rows,
+            status="published" if not blocked_rel_id else "blocked",
+            remediation="",
+            published=True,
+        ))
+
+    return receipts

@@ -1101,6 +1101,10 @@ class QueryReadiness(_StrictPersistedModel):
         "not_observed", "visible", "not_visible"
     ] = "not_observed"
     notes: list[str] = Field(default_factory=list)
+    # Per-relationship row counts observed during GQL readiness validation (#13).
+    # Key = semantic_id; value = observed row count.  Defaults to empty dict
+    # so existing persisted receipts round-trip without modification.
+    observed_relationship_rows: dict[str, int] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_readiness_consistency(self) -> "QueryReadiness":
@@ -1251,6 +1255,38 @@ class DraftProjectionReceipt(StrictModel):
 DataAgentTargetMode = Literal["update", "create", "replace"]
 DataAgentAction = Literal["update", "create", "replace", "publish"]
 
+# Four-state classification for per-relationship example gating (#13).
+# Derived at runtime from DataAvailability + required flag; never persisted
+# as an enum member to preserve DataAvailabilityStatus round-trips.
+CompetencyExampleStatus = Literal["pass", "published", "blocked", "skipped", "omitted"]
+
+RelationshipAvailabilityClass = Literal[
+    "schema_supported_unobserved",
+    "optional_absent",
+    "required_absent",
+    "executable_nonempty",
+]
+
+
+class CompetencyExampleReceipt(_StrictPersistedModel):
+    """Gating decision for one competency example (#13).
+
+    Records whether a few-shot example can be published based on observed
+    relationship row counts.  ``status="blocked"`` means a required example
+    was suppressed because at least one required relationship has zero rows.
+    ``status="skipped"`` means an optional example was silently dropped.
+    ``status="pass"`` means the example is safe to publish.
+    """
+
+    competency_id: str = Field(min_length=1)
+    required: bool = True
+    required_relationship_ids: list[str] = Field(default_factory=list)
+    observed_rows: dict[str, int] = Field(default_factory=dict)
+    min_required_rows: int = Field(default=1, ge=0)
+    status: CompetencyExampleStatus = "pass"
+    remediation: str = ""
+    published: bool = False
+
 
 class AgentSelectedSource(_StrictPersistedModel):
     """One independently read-back Data Agent source selection."""
@@ -1292,6 +1328,18 @@ class AgentPublicationReceipt(_StrictPersistedModel):
     property_child_coverage: float = Field(ge=0.0, le=1.0)
     publication_status: Literal["published"]
     validated_at_utc: str = Field(min_length=1)
+    # Property assurance fields (#14) — counts at each stage and deterministic hashes.
+    # All default to 0/"" so existing receipts round-trip without change.
+    required_property_count: int = Field(default=0, ge=0)
+    compiled_property_count: int = Field(default=0, ge=0)
+    draft_property_count: int = Field(default=0, ge=0)
+    published_property_count: int = Field(default=0, ge=0)
+    compiled_property_selection_hash: str = Field(default="")
+    published_property_selection_hash: str = Field(default="")
+    # Grounding text counts (#12) — char counts for receipt audit trail.
+    global_instruction_chars: int = Field(default=0, ge=0)
+    instruction_chars: dict[str, int] = Field(default_factory=dict)
+    description_chars: dict[str, int] = Field(default_factory=dict)
 
     _check_hash_fields = field_validator(
         "semantic_model_manifest_hash",
@@ -1310,6 +1358,12 @@ class AgentPublicationReceipt(_StrictPersistedModel):
         "agent_schema_sidecar_hash",
         mode="after",
     )(_check_nonempty_hash)
+    # New optional hash fields use _check_hash (allows empty) for backward compat.
+    _check_optional_hash_fields = field_validator(
+        "compiled_property_selection_hash",
+        "published_property_selection_hash",
+        mode="after",
+    )(_check_hash)
     _check_validated_at = field_validator(
         "validated_at_utc", mode="after"
     )(_check_utc_timestamp)

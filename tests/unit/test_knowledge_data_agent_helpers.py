@@ -1,4 +1,22 @@
-"""Tests for knowledge/data_agent.py — pure helpers and data models."""
+"""Tests for knowledge/data_agent.py — pure helpers, data models,
+and capability-aware few-shot gating (issues #13).
+
+Covers (original):
+- Exception classes: LROTimeoutError, UnsupportedDataSourceType
+- DataSourceElement: to_dict, optional fields, None exclusion
+- FewShotExample: basic construction
+- Hashing helpers: _canonical_hash, _text_hash — deterministic
+- _encode_part / _decode_part_payload: round-trip, error cases
+- Element normalization: _selected_children, _normalized_data_source_element, _selected_elements
+- DataAgentUpsertResult, DataAgentPublishResult, DataAgentStageSnapshot
+- build_definition_parts: returns list, correct keys, valid base64-JSON
+
+Covers (new #13):
+- graph_few_shots_from_competency_contract: observed row gating
+  (after Verbal wires gate_competency_examples, only cases with observed rows pass)
+- Property children in DataSourceElement: children preserved in to_dict()
+- Deterministic property selection hash via _canonical_hash
+"""
 from __future__ import annotations
 
 import base64
@@ -26,6 +44,7 @@ from fabric_kg_builder.knowledge.data_agent import (
     _text_hash,
     build_definition_parts,
     decode_stage_snapshot,
+    graph_few_shots_from_competency_contract,
     stage_snapshot_from_spec,
 )
 
@@ -399,3 +418,291 @@ class TestBuildDefinitionParts:
             raw = base64.b64decode(part["payload"])
             data = json.loads(raw)
             assert isinstance(data, dict)
+
+
+# ===========================================================================
+# Issue #13 — graph_few_shots_from_competency_contract: observed row gating
+# (pre-implementation tests — fail RED until Verbal wires the gate)
+# ===========================================================================
+
+
+class TestGraphFewShotsObservedRowGating:
+    """After Verbal wires gate_competency_examples into graph_few_shots_from_competency_contract:
+
+    - Required cases with observed rows ≥ 1 → included
+    - Required cases with observed rows == 0 → raises DATA_AGENT_REQUIRED_EXAMPLE_EMPTY
+    - Optional cases with observed rows == 0 → silently omitted
+    - Unrelated required cases with rows are unaffected by unavailable optional cases
+
+    The gate function uses DataAvailability instances passed alongside the contract.
+    """
+
+    def _contract_with_required_case(self, rel_id: str, observed_rows: int) -> tuple[dict, dict]:
+        """Build a contract + availability dict pair for a single required case.
+
+        The contract includes both ``expected.relationship_types`` (consumed by
+        ``gate_competency_examples``) and ``probes.direct_graph`` (consumed by
+        the example-extraction pass in ``graph_few_shots_from_competency_contract``).
+        Availability is a dict keyed by semantic_id, as gate_competency_examples requires.
+        """
+        contract = {
+            "cases": [
+                {
+                    "id": "test-case",
+                    "question": "Where is Chiller 1?",
+                    "expected": {
+                        "relationship_types": [rel_id],  # str → required by default
+                    },
+                    "probes": {
+                        "direct_graph": {
+                            "query": f"MATCH (a:`Asset`)-[:`{rel_id}`]->(b) RETURN a, b LIMIT 10",
+                            "static_validation_passed": True,
+                        }
+                    },
+                }
+            ]
+        }
+        from fabric_kg_builder.semantic.schemas import DataAvailability
+        if observed_rows > 0:
+            avail = DataAvailability(
+                semantic_id=rel_id,
+                status="sufficient",
+                observed_rows=observed_rows,
+                required_rows=1,
+            )
+        else:
+            avail = DataAvailability(semantic_id=rel_id, status="unavailable")
+        return contract, {rel_id: avail}
+
+    def _contract_with_optional_case(self, rel_id: str, observed_rows: int) -> tuple[dict, dict]:
+        """Build a contract + availability dict pair for a single optional case.
+
+        Production gate_competency_examples reads ``routes.direct_graph`` to
+        determine case_required.  ``"optional"`` marks the case as optional so
+        zero-row cases are silently omitted rather than raising.
+        """
+        contract = {
+            "cases": [
+                {
+                    "id": "optional-case",
+                    "question": "What warranty covers Asset X?",
+                    "routes": {"direct_graph": "optional"},
+                    "expected": {
+                        "relationship_types": [rel_id],
+                    },
+                    "probes": {
+                        "direct_graph": {
+                            "query": f"MATCH (a:`Asset`)-[:`{rel_id}`]->(w) RETURN a, w LIMIT 10",
+                            "static_validation_passed": True,
+                        }
+                    },
+                }
+            ]
+        }
+        from fabric_kg_builder.semantic.schemas import DataAvailability
+        if observed_rows > 0:
+            avail = DataAvailability(
+                semantic_id=rel_id,
+                status="sufficient",
+                observed_rows=observed_rows,
+                required_rows=0,
+            )
+        else:
+            avail = DataAvailability(semantic_id=rel_id, status="unavailable")
+        return contract, {rel_id: avail}
+
+    def test_required_case_with_positive_rows_is_included(self):
+        """Required case + observed_rows=5 → example included (published)."""
+        contract, availability = self._contract_with_required_case(
+            "relationship-type:located_at", observed_rows=5
+        )
+        # After Verbal's fix, graph_few_shots_from_competency_contract accepts availability
+        examples = graph_few_shots_from_competency_contract(
+            contract, availability=availability
+        )
+        assert len(examples) == 1
+        assert examples[0].question == "Where is Chiller 1?"
+
+    def test_required_case_with_zero_rows_raises_required_example_empty(self):
+        """Required case + observed_rows=0 → raises DATA_AGENT_REQUIRED_EXAMPLE_EMPTY pre-flight."""
+        from fabric_kg_builder.knowledge.validation import DataAgentRequiredExampleEmpty
+        contract, availability = self._contract_with_required_case(
+            "relationship-type:warranty", observed_rows=0
+        )
+        with pytest.raises(DataAgentRequiredExampleEmpty) as exc_info:
+            graph_few_shots_from_competency_contract(contract, availability=availability)
+        assert exc_info.value.code == "DATA_AGENT_REQUIRED_EXAMPLE_EMPTY"
+        assert exc_info.value.observed_rows == 0
+
+    def test_optional_case_with_zero_rows_is_silently_omitted(self):
+        """Optional case + zero rows → omitted (empty examples list), no exception."""
+        contract, availability = self._contract_with_optional_case(
+            "relationship-type:warranty", observed_rows=0
+        )
+        examples = graph_few_shots_from_competency_contract(
+            contract, availability=availability
+        )
+        assert len(examples) == 0, (
+            "Optional-absent cases must be silently omitted from few-shot examples"
+        )
+
+    def test_unrelated_required_case_unaffected_by_unavailable_optional(self):
+        """An unrelated required case with rows is unaffected by an unavailable optional case."""
+        from fabric_kg_builder.semantic.schemas import DataAvailability
+        contract = {
+            "cases": [
+                {
+                    "id": "location-case",
+                    "question": "Where is Asset X?",
+                    "expected": {
+                        "relationship_types": ["relationship-type:located_at"],
+                    },
+                    "probes": {
+                        "direct_graph": {
+                            "query": "MATCH (a:`Asset`)-[:`located_at`]->(l) RETURN a, l LIMIT 10",
+                            "static_validation_passed": True,
+                        }
+                    },
+                },
+                {
+                    "id": "warranty-case",
+                    "question": "What warranty covers Asset X?",
+                    "routes": {"direct_graph": "optional"},
+                    "expected": {
+                        "relationship_types": [
+                            {"semantic_id": "relationship-type:warranty", "requirement": "optional"},
+                        ],
+                    },
+                    "probes": {
+                        "direct_graph": {
+                            "query": "MATCH (a:`Asset`)-[:`covered_by`]->(w) RETURN a, w LIMIT 10",
+                            "static_validation_passed": True,
+                        }
+                    },
+                },
+            ]
+        }
+        availability = {
+            "relationship-type:located_at": DataAvailability(
+                semantic_id="relationship-type:located_at",
+                status="sufficient",
+                observed_rows=7,
+                required_rows=1,
+            ),
+            "relationship-type:warranty": DataAvailability(
+                semantic_id="relationship-type:warranty", status="unavailable"
+            ),
+        }
+        examples = graph_few_shots_from_competency_contract(
+            contract, availability=availability
+        )
+        questions = [ex.question for ex in examples]
+        assert "Where is Asset X?" in questions, (
+            "Required case with positive rows must be included "
+            "even when an unrelated optional case is unavailable"
+        )
+        assert "What warranty covers Asset X?" not in questions, (
+            "Optional-absent case must not be included"
+        )
+
+    def test_no_availability_param_preserves_existing_behavior(self):
+        """Without availability parameter: existing static_validation_passed behavior unchanged."""
+        contract = {
+            "cases": [
+                {
+                    "id": "location",
+                    "question": "Where is Chiller 1?",
+                    "probes": {
+                        "direct_graph": {
+                            "query": "MATCH (a:`Asset`)-[:`located_at`]->(l) RETURN a, l LIMIT 10",
+                            "static_validation_passed": True,
+                        }
+                    },
+                },
+            ]
+        }
+        # No availability param — backward compat: existing validation still runs
+        examples = graph_few_shots_from_competency_contract(contract)
+        assert len(examples) == 1, (
+            "Without availability parameter, existing static_validation_passed "
+            "filtering must still work"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Property children in DataSourceElement (for #14 projection testing)
+# ---------------------------------------------------------------------------
+
+
+class TestDataSourceElementPropertyChildren:
+    """DataSourceElement must preserve property children through to_dict()."""
+
+    def test_to_dict_includes_children_when_set(self):
+        """Children in DataSourceElement are included in to_dict()."""
+        el = DataSourceElement(
+            id="node-1",
+            display_name="Asset",
+            type="graph.nodeType",
+            is_selected=True,
+            children=[
+                {
+                    "id": "prop-sn",
+                    "display_name": "serial_number",
+                    "type": "graph.property",
+                    "is_selected": True,
+                    "data_type": "string",
+                    "index_state": "indexed",
+                }
+            ],
+        )
+        d = el.to_dict()
+        assert "children" in d
+        assert len(d["children"]) == 1
+        assert d["children"][0]["id"] == "prop-sn"
+
+    def test_to_dict_excludes_children_when_none(self):
+        """When children=None, to_dict() must not include a 'children' key."""
+        el = DataSourceElement(id="node-1", display_name="Asset", type="graph.nodeType")
+        d = el.to_dict()
+        assert "children" not in d
+
+    def test_property_child_count_from_stage_snapshot(self):
+        """stage_snapshot_from_spec counts property children from DataSourceSpec.elements."""
+        from fabric_kg_builder.knowledge.data_agent import (
+            DataAgentSpec,
+            DataSourceSpec,
+            stage_snapshot_from_spec,
+        )
+        child_dict = {
+            "id": "prop-sn",
+            "display_name": "serial_number",
+            "type": "graph.property",
+            "is_selected": True,
+            "data_type": "string",
+            "index_state": "indexed",
+        }
+        node_with_children = DataSourceElement(
+            id="node-1",
+            display_name="Asset",
+            type="graph.nodeType",
+            is_selected=True,
+            children=[child_dict],
+        )
+        spec = DataAgentSpec(
+            display_name="Agent",
+            instruction="Route.",
+            sources=[
+                DataSourceSpec(
+                    source_type="graph",
+                    name="g",
+                    instructions="Use.",
+                    description="G.",
+                    elements=[node_with_children],
+                    preview=True,
+                )
+            ],
+        )
+        snap = stage_snapshot_from_spec(spec)
+        assert snap.property_child_count == 1, (
+            f"Expected 1 selected property child, got {snap.property_child_count}"
+        )

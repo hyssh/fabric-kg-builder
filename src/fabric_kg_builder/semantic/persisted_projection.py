@@ -931,6 +931,14 @@ def validate_graph_query_readiness(
         gql_edge_count=edge_total,
         canvas_visibility=canvas_visibility,
         notes=notes,
+        observed_relationship_rows={
+            semantic_id: count
+            for semantic_id, count in counts_by_semantic_id.items()
+            if any(
+                r.semantic_id == semantic_id
+                for r in manifest.relationship_types
+            )
+        },
     )
 
 

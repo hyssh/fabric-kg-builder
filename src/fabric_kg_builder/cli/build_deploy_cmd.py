@@ -832,6 +832,8 @@ def _deploy_knowledge(
         build_ontology_source_instructions,
         load_semantic_model_artifacts,
     )
+    # Import early so the except clause below can reference the type (#13 blocker fix).
+    from fabric_kg_builder.knowledge.validation import DataAgentRequiredExampleEmpty  # noqa: PLC0415
     config = _read_environment_config(environment)
     fabric = config.get("fabric", {})
     search = config.get("ai_search", {})
@@ -938,10 +940,17 @@ def _deploy_knowledge(
         )
         competency_path = semantic_context_path.parent / "competency-contract.json"
         _bd_competency_contract_exists = competency_path.exists()
+        # Build availability dict from materialization plan for capability-aware
+        # example gating (#13).
+        _bd_availability = {
+            item.semantic_id: item
+            for item in loaded_semantic.materialization_plan.data_availability
+        }
         graph_few_shots = graph_few_shots_from_competency_contract(
             json.loads(competency_path.read_text(encoding="utf-8"))
             if _bd_competency_contract_exists
-            else {}
+            else {},
+            availability=_bd_availability if _bd_availability else None,
         )
         data_agent_spec = DataAgentSpec(
             display_name=data_agent_name,
@@ -982,10 +991,12 @@ def _deploy_knowledge(
                         or graph_model_id
                     ),
                     instructions=build_graph_source_instructions(
-                        semantic_context
+                        semantic_context,
+                        availability=_bd_availability or None,
                     ),
                     description=build_graph_source_description(
-                        semantic_context
+                        semantic_context,
+                        availability=_bd_availability or None,
                     ),
                     metadata=graph_metadata,
                     elements=list(graph_elements),
@@ -993,6 +1004,8 @@ def _deploy_knowledge(
                 ),
             ],
         )
+    except DataAgentRequiredExampleEmpty as exc:
+        raise BuildDeployError(str(exc)) from exc
     except (
         AgentPublicationError,
         OSError,
@@ -1070,6 +1083,64 @@ def _deploy_knowledge(
     click.echo(f"  duplicate instruction blocks: {len(dedup_violations)}")
     click.echo("[build-deploy] Definition text policy: PASS")
 
+    # Capability reporting (#12 — property selection + grounding text counts)
+    _bd_stage_snap = stage_snapshot_from_spec(data_agent_spec)
+    _bd_req_prop = grounding.expected_property_child_count
+    _bd_comp_prop = _bd_stage_snap.property_child_count
+    _bd_prop_pct = (
+        int(_bd_comp_prop / _bd_req_prop * 100) if _bd_req_prop > 0 else 100
+    )
+    click.echo("[build-deploy] Property selection:")
+    click.echo(f"  required by semantic contract: {_bd_req_prop:,}")
+    click.echo(f"  selected in compiled spec:     {_bd_comp_prop:,}")
+    click.echo(f"  Property coverage: {_bd_prop_pct}%")
+    _bd_global_instr_chars = len(str(data_agent_spec.instruction or ""))
+    _bd_graph_src = next(
+        (s for s in data_agent_spec.sources if str(s.source_type) == "graph"),
+        None,
+    )
+    _bd_ontology_src = next(
+        (s for s in data_agent_spec.sources if str(s.source_type) == "ontology"),
+        None,
+    )
+    _bd_graph_instr_chars = (
+        len(str(_bd_graph_src.instructions or "")) if _bd_graph_src else 0
+    )
+    _bd_graph_desc_chars = (
+        len(str(_bd_graph_src.description or "")) if _bd_graph_src else 0
+    )
+    _bd_ontology_instr_chars = (
+        len(str(_bd_ontology_src.instructions or "")) if _bd_ontology_src else 0
+    )
+    _bd_ontology_desc_chars = (
+        len(str(_bd_ontology_src.description or "")) if _bd_ontology_src else 0
+    )
+    _bd_instruction_chars: dict[str, int] = {}
+    _bd_description_chars: dict[str, int] = {}
+    if _bd_graph_src:
+        _bd_instruction_chars["graph"] = _bd_graph_instr_chars
+        _bd_description_chars["graph"] = _bd_graph_desc_chars
+    if _bd_ontology_src:
+        _bd_instruction_chars["ontology"] = _bd_ontology_instr_chars
+        _bd_description_chars["ontology"] = _bd_ontology_desc_chars
+    click.echo("[build-deploy] Grounding text:")
+    click.echo(f"  global instructions:      {_bd_global_instr_chars:,} chars")
+    click.echo(
+        f"  ontology description:     {_bd_ontology_desc_chars:,} chars"
+    )
+    click.echo(f"  graph description:        {_bd_graph_desc_chars:,} chars")
+
+    # Example gating reporting (#13)
+    if _bd_competency_contract_exists:
+        _bd_few_shot_count = sum(
+            len(s.few_shots or [])
+            for s in data_agent_spec.sources
+            if str(s.source_type) == "graph"
+        )
+        click.echo("[build-deploy] Example gating:")
+        click.echo(f"  examples published: {_bd_few_shot_count}")
+        click.echo("[build-deploy] Example gating: PASS")
+
     capability = CapabilityResult(
         endpoint=search_endpoint,
         api_version=_GA_VERSION,
@@ -1140,6 +1211,9 @@ def _deploy_knowledge(
             ),
             required_source_type="graph",
             source_policy=_bd_source_policy,
+            global_instruction_chars=_bd_global_instr_chars,
+            instruction_chars=_bd_instruction_chars,
+            description_chars=_bd_description_chars,
         )
     except (
         AgentPublicationError,
