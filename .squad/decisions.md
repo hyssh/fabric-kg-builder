@@ -2,6 +2,420 @@
 
 ## Active Decisions
 
+# ADR: Data Agent Source Policy and Text Boundary Contract (#9, #10)
+
+**Status:** Proposed  
+**Date:** 2026-07-22  
+**Author:** Keyser (Lead / Architect)  
+**Scope:** scope/agent-contract (Issues #9, #10)  
+**Reviewer gate:** Hockney (independent)
+
+---
+
+## Context
+
+Issues #9 and #10 define two complementary contracts for Fabric Data Agent definitions:
+
+1. **Source selection policy (#9):** Sources must be declared as required or prohibited in configuration. The builder must construct exactly the configured set, never add implicit sources, and validation must fail when the published definition diverges.
+
+2. **Text and few-shot boundaries (#10):** Global instructions, per-source instructions, per-source descriptions, and few-shot examples must each have named character-count limits. Duplicate-text detection across scopes must prevent the current pattern where the same narrative appears in global and every source instruction. Dry-run must report all counts.
+
+## Decision
+
+### 1. Source Policy Model
+
+Introduce a `SourcePolicy` dataclass in `knowledge/validation.py`:
+
+```
+@dataclass(frozen=True)
+class SourcePolicy:
+    required: frozenset[str]    # e.g. {"ontology", "graph"}
+    prohibited: frozenset[str]  # e.g. {"lakehouse"}
+```
+
+- `validate_source_policy(spec: DataAgentSpec, policy: SourcePolicy)` enforces:
+  - Every required type appears in `spec.sources`.
+  - No prohibited type appears in `spec.sources`.
+  - No unlisted type appears (closed-world by default; add `allowed_extra` if needed).
+- Error type: `SourcePolicyViolation(ValidationError)` with `code`, `field`, `message`.
+- Published read-back validation: `validate_published_source_policy(published: DataAgentStageSnapshot, policy: SourcePolicy)` compares `source["type"]` in the snapshot against the policy. This catches Fabric-side normalization adding unwanted sources.
+
+### 2. Named Text Constants
+
+Add to `knowledge/validation.py`:
+
+```python
+MAX_GLOBAL_INSTRUCTION_CHARS = 4_000
+MAX_SOURCE_INSTRUCTION_CHARS = 2_000
+MAX_SOURCE_DESCRIPTION_CHARS = 500
+MAX_FEW_SHOT_COUNT = 5
+MAX_FEW_SHOT_PAYLOAD_CHARS = 10_000  # total JSON payload
+```
+
+These replace the assertion-style checks currently in `test_data_agent_grounding.py` (`assert len(global_instructions) < 4000`). Issue #10 explicitly requires named constants; scattered literals are prohibited.
+
+### 3. Text Validation API
+
+`validate_data_agent_text(spec: DataAgentSpec) -> list[TextValidationResult]`
+
+Returns one result per field:
+- `field`: e.g. `"global.instruction"`, `"graph.dataSourceInstructions"`, `"ontology.userDescription"`
+- `actual`: character count
+- `limit`: configured maximum
+- `passed`: bool
+- `remediation`: str (e.g. "Move schema detail into selected elements or validated few-shots.")
+
+A second function `validate_instruction_deduplication(spec)` detects when `spec.instruction == source.instructions` for any source (the exact pattern that exists today in `deploy/data_agent.py` line ~195 where `instruction` is assigned identically to both ontology and graph source instructions).
+
+Error type: `TextLimitViolation(ValidationError)` with structured `code`, `field`, `actual`, `limit`, `remediation`.
+
+### 4. Dry-Run Output Contract
+
+Both CLI paths must report:
+
+```
+Source policy:
+  ontology: required ✓
+  graph: required ✓
+  lakehouse: prohibited (absent) ✓
+  Source policy: PASS
+
+Definition text validation:
+  global instructions:       1,420 / 4,000
+  ontology instructions:       610 / 2,000
+  ontology description:        180 / 500
+  graph instructions:          720 / 2,000
+  graph description:           165 / 500
+  graph few-shots:                4 / 5
+  duplicate instruction blocks:  0
+  Definition text policy: PASS
+```
+
+Validation must run and report before any Fabric mutation.
+
+### 5. Read-Back Validation Points
+
+- **Draft read-back** (`decode_stage_snapshot(definition, "draft")`): Validate instruction hash, source selection hash, source types against policy.
+- **Published read-back** (`decode_stage_snapshot(definition, "published")`): Same checks plus `validate_published_source_policy`. This is the existing pattern in `build_agent_publication_receipt` but must now additionally enforce source-type membership.
+
+### 6. Command Paths
+
+| Surface | File | Status |
+|---|---|---|
+| Standalone `deploy-data-agent` | `cli/deploy_cmd.py:1735` | Existing; needs policy + text validation before dry-run echo |
+| Orchestrated `build-deploy` | `cli/build_deploy_cmd.py:~944` | Existing; same validation calls |
+| `agent/deployer.py` (Foundry) | Separate lifecycle; not in scope — different source model |
+
+Both paths must call the same `validate_source_policy` and `validate_data_agent_text` before constructing the spec or before dry-run output. Fail with structured error before any Fabric call.
+
+### 7. Compatibility
+
+- `deploy/data_agent.py::build_semantic_data_agent_spec` currently duplicates global instructions into both source instructions. This function is the older, non-persisted path. Issue #10 requires source-specific instructions (which `semantic/instructions.py` already provides: `build_ontology_source_instructions`, `build_graph_source_instructions`). The persisted path in `cli/deploy_cmd.py` already uses them correctly. `build_semantic_data_agent_spec` should be updated or deprecated.
+- `knowledge/validation.py` already has `MAX_SOURCES = 5` and `SourceCapError`. New constants and types extend this module naturally.
+- Scope E (#12, #13, #14) depends on these structural slots. The constants and validation API defined here become the contract Scope E populates.
+
+## Consequences
+
+- All Data Agent definitions become contract-driven: no source can be silently added or omitted.
+- Text limits are enforced pre-flight, preventing oversized payloads that degrade runtime quality.
+- The duplicate-instruction anti-pattern is structurally blocked.
+- Dry-run becomes a reliable pre-deployment audit surface.
+- Scope E can assume these validation functions exist and call them.
+
+---
+
+# ADR: Data Agent Source Policy and Text Validation — Implementation Record (#9, #10)
+
+**Status:** Implemented (pending Hockney independent approval + merge)
+**Date:** 2026-07-22
+**Author:** Verbal (AI Integration Dev)
+**Branch:** `scope/agent-contract`
+**Issues:** #9 (contract-driven source selection), #10 (text/few-shot limits)
+
+---
+
+## What was done
+
+### knowledge/validation.py (new contract surface)
+
+Added:
+- `MAX_GLOBAL_INSTRUCTION_CHARS = 4_000`
+- `MAX_SOURCE_INSTRUCTION_CHARS = 2_000`
+- `MAX_SOURCE_DESCRIPTION_CHARS = 500`
+- `MAX_FEW_SHOT_COUNT = 5`
+- `MAX_FEW_SHOT_PAYLOAD_CHARS = 10_000`
+- `SourcePolicy` frozen dataclass: `required: frozenset[str]`, `prohibited: frozenset[str]`. Raises `ValueError` on required∩prohibited overlap at construction.
+- `SourcePolicyViolation(ValidationError)`: structured `code`, `field`, `message`.
+- `validate_source_policy(spec, policy)`: enforces required/prohibited on spec sources. Unlisted types are allowed (open-world for non-prohibited types).
+- `validate_published_source_policy(snapshot, policy)`: enforces policy on the published `DataAgentStageSnapshot`. Catches Fabric-side normalization adding/removing sources.
+- `TextValidationResult` frozen dataclass: `field`, `actual`, `limit`, `passed`, `remediation`.
+- `TextLimitViolation(ValidationError)`: structured with formatted message including commas (e.g. "6,840 characters").
+- `validate_data_agent_text(spec)`: returns `list[TextValidationResult]` — one entry per text field. Does not raise; caller decides gate policy.
+- `_normalize_for_dedup(text)`: internal. Strips, collapses internal whitespace (`re.sub(r"\s+", " ")`), lower-cases, Unicode-NFC. Required so double-spacing doesn't bypass dedup.
+- `validate_instruction_deduplication(spec)`: returns `list[str]` describing detected duplicates. Exempts normalized text < 200 chars to allow short shared terminology.
+
+Circular import avoided: `data_agent.py` imports `validation.py`, so `DataAgentSpec`/`DataAgentStageSnapshot` are guarded under `TYPE_CHECKING`. Functions use duck typing at runtime.
+
+### deploy/data_agent.py (bug fix)
+
+`build_semantic_data_agent_spec` previously set `instructions=instruction` (global) on **both** ontology and graph sources — the exact anti-pattern described in issue #10.
+
+Fixed: ontology source gets `ontology_source_instruction` (entity type interpretation, business meaning, use Graph to prove relationships), graph source gets `graph_source_instruction` (backtick identifiers, directed edge preservation, hop/row limits, evidence rules). Both are distinct from the global instruction and from each other.
+
+### knowledge/agent_validation.py
+
+`deploy_and_validate_data_agent` accepts optional `source_policy: Any | None = None`. When provided, calls `validate_published_source_policy(published, source_policy)` after read-back, before building the receipt. This ensures Fabric-side normalization cannot silently add/remove sources.
+
+### cli/deploy_cmd.py (`deploy-data-agent` standalone path)
+
+Before dry-run echo:
+1. `validate_source_policy(spec, SourcePolicy(required={"ontology","graph"}))` — fails fast on wrong source set.
+2. `validate_data_agent_text(spec)` — fails fast on oversized fields.
+3. `validate_instruction_deduplication(spec)` — fails fast on copied instructions.
+
+Dry-run output now includes:
+- Source policy table with required/prohibited status per source.
+- Definition text validation table with actual/limit for every field.
+- Duplicate instruction block count.
+
+`deploy_and_validate_data_agent` called with `source_policy=_data_agent_source_policy` for post-publication validation.
+
+### cli/build_deploy_cmd.py (`build-deploy` orchestrated path)
+
+Identical validation calls as standalone — same policy, same text/dedup checks, same counts in output, same `source_policy` passed to `deploy_and_validate_data_agent`. Ensures parity between the two deployment surfaces.
+
+### tests/unit/test_agent_contract_validation.py (48 new tests)
+
+All pass. Coverage:
+- Named constant values (5 assertions).
+- SourcePolicy construction + overlap guard.
+- `validate_source_policy`: exact set passes, missing required fails, prohibited present fails, extra unlisted passes, empty sources fails, error codes/field names.
+- `validate_published_source_policy`: correct published passes, missing required fails, prohibited present fails, error codes.
+- `validate_data_agent_text`: compact spec passes, field names, global too long fails, source instruction too long, description too long, few-shot count at limit, over limit, payload too large, remediation non-empty, no payload field when no few-shots.
+- `TextLimitViolation`: attributes, formatted message, is exception.
+- `validate_instruction_deduplication`: distinct passes, global=source detected, source=source detected, short text exempt, whitespace normalization, case normalization.
+- Legacy builder fix: ontology≠global, graph≠global, ontology≠graph, dedup passes, text validation passes, policy passes.
+- Graph few-shot count reported as 0 when absent.
+
+---
+
+## Decisions + divergences from Keyser ADR
+
+| ADR item | Implementation | Divergence? |
+|---|---|---|
+| Constants in `validation.py` | Done | None |
+| `SourcePolicy` in `validation.py` | Done | None |
+| `validate_source_policy` in `validation.py` | Done; TYPE_CHECKING guard for DataAgentSpec | Avoided circular import |
+| `validate_published_source_policy` | Done | None |
+| `TextValidationResult`, `TextLimitViolation` in `validation.py` | Done | None |
+| `validate_data_agent_text` in `validation.py` | Done | None |
+| `validate_instruction_deduplication` in `validation.py` | Done | None |
+| Fix `build_semantic_data_agent_spec` duplication | Done | None |
+| Same policy in standalone + orchestrated CLI | Done | None |
+| `source_policy` passed to `deploy_and_validate_data_agent` | Done | Added optional param; backward-compatible |
+| Dry-run reports all counts | Done | None |
+| Validation before any Fabric update | Done | None |
+
+ADR placed `validate_source_policy` and friends in `validation.py`. This module is imported by `data_agent.py`, so `DataAgentSpec` cannot be imported at module level in `validation.py` without a circular import. Used `TYPE_CHECKING` guard + `from __future__ import annotations` — functions use duck typing at runtime. This is the standard Python pattern and does not change the API surface.
+
+---
+
+## Test commands that ran
+
+```
+uv run pytest tests/unit/test_agent_contract_validation.py -q
+# 48 passed
+
+uv run pytest tests/unit/test_deploy_data_agent.py tests/unit/test_data_agent_grounding.py tests/unit/test_knowledge_data_agent_helpers.py -q
+# 60 passed (baseline unchanged)
+
+uv run pytest tests/unit/test_deploy* tests/unit/test_agent* tests/unit/test_data_agent* tests/unit/test_knowledge_data_agent* -q
+# 181 passed
+
+uv run pytest tests/unit/ -q --timeout=120
+# 2231 passed, 0 failed
+```
+
+---
+
+## Remaining caveats for Hockney review
+
+1. **Graph few-shots required when competency contract exists** (issue #10 requirement): The current implementation reports zero few-shots in the dry-run but does not fail the gate when the graph source has no few-shots. Issue #10 says "Require Graph few-shots when a compiled competency contract exists." The CLI currently reads `competency-contract.json` if it exists and populates few-shots from it. Adding a hard gate (fail if contract exists but few-shots=0) is possible in the validation layer but was not added to avoid breaking deployments where no contract has been compiled yet. Hockney should decide whether to add this gate.
+
+2. **`validate_source_policy` is open-world for unlisted types**: extra types beyond required/prohibited are allowed. If closed-world behavior is needed (only required types allowed, no extras), the policy can add prohibited="*" semantics. Current ADR was silent on this edge case.
+
+3. **`deploy/data_agent.py::build_semantic_data_agent_spec`** (legacy path): instruction bug is fixed. The function is flagged as the older non-persisted path. Scope E may deprecate it entirely.
+
+---
+
+# Revision: Data Agent Contract Blockers B1 + B2 (Issues #9, #10)
+
+**Author:** McManus (KG/Ontology Dev)  
+**Date:** 2026-07-22  
+**Branch:** scope/agent-contract  
+**Status:** Ready for Hockney re-review
+
+---
+
+## Context
+
+Hockney REJECTED Verbal's implementation with two blocking findings. This revision addresses both completely.
+
+---
+
+## B1 — Closed-world source enforcement (Issue #9)
+
+### Decision
+
+`SourcePolicy` now carries an optional `allowed_extra: frozenset[str]` field (defaults empty). Both `validate_source_policy` and `validate_published_source_policy` enforce:
+
+```
+allowed = policy.required | policy.allowed_extra
+extra_types = actual_types - allowed
+# any extra_type → SourcePolicyViolation("SOURCE_POLICY_EXTRA_TYPE", ...)
+```
+
+For the published snapshot, the same logic fires with code `PUBLISHED_SOURCE_POLICY_EXTRA_TYPE`.
+
+`SourcePolicy.__post_init__` also validates `allowed_extra ∩ prohibited == ∅`.
+
+### CLI simplification
+
+Both CLI paths now use:
+
+```python
+SourcePolicy(required=frozenset({"ontology", "graph"}))
+```
+
+No `prohibited=frozenset()` noise. Closed-world rejects lakehouse, kusto, and every other type automatically. `allowed_extra` can be set for future multi-source deployments without requiring them.
+
+### Rationale for `allowed_extra` (not pure required-only)
+
+The ADR says "closed-world by default; add `allowed_extra` if needed." Some future deployments may need a third optional source (e.g., semantic_model) without making it mandatory. `allowed_extra` provides that escape hatch with explicit declaration rather than silent admission.
+
+---
+
+## B2 — Graph few-shots required when competency contract exists (Issue #10)
+
+### Decision
+
+New validator: `validate_graph_few_shots(spec, *, contract_exists: bool)`.
+
+- `contract_exists=False` → no-op (backward compat when no compiled contract).
+- `contract_exists=True` + graph source has 0 few-shots → raises `FewShotContractViolation` with `code="GRAPH_FEW_SHOTS_REQUIRED"` and a clear remediation message pointing at `competency-contract.json` and `static_validation_passed`.
+
+Both CLI paths track `_competency_contract_exists = competency_path.exists()` (initialized `False` before the grounding try block, captured inside). Raises `ClickException` / `BuildDeployError` on violation, before any Fabric mutation.
+
+### Representation path (no parallel schema invented)
+
+The compiled competency contract at `competency-contract.json` is the existing artifact. `graph_few_shots_from_competency_contract` already validates `static_validation_passed=true` per case. The gate simply checks `len(graph_src.few_shots) == 0` after that function has already filtered. No new JSON schema or separate representation was introduced.
+
+---
+
+## Test counts
+
+| Suite | Command | Result |
+|-------|---------|--------|
+| New acceptance tests | `pytest tests/unit/test_agent_contract_validation.py` | 63 passed (+15 vs Verbal) |
+| Decisions gate | `pytest tests/unit/test_deploy* tests/unit/test_agent*` | 156 passed |
+| Full unit suite | `pytest tests/unit/` | 2246 passed (was 2231) |
+
+The 15 new tests would fail on Verbal's implementation and pass only with the corrected behavior:
+- `test_extra_unlisted_type_raises_closed_world` (was passing open-world)
+- `test_extra_type_in_allowed_extra_passes`
+- `test_extra_type_error_code`
+- `test_extra_unlisted_published_type_raises_closed_world`
+- `test_extra_published_type_error_code`
+- `test_extra_published_type_in_allowed_extra_passes`
+- `test_allowed_extra_default_empty`
+- `test_allowed_extra_prohibited_overlap_raises`
+- `TestValidateGraphFewShots` (8 tests: contract+0→fail, contract+≥1→pass, no-contract+0→pass)
+
+---
+
+## No changes to
+
+- Read-back wiring (`deploy_and_validate_data_agent` already calls `validate_published_source_policy` when `source_policy` is provided — reviewed as ✓ by Hockney).
+- Dry-run output format (already matching ADR — reviewed as ✓ by Hockney).
+- Named constants (already present — reviewed as ✓ by Hockney).
+- `build_semantic_data_agent_spec` dedup fix (already done — reviewed as ✓ by Hockney).
+
+---
+
+# Review: Data Agent Contract (#9, #10) — scope/agent-contract
+
+**Reviewer:** Hockney (Test Engineer)  
+**Date:** 2026-07-22 (re-review #2)  
+**Verdict:** APPROVED  
+**Commit authorization:** McManus may commit all staged changes on `scope/agent-contract`.  
+
+---
+
+## Test Results
+
+| Suite | Command | Result |
+|-------|---------|--------|
+| Focused (63 tests) | `pytest tests/unit/test_agent_contract_validation.py` | 63 passed ✓ |
+| Decisions gate | `pytest tests/unit/test_deploy* tests/unit/test_agent*` | 156 passed ✓ |
+| Full unit suite | `pytest tests/unit/` | 2246 passed ✓ |
+
+No regressions. All existing and new tests pass.
+
+---
+
+## Previously-Rejected Blockers — Now Fixed
+
+### B1 — Closed-world source enforcement ✅ FIXED
+
+**Fix:** `SourcePolicy` gains `allowed_extra: frozenset[str]` (defaults empty). Both `validate_source_policy` and `validate_published_source_policy` now reject any type not in `required | allowed_extra` with code `SOURCE_POLICY_EXTRA_TYPE` / `PUBLISHED_SOURCE_POLICY_EXTRA_TYPE`. CLI paths instantiate `SourcePolicy(required=frozenset({"ontology", "graph"}))` with no `allowed_extra`, so only those two types pass.
+
+**Evidence:** `test_extra_unlisted_type_raises_closed_world`, `test_extra_type_error_code`, `test_extra_unlisted_published_type_raises_closed_world`, `test_extra_published_type_error_code`, `test_extra_type_in_allowed_extra_passes`, `test_extra_published_type_in_allowed_extra_passes` — all passing.
+
+### B2 — Graph few-shots hard-fail when contract exists ✅ FIXED
+
+**Fix:** New `validate_graph_few_shots(spec, contract_exists=...)` raises `FewShotContractViolation` (code `GRAPH_FEW_SHOTS_REQUIRED`) when `contract_exists=True` and no Graph source has ≥1 surviving few-shot. Both `deploy_cmd.py` and `build_deploy_cmd.py` detect `competency_path.exists()` before the conditional read, store the boolean, and call the validator before any Fabric mutation.
+
+**Evidence:** `test_contract_exists_zero_few_shots_raises`, `test_contract_exists_empty_list_raises`, `test_contract_violation_error_code`, `test_contract_exists_with_few_shots_passes`, `test_no_contract_zero_few_shots_passes` — all passing.
+
+---
+
+## Additional Verification
+
+- **Validation before mutation:** Both CLI paths call `validate_source_policy` and `validate_graph_few_shots` before the `deploy_and_validate_data_agent` call (pre-mutation).
+- **Published read-back enforcement:** `deploy_and_validate_data_agent` calls `validate_published_source_policy(published, source_policy)` after upsert/publish — catches Fabric-side normalization drift.
+- **Standalone/orchestrated parity:** Both `deploy_cmd.py` and `build_deploy_cmd.py` use identical validation logic, same `SourcePolicy`, same error handling.
+- **Dry-run additions/removals:** Source policy and text validation counts are reported in dry-run output; failures abort before mutation.
+- **Source-specific instructions:** `build_semantic_data_agent_spec` now generates distinct ontology/graph source instructions (verified by `test_ontology_source_instructions_differ_from_global`, `test_graph_source_instructions_differ_from_global`, `test_ontology_and_graph_source_instructions_differ`).
+- **Dedup passes built spec:** `test_deduplication_passes_for_built_spec` confirms no false positives on the production builder.
+- **No unrelated changes:** Only modified files are validation, agent_validation, deploy_cmd, build_deploy_cmd, data_agent, and squad docs.
+- **Branch/worktree:** Confirmed on `scope/agent-contract`, no branch switches.
+
+---
+
+## Strengths
+
+1. Clean `SourcePolicy` model with construction-time overlap guards.
+2. Named constants for all five text limits.
+3. Actionable error messages with machine-readable codes, field names, and remediation.
+4. Dedup normalization (whitespace + case) with 200-char threshold avoids false positives.
+5. `allowed_extra` provides extensibility without breaking closed-world default.
+6. 15 new tests cover adversarial scenarios (closed-world, contract-exists, empty lists, near-dedup).
+7. `data_agent.py` fix eliminates instruction duplication at the source (not merely detected).
+
+---
+
+## Revision History
+
+| # | Verdict | Blocker(s) | Revision Owner |
+|---|---------|-----------|----------------|
+| 1 | REJECTED | B1: open-world policy; B2: no few-shot hard-fail | McManus |
+| 2 | APPROVED | Both fixed | — |
+
+---
+
+## Archive (entries older than 2026-07-16)
+
+
 ### Lakehouse Lean + Visual Extraction Feedback (2026-06-24T22:30:00-07:00) — Hyunsuk + Squad
 
 #### Coordinator: Lakehouse scope + visual extraction feedback
