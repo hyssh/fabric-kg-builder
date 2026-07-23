@@ -220,6 +220,32 @@ def build_semantic_data_agent_spec(
         )
     instruction = "\n".join(instruction_lines)
 
+    # Ontology source: business meaning, approved concepts, entity interpretation.
+    # Deliberately distinct from global and graph instructions (issue #10).
+    ontology_source_lines = [
+        f"Use this Ontology source to interpret approved entity types: "
+        f"{', '.join(entity_names)}.",
+        "Resolve user language to selected entity concepts and semantic properties.",
+        "Do not treat semantic concept match as proof that two records are related.",
+        "Use the Graph source to prove relationships and paths.",
+        "Preserve partial dates exactly as stored; keep distinct serial-numbered "
+        "assets separate.",
+    ]
+    ontology_source_instruction = "\n".join(ontology_source_lines)
+
+    # Graph source: exact traversal, edge direction, query, and evidence rules.
+    # Deliberately distinct from global and ontology instructions (issue #10).
+    graph_source_lines = [
+        "Use only selected node and edge labels. Backtick-quote all identifiers.",
+        "Preserve every directed edge exactly; do not reverse traversal direction.",
+        "Prefer one-hop MATCH patterns; use OPTIONAL MATCH only for optional later hops.",
+        "Keep each query within 4 hops and LIMIT 100.",
+        "Return endpoint entity IDs and citation_json for relationship findings.",
+        "A valid empty result means no verified relationship was found.",
+        f"Selected graph edge labels: {', '.join(graph_labels)}.",
+    ]
+    graph_source_instruction = "\n".join(graph_source_lines)
+
     ontology_elements = [
         DataSourceElement(
             id=item.type_name,
@@ -245,7 +271,7 @@ def build_semantic_data_agent_spec(
                 artifact_id=ontology_id,
                 workspace_id=workspace_id,
                 display_name=ontology_name,
-                instructions=instruction,
+                instructions=ontology_source_instruction,
                 description=(
                     "Semantic Ontology for evidence-backed building maintenance, "
                     "equipment, facility, project, and service relationships."
@@ -259,7 +285,7 @@ def build_semantic_data_agent_spec(
                 artifact_id=graph_model_id,
                 workspace_id=workspace_id,
                 display_name=graph_model_name,
-                instructions=instruction,
+                instructions=graph_source_instruction,
                 description=(
                     "Typed Graph Model over semantic serving tables. Use it for "
                     "relationship traversal and edge-level temporal evidence."
