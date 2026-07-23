@@ -3124,3 +3124,208 @@ Callers never need to remember the string literals. Evidence IDs are determinist
 
 
 
+
+---
+
+## Decision: Issue Worktree Roadmap
+
+**Date:** 2026-07-22T21:22:00-07:00
+**By:** Keyser (Lead / Architect)
+**Requested by:** Hyunsuk Shin
+**Status:** 📋 Proposed
+
+---
+
+### Observed State
+
+**Open issues:** 10 (#5–#14) — all OPEN, no labels, no assignees.
+User expected 8; a prior fetch returned 10. The `gh issue list` run at decision time confirms **10 open issues**.
+
+### Scope Clusters
+
+Six worktree scopes, organized into three delivery waves.
+
+#### Scope A — Ontology Integrity (#7, #8)
+
+| Field | Value |
+|---|---|
+| Issues | #7 Validate identity keys vs. relationship endpoints, #8 Preserve partial dates |
+| Owner | **McManus** (KG/Ontology Dev) |
+| Branch | `scope/ontology-integrity` |
+| Worktree | `../fabric-kg-builder-wt-ontology-integrity` |
+| Primary files | `ontology/compiler.py`, `ontology/bridge_validation.py`, `validate/data_gates.py` |
+| Wave | **1 — Start now** |
+
+**Cohesion:** Both fix ontology compilation correctness — identity key alignment and type-safe date projection. Same module, same owner, same validation subsystem.
+
+#### Scope B — Data Agent Contract & Boundaries (#9, #10)
+
+| Field | Value |
+|---|---|
+| Issues | #9 Contract-driven source selection, #10 Instruction/description/few-shot limits |
+| Owner | **Verbal** (AI Integration Dev) |
+| Branch | `scope/agent-contract` |
+| Worktree | `../fabric-kg-builder-wt-agent-contract` |
+| Primary files | `deploy/data_agent.py`, `deploy/agent_instructions.py`, `agent/deployer.py`, config/contract schema |
+| Wave | **1 — Start now** |
+
+**Cohesion:** Both establish the structural rules for Data Agent definitions — what sources are allowed (#9) and what size/content limits apply (#10). Shared files, shared author perspective.
+
+#### Scope C — Deployment Manifest (#6)
+
+| Field | Value |
+|---|---|
+| Issues | #6 Single naming authority |
+| Owner | **Fenster** (Data Engineer) |
+| Branch | `scope/deploy-manifest` |
+| Worktree | `../fabric-kg-builder-wt-deploy-manifest` |
+| Primary files | `infra/names.py`, `cli/deploy_cmd.py`, `semantic/compiler.py` |
+| Wave | **1 — Start now** |
+
+**Cohesion:** Single cross-cutting concern — one manifest as the naming authority for all Fabric items. Isolated from other scopes.
+
+#### Scope D — Source Inspection (#5)
+
+| Field | Value |
+|---|---|
+| Issues | #5 Inspect and summarize source data before domain questioning |
+| Owner | **Fenster** (Data Engineer) |
+| Branch | `scope/source-inspect` |
+| Worktree | `../fabric-kg-builder-wt-source-inspect` |
+| Primary files | `sources/adapter.py`, `sources/router.py`, `domain/service.py`, `cli/init_cmd.py` |
+| Wave | **1 — Start now** |
+
+**Cohesion:** Single concern — source profiling before domain dialog. Fenster owns two Wave 1 scopes; recommend starting D after C, or running in parallel if capacity allows.
+
+#### Scope E — Capability-Aware Agent Generation (#12, #13, #14)
+
+| Field | Value |
+|---|---|
+| Issues | #12 Capability-aware instructions, #13 Gate examples on relationship availability, #14 Graph properties survive publication |
+| Owner | **Verbal** + **McManus** (pair) |
+| Branch | `scope/agent-capability` |
+| Worktree | `../fabric-kg-builder-wt-agent-capability` |
+| Primary files | `semantic/persisted_projection.py`, `deploy/data_agent.py`, `deploy/agent_instructions.py`, `serving/competency.py` |
+| Wave | **2 — After Scope B merges** |
+
+**Cohesion:** All three issues ground Data Agent generation in the observed/deployed state. #12 generates instructions from live capabilities; #13 gates examples on relationship row counts; #14 ensures properties survive the publication projection. They share `persisted_projection.py` (962 LOC) and `data_agent.py` (270 LOC).
+
+**Dependency:** Scope B must merge first — the contract and boundary framework from #9/#10 defines the structural slots that #12/#13/#14 populate.
+
+#### Scope F — Data Agent Live Validation (#11)
+
+| Field | Value |
+|---|---|
+| Issues | #11 Live-validate up to seven Data Agent examples before publication |
+| Owner | **Verbal** |
+| Branch | `scope/agent-livevalidation` |
+| Worktree | `../fabric-kg-builder-wt-agent-livevalidation` |
+| Primary files | `semantic/persisted_projection.py`, `serving/competency.py`, `deploy/data_agent.py` |
+| Wave | **3 — After Scope E merges** |
+
+**Cohesion:** Single concern — runtime execution of GQL examples against the deployed Graph. Depends on examples being correctly generated and gated (Scope E).
+
+---
+
+### Dependency Graph
+
+```
+Wave 1 (parallel)          Wave 2              Wave 3
+─────────────────          ──────              ──────
+A: Ontology (#7,#8)  ──┐
+B: Agent Contract (#9,#10) ──→  E: Capability (#12,#13,#14) ──→  F: Live Val (#11)
+C: Deploy Manifest (#6)   ──┘        ↑
+D: Source Inspect (#5)     ──────────┘ (no hard dep, just rebase)
+```
+
+**Critical path:** B → E → F (three serial waves through Data Agent).
+
+---
+
+### Shared-File & Merge Collision Risks
+
+| Hot file | LOC | Scopes touching it | Risk | Mitigation |
+|---|---|---|---|---|
+| `deploy/data_agent.py` | 270 | B, E, F | **HIGH** | Merge B before starting E; E before F. Never two scopes editing simultaneously. |
+| `semantic/persisted_projection.py` | 962 | E, F | **MEDIUM** | E merges before F starts. |
+| `deploy/agent_instructions.py` | 284 | B, E | **MEDIUM** | Same serial dependency. |
+| `ontology/compiler.py` | 724 | A only | **LOW** | Single owner. |
+| `infra/names.py` | 239 | C only | **LOW** | Single owner. |
+| `cli/deploy_cmd.py` | — | B, C | **LOW** | B touches agent args; C touches naming. Different sections. |
+
+**Recommendation:** The serial B→E→F chain naturally prevents collision on the three highest-risk files. Scope A and Scope C/D are fully isolated.
+
+---
+
+### Worktree Strategy: Per-Issue vs. Per-Scope
+
+**Recommendation: One worktree per scope (not per issue).**
+
+Rationale:
+- Issues within a scope share files — separate worktrees would produce merge conflicts between teammates.
+- Coupled issues need shared test fixtures and integrated validation.
+- Six worktrees are manageable; ten would be noisy.
+- Each scope produces one PR with a coherent review surface.
+
+---
+
+### Merge Train & Validation Gates
+
+| Order | Scope | PR title pattern | Gate |
+|---|---|---|---|
+| 1 | A: Ontology Integrity | `scope/ontology-integrity → main` | `pytest tests/unit/test_ontology* tests/unit/test_bridge*` + full suite green |
+| 2 | C: Deploy Manifest | `scope/deploy-manifest → main` | `pytest tests/unit/test_deploy* tests/unit/test_infra*` + full suite green |
+| 3 | D: Source Inspect | `scope/source-inspect → main` | `pytest tests/unit/test_sources* tests/unit/test_domain*` + full suite green |
+| 4 | B: Agent Contract | `scope/agent-contract → main` | `pytest tests/unit/test_deploy* tests/unit/test_agent*` + full suite green |
+| 5 | E: Capability-Aware | `scope/agent-capability → main` | Full suite + manual Data Agent smoke test |
+| 6 | F: Live Validation | `scope/agent-livevalidation → main` | Full suite + integration test against a deployed Graph |
+
+**Between each merge:** Remaining open scopes rebase onto updated `main`.
+
+---
+
+### Recommended First Parallel Tasks (Wave 1)
+
+Start these four scopes immediately — they have zero inter-dependencies:
+
+1. **Scope A** (#7, #8) → McManus — Ontology compiler fixes
+2. **Scope B** (#9, #10) → Verbal — Data Agent contract & limits
+3. **Scope C** (#6) → Fenster — Deployment manifest naming
+4. **Scope D** (#5) → Fenster — Source inspection (start after C, or in parallel if bandwidth allows)
+
+Hockney writes tests across all four scopes.
+
+---
+
+### Worktree Creation Commands
+
+```bash
+# Run from repo root: /Users/hyssh/workspace/fabric-kg-builder
+
+# Wave 1 — create branches and worktrees
+git branch scope/ontology-integrity main
+git worktree add ../fabric-kg-builder-wt-ontology-integrity scope/ontology-integrity
+
+git branch scope/agent-contract main
+git worktree add ../fabric-kg-builder-wt-agent-contract scope/agent-contract
+
+git branch scope/deploy-manifest main
+git worktree add ../fabric-kg-builder-wt-deploy-manifest scope/deploy-manifest
+
+git branch scope/source-inspect main
+git worktree add ../fabric-kg-builder-wt-source-inspect scope/source-inspect
+
+# Wave 2 — create after Scope B merges and main is updated
+git branch scope/agent-capability main
+git worktree add ../fabric-kg-builder-wt-agent-capability scope/agent-capability
+
+# Wave 3 — create after Scope E merges and main is updated
+git branch scope/agent-livevalidation main
+git worktree add ../fabric-kg-builder-wt-agent-livevalidation scope/agent-livevalidation
+```
+
+**Cleanup after merge:**
+```bash
+git worktree remove ../fabric-kg-builder-wt-<scope-name>
+git branch -d scope/<scope-name>
+```
