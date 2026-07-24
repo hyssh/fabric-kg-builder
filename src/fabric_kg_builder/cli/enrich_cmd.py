@@ -35,14 +35,13 @@ from ..sources.csv_loader import load_csv
 from ..sources.chunker import Chunker
 from ..sources.router import extract as router_extract
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 _CSV_EXTENSIONS: frozenset[str] = frozenset({".csv", ".tsv", ".xls", ".xlsx"})
 _DOC_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".html", ".htm", ".md", ".pptx"})
 _PARQUET_EXTENSIONS: frozenset[str] = frozenset({".parquet"})
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".tiff", ".tif"})
+
+# Default location for the approved source profile (relative to cwd)
+_DEFAULT_SOURCE_PROFILE_PATH = ".fkg/source-profile.json"
 
 # Drawing mode values (validated by Click choice, also used internally)
 DRAWING_MODE_AUTO: str = "auto"
@@ -274,6 +273,59 @@ def _build_blob_uploader(ctx_obj: dict):
     except Exception as exc:
         _log.debug("_build_blob_uploader: blob uploader not available (%s)", exc)
         return None
+
+
+def _load_source_profile_for_enrich(
+    source_path: Path,
+    profile_path: Path,
+) -> "tuple[object | None, str | None]":
+    """Try to load and validate the approved source profile for enrichment.
+
+    This is the downstream consumer boundary for ``init-domain``'s persisted
+    profile (B1 downstream reuse).  It is deliberately non-blocking — a missing
+    or unreadable profile is a soft warning, not an error, to maintain backward
+    compatibility with projects that have not yet run ``init-domain``.
+
+    Parameters
+    ----------
+    source_path:
+        The ``--input`` path being enriched; used to compute the current
+        ``source_hash`` for staleness validation.
+    profile_path:
+        Path to the candidate profile JSON (e.g. ``.fkg/source-profile.json``).
+
+    Returns
+    -------
+    (profile, stale_warning)
+        ``profile``: :class:`SourceProfile` instance, or ``None`` when absent/
+        unreadable.
+        ``stale_warning``: human-readable string when files have changed since
+        the profile was approved, ``None`` when the hash matches or is absent.
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
+
+    if not profile_path.exists():
+        _log.debug("_load_source_profile_for_enrich: no profile at %s", profile_path)
+        return None, None
+
+    try:
+        from ..sources.inspector import (  # noqa: PLC0415
+            check_source_profile_staleness,
+            load_source_profile,
+        )
+
+        profile = load_source_profile(profile_path)
+        stale_warning = check_source_profile_staleness(profile, source_path)
+        return profile, stale_warning
+    except Exception as exc:
+        _log.warning(
+            "_load_source_profile_for_enrich: failed to load profile at %s: %s",
+            profile_path,
+            exc,
+        )
+        return None, None
 
 
 def _resolve_domain_brief(
@@ -1608,6 +1660,19 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
         "Decision and reason are recorded in drawing_manifest of the canonical JSON."
     ),
 )
+@click.option(
+    "--source-profile",
+    "source_profile_path",
+    default=_DEFAULT_SOURCE_PROFILE_PATH,
+    show_default=True,
+    type=click.Path(),
+    help=(
+        "Path to the approved source profile produced by 'fabric-kg init-domain'. "
+        "When present, extraction risks are surfaced as warnings and source_hash "
+        "staleness is validated. Silently ignored when the file is absent (legacy "
+        "projects without a profile continue to work unchanged)."
+    ),
+)
 @click.pass_context
 def enrich_cmd(
     ctx: click.Context,
@@ -1628,6 +1693,7 @@ def enrich_cmd(
     force: bool,
     output_path: str,
     drawing_mode: str,
+    source_profile_path: str,
 ) -> None:
     """Run LLM extraction on source files and produce structured JSON in build/enriched/.
 
@@ -1637,6 +1703,11 @@ def enrich_cmd(
 
     Enrichment requires an approved domain.yaml contract. A compatibility error
     is raised when only legacy domain.json inputs are present.
+
+    When an approved source profile is found at --source-profile (default:
+    .fkg/source-profile.json), extraction risks are surfaced and the source_hash
+    is validated for staleness. This is a soft check — enrichment proceeds even
+    when the profile is absent or stale.
 
     Exit codes: 0 success · 1 error · 4 partial enrichment (checkpoint saved).
     """
@@ -1654,6 +1725,21 @@ def enrich_cmd(
 
     out_dir = Path(output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- B1: Load approved source profile (downstream reuse of init-domain output) ---
+    # Silently skipped when profile is absent (legacy projects without init-domain).
+    input_p = Path(input_path)
+    _source_profile, _stale_warning = _load_source_profile_for_enrich(
+        input_p, Path(source_profile_path)
+    )
+    if _source_profile is not None:
+        click.echo(f"[enrich] source profile  → {source_profile_path}")
+        if _stale_warning:
+            click.echo(f"[enrich] WARNING: {_stale_warning}", err=True)
+        if _source_profile.inferred.extraction_risks:
+            click.echo("[enrich] extraction risks from approved profile:")
+            for _risk in _source_profile.inferred.extraction_risks:
+                click.echo(f"[enrich]   ⚠ {_risk}")
 
     try:
         (
@@ -1761,8 +1847,7 @@ def enrich_cmd(
 
     checkpoint_store = CheckpointStore(out_dir / ".checkpoints.json")
 
-    # Collect source files.
-    input_p = Path(input_path)
+    # Collect source files (reuse input_p already set above).
     if input_p.is_dir():
         iterator = input_p.rglob("*") if recursive else input_p.iterdir()
         supported = (

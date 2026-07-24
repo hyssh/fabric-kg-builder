@@ -71,3 +71,100 @@ Authored/revised 5 authorized test files totalling ~370 new lines of tests. Fina
 Root cause: `graph_few_shots_from_competency_contract` iterates all cases with `probes.direct_graph.static_validation_passed=True` regardless of gating receipts. Optional-absent cases are not filtered out.
 
 Fix required: After `gate_competency_examples`, collect receipts and skip cases where `receipt.published=False`. OR: check `routes.direct_graph` + availability directly during extraction loop.
+
+## 2026-07-23 (Issue #5 Review — Source Inspection & Domain Initialization)
+
+**Assigned by:** Hyunsuk (Requested)
+**Role:** Independent inspection & review checklist authoring (READ-ONLY, no implementation)
+**Status:** COMPLETE
+
+### Task Scope
+
+Inspect GitHub issue #5 and the existing source inspection/domain initialization workflow. Produce a precise review checklist and test/contract matrix for the implementation owner, emphasizing:
+- Mixed formats, missing metadata, empty inputs
+- Observed vs inferred facts
+- Existing domain descriptions
+- Approval/corrections
+- Persistence and reuse
+- Unresolved-only questioning
+- Noninteractive behavior
+- Backward compatibility
+
+### Findings Summary
+
+**Issue #5 Contract:** New `init-domain` command should inspect source files BEFORE asking domain questions, summarize observable facts (file counts, formats, date ranges, document categories, extraction constraints, entity candidates), incorporate existing domain descriptions if present, allow user approval/correction, and persist the approved profile for reuse by enrichment and compile commands.
+
+**Current State:** Workflow asks broad domain questions blindly without summarizing what information is already available in source files and existing domain contracts.
+
+**Key Architectural Components Needed:**
+1. Source profiler module: scan files, categorize by format, extract metadata (dates, sizes, hashes)
+2. Domain merge logic: load existing domain.yaml, display alongside source profile
+3. Approval & persistence: save approved profile to `.fkg/source-profile.json` with metadata
+4. Profile reuse: enrich/compile commands load and reference persisted profile
+5. Noninteractive mode: --approve flag for CI/CD, stdin EOF handling
+
+**High-Risk Regressions:**
+- R1 (CRITICAL): Metadata extraction inconsistency → profile metadata (hash, dates, CSV schema) must match SourceFileRow/DocumentElementRow/schema_profile from existing modules
+- R2 (CRITICAL): Profile staleness → no cache invalidation if source files change between init-domain and enrich runs
+- R3 (HIGH): Domain overwrite risk → existing domain.yaml must not be overwritten without explicit --force flag
+- R4 (HIGH): LLM inference divergence → entity candidates inferred from schema only (not LLM), to avoid conflicts with enrichment LLM suggestions
+- R5 (HIGH): Interactive-to-noninteractive fallback → --approve flag and non-tty EOF must not hang CI/CD
+- R6 (MEDIUM): Backward compat with legacy domain.json format → profile schema version markers for future migration
+
+**Concrete Test Coverage (Unit + Integration):**
+- Empty directory, single file, mixed formats (5+ types), corrupted/unsupported files
+- Date range extraction from file metadata and PDF/CSV timestamps
+- Scanned PDF detection, extraction risk assessment
+- Profile persistence and round-trip (load/save/reload)
+- Domain merge: entity matching, question filtering, no duplication
+- Noninteractive mode & CI/CD (--approve, no tty, EOF handling)
+- Real Surface directory (integration test)
+- Profile staleness detection (source modified, hash mismatch)
+- Enrich command reuses persisted profile (no re-inspection)
+
+**Files the Implementation Owner Must Modify:**
+1. `src/fabric_kg_builder/cli/domain_cmd.py` or NEW `init_domain_cmd.py` — command orchestration
+2. `src/fabric_kg_builder/cli/inspect_cmd.py` or NEW `profiler.py` — shared profiler logic
+3. `src/fabric_kg_builder/domain/profile.py` (NEW) — profile models & persistence
+4. `src/fabric_kg_builder/domain/service.py` — merge profile + domain
+5. `src/fabric_kg_builder/cli/enrich_cmd.py` — load & validate persisted profile
+6. `tests/unit/test_init_domain_cmd.py` (NEW) — comprehensive tests
+
+**Backward Compatibility Gates (MUST PASS):**
+- `test_inspect_source_cmd.py` — all existing tests pass (inspect-source unchanged)
+- `test_domain.py` — all existing tests pass (domain init unchanged)
+- `test_enrich_cmd_*.py` — enrich works both with and without persisted profile
+
+**No Implementation Performed:** This is a review checklist only. Tests not written; code not modified. Implementation owner will author the feature based on this contract matrix.
+
+### Deliverable
+
+Comprehensive review checklist document saved (see attached plain-text summary below).
+
+
+## Issue #5 — Source-First Domain Initialization (2026-07-23) — Test Validation & Contract Matrix
+
+**Sprint:** Post-implementation validation for Fenster's init-domain submission + Verbal's corrections.
+
+**Contract Matrix Authored:**
+- 24+ items covering init-domain workflows: file count/format detection, metadata extraction (size, columns, date range), extraction risk assessment, profile structure (observed/inferred clear separation), domain loading, approval prompts, correction/edit workflows, profile location/versioning, staleness tracking, CLI compatibility, edge cases.
+
+**Validation Work:**
+
+1. **Post-Fenster Submission (2026-07-23 precheck):**
+   - Verified targeted test run: 123/123 pass (63 unit + 35 contract + 25 matrix items)
+   - Verified full baseline: 2,510 → 2,535 pass (+25 net new)
+   - All matrix contracts passing on Fenster submission
+
+2. **Post-Verbal Revisions (2026-07-23 final review):**
+   - Verified targeted test run: 147/147 pass (123 Fenster + 24 Verbal corrections)
+   - Expanded matrix: +7 tests for B2 correction flow, +6 tests for B1 downstream reuse, +4 tests for staleness detection, +7 tests for correction contract
+   - Verified full baseline: 2,567 pass, 4 deselected, 0 failed (no regressions)
+   - Final sign-off: APPROVED
+
+**Test Evidence Collected:**
+- All 31 matrix items confirmed passing (24 baseline + 7 new for B2)
+- Full suite stability demonstrated (2,567 pass comprehensive coverage)
+- Zero regressions from Fenster baseline through Verbal revisions
+
+**Role:** Independent validator confirming both Fenster's baseline quality and Verbal's revision completeness. No code authored; pure test orchestration and verification.
