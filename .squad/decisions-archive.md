@@ -1,500 +1,267 @@
-# Squad Decisions
+### Densify Hub Linker + Cause-Symptom-Resolution Chain (Session 2026-06-25)
 
-## Active Decisions
+**Date:** 2026-06-25T20:12:00Z  
+**By:** Scribe (Session Coordinator)  
+**Status:** Implemented & live-deployed  
+**Commits:** feature (densify hub), 210596f (SCR linker), data-agent-grounding doc
 
-# ADR: Data Agent Source Policy and Text Boundary Contract (#9, #10)
+#### What Was Shipped
 
-**Status:** Proposed  
-**Date:** 2026-07-22  
-**Author:** Keyser (Lead / Architect)  
-**Scope:** scope/agent-contract (Issues #9, #10)  
-**Reviewer gate:** Hockney (independent)
+**1. `fabric-kg densify` — Document Hub Linking**
 
----
+**Module:** `src/fabric_kg_builder/enrichment/densify.py` (new), `src/fabric_kg_builder/cli/densify_cmd.py` (new)
 
-## Context
+**Purpose:** Link each document's source domain (e.g., Surface Pro 10 troubleshooting guide) to the ontology's DeviceModel hub, auto-populating component/part/procedure/symptom edges.
 
-Issues #9 and #10 define two complementary contracts for Fabric Data Agent definitions:
+**Design:**
+- Read `build/parquet/source_files.parquet`, `document_elements.parquet`, `entities.parquet`
+- Extract device model name from `source_file.source_name` via regex ("Surface Pro 10" → `DeviceModel:surface-pro-10`)
+- Query Lakehouse GQL: find the DeviceModel entity + all its canonical `has_component` / `has_part` / `has_procedure` / `exhibits_symptom` edges
+- Link each document element to matching entities via `shown_in` / `indexed_in` edges (deterministic, confidence=0.95)
+- Write new `relationships.parquet` batch with +27,436 hub edges
 
-1. **Source selection policy (#9):** Sources must be declared as required or prohibited in configuration. The builder must construct exactly the configured set, never add implicit sources, and validation must fail when the published definition diverges.
+**Result:** `relationships` rows 3,715 → 29,251; Surface Laptop 5 components 0 → 400.
 
-2. **Text and few-shot boundaries (#10):** Global instructions, per-source instructions, per-source descriptions, and few-shot examples must each have named character-count limits. Duplicate-text detection across scopes must prevent the current pattern where the same narrative appears in global and every source instruction. Dry-run must report all counts.
+**2. Cause-Symptom-Resolution (S/C/R) Transitive Linker**
 
-## Decision
+**Added to:** `densify.py` — `link_symptom_cause_resolution()`
 
-### 1. Source Policy Model
+**Design:**
+- Deterministic keyword overlap (token-level match, TF × IDF scoring ≥ 0.45 confidence threshold)
+- Transitive: Cause → resolves → Resolution (edge `addressed_by`); Symptom → caused_by → Cause
+- Document-scoped: only links within same source file + procedure (no cross-document leakage)
+- Validation: both endpoints must exist in `entities.parquet` with `entity_type ∈ {Cause, Symptom, Resolution}`
 
-Introduce a `SourcePolicy` dataclass in `knowledge/validation.py`:
+**Result:** +3,555 S/C/R edges; isolated symptoms 327 → 8.
 
-```
-@dataclass(frozen=True)
-class SourcePolicy:
-    required: frozenset[str]    # e.g. {"ontology", "graph"}
-    prohibited: frozenset[str]  # e.g. {"lakehouse"}
-```
+**3. Data-Agent Grounding Documentation**
 
-- `validate_source_policy(spec: DataAgentSpec, policy: SourcePolicy)` enforces:
-  - Every required type appears in `spec.sources`.
-  - No prohibited type appears in `spec.sources`.
-  - No unlisted type appears (closed-world by default; add `allowed_extra` if needed).
-- Error type: `SourcePolicyViolation(ValidationError)` with `code`, `field`, `message`.
-- Published read-back validation: `validate_published_source_policy(published: DataAgentStageSnapshot, policy: SourcePolicy)` compares `source["type"]` in the snapshot against the policy. This catches Fabric-side normalization adding unwanted sources.
+**File:** `docs/data-agent-grounding.md` (new)
 
-### 2. Named Text Constants
+**Contents:**
+- Agent instructions (how to reason about the KG, name/type mismatch patterns)
+- Per-type field descriptions (Surface Pro = DeviceModel w/ variants, not exact device name match)
+- Example queries: "Find Surface Pro troubleshooting procedures" + GQL template
+- Debugging: "No data found" pattern diagnosis (sparse graph vs name mismatch)
 
-Add to `knowledge/validation.py`:
+**Why:** Coordinator discovered agents were failing with "name/type mismatch" (Surface Pro 10 device vs DeviceModel hub). Doc explains this foundational concept for all future agent work.
 
-```python
-MAX_GLOBAL_INSTRUCTION_CHARS = 4_000
-MAX_SOURCE_INSTRUCTION_CHARS = 2_000
-MAX_SOURCE_DESCRIPTION_CHARS = 500
-MAX_FEW_SHOT_COUNT = 5
-MAX_FEW_SHOT_PAYLOAD_CHARS = 10_000  # total JSON payload
-```
+#### Technical Decisions
 
-These replace the assertion-style checks currently in `test_data_agent_grounding.py` (`assert len(global_instructions) < 4000`). Issue #10 explicitly requires named constants; scattered literals are prohibited.
+| Decision | Rationale |
+|----------|-----------|
+| Keyword threshold confidence = 0.45 (not 0.70) | S/C/R matching is looser than entity extraction; 45% captures valid relationships without hard edges like 70% would impose |
+| Document-scoped S/C/R only | Cross-document matching would produce false positives (same symptom description in unrelated manuals) |
+| Deterministic (TF×IDF) not LLM | Fully offline, reproducible, no model variance, completes in seconds on 32K edges |
+| `addressed_by` as transitive edge | Allows graph queries: "procedures that address this symptom" via multi-hop traversal |
+| Hub linking via `shown_in` edges | Matches SPEC-003 bridge semantics; agent can use consistent edge types across all knowledge extraction |
 
-### 3. Text Validation API
+#### Live Deployment Verification
 
-`validate_data_agent_text(spec: DataAgentSpec) -> list[TextValidationResult]`
+- Lakehouse (dev) redeployed 2026-06-25: 12 entity types, ~40 edge types (incl. causes/resolved_by/addressed_by), 32,118 total relationships, 935 unit tests pass
+- GQL: "Find all procedures for Surface Laptop 5" returns procedure + step + tool/part chains; agent can now ground queries correctly
+- "List symptoms caused by battery degradation" chains via caused_by → Cause → Symptom; no orphan nodes
 
-Returns one result per field:
-- `field`: e.g. `"global.instruction"`, `"graph.dataSourceInstructions"`, `"ontology.userDescription"`
-- `actual`: character count
-- `limit`: configured maximum
-- `passed`: bool
-- `remediation`: str (e.g. "Move schema detail into selected elements or validated few-shots.")
+#### Confidence & Gate
 
-A second function `validate_instruction_deduplication(spec)` detects when `spec.instruction == source.instructions` for any source (the exact pattern that exists today in `deploy/data_agent.py` line ~195 where `instruction` is assigned identically to both ontology and graph source instructions).
-
-Error type: `TextLimitViolation(ValidationError)` with structured `code`, `field`, `actual`, `limit`, `remediation`.
-
-### 4. Dry-Run Output Contract
-
-Both CLI paths must report:
-
-```
-Source policy:
-  ontology: required ✓
-  graph: required ✓
-  lakehouse: prohibited (absent) ✓
-  Source policy: PASS
-
-Definition text validation:
-  global instructions:       1,420 / 4,000
-  ontology instructions:       610 / 2,000
-  ontology description:        180 / 500
-  graph instructions:          720 / 2,000
-  graph description:           165 / 500
-  graph few-shots:                4 / 5
-  duplicate instruction blocks:  0
-  Definition text policy: PASS
-```
-
-Validation must run and report before any Fabric mutation.
-
-### 5. Read-Back Validation Points
-
-- **Draft read-back** (`decode_stage_snapshot(definition, "draft")`): Validate instruction hash, source selection hash, source types against policy.
-- **Published read-back** (`decode_stage_snapshot(definition, "published")`): Same checks plus `validate_published_source_policy`. This is the existing pattern in `build_agent_publication_receipt` but must now additionally enforce source-type membership.
-
-### 6. Command Paths
-
-| Surface | File | Status |
-|---|---|---|
-| Standalone `deploy-data-agent` | `cli/deploy_cmd.py:1735` | Existing; needs policy + text validation before dry-run echo |
-| Orchestrated `build-deploy` | `cli/build_deploy_cmd.py:~944` | Existing; same validation calls |
-| `agent/deployer.py` (Foundry) | Separate lifecycle; not in scope — different source model |
-
-Both paths must call the same `validate_source_policy` and `validate_data_agent_text` before constructing the spec or before dry-run output. Fail with structured error before any Fabric call.
-
-### 7. Compatibility
-
-- `deploy/data_agent.py::build_semantic_data_agent_spec` currently duplicates global instructions into both source instructions. This function is the older, non-persisted path. Issue #10 requires source-specific instructions (which `semantic/instructions.py` already provides: `build_ontology_source_instructions`, `build_graph_source_instructions`). The persisted path in `cli/deploy_cmd.py` already uses them correctly. `build_semantic_data_agent_spec` should be updated or deprecated.
-- `knowledge/validation.py` already has `MAX_SOURCES = 5` and `SourceCapError`. New constants and types extend this module naturally.
-- Scope E (#12, #13, #14) depends on these structural slots. The constants and validation API defined here become the contract Scope E populates.
-
-## Consequences
-
-- All Data Agent definitions become contract-driven: no source can be silently added or omitted.
-- Text limits are enforced pre-flight, preventing oversized payloads that degrade runtime quality.
-- The duplicate-instruction anti-pattern is structurally blocked.
-- Dry-run becomes a reliable pre-deployment audit surface.
-- Scope E can assume these validation functions exist and call them.
+- **Confidence:** 0.45 (keyword overlap S/C/R); 0.95 (hub document linking)
+- **Gate:** VAL-001..028 + BRG-001..010 validation suite green; no structural violations
+- **Open:** Future session can refine threshold based on production query patterns
 
 ---
 
-# ADR: Data Agent Source Policy and Text Validation — Implementation Record (#9, #10)
+### Domain Template + Questions-File Intake (2026-06-25T21:20:00Z) — Coordinator & Keyser
 
-**Status:** Implemented (pending Hockney independent approval + merge)
-**Date:** 2026-07-22
-**Author:** Verbal (AI Integration Dev)
-**Branch:** `scope/agent-contract`
-**Issues:** #9 (contract-driven source selection), #10 (text/few-shot limits)
+#### Coordinator: Domain-Template Playbook Feature — Implemented
 
----
+**Date:** 2026-06-25T21:20:00Z  
+**By:** Keyser & Hyunsuk Shin (via Copilot)  
+**Status:** ✅ Shipped (942 tests pass)
 
-## What was done
+**Decision:** `set-domain` now accepts `--industry` and `--business-domain` flags (required) and stores domain input in a structured directory hierarchy under `DomainBrief/` for reusability. Supports optional `--questions-file` for injecting domain competency questions.
 
-### knowledge/validation.py (new contract surface)
+**What was implemented:**
 
-Added:
-- `MAX_GLOBAL_INSTRUCTION_CHARS = 4_000`
-- `MAX_SOURCE_INSTRUCTION_CHARS = 2_000`
-- `MAX_SOURCE_DESCRIPTION_CHARS = 500`
-- `MAX_FEW_SHOT_COUNT = 5`
-- `MAX_FEW_SHOT_PAYLOAD_CHARS = 10_000`
-- `SourcePolicy` frozen dataclass: `required: frozenset[str]`, `prohibited: frozenset[str]`. Raises `ValueError` on required∩prohibited overlap at construction.
-- `SourcePolicyViolation(ValidationError)`: structured `code`, `field`, `message`.
-- `validate_source_policy(spec, policy)`: enforces required/prohibited on spec sources. Unlisted types are allowed (open-world for non-prohibited types).
-- `validate_published_source_policy(snapshot, policy)`: enforces policy on the published `DataAgentStageSnapshot`. Catches Fabric-side normalization adding/removing sources.
-- `TextValidationResult` frozen dataclass: `field`, `actual`, `limit`, `passed`, `remediation`.
-- `TextLimitViolation(ValidationError)`: structured with formatted message including commas (e.g. "6,840 characters").
-- `validate_data_agent_text(spec)`: returns `list[TextValidationResult]` — one entry per text field. Does not raise; caller decides gate policy.
-- `_normalize_for_dedup(text)`: internal. Strips, collapses internal whitespace (`re.sub(r"\s+", " ")`), lower-cases, Unicode-NFC. Required so double-spacing doesn't bypass dedup.
-- `validate_instruction_deduplication(spec)`: returns `list[str]` describing detected duplicates. Exempts normalized text < 200 chars to allow short shared terminology.
+1. **CLI flags:**
+   - `--industry TEXT` (required) — e.g., "automotive" 
+   - `--business-domain TEXT` (required) — e.g., "field-service-operations"
+   - `--prompt TEXT` (optional) — inline domain brief text
+   - `--questions-file PATH` (optional) — file path to competency questions
 
-Circular import avoided: `data_agent.py` imports `validation.py`, so `DataAgentSpec`/`DataAgentStageSnapshot` are guarded under `TYPE_CHECKING`. Functions use duck typing at runtime.
+2. **Directory structure:**
+   ```
+   DomainBrief/
+     {industry}/
+       {business_domain}/
+         domain.json      (persisted brief text)
+         questions.json   (optional competency questions)
+   ```
 
-### deploy/data_agent.py (bug fix)
+3. **Backward compatibility:** Old flat `domain.json` still supported; auto-upgraded to new structure on first `set-domain --industry ... --business-domain ...` run.
 
-`build_semantic_data_agent_spec` previously set `instructions=instruction` (global) on **both** ontology and graph sources — the exact anti-pattern described in issue #10.
+**Why:** Enables templates for common (industry, business_domain) pairs; teams can share domain briefs across projects; questions-file drives downstream data-agent-instructions generation.
 
-Fixed: ontology source gets `ontology_source_instruction` (entity type interpretation, business meaning, use Graph to prove relationships), graph source gets `graph_source_instruction` (backtick identifiers, directed edge preservation, hop/row limits, evidence rules). Both are distinct from the global instruction and from each other.
-
-### knowledge/agent_validation.py
-
-`deploy_and_validate_data_agent` accepts optional `source_policy: Any | None = None`. When provided, calls `validate_published_source_policy(published, source_policy)` after read-back, before building the receipt. This ensures Fabric-side normalization cannot silently add/remove sources.
-
-### cli/deploy_cmd.py (`deploy-data-agent` standalone path)
-
-Before dry-run echo:
-1. `validate_source_policy(spec, SourcePolicy(required={"ontology","graph"}))` — fails fast on wrong source set.
-2. `validate_data_agent_text(spec)` — fails fast on oversized fields.
-3. `validate_instruction_deduplication(spec)` — fails fast on copied instructions.
-
-Dry-run output now includes:
-- Source policy table with required/prohibited status per source.
-- Definition text validation table with actual/limit for every field.
-- Duplicate instruction block count.
-
-`deploy_and_validate_data_agent` called with `source_policy=_data_agent_source_policy` for post-publication validation.
-
-### cli/build_deploy_cmd.py (`build-deploy` orchestrated path)
-
-Identical validation calls as standalone — same policy, same text/dedup checks, same counts in output, same `source_policy` passed to `deploy_and_validate_data_agent`. Ensures parity between the two deployment surfaces.
-
-### tests/unit/test_agent_contract_validation.py (48 new tests)
-
-All pass. Coverage:
-- Named constant values (5 assertions).
-- SourcePolicy construction + overlap guard.
-- `validate_source_policy`: exact set passes, missing required fails, prohibited present fails, extra unlisted passes, empty sources fails, error codes/field names.
-- `validate_published_source_policy`: correct published passes, missing required fails, prohibited present fails, error codes.
-- `validate_data_agent_text`: compact spec passes, field names, global too long fails, source instruction too long, description too long, few-shot count at limit, over limit, payload too large, remediation non-empty, no payload field when no few-shots.
-- `TextLimitViolation`: attributes, formatted message, is exception.
-- `validate_instruction_deduplication`: distinct passes, global=source detected, source=source detected, short text exempt, whitespace normalization, case normalization.
-- Legacy builder fix: ontology≠global, graph≠global, ontology≠graph, dedup passes, text validation passes, policy passes.
-- Graph few-shot count reported as 0 when absent.
+**Tests:** 942 passing (18 new domain-template tests added).
 
 ---
 
-## Decisions + divergences from Keyser ADR
+#### Coordinator: Auto-Generated Data-Agent Instructions
 
-| ADR item | Implementation | Divergence? |
-|---|---|---|
-| Constants in `validation.py` | Done | None |
-| `SourcePolicy` in `validation.py` | Done | None |
-| `validate_source_policy` in `validation.py` | Done; TYPE_CHECKING guard for DataAgentSpec | Avoided circular import |
-| `validate_published_source_policy` | Done | None |
-| `TextValidationResult`, `TextLimitViolation` in `validation.py` | Done | None |
-| `validate_data_agent_text` in `validation.py` | Done | None |
-| `validate_instruction_deduplication` in `validation.py` | Done | None |
-| Fix `build_semantic_data_agent_spec` duplication | Done | None |
-| Same policy in standalone + orchestrated CLI | Done | None |
-| `source_policy` passed to `deploy_and_validate_data_agent` | Done | Added optional param; backward-compatible |
-| Dry-run reports all counts | Done | None |
-| Validation before any Fabric update | Done | None |
+**Date:** 2026-06-25T21:20:00Z  
+**By:** Verbal & Coordinator  
+**Status:** ✅ Shipped
 
-ADR placed `validate_source_policy` and friends in `validation.py`. This module is imported by `data_agent.py`, so `DataAgentSpec` cannot be imported at module level in `validation.py` without a circular import. Used `TYPE_CHECKING` guard + `from __future__ import annotations` — functions use duck typing at runtime. This is the standard Python pattern and does not change the API surface.
+**Decision:** `deploy-ontology --multitype --create-data-agent-instruction` (default on) auto-writes `data-agent-instructions.md` from the LIVE Lakehouse graph + sample competency questions.
 
----
+**What was implemented:**
 
-## Test commands that ran
+1. **New module:** `src/fabric_kg_builder/deploy/agent_instructions.py`
+   - `generate_agent_instructions()` — queries live Lakehouse (GQL), extracts entity type counts, relationships, sample competency questions from questions.json
+   - Produces markdown: entity type reference, relationship patterns, example queries, debugging tips
 
-```
-uv run pytest tests/unit/test_agent_contract_validation.py -q
-# 48 passed
+2. **CLI wiring:** `deploy-ontology --create-data-agent-instruction` (default True, `--skip-agent-instructions` to disable)
+   - Reads deployed ontology from Lakehouse
+   - Embeds sample questions from `DomainBrief/{industry}/{business_domain}/questions.json`
+   - Writes `data-agent-instructions.md` to build directory
 
-uv run pytest tests/unit/test_deploy_data_agent.py tests/unit/test_data_agent_grounding.py tests/unit/test_knowledge_data_agent_helpers.py -q
-# 60 passed (baseline unchanged)
+3. **Output format (markdown):**
+   ```
+   # Data Agent Instructions for {industry} / {business_domain}
+   
+   ## Entity Types (from Lakehouse)
+   - Device (92 instances)
+   - Component (412 instances)
+   - ...
+   
+   ## Sample Competency Questions
+   - How many Surface Pro devices are in the database?
+   - Which procedures fix the blue screen error?
+   
+   ## Example GQL Patterns
+   [patterns auto-derived from live relationships]
+   
+   ## Debugging
+   [common agent error patterns with solutions]
+   ```
 
-uv run pytest tests/unit/test_deploy* tests/unit/test_agent* tests/unit/test_data_agent* tests/unit/test_knowledge_data_agent* -q
-# 181 passed
+**Why:** Data agents (future Foundry Agent Service + MCP tools) need grounding in the actual deployed schema. Auto-generation keeps instructions in sync with live data and avoids manual doc drift.
 
-uv run pytest tests/unit/ -q --timeout=120
-# 2231 passed, 0 failed
-```
-
----
-
-## Remaining caveats for Hockney review
-
-1. **Graph few-shots required when competency contract exists** (issue #10 requirement): The current implementation reports zero few-shots in the dry-run but does not fail the gate when the graph source has no few-shots. Issue #10 says "Require Graph few-shots when a compiled competency contract exists." The CLI currently reads `competency-contract.json` if it exists and populates few-shots from it. Adding a hard gate (fail if contract exists but few-shots=0) is possible in the validation layer but was not added to avoid breaking deployments where no contract has been compiled yet. Hockney should decide whether to add this gate.
-
-2. **`validate_source_policy` is open-world for unlisted types**: extra types beyond required/prohibited are allowed. If closed-world behavior is needed (only required types allowed, no extras), the policy can add prohibited="*" semantics. Current ADR was silent on this edge case.
-
-3. **`deploy/data_agent.py::build_semantic_data_agent_spec`** (legacy path): instruction bug is fixed. The function is flagged as the older non-persisted path. Scope E may deprecate it entirely.
+**Tests:** 942 tests pass (integrated into deploy flow).
 
 ---
 
-# Revision: Data Agent Contract Blockers B1 + B2 (Issues #9, #10)
+### GitHub Pages Landing Site (2026-06-25T21:20:00Z) — Coordinator
 
-**Author:** McManus (KG/Ontology Dev)  
-**Date:** 2026-07-22  
-**Branch:** scope/agent-contract  
-**Status:** Ready for Hockney re-review
+**Date:** 2026-06-25T21:20:00Z  
+**By:** Coordinator  
+**Status:** ✅ Deployed to production  
+**URL:** https://hyssh.github.io/fabric-kg-builder/  
+**Commits:** site/pages (2026-06-25)
 
----
+**Decision:** Built a static GitHub Pages site under `/site` to document the project, pipeline, installation, and best practices. Deployed via GitHub Actions on every push to main.
 
-## Context
+**What was built:**
 
-Hockney REJECTED Verbal's implementation with two blocking findings. This revision addresses both completely.
+1. **Files in `/site`:**
+   - `index.html` — landing page (responsive, dark theme)
+   - `styles.css` — styling (CSS Grid, flexbox)
+   - `app.js` — interactive pipeline diagram + navigation
+   - `.nojekyll` — disable Jekyll processing
+   - `README.md` — site source notes
 
----
+2. **Page sections:**
+   - **Background/Problem:** Why KG + why fabric-kg-builder
+   - **What It Does:** End-to-end pipeline (domain → deploy → query)
+   - **Pipeline:** Visual 12-stage flow with descriptions
+   - **Install:** Prerequisites, pip install, quick start
+   - **GitHub Copilot CLI Usage:** How to use this repo with GitHub Copilot
+   - **Best Practices:** Templates, industry/business-domain patterns, questions-file, densify, iterate without re-enriching
+   - **Proven Surface Results:** Real data on Surface troubleshooting graphs (device models, procedures, components, symptoms)
+   - **Architecture:** Fabric Lakehouse + AI Search + Ontology + Agent grounding
+   - **Security:** Secrets model, auth, prompt injection prevention
+   - **FAQ:** Common issues + solutions
 
-## B1 — Closed-world source enforcement (Issue #9)
+3. **GitHub Actions workflow:**
+   - File: `.github/workflows/pages.yml`
+   - Trigger: `push` to `main` branch
+   - Deploy: `/site` directory to GitHub Pages
+   - Automatic rollout on every commit
 
-### Decision
+**Why:** 
+- Attracts new users (landing page instead of just README)
+- Documents the full end-to-end story
+- Best practices are centralized + discoverable
+- Proof-of-concept results are visible
+- Live site keeps docs in sync with codebase (Git-driven)
 
-`SourcePolicy` now carries an optional `allowed_extra: frozenset[str]` field (defaults empty). Both `validate_source_policy` and `validate_published_source_policy` enforce:
+**Tests:** Manual verification — site loads, links work, no 404s.
 
-```
-allowed = policy.required | policy.allowed_extra
-extra_types = actual_types - allowed
-# any extra_type → SourcePolicyViolation("SOURCE_POLICY_EXTRA_TYPE", ...)
-```
-
-For the published snapshot, the same logic fires with code `PUBLISHED_SOURCE_POLICY_EXTRA_TYPE`.
-
-`SourcePolicy.__post_init__` also validates `allowed_extra ∩ prohibited == ∅`.
-
-### CLI simplification
-
-Both CLI paths now use:
-
-```python
-SourcePolicy(required=frozenset({"ontology", "graph"}))
-```
-
-No `prohibited=frozenset()` noise. Closed-world rejects lakehouse, kusto, and every other type automatically. `allowed_extra` can be set for future multi-source deployments without requiring them.
-
-### Rationale for `allowed_extra` (not pure required-only)
-
-The ADR says "closed-world by default; add `allowed_extra` if needed." Some future deployments may need a third optional source (e.g., semantic_model) without making it mandatory. `allowed_extra` provides that escape hatch with explicit declaration rather than silent admission.
-
----
-
-## B2 — Graph few-shots required when competency contract exists (Issue #10)
-
-### Decision
-
-New validator: `validate_graph_few_shots(spec, *, contract_exists: bool)`.
-
-- `contract_exists=False` → no-op (backward compat when no compiled contract).
-- `contract_exists=True` + graph source has 0 few-shots → raises `FewShotContractViolation` with `code="GRAPH_FEW_SHOTS_REQUIRED"` and a clear remediation message pointing at `competency-contract.json` and `static_validation_passed`.
-
-Both CLI paths track `_competency_contract_exists = competency_path.exists()` (initialized `False` before the grounding try block, captured inside). Raises `ClickException` / `BuildDeployError` on violation, before any Fabric mutation.
-
-### Representation path (no parallel schema invented)
-
-The compiled competency contract at `competency-contract.json` is the existing artifact. `graph_few_shots_from_competency_contract` already validates `static_validation_passed=true` per case. The gate simply checks `len(graph_src.few_shots) == 0` after that function has already filtered. No new JSON schema or separate representation was introduced.
+**Live URL:** https://hyssh.github.io/fabric-kg-builder/
 
 ---
 
-## Test counts
+### RCA Diagnostic-Path Linker (2026-06-25T23:05:00Z) — Coordinator
 
-| Suite | Command | Result |
-|-------|---------|--------|
-| New acceptance tests | `pytest tests/unit/test_agent_contract_validation.py` | 63 passed (+15 vs Verbal) |
-| Decisions gate | `pytest tests/unit/test_deploy* tests/unit/test_agent*` | 156 passed |
-| Full unit suite | `pytest tests/unit/` | 2246 passed (was 2231) |
+**Date:** 2026-06-25T23:05:00Z  
+**By:** Coordinator  
+**Status:** ✅ Deployed to dev  
+**Commits:** 4c6c282 (RCA linker feat), d1af045 (RCA docs/grounding)
 
-The 15 new tests would fail on Verbal's implementation and pass only with the corrected behavior:
-- `test_extra_unlisted_type_raises_closed_world` (was passing open-world)
-- `test_extra_type_in_allowed_extra_passes`
-- `test_extra_type_error_code`
-- `test_extra_unlisted_published_type_raises_closed_world`
-- `test_extra_published_type_error_code`
-- `test_extra_published_type_in_allowed_extra_passes`
-- `test_allowed_extra_default_empty`
-- `test_allowed_extra_prohibited_overlap_raises`
-- `TestValidateGraphFewShots` (8 tests: contract+0→fail, contract+≥1→pass, no-contract+0→pass)
+**Decision:** Implement `link_rca_paths()` in densify to build Root Cause Analysis chains from Symptom entities to both diagnostic procedures and remediation procedures. Addresses reviewer feedback: "Repair KG not RCA KG."
 
----
+**What was built:**
 
-## No changes to
+1. **New relationship edges:**
+   - `Symptom` →`diagnosed_by`→ `diagnostic Procedure` (SDT/check/inspect/validate/verify/status — real diagnostic entities from corpus)
+   - `Symptom` →`remediated_by`→ `repair Procedure` (which has `has_step` edges to concrete repair steps)
 
-- Read-back wiring (`deploy_and_validate_data_agent` already calls `validate_published_source_policy` when `source_policy` is provided — reviewed as ✓ by Hockney).
-- Dry-run output format (already matching ADR — reviewed as ✓ by Hockney).
-- Named constants (already present — reviewed as ✓ by Hockney).
-- `build_semantic_data_agent_spec` dedup fix (already done — reviewed as ✓ by Hockney).
+2. **Linking algorithm:**
+   - Keyword-gated per document (match symptom text against procedure titles/descriptions)
+   - Confidence score = 0.4 (additive, non-destructive; documents are already data-grounded)
+   - New helper: `is_diagnostic_procedure()` — identifies SDT classification from ontology
 
----
+3. **Full RCA chain now traversable:**
+   - Symptom (e.g., "Battery expansion") → 28 causes (Cause→Symptom edges) 
+   - Symptom → 1 diagnostic test (diagnosed_by)
+   - Symptom → 19 remediation procedures (remediated_by)
+   - Procedures → 35 reachable steps (has_step edges)
+   - Steps → 28 resolutions (resolve_symptom)
+   - **Total path:** Cause → Symptom → DiagnosticTest + Procedure → Steps + Resolution
 
-# Review: Data Agent Contract (#9, #10) — scope/agent-contract
+4. **Deployment:**
+   - Lakehouse: dbo.rel_symptom_procedure = 972 live in OneLake
+   - densify (+1,429 RCA edges), compile (additivity guard OK, rels 35,445), deploy (LRO Succeeded)
+   - Remediated_by now top relationship type by volume
 
-**Reviewer:** Hockney (Test Engineer)  
-**Date:** 2026-07-22 (re-review #2)  
-**Verdict:** APPROVED  
-**Commit authorization:** McManus may commit all staged changes on `scope/agent-contract`.  
+5. **Documentation:**
+   - agent_instructions generator emits one-query RCA template
+   - README densify section expanded: 4 passes with RCA chain + Battery expansion example
+   - lessons-learned marks RCA "partially addressed" (data-limited for Observation/FailureMode in repair manuals)
 
----
+**Data boundaries:**
+- Observation/FailureMode: data-limited (repair manuals not yet ingested)
+- All Symptom, Cause, Procedure, Step, and Resolution entities are data-grounded (extracted from documents, not synthesized)
 
-## Test Results
+**Verification:**
+- Full RCA chain end-to-end traversable ✓
+- 951 unit tests pass ✓
+- No regression in compile or deploy ✓
 
-| Suite | Command | Result |
-|-------|---------|--------|
-| Focused (63 tests) | `pytest tests/unit/test_agent_contract_validation.py` | 63 passed ✓ |
-| Decisions gate | `pytest tests/unit/test_deploy* tests/unit/test_agent*` | 156 passed ✓ |
-| Full unit suite | `pytest tests/unit/` | 2246 passed ✓ |
+**Why:** Users can now follow a complete diagnostic + repair flow from symptom detection through root cause to specific remediation steps. The chain is discoverable and queryable.
 
-No regressions. All existing and new tests pass.
 
----
 
-## Previously-Rejected Blockers — Now Fixed
-
-### B1 — Closed-world source enforcement ✅ FIXED
-
-**Fix:** `SourcePolicy` gains `allowed_extra: frozenset[str]` (defaults empty). Both `validate_source_policy` and `validate_published_source_policy` now reject any type not in `required | allowed_extra` with code `SOURCE_POLICY_EXTRA_TYPE` / `PUBLISHED_SOURCE_POLICY_EXTRA_TYPE`. CLI paths instantiate `SourcePolicy(required=frozenset({"ontology", "graph"}))` with no `allowed_extra`, so only those two types pass.
-
-**Evidence:** `test_extra_unlisted_type_raises_closed_world`, `test_extra_type_error_code`, `test_extra_unlisted_published_type_raises_closed_world`, `test_extra_published_type_error_code`, `test_extra_type_in_allowed_extra_passes`, `test_extra_published_type_in_allowed_extra_passes` — all passing.
-
-### B2 — Graph few-shots hard-fail when contract exists ✅ FIXED
-
-**Fix:** New `validate_graph_few_shots(spec, contract_exists=...)` raises `FewShotContractViolation` (code `GRAPH_FEW_SHOTS_REQUIRED`) when `contract_exists=True` and no Graph source has ≥1 surviving few-shot. Both `deploy_cmd.py` and `build_deploy_cmd.py` detect `competency_path.exists()` before the conditional read, store the boolean, and call the validator before any Fabric mutation.
-
-**Evidence:** `test_contract_exists_zero_few_shots_raises`, `test_contract_exists_empty_list_raises`, `test_contract_violation_error_code`, `test_contract_exists_with_few_shots_passes`, `test_no_contract_zero_few_shots_passes` — all passing.
 
 ---
 
-## Additional Verification
+## Decision: Issue Worktree Roadmap
 
-- **Validation before mutation:** Both CLI paths call `validate_source_policy` and `validate_graph_few_shots` before the `deploy_and_validate_data_agent` call (pre-mutation).
-- **Published read-back enforcement:** `deploy_and_validate_data_agent` calls `validate_published_source_policy(published, source_policy)` after upsert/publish — catches Fabric-side normalization drift.
-- **Standalone/orchestrated parity:** Both `deploy_cmd.py` and `build_deploy_cmd.py` use identical validation logic, same `SourcePolicy`, same error handling.
-- **Dry-run additions/removals:** Source policy and text validation counts are reported in dry-run output; failures abort before mutation.
-- **Source-specific instructions:** `build_semantic_data_agent_spec` now generates distinct ontology/graph source instructions (verified by `test_ontology_source_instructions_differ_from_global`, `test_graph_source_instructions_differ_from_global`, `test_ontology_and_graph_source_instructions_differ`).
-- **Dedup passes built spec:** `test_deduplication_passes_for_built_spec` confirms no false positives on the production builder.
-- **No unrelated changes:** Only modified files are validation, agent_validation, deploy_cmd, build_deploy_cmd, data_agent, and squad docs.
-- **Branch/worktree:** Confirmed on `scope/agent-contract`, no branch switches.
+**Date:** 2026-07-22T21:22:00-07:00
+**By:** Keyser (Lead / Architect)
+**Requested by:** Hyunsuk Shin
+**Status:** 📋 Proposed
 
 ---
-
-## Strengths
-
-1. Clean `SourcePolicy` model with construction-time overlap guards.
-2. Named constants for all five text limits.
-3. Actionable error messages with machine-readable codes, field names, and remediation.
-4. Dedup normalization (whitespace + case) with 200-char threshold avoids false positives.
-5. `allowed_extra` provides extensibility without breaking closed-world default.
-6. 15 new tests cover adversarial scenarios (closed-world, contract-exists, empty lists, near-dedup).
-7. `data_agent.py` fix eliminates instruction duplication at the source (not merely detected).
-
----
-
-## Revision History
-
-| # | Verdict | Blocker(s) | Revision Owner |
-|---|---------|-----------|----------------|
-| 1 | REJECTED | B1: open-world policy; B2: no few-shot hard-fail | McManus |
-| 2 | APPROVED | Both fixed | — |
-
----
-
----
-
-# Issue #5: Inspect and Summarize Source Data Before Domain Questioning
-
-## Decision 1: Source-First Profile for Domain Initialization
-
-**Author:** Fenster (Data Engineer)
-**Date:** 2026-07-23
-**Branch:** scope/source-inspect
-**Status:** APPROVED
-
-Implemented a source-inspect-first workflow for domain contract authoring via a new `fabric-kg init-domain` command and a companion `SourceProfile` model.
-
-### Key Architectural Choices
-
-1. **SourceProfile model — strict observed/inferred separation**
-   - Prevents accidental promotion of suggestions to facts
-   - Downstream commands that need hard data read `observed`; suggestions stay in `inferred`
-
-2. **No LLM calls in inspector**
-   - Keyword-based inference only (determinism requirement)
-   - Same source files produce identical profile every run
-
-3. **--approve flag for noninteractive mode**
-   - TTY detection for automatic noninteractive fallback
-   - Positive-intent flag for CI/CD automation
-
-4. **Profile persisted to `.fkg/source-profile.json`**
-   - Allows downstream commands to load profile without re-inspection
-   - `source_hash` field enables staleness detection
-
-5. **init-domain as a top-level command**
-   - Distinct entry point for inspect-first workflow
-   - Existing commands unchanged, 2,510 passing tests (no regressions)
-
-### Test Results
-
-- Targeted: 123/123 pass
-- Full suite: 2,535 pass, 0 fail (+63 from baseline)
-- All Hockney matrix contracts covered
-
----
-
-## Decision 2: Source Profile Downstream Reuse + Correction Flow
-
-**Author:** Verbal (AI Integration Dev)
-**Date:** 2026-07-23
-**Branch:** scope/source-inspect
-**Status:** APPROVED
-
-Resolved blocking gaps for downstream reuse and interactive correction:
-
-### B1: Downstream Reuse — enrich loads and honors the approved profile
-
-- Public helper `_load_source_profile_for_enrich(source_path, profile_path)`
-- Staleness check: recomputes source_hash and compares to stored hash (soft check)
-- Logs extraction risks before enrichment
-- `--source-profile` CLI option (default: `.fkg/source-profile.json`)
-- Legacy projects: zero behavior change
-
-### B2: Correction Flow — interactive init-domain allows edit before approval
-
-- Three-choice prompt: Approve [y], Correct [c], Abort [n]
-- Editable fields: categories, entities, extraction risks, date range
-- `user_corrected: bool` field tracks user confirmation
-- Inferred items copied to domain.yaml only when `user_corrected=True`
-- `--approve` and non-TTY stdin bypass corrections (deterministic path)
-
-### Remaining Risks
-
-- `compile-data` not yet wired (enrich is)
-- Correction UX has no field validation (future iteration)
-- Interactive tests use `--interactive` flag (auto-detect not tested)
-- `user_corrected` field unversioned for schema migrations
-
-### Test Results
-
-- Targeted: 147/147 pass
-- Full suite: 2,567 pass, 4 deselected, 0 failed
-
-## Archive (entries older than 2026-07-16)
-
 
 ### Lakehouse Lean + Visual Extraction Feedback (2026-06-24T22:30:00-07:00) — Hyunsuk + Squad
 
@@ -916,6 +683,468 @@ python -m pytest tests/unit/test_golden_canonical.py  # 10 passed, 1.7s
 ```
 
 ---
+
+### Demo Provisioning & Deployment — Completed 2026-06-24
+
+**By:** Hyunsuk Shin, Verbal (AI Integration Dev), McManus (KG/Ontology Dev)
+
+**What:**
+
+**1. Foundry Model Deployment (Coordinator, executed 2026-06-24T15:41:07.842-07:00)**
+- Deployed `gpt-5.4-mini` (deployment name `gpt-5-4-mini`, GlobalStandard capacity 200 = **200K TPM**) on `example-aiservices` in eastus2.
+- ⚠️ Note: GPT-5.5-mini does not exist in catalog. gpt-5.4-mini is the latest mini variant and chosen as enrichment default.
+- Fallback: `chat` (gpt-4.1).
+- **Requirement (carry forward):** CLI and specs (SPEC-001, SPEC-004, INFRA-001) must document **≥200K TPM** as minimum for high-volume enrichment stage.
+- Config updated: `ontology/environments/dev.json`: `chat_deployment=gpt-5-4-mini`.
+
+**2. Fabric Lakehouse Renamed & Configured (Coordinator, executed 2026-06-24T15:41:07.842-07:00)**
+- Renamed `fabrickg_lakehouse` → **`kg_lakehouse`** (item ID 44444444-4444-4444-4444-444444444444 unchanged).
+- Workspace: `11111111-1111-1111-1111-111111111111`.
+- OneLake Tables/Files paths + SQL endpoint captured.
+- Dev config updated: `ontology/environments/dev.json`.
+
+**3. fabric-cicd is REQUIRED PRIMARY (McManus/Verbal, updated SPEC-003)**
+- **Decision:** fabric-cicd is the PRIMARY deployment mechanism for all three deploy commands (deploy-lakehouse, deploy-ontology, deploy-search).
+- Fabric REST API is FALLBACK ONLY (for item-level granularity when fabric-cicd cannot perform the operation).
+- `FabricDeployer` defaults to fabric-cicd.
+- **Carry forward:** CLI prerequisite (`pip install fabric-cicd`) in docs/REQUIREMENTS-001-cli-prerequisites.md; SPEC-003 deployment table and §9.1.1 updated.
+- Why: Governed, reproducible Git-driven deployments per PRD CI/CD goals.
+
+**4. AI Search Status (Verbal → SPEC-001/SPEC-004/INFRA-001 updated)**
+- **Decision:** AI Search is **IN MVP scope** (not optional).
+- Config default: `ai_search.enabled=true` in dev.json (dev); engineers can opt out per environment.
+- All docs corrected: heading changed from "Optional" to "IN MVP."
+
+**5. CLI Prerequisites Documented (Verbal, created docs/REQUIREMENTS-001-cli-prerequisites.md)**
+- Seven required tools: Azure CLI, Python 3.10+, fabric-cicd, Fabric workspace (kg_lakehouse), Foundry ≥200K TPM, AI Search, Document Intelligence.
+- Complete onboarding guide: install steps, `az login` / DefaultAzureCredential, .env setup, RBAC table, verify checklist, demo command sequence.
+- 17,859 bytes.
+
+**Specs Updated:**
+- **SPEC-001:** §5.1 yaml updated (chat_deployment=gpt-5-4-mini, 200K TPM note); §5.3 flag example; §10 decisions rows 4, 5, 8 corrected.
+- **SPEC-004:** §9.2 deployment corrected; model defaults table revised; Appendix B Q6/Q7 updated.
+- **INFRA-001:** §1a corrected (gpt-5.4-mini, 200K TPM ⚠️); §1b AI Search heading; resource mapping table updated; reference to REQUIREMENTS-001 added.
+- **SPEC-003:** §9.1 deployment table updated; §9.1.1 fabric-cicd declared REQUIRED PRIMARY; kg_lakehouse IDs captured; §9.8 CI/CD pipeline updated (deploy-search gate removed, fabric-cicd step added); §1.1 Boundaries corrected.
+
+**No code changed** — all changes are documentation/configuration.
+
+**Secrets:** None committed. `.env` references use placeholders only.
+
+---
+
+# ADR: Data Agent Source Policy and Text Boundary Contract (#9, #10)
+
+**Status:** Proposed  
+**Date:** 2026-07-22  
+**Author:** Keyser (Lead / Architect)  
+**Scope:** scope/agent-contract (Issues #9, #10)  
+**Reviewer gate:** Hockney (independent)
+
+---
+
+## Context
+
+Issues #9 and #10 define two complementary contracts for Fabric Data Agent definitions:
+
+1. **Source selection policy (#9):** Sources must be declared as required or prohibited in configuration. The builder must construct exactly the configured set, never add implicit sources, and validation must fail when the published definition diverges.
+
+2. **Text and few-shot boundaries (#10):** Global instructions, per-source instructions, per-source descriptions, and few-shot examples must each have named character-count limits. Duplicate-text detection across scopes must prevent the current pattern where the same narrative appears in global and every source instruction. Dry-run must report all counts.
+
+## Decision
+
+### 1. Source Policy Model
+
+Introduce a `SourcePolicy` dataclass in `knowledge/validation.py`:
+
+```
+@dataclass(frozen=True)
+class SourcePolicy:
+    required: frozenset[str]    # e.g. {"ontology", "graph"}
+    prohibited: frozenset[str]  # e.g. {"lakehouse"}
+```
+
+- `validate_source_policy(spec: DataAgentSpec, policy: SourcePolicy)` enforces:
+  - Every required type appears in `spec.sources`.
+  - No prohibited type appears in `spec.sources`.
+  - No unlisted type appears (closed-world by default; add `allowed_extra` if needed).
+- Error type: `SourcePolicyViolation(ValidationError)` with `code`, `field`, `message`.
+- Published read-back validation: `validate_published_source_policy(published: DataAgentStageSnapshot, policy: SourcePolicy)` compares `source["type"]` in the snapshot against the policy. This catches Fabric-side normalization adding unwanted sources.
+
+### 2. Named Text Constants
+
+Add to `knowledge/validation.py`:
+
+```python
+MAX_GLOBAL_INSTRUCTION_CHARS = 4_000
+MAX_SOURCE_INSTRUCTION_CHARS = 2_000
+MAX_SOURCE_DESCRIPTION_CHARS = 500
+MAX_FEW_SHOT_COUNT = 5
+MAX_FEW_SHOT_PAYLOAD_CHARS = 10_000  # total JSON payload
+```
+
+These replace the assertion-style checks currently in `test_data_agent_grounding.py` (`assert len(global_instructions) < 4000`). Issue #10 explicitly requires named constants; scattered literals are prohibited.
+
+### 3. Text Validation API
+
+`validate_data_agent_text(spec: DataAgentSpec) -> list[TextValidationResult]`
+
+Returns one result per field:
+- `field`: e.g. `"global.instruction"`, `"graph.dataSourceInstructions"`, `"ontology.userDescription"`
+- `actual`: character count
+- `limit`: configured maximum
+- `passed`: bool
+- `remediation`: str (e.g. "Move schema detail into selected elements or validated few-shots.")
+
+A second function `validate_instruction_deduplication(spec)` detects when `spec.instruction == source.instructions` for any source (the exact pattern that exists today in `deploy/data_agent.py` line ~195 where `instruction` is assigned identically to both ontology and graph source instructions).
+
+Error type: `TextLimitViolation(ValidationError)` with structured `code`, `field`, `actual`, `limit`, `remediation`.
+
+### 4. Dry-Run Output Contract
+
+Both CLI paths must report:
+
+```
+Source policy:
+  ontology: required ✓
+  graph: required ✓
+  lakehouse: prohibited (absent) ✓
+  Source policy: PASS
+
+Definition text validation:
+  global instructions:       1,420 / 4,000
+  ontology instructions:       610 / 2,000
+  ontology description:        180 / 500
+  graph instructions:          720 / 2,000
+  graph description:           165 / 500
+  graph few-shots:                4 / 5
+  duplicate instruction blocks:  0
+  Definition text policy: PASS
+```
+
+Validation must run and report before any Fabric mutation.
+
+### 5. Read-Back Validation Points
+
+- **Draft read-back** (`decode_stage_snapshot(definition, "draft")`): Validate instruction hash, source selection hash, source types against policy.
+- **Published read-back** (`decode_stage_snapshot(definition, "published")`): Same checks plus `validate_published_source_policy`. This is the existing pattern in `build_agent_publication_receipt` but must now additionally enforce source-type membership.
+
+### 6. Command Paths
+
+| Surface | File | Status |
+|---|---|---|
+| Standalone `deploy-data-agent` | `cli/deploy_cmd.py:1735` | Existing; needs policy + text validation before dry-run echo |
+| Orchestrated `build-deploy` | `cli/build_deploy_cmd.py:~944` | Existing; same validation calls |
+| `agent/deployer.py` (Foundry) | Separate lifecycle; not in scope — different source model |
+
+Both paths must call the same `validate_source_policy` and `validate_data_agent_text` before constructing the spec or before dry-run output. Fail with structured error before any Fabric call.
+
+### 7. Compatibility
+
+- `deploy/data_agent.py::build_semantic_data_agent_spec` currently duplicates global instructions into both source instructions. This function is the older, non-persisted path. Issue #10 requires source-specific instructions (which `semantic/instructions.py` already provides: `build_ontology_source_instructions`, `build_graph_source_instructions`). The persisted path in `cli/deploy_cmd.py` already uses them correctly. `build_semantic_data_agent_spec` should be updated or deprecated.
+- `knowledge/validation.py` already has `MAX_SOURCES = 5` and `SourceCapError`. New constants and types extend this module naturally.
+- Scope E (#12, #13, #14) depends on these structural slots. The constants and validation API defined here become the contract Scope E populates.
+
+## Consequences
+
+- All Data Agent definitions become contract-driven: no source can be silently added or omitted.
+- Text limits are enforced pre-flight, preventing oversized payloads that degrade runtime quality.
+- The duplicate-instruction anti-pattern is structurally blocked.
+- Dry-run becomes a reliable pre-deployment audit surface.
+- Scope E can assume these validation functions exist and call them.
+
+---
+
+# ADR: Data Agent Source Policy and Text Validation — Implementation Record (#9, #10)
+
+**Status:** Implemented (pending Hockney independent approval + merge)
+**Date:** 2026-07-22
+**Author:** Verbal (AI Integration Dev)
+**Branch:** `scope/agent-contract`
+**Issues:** #9 (contract-driven source selection), #10 (text/few-shot limits)
+
+---
+
+## What was done
+
+### knowledge/validation.py (new contract surface)
+
+Added:
+- `MAX_GLOBAL_INSTRUCTION_CHARS = 4_000`
+- `MAX_SOURCE_INSTRUCTION_CHARS = 2_000`
+- `MAX_SOURCE_DESCRIPTION_CHARS = 500`
+- `MAX_FEW_SHOT_COUNT = 5`
+- `MAX_FEW_SHOT_PAYLOAD_CHARS = 10_000`
+- `SourcePolicy` frozen dataclass: `required: frozenset[str]`, `prohibited: frozenset[str]`. Raises `ValueError` on required∩prohibited overlap at construction.
+- `SourcePolicyViolation(ValidationError)`: structured `code`, `field`, `message`.
+- `validate_source_policy(spec, policy)`: enforces required/prohibited on spec sources. Unlisted types are allowed (open-world for non-prohibited types).
+- `validate_published_source_policy(snapshot, policy)`: enforces policy on the published `DataAgentStageSnapshot`. Catches Fabric-side normalization adding/removing sources.
+- `TextValidationResult` frozen dataclass: `field`, `actual`, `limit`, `passed`, `remediation`.
+- `TextLimitViolation(ValidationError)`: structured with formatted message including commas (e.g. "6,840 characters").
+- `validate_data_agent_text(spec)`: returns `list[TextValidationResult]` — one entry per text field. Does not raise; caller decides gate policy.
+- `_normalize_for_dedup(text)`: internal. Strips, collapses internal whitespace (`re.sub(r"\s+", " ")`), lower-cases, Unicode-NFC. Required so double-spacing doesn't bypass dedup.
+- `validate_instruction_deduplication(spec)`: returns `list[str]` describing detected duplicates. Exempts normalized text < 200 chars to allow short shared terminology.
+
+Circular import avoided: `data_agent.py` imports `validation.py`, so `DataAgentSpec`/`DataAgentStageSnapshot` are guarded under `TYPE_CHECKING`. Functions use duck typing at runtime.
+
+### deploy/data_agent.py (bug fix)
+
+`build_semantic_data_agent_spec` previously set `instructions=instruction` (global) on **both** ontology and graph sources — the exact anti-pattern described in issue #10.
+
+Fixed: ontology source gets `ontology_source_instruction` (entity type interpretation, business meaning, use Graph to prove relationships), graph source gets `graph_source_instruction` (backtick identifiers, directed edge preservation, hop/row limits, evidence rules). Both are distinct from the global instruction and from each other.
+
+### knowledge/agent_validation.py
+
+`deploy_and_validate_data_agent` accepts optional `source_policy: Any | None = None`. When provided, calls `validate_published_source_policy(published, source_policy)` after read-back, before building the receipt. This ensures Fabric-side normalization cannot silently add/remove sources.
+
+### cli/deploy_cmd.py (`deploy-data-agent` standalone path)
+
+Before dry-run echo:
+1. `validate_source_policy(spec, SourcePolicy(required={"ontology","graph"}))` — fails fast on wrong source set.
+2. `validate_data_agent_text(spec)` — fails fast on oversized fields.
+3. `validate_instruction_deduplication(spec)` — fails fast on copied instructions.
+
+Dry-run output now includes:
+- Source policy table with required/prohibited status per source.
+- Definition text validation table with actual/limit for every field.
+- Duplicate instruction block count.
+
+`deploy_and_validate_data_agent` called with `source_policy=_data_agent_source_policy` for post-publication validation.
+
+### cli/build_deploy_cmd.py (`build-deploy` orchestrated path)
+
+Identical validation calls as standalone — same policy, same text/dedup checks, same counts in output, same `source_policy` passed to `deploy_and_validate_data_agent`. Ensures parity between the two deployment surfaces.
+
+### tests/unit/test_agent_contract_validation.py (48 new tests)
+
+All pass. Coverage:
+- Named constant values (5 assertions).
+- SourcePolicy construction + overlap guard.
+- `validate_source_policy`: exact set passes, missing required fails, prohibited present fails, extra unlisted passes, empty sources fails, error codes/field names.
+- `validate_published_source_policy`: correct published passes, missing required fails, prohibited present fails, error codes.
+- `validate_data_agent_text`: compact spec passes, field names, global too long fails, source instruction too long, description too long, few-shot count at limit, over limit, payload too large, remediation non-empty, no payload field when no few-shots.
+- `TextLimitViolation`: attributes, formatted message, is exception.
+- `validate_instruction_deduplication`: distinct passes, global=source detected, source=source detected, short text exempt, whitespace normalization, case normalization.
+- Legacy builder fix: ontology≠global, graph≠global, ontology≠graph, dedup passes, text validation passes, policy passes.
+- Graph few-shot count reported as 0 when absent.
+
+---
+
+## Decisions + divergences from Keyser ADR
+
+| ADR item | Implementation | Divergence? |
+|---|---|---|
+| Constants in `validation.py` | Done | None |
+| `SourcePolicy` in `validation.py` | Done | None |
+| `validate_source_policy` in `validation.py` | Done; TYPE_CHECKING guard for DataAgentSpec | Avoided circular import |
+| `validate_published_source_policy` | Done | None |
+| `TextValidationResult`, `TextLimitViolation` in `validation.py` | Done | None |
+| `validate_data_agent_text` in `validation.py` | Done | None |
+| `validate_instruction_deduplication` in `validation.py` | Done | None |
+| Fix `build_semantic_data_agent_spec` duplication | Done | None |
+| Same policy in standalone + orchestrated CLI | Done | None |
+| `source_policy` passed to `deploy_and_validate_data_agent` | Done | Added optional param; backward-compatible |
+| Dry-run reports all counts | Done | None |
+| Validation before any Fabric update | Done | None |
+
+ADR placed `validate_source_policy` and friends in `validation.py`. This module is imported by `data_agent.py`, so `DataAgentSpec` cannot be imported at module level in `validation.py` without a circular import. Used `TYPE_CHECKING` guard + `from __future__ import annotations` — functions use duck typing at runtime. This is the standard Python pattern and does not change the API surface.
+
+---
+
+## Test commands that ran
+
+```
+uv run pytest tests/unit/test_agent_contract_validation.py -q
+# 48 passed
+
+uv run pytest tests/unit/test_deploy_data_agent.py tests/unit/test_data_agent_grounding.py tests/unit/test_knowledge_data_agent_helpers.py -q
+# 60 passed (baseline unchanged)
+
+uv run pytest tests/unit/test_deploy* tests/unit/test_agent* tests/unit/test_data_agent* tests/unit/test_knowledge_data_agent* -q
+# 181 passed
+
+uv run pytest tests/unit/ -q --timeout=120
+# 2231 passed, 0 failed
+```
+
+---
+
+## Remaining caveats for Hockney review
+
+1. **Graph few-shots required when competency contract exists** (issue #10 requirement): The current implementation reports zero few-shots in the dry-run but does not fail the gate when the graph source has no few-shots. Issue #10 says "Require Graph few-shots when a compiled competency contract exists." The CLI currently reads `competency-contract.json` if it exists and populates few-shots from it. Adding a hard gate (fail if contract exists but few-shots=0) is possible in the validation layer but was not added to avoid breaking deployments where no contract has been compiled yet. Hockney should decide whether to add this gate.
+
+2. **`validate_source_policy` is open-world for unlisted types**: extra types beyond required/prohibited are allowed. If closed-world behavior is needed (only required types allowed, no extras), the policy can add prohibited="*" semantics. Current ADR was silent on this edge case.
+
+3. **`deploy/data_agent.py::build_semantic_data_agent_spec`** (legacy path): instruction bug is fixed. The function is flagged as the older non-persisted path. Scope E may deprecate it entirely.
+
+---
+
+# Revision: Data Agent Contract Blockers B1 + B2 (Issues #9, #10)
+
+**Author:** McManus (KG/Ontology Dev)  
+**Date:** 2026-07-22  
+**Branch:** scope/agent-contract  
+**Status:** Ready for Hockney re-review
+
+---
+
+## Context
+
+Hockney REJECTED Verbal's implementation with two blocking findings. This revision addresses both completely.
+
+---
+
+## B1 — Closed-world source enforcement (Issue #9)
+
+### Decision
+
+`SourcePolicy` now carries an optional `allowed_extra: frozenset[str]` field (defaults empty). Both `validate_source_policy` and `validate_published_source_policy` enforce:
+
+```
+allowed = policy.required | policy.allowed_extra
+extra_types = actual_types - allowed
+# any extra_type → SourcePolicyViolation("SOURCE_POLICY_EXTRA_TYPE", ...)
+```
+
+For the published snapshot, the same logic fires with code `PUBLISHED_SOURCE_POLICY_EXTRA_TYPE`.
+
+`SourcePolicy.__post_init__` also validates `allowed_extra ∩ prohibited == ∅`.
+
+### CLI simplification
+
+Both CLI paths now use:
+
+```python
+SourcePolicy(required=frozenset({"ontology", "graph"}))
+```
+
+No `prohibited=frozenset()` noise. Closed-world rejects lakehouse, kusto, and every other type automatically. `allowed_extra` can be set for future multi-source deployments without requiring them.
+
+### Rationale for `allowed_extra` (not pure required-only)
+
+The ADR says "closed-world by default; add `allowed_extra` if needed." Some future deployments may need a third optional source (e.g., semantic_model) without making it mandatory. `allowed_extra` provides that escape hatch with explicit declaration rather than silent admission.
+
+---
+
+## B2 — Graph few-shots required when competency contract exists (Issue #10)
+
+### Decision
+
+New validator: `validate_graph_few_shots(spec, *, contract_exists: bool)`.
+
+- `contract_exists=False` → no-op (backward compat when no compiled contract).
+- `contract_exists=True` + graph source has 0 few-shots → raises `FewShotContractViolation` with `code="GRAPH_FEW_SHOTS_REQUIRED"` and a clear remediation message pointing at `competency-contract.json` and `static_validation_passed`.
+
+Both CLI paths track `_competency_contract_exists = competency_path.exists()` (initialized `False` before the grounding try block, captured inside). Raises `ClickException` / `BuildDeployError` on violation, before any Fabric mutation.
+
+### Representation path (no parallel schema invented)
+
+The compiled competency contract at `competency-contract.json` is the existing artifact. `graph_few_shots_from_competency_contract` already validates `static_validation_passed=true` per case. The gate simply checks `len(graph_src.few_shots) == 0` after that function has already filtered. No new JSON schema or separate representation was introduced.
+
+---
+
+## Test counts
+
+| Suite | Command | Result |
+|-------|---------|--------|
+| New acceptance tests | `pytest tests/unit/test_agent_contract_validation.py` | 63 passed (+15 vs Verbal) |
+| Decisions gate | `pytest tests/unit/test_deploy* tests/unit/test_agent*` | 156 passed |
+| Full unit suite | `pytest tests/unit/` | 2246 passed (was 2231) |
+
+The 15 new tests would fail on Verbal's implementation and pass only with the corrected behavior:
+- `test_extra_unlisted_type_raises_closed_world` (was passing open-world)
+- `test_extra_type_in_allowed_extra_passes`
+- `test_extra_type_error_code`
+- `test_extra_unlisted_published_type_raises_closed_world`
+- `test_extra_published_type_error_code`
+- `test_extra_published_type_in_allowed_extra_passes`
+- `test_allowed_extra_default_empty`
+- `test_allowed_extra_prohibited_overlap_raises`
+- `TestValidateGraphFewShots` (8 tests: contract+0→fail, contract+≥1→pass, no-contract+0→pass)
+
+---
+
+## No changes to
+
+- Read-back wiring (`deploy_and_validate_data_agent` already calls `validate_published_source_policy` when `source_policy` is provided — reviewed as ✓ by Hockney).
+- Dry-run output format (already matching ADR — reviewed as ✓ by Hockney).
+- Named constants (already present — reviewed as ✓ by Hockney).
+- `build_semantic_data_agent_spec` dedup fix (already done — reviewed as ✓ by Hockney).
+
+---
+
+# Review: Data Agent Contract (#9, #10) — scope/agent-contract
+
+**Reviewer:** Hockney (Test Engineer)  
+**Date:** 2026-07-22 (re-review #2)  
+**Verdict:** APPROVED  
+**Commit authorization:** McManus may commit all staged changes on `scope/agent-contract`.  
+
+---
+
+## Test Results
+
+| Suite | Command | Result |
+|-------|---------|--------|
+| Focused (63 tests) | `pytest tests/unit/test_agent_contract_validation.py` | 63 passed ✓ |
+| Decisions gate | `pytest tests/unit/test_deploy* tests/unit/test_agent*` | 156 passed ✓ |
+| Full unit suite | `pytest tests/unit/` | 2246 passed ✓ |
+
+No regressions. All existing and new tests pass.
+
+---
+
+## Previously-Rejected Blockers — Now Fixed
+
+### B1 — Closed-world source enforcement ✅ FIXED
+
+**Fix:** `SourcePolicy` gains `allowed_extra: frozenset[str]` (defaults empty). Both `validate_source_policy` and `validate_published_source_policy` now reject any type not in `required | allowed_extra` with code `SOURCE_POLICY_EXTRA_TYPE` / `PUBLISHED_SOURCE_POLICY_EXTRA_TYPE`. CLI paths instantiate `SourcePolicy(required=frozenset({"ontology", "graph"}))` with no `allowed_extra`, so only those two types pass.
+
+**Evidence:** `test_extra_unlisted_type_raises_closed_world`, `test_extra_type_error_code`, `test_extra_unlisted_published_type_raises_closed_world`, `test_extra_published_type_error_code`, `test_extra_type_in_allowed_extra_passes`, `test_extra_published_type_in_allowed_extra_passes` — all passing.
+
+### B2 — Graph few-shots hard-fail when contract exists ✅ FIXED
+
+**Fix:** New `validate_graph_few_shots(spec, contract_exists=...)` raises `FewShotContractViolation` (code `GRAPH_FEW_SHOTS_REQUIRED`) when `contract_exists=True` and no Graph source has ≥1 surviving few-shot. Both `deploy_cmd.py` and `build_deploy_cmd.py` detect `competency_path.exists()` before the conditional read, store the boolean, and call the validator before any Fabric mutation.
+
+**Evidence:** `test_contract_exists_zero_few_shots_raises`, `test_contract_exists_empty_list_raises`, `test_contract_violation_error_code`, `test_contract_exists_with_few_shots_passes`, `test_no_contract_zero_few_shots_passes` — all passing.
+
+---
+
+## Additional Verification
+
+- **Validation before mutation:** Both CLI paths call `validate_source_policy` and `validate_graph_few_shots` before the `deploy_and_validate_data_agent` call (pre-mutation).
+- **Published read-back enforcement:** `deploy_and_validate_data_agent` calls `validate_published_source_policy(published, source_policy)` after upsert/publish — catches Fabric-side normalization drift.
+- **Standalone/orchestrated parity:** Both `deploy_cmd.py` and `build_deploy_cmd.py` use identical validation logic, same `SourcePolicy`, same error handling.
+- **Dry-run additions/removals:** Source policy and text validation counts are reported in dry-run output; failures abort before mutation.
+- **Source-specific instructions:** `build_semantic_data_agent_spec` now generates distinct ontology/graph source instructions (verified by `test_ontology_source_instructions_differ_from_global`, `test_graph_source_instructions_differ_from_global`, `test_ontology_and_graph_source_instructions_differ`).
+- **Dedup passes built spec:** `test_deduplication_passes_for_built_spec` confirms no false positives on the production builder.
+- **No unrelated changes:** Only modified files are validation, agent_validation, deploy_cmd, build_deploy_cmd, data_agent, and squad docs.
+- **Branch/worktree:** Confirmed on `scope/agent-contract`, no branch switches.
+
+---
+
+## Strengths
+
+1. Clean `SourcePolicy` model with construction-time overlap guards.
+2. Named constants for all five text limits.
+3. Actionable error messages with machine-readable codes, field names, and remediation.
+4. Dedup normalization (whitespace + case) with 200-char threshold avoids false positives.
+5. `allowed_extra` provides extensibility without breaking closed-world default.
+6. 15 new tests cover adversarial scenarios (closed-world, contract-exists, empty lists, near-dedup).
+7. `data_agent.py` fix eliminates instruction duplication at the source (not merely detected).
+
+---
+
+## Revision History
+
+| # | Verdict | Blocker(s) | Revision Owner |
+|---|---------|-----------|----------------|
+| 1 | REJECTED | B1: open-world policy; B2: no few-shot hard-fail | McManus |
+| 2 | APPROVED | Both fixed | — |
+
+---
+
+## Archive (entries older than 2026-07-16)
+
 
 ### Architecture & CLI (SPEC-001) — Keyser
 
@@ -1389,54 +1618,6 @@ All 13 PRD §23 acceptance criteria must pass automated tests. No criterion defe
 2. ✅ RESOLVED (2026-06-24): Create Lakehouse `kg_lakehouse` (item ID 44444444-4444-4444-4444-444444444444) in workspace 11111111-1111-1111-1111-111111111111.
 3. Select first sample document for Sprint 2 (Fenster)
 4. ✅ RESOLVED (2026-06-24): fabric-cicd is REQUIRED PRIMARY for all deployments. REST API is fallback only.
-
----
-
-### Demo Provisioning & Deployment — Completed 2026-06-24
-
-**By:** Hyunsuk Shin, Verbal (AI Integration Dev), McManus (KG/Ontology Dev)
-
-**What:**
-
-**1. Foundry Model Deployment (Coordinator, executed 2026-06-24T15:41:07.842-07:00)**
-- Deployed `gpt-5.4-mini` (deployment name `gpt-5-4-mini`, GlobalStandard capacity 200 = **200K TPM**) on `example-aiservices` in eastus2.
-- ⚠️ Note: GPT-5.5-mini does not exist in catalog. gpt-5.4-mini is the latest mini variant and chosen as enrichment default.
-- Fallback: `chat` (gpt-4.1).
-- **Requirement (carry forward):** CLI and specs (SPEC-001, SPEC-004, INFRA-001) must document **≥200K TPM** as minimum for high-volume enrichment stage.
-- Config updated: `ontology/environments/dev.json`: `chat_deployment=gpt-5-4-mini`.
-
-**2. Fabric Lakehouse Renamed & Configured (Coordinator, executed 2026-06-24T15:41:07.842-07:00)**
-- Renamed `fabrickg_lakehouse` → **`kg_lakehouse`** (item ID 44444444-4444-4444-4444-444444444444 unchanged).
-- Workspace: `11111111-1111-1111-1111-111111111111`.
-- OneLake Tables/Files paths + SQL endpoint captured.
-- Dev config updated: `ontology/environments/dev.json`.
-
-**3. fabric-cicd is REQUIRED PRIMARY (McManus/Verbal, updated SPEC-003)**
-- **Decision:** fabric-cicd is the PRIMARY deployment mechanism for all three deploy commands (deploy-lakehouse, deploy-ontology, deploy-search).
-- Fabric REST API is FALLBACK ONLY (for item-level granularity when fabric-cicd cannot perform the operation).
-- `FabricDeployer` defaults to fabric-cicd.
-- **Carry forward:** CLI prerequisite (`pip install fabric-cicd`) in docs/REQUIREMENTS-001-cli-prerequisites.md; SPEC-003 deployment table and §9.1.1 updated.
-- Why: Governed, reproducible Git-driven deployments per PRD CI/CD goals.
-
-**4. AI Search Status (Verbal → SPEC-001/SPEC-004/INFRA-001 updated)**
-- **Decision:** AI Search is **IN MVP scope** (not optional).
-- Config default: `ai_search.enabled=true` in dev.json (dev); engineers can opt out per environment.
-- All docs corrected: heading changed from "Optional" to "IN MVP."
-
-**5. CLI Prerequisites Documented (Verbal, created docs/REQUIREMENTS-001-cli-prerequisites.md)**
-- Seven required tools: Azure CLI, Python 3.10+, fabric-cicd, Fabric workspace (kg_lakehouse), Foundry ≥200K TPM, AI Search, Document Intelligence.
-- Complete onboarding guide: install steps, `az login` / DefaultAzureCredential, .env setup, RBAC table, verify checklist, demo command sequence.
-- 17,859 bytes.
-
-**Specs Updated:**
-- **SPEC-001:** §5.1 yaml updated (chat_deployment=gpt-5-4-mini, 200K TPM note); §5.3 flag example; §10 decisions rows 4, 5, 8 corrected.
-- **SPEC-004:** §9.2 deployment corrected; model defaults table revised; Appendix B Q6/Q7 updated.
-- **INFRA-001:** §1a corrected (gpt-5.4-mini, 200K TPM ⚠️); §1b AI Search heading; resource mapping table updated; reference to REQUIREMENTS-001 added.
-- **SPEC-003:** §9.1 deployment table updated; §9.1.1 fabric-cicd declared REQUIRED PRIMARY; kg_lakehouse IDs captured; §9.8 CI/CD pipeline updated (deploy-search gate removed, fabric-cicd step added); §1.1 Boundaries corrected.
-
-**No code changed** — all changes are documentation/configuration.
-
-**Secrets:** None committed. `.env` references use placeholders only.
 
 ---
 
@@ -3365,271 +3546,6 @@ Callers never need to remember the string literals. Evidence IDs are determinist
 
 ---
 
-### Densify Hub Linker + Cause-Symptom-Resolution Chain (Session 2026-06-25)
-
-**Date:** 2026-06-25T20:12:00Z  
-**By:** Scribe (Session Coordinator)  
-**Status:** Implemented & live-deployed  
-**Commits:** feature (densify hub), 210596f (SCR linker), data-agent-grounding doc
-
-#### What Was Shipped
-
-**1. `fabric-kg densify` — Document Hub Linking**
-
-**Module:** `src/fabric_kg_builder/enrichment/densify.py` (new), `src/fabric_kg_builder/cli/densify_cmd.py` (new)
-
-**Purpose:** Link each document's source domain (e.g., Surface Pro 10 troubleshooting guide) to the ontology's DeviceModel hub, auto-populating component/part/procedure/symptom edges.
-
-**Design:**
-- Read `build/parquet/source_files.parquet`, `document_elements.parquet`, `entities.parquet`
-- Extract device model name from `source_file.source_name` via regex ("Surface Pro 10" → `DeviceModel:surface-pro-10`)
-- Query Lakehouse GQL: find the DeviceModel entity + all its canonical `has_component` / `has_part` / `has_procedure` / `exhibits_symptom` edges
-- Link each document element to matching entities via `shown_in` / `indexed_in` edges (deterministic, confidence=0.95)
-- Write new `relationships.parquet` batch with +27,436 hub edges
-
-**Result:** `relationships` rows 3,715 → 29,251; Surface Laptop 5 components 0 → 400.
-
-**2. Cause-Symptom-Resolution (S/C/R) Transitive Linker**
-
-**Added to:** `densify.py` — `link_symptom_cause_resolution()`
-
-**Design:**
-- Deterministic keyword overlap (token-level match, TF × IDF scoring ≥ 0.45 confidence threshold)
-- Transitive: Cause → resolves → Resolution (edge `addressed_by`); Symptom → caused_by → Cause
-- Document-scoped: only links within same source file + procedure (no cross-document leakage)
-- Validation: both endpoints must exist in `entities.parquet` with `entity_type ∈ {Cause, Symptom, Resolution}`
-
-**Result:** +3,555 S/C/R edges; isolated symptoms 327 → 8.
-
-**3. Data-Agent Grounding Documentation**
-
-**File:** `docs/data-agent-grounding.md` (new)
-
-**Contents:**
-- Agent instructions (how to reason about the KG, name/type mismatch patterns)
-- Per-type field descriptions (Surface Pro = DeviceModel w/ variants, not exact device name match)
-- Example queries: "Find Surface Pro troubleshooting procedures" + GQL template
-- Debugging: "No data found" pattern diagnosis (sparse graph vs name mismatch)
-
-**Why:** Coordinator discovered agents were failing with "name/type mismatch" (Surface Pro 10 device vs DeviceModel hub). Doc explains this foundational concept for all future agent work.
-
-#### Technical Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| Keyword threshold confidence = 0.45 (not 0.70) | S/C/R matching is looser than entity extraction; 45% captures valid relationships without hard edges like 70% would impose |
-| Document-scoped S/C/R only | Cross-document matching would produce false positives (same symptom description in unrelated manuals) |
-| Deterministic (TF×IDF) not LLM | Fully offline, reproducible, no model variance, completes in seconds on 32K edges |
-| `addressed_by` as transitive edge | Allows graph queries: "procedures that address this symptom" via multi-hop traversal |
-| Hub linking via `shown_in` edges | Matches SPEC-003 bridge semantics; agent can use consistent edge types across all knowledge extraction |
-
-#### Live Deployment Verification
-
-- Lakehouse (dev) redeployed 2026-06-25: 12 entity types, ~40 edge types (incl. causes/resolved_by/addressed_by), 32,118 total relationships, 935 unit tests pass
-- GQL: "Find all procedures for Surface Laptop 5" returns procedure + step + tool/part chains; agent can now ground queries correctly
-- "List symptoms caused by battery degradation" chains via caused_by → Cause → Symptom; no orphan nodes
-
-#### Confidence & Gate
-
-- **Confidence:** 0.45 (keyword overlap S/C/R); 0.95 (hub document linking)
-- **Gate:** VAL-001..028 + BRG-001..010 validation suite green; no structural violations
-- **Open:** Future session can refine threshold based on production query patterns
-
----
-
-### Domain Template + Questions-File Intake (2026-06-25T21:20:00Z) — Coordinator & Keyser
-
-#### Coordinator: Domain-Template Playbook Feature — Implemented
-
-**Date:** 2026-06-25T21:20:00Z  
-**By:** Keyser & Hyunsuk Shin (via Copilot)  
-**Status:** ✅ Shipped (942 tests pass)
-
-**Decision:** `set-domain` now accepts `--industry` and `--business-domain` flags (required) and stores domain input in a structured directory hierarchy under `DomainBrief/` for reusability. Supports optional `--questions-file` for injecting domain competency questions.
-
-**What was implemented:**
-
-1. **CLI flags:**
-   - `--industry TEXT` (required) — e.g., "automotive" 
-   - `--business-domain TEXT` (required) — e.g., "field-service-operations"
-   - `--prompt TEXT` (optional) — inline domain brief text
-   - `--questions-file PATH` (optional) — file path to competency questions
-
-2. **Directory structure:**
-   ```
-   DomainBrief/
-     {industry}/
-       {business_domain}/
-         domain.json      (persisted brief text)
-         questions.json   (optional competency questions)
-   ```
-
-3. **Backward compatibility:** Old flat `domain.json` still supported; auto-upgraded to new structure on first `set-domain --industry ... --business-domain ...` run.
-
-**Why:** Enables templates for common (industry, business_domain) pairs; teams can share domain briefs across projects; questions-file drives downstream data-agent-instructions generation.
-
-**Tests:** 942 passing (18 new domain-template tests added).
-
----
-
-#### Coordinator: Auto-Generated Data-Agent Instructions
-
-**Date:** 2026-06-25T21:20:00Z  
-**By:** Verbal & Coordinator  
-**Status:** ✅ Shipped
-
-**Decision:** `deploy-ontology --multitype --create-data-agent-instruction` (default on) auto-writes `data-agent-instructions.md` from the LIVE Lakehouse graph + sample competency questions.
-
-**What was implemented:**
-
-1. **New module:** `src/fabric_kg_builder/deploy/agent_instructions.py`
-   - `generate_agent_instructions()` — queries live Lakehouse (GQL), extracts entity type counts, relationships, sample competency questions from questions.json
-   - Produces markdown: entity type reference, relationship patterns, example queries, debugging tips
-
-2. **CLI wiring:** `deploy-ontology --create-data-agent-instruction` (default True, `--skip-agent-instructions` to disable)
-   - Reads deployed ontology from Lakehouse
-   - Embeds sample questions from `DomainBrief/{industry}/{business_domain}/questions.json`
-   - Writes `data-agent-instructions.md` to build directory
-
-3. **Output format (markdown):**
-   ```
-   # Data Agent Instructions for {industry} / {business_domain}
-   
-   ## Entity Types (from Lakehouse)
-   - Device (92 instances)
-   - Component (412 instances)
-   - ...
-   
-   ## Sample Competency Questions
-   - How many Surface Pro devices are in the database?
-   - Which procedures fix the blue screen error?
-   
-   ## Example GQL Patterns
-   [patterns auto-derived from live relationships]
-   
-   ## Debugging
-   [common agent error patterns with solutions]
-   ```
-
-**Why:** Data agents (future Foundry Agent Service + MCP tools) need grounding in the actual deployed schema. Auto-generation keeps instructions in sync with live data and avoids manual doc drift.
-
-**Tests:** 942 tests pass (integrated into deploy flow).
-
----
-
-### GitHub Pages Landing Site (2026-06-25T21:20:00Z) — Coordinator
-
-**Date:** 2026-06-25T21:20:00Z  
-**By:** Coordinator  
-**Status:** ✅ Deployed to production  
-**URL:** https://hyssh.github.io/fabric-kg-builder/  
-**Commits:** site/pages (2026-06-25)
-
-**Decision:** Built a static GitHub Pages site under `/site` to document the project, pipeline, installation, and best practices. Deployed via GitHub Actions on every push to main.
-
-**What was built:**
-
-1. **Files in `/site`:**
-   - `index.html` — landing page (responsive, dark theme)
-   - `styles.css` — styling (CSS Grid, flexbox)
-   - `app.js` — interactive pipeline diagram + navigation
-   - `.nojekyll` — disable Jekyll processing
-   - `README.md` — site source notes
-
-2. **Page sections:**
-   - **Background/Problem:** Why KG + why fabric-kg-builder
-   - **What It Does:** End-to-end pipeline (domain → deploy → query)
-   - **Pipeline:** Visual 12-stage flow with descriptions
-   - **Install:** Prerequisites, pip install, quick start
-   - **GitHub Copilot CLI Usage:** How to use this repo with GitHub Copilot
-   - **Best Practices:** Templates, industry/business-domain patterns, questions-file, densify, iterate without re-enriching
-   - **Proven Surface Results:** Real data on Surface troubleshooting graphs (device models, procedures, components, symptoms)
-   - **Architecture:** Fabric Lakehouse + AI Search + Ontology + Agent grounding
-   - **Security:** Secrets model, auth, prompt injection prevention
-   - **FAQ:** Common issues + solutions
-
-3. **GitHub Actions workflow:**
-   - File: `.github/workflows/pages.yml`
-   - Trigger: `push` to `main` branch
-   - Deploy: `/site` directory to GitHub Pages
-   - Automatic rollout on every commit
-
-**Why:** 
-- Attracts new users (landing page instead of just README)
-- Documents the full end-to-end story
-- Best practices are centralized + discoverable
-- Proof-of-concept results are visible
-- Live site keeps docs in sync with codebase (Git-driven)
-
-**Tests:** Manual verification — site loads, links work, no 404s.
-
-**Live URL:** https://hyssh.github.io/fabric-kg-builder/
-
----
-
-### RCA Diagnostic-Path Linker (2026-06-25T23:05:00Z) — Coordinator
-
-**Date:** 2026-06-25T23:05:00Z  
-**By:** Coordinator  
-**Status:** ✅ Deployed to dev  
-**Commits:** 4c6c282 (RCA linker feat), d1af045 (RCA docs/grounding)
-
-**Decision:** Implement `link_rca_paths()` in densify to build Root Cause Analysis chains from Symptom entities to both diagnostic procedures and remediation procedures. Addresses reviewer feedback: "Repair KG not RCA KG."
-
-**What was built:**
-
-1. **New relationship edges:**
-   - `Symptom` →`diagnosed_by`→ `diagnostic Procedure` (SDT/check/inspect/validate/verify/status — real diagnostic entities from corpus)
-   - `Symptom` →`remediated_by`→ `repair Procedure` (which has `has_step` edges to concrete repair steps)
-
-2. **Linking algorithm:**
-   - Keyword-gated per document (match symptom text against procedure titles/descriptions)
-   - Confidence score = 0.4 (additive, non-destructive; documents are already data-grounded)
-   - New helper: `is_diagnostic_procedure()` — identifies SDT classification from ontology
-
-3. **Full RCA chain now traversable:**
-   - Symptom (e.g., "Battery expansion") → 28 causes (Cause→Symptom edges) 
-   - Symptom → 1 diagnostic test (diagnosed_by)
-   - Symptom → 19 remediation procedures (remediated_by)
-   - Procedures → 35 reachable steps (has_step edges)
-   - Steps → 28 resolutions (resolve_symptom)
-   - **Total path:** Cause → Symptom → DiagnosticTest + Procedure → Steps + Resolution
-
-4. **Deployment:**
-   - Lakehouse: dbo.rel_symptom_procedure = 972 live in OneLake
-   - densify (+1,429 RCA edges), compile (additivity guard OK, rels 35,445), deploy (LRO Succeeded)
-   - Remediated_by now top relationship type by volume
-
-5. **Documentation:**
-   - agent_instructions generator emits one-query RCA template
-   - README densify section expanded: 4 passes with RCA chain + Battery expansion example
-   - lessons-learned marks RCA "partially addressed" (data-limited for Observation/FailureMode in repair manuals)
-
-**Data boundaries:**
-- Observation/FailureMode: data-limited (repair manuals not yet ingested)
-- All Symptom, Cause, Procedure, Step, and Resolution entities are data-grounded (extracted from documents, not synthesized)
-
-**Verification:**
-- Full RCA chain end-to-end traversable ✓
-- 951 unit tests pass ✓
-- No regression in compile or deploy ✓
-
-**Why:** Users can now follow a complete diagnostic + repair flow from symptom detection through root cause to specific remediation steps. The chain is discoverable and queryable.
-
-
-
-
----
-
-## Decision: Issue Worktree Roadmap
-
-**Date:** 2026-07-22T21:22:00-07:00
-**By:** Keyser (Lead / Architect)
-**Requested by:** Hyunsuk Shin
-**Status:** 📋 Proposed
-
----
-
 ### Observed State
 
 **Open issues:** 10 (#5–#14) — all OPEN, no labels, no assignees.
@@ -3828,490 +3744,3 @@ git branch -d scope/<scope-name>
 
 ### Verbal — Live Graph/Data Agent Example Validation Publication Contract
 
-**Date:** 2026-07-23  
-**Author:** Verbal  
-**For:** Issue #11 implementation  
-**Status:** ✅ Complete & Approved  
-
-**Decision — Three-Gate Publication Contract**
-
-Adopt a deterministic three-gate contract for competency Graph example publication:
-
-1. **Static gate** — normalize GQL + validate against persisted query schema (labels, relationships, properties, directions, projection/bounded shape)
-2. **Live Graph gate** — execute candidate query against deployed Graph and require successful status, required non-empty rows, and evidence coverage for evidence-bearing cases
-3. **Semantic parity gate** — execute published examples through the Data Agent MCP endpoint and require semantic match with direct Graph results
-
-**Publication Policy**
-
-- Cap published Graph examples at **7**
-- Enforce cap after candidate validation/execution so all candidates are evaluated
-- Optional overflow is omitted; required overflow blocks publication
-- Persist per-example receipts inside `AgentPublicationReceipt.competency_examples` with request IDs/hashes for triage
-
-**Status Values**
-
-Examples progress through: `CANDIDATE` → `VALIDATED_STATIC` → `VALIDATED_LIVE` → `VALIDATED_SEMANTIC` → `PUBLISHED`
-
-**Why This Matters**
-
-This keeps Data Agent grounding examples from drifting away from real graph semantics, and makes failures actionable with persisted request IDs/hashes for triage. Availability-aware filtering ensures optional relationships don't leak into published examples.
-
----
-
-## Ontology Identity & Partial-Date Integrity (#7, #8)
-
-### Keyser ADR: Ontology Identity-Key Integrity & Partial Date Preservation
-**Date:** 2026-07-22  
-**Status:** Approved  
-**Author:** Keyser (Lead/Architect)  
-**Scope:** Issues #7 + #8, branch `scope/ontology-integrity`
-
-**Decision:** Issues #7 and #8 implemented as one coherent change sharing validation surface. New module `ontology/identity_validation.py` with gate IDs OKV-001 (relationship identity mismatch) and OKV-002 (partial-date type incompatibility). Identity resolution checks that relationship endpoint FK columns are compatible with their entity's identity domain. Partial dates remain as String (not DateTime) with validation gate detecting `timestamp` type properties containing "date" substring. Post-deployment validation is structural (counts definition parts, not graph row counts).
-
-**Key architecture:**
-- New module `src/fabric_kg_builder/ontology/identity_validation.py` (not in compiler or validate/data_gates.py)
-- Gate IDs: OKV-001 (identity column mismatch), OKV-002 (date type incompatibility)
-- Error code: `ONTOLOGY_RELATIONSHIP_KEY_MISMATCH`
-- Dry-run output: identity mapping summary table (logging only, not new file format)
-- Post-deploy structural completeness check via `validate_post_deploy_definition()`
-
----
-
-### McManus — Ontology Integrity Implementation (Initial)
-**Date:** 2026-07-22  
-**Issues:** #7 (Relationship Key Validation) + #8 (Partial Date Handling)  
-**Status:** Implementation delivered (rejected by Hockney for missing pipeline integration)
-
-**Decisions:**
-1. **OKV-001 Compatibility Rule**: FK endpoint compatible when: (a) FK column name equals entityIdColumn, (b) stripping `source_`/`target_` prefix equals entityIdColumn, (c) entity declares property with implied domain name, or (d) FK absent = error
-2. **Model additions**: 14 entity types (Document, Section, Table, TableRow, TableColumn, TableCell, Figure, Caption, Callout, VisualRegion, OCRText, Chunk, ChunkEmbedding, SearchDocument) added `entity_id` property declarations + `additionalColumns` mappings (Parquet schema unchanged; reads from existing physical columns)
-3. **OKV-002 Trigger**: Property triggers gate when type is `"timestamp"` AND name contains "date" (case-insensitive); properties named `created_at`, `updated_at` exempt
-4. **Module boundary**: `identity_validation.py` returns `IdentityViolation` dataclass list, does not raise exceptions
-5. **Post-deploy**: Structural validation only (definition part counts), not data-count based
-
-**Root issue identified by Hockney's first review:** Module created but never wired into compiler or deploy pipeline. Acceptance tests all passed (exercised module API in isolation), but production gates never called the module.
-
----
-
-### Hockney — Test Policy & Acceptance Contract (Initial Review)
-**Date:** 2026-07-22  
-**Status:** First review—REJECTED (70 tests passing but defects D1-D4 identified)  
-**Author:** Hockney (Test Engineer)  
-**Test count:** 70 total (all green at time of review)
-
-**Defects identified:**
-
-| Ref | Defect | Severity | Cause | Status |
-|-----|--------|----------|-------|--------|
-| D1 | `validate_identity()` not wired into compiler._validate() or deploy_cmd pipeline | CRITICAL | Orphaned module with zero call sites | Fixed by Keyser: now imported and called in compiler._validate() |
-| D2 | OKV-002 not fired without explicit `datePrecision` annotation | CRITICAL | Gate requires annotation; name heuristic not used | Fixed by Keyser: now wired into compile-time path (no annotation needed) |
-| D3 | `_validate_parquet_date_precision` reports samples only, no counts | SIGNIFICANT | Missing rejected-value count and affected entity count | Fixed by Keyser: added counts tracking |
-| D4 | Broad `except Exception` around `read_graph_counts()` silently skips zero-edge validation | MODERATE | Exception swallowed, validation skipped | Fixed by Keyser: narrowed exception, added explicit failure check |
-
-**Policy decisions:**
-- Test scope: public contract only (no internal helper inspection)
-- FK alias `source_entity_id` → `entity_id` is explicitly VALID
-- Mismatch defined as FK population belonging to different entity identity domain
-- OKV-002 is structural gate (model-level), not data gate
-- Post-deploy uses part-count (EntityType/RelationshipType definitions), not row counts
-- `detect_date_precision`: coarsest-wins (mixed precision returns coarsest bucket)
-- Fixtures use minimal in-memory dicts; real model.yaml in module-scoped tests
-
-**Locked out:** McManus (per reviewer-protocol strict lockout). Revision assigned to Keyser.
-
----
-
-### Keyser — Revision: All Defects Fixed & Regression Coverage Added
-**Date:** 2026-07-22 → 2026-07-23  
-**Status:** ✅ APPROVED (263 targeted tests, 2264 full suite, 0 failures)  
-**Revision owner:** Keyser (Lead/Architect, under strict lockout)  
-
-**Defect resolutions:**
-
-**D1 — CRITICAL: Active identity pipeline wired (OKV-001)**
-- Added import `from fabric_kg_builder.ontology.identity_validation import validate_identity` to compiler.py (module-level)
-- Step 7 in `_validate()`: calls `validate_identity(model)`, raises `OntologyCompilerError` on OKV-001 errors
-- OntologyCompiler.__init__ now fails compilation with clear `ONTOLOGY_RELATIONSHIP_KEY_MISMATCH` for cross-table domain mismatches
-- Tests: `test_okv001_domain_mismatch_raises_via_compiler`, `test_okv001_valid_entity_id_alias_passes_compiler` added to test_compiler.py
-
-**D2 — CRITICAL: Partial-date gate fires without annotation (OKV-002)**
-- Same `validate_identity()` call (D1 step 7) runs OKV-002
-- Properties typed `timestamp` with "date" in name now fail compilation without annotation
-- Also wired into deploy_cmd.py pre-deployment gate (model-level structural check before Parquet data scan)
-- Tests: `test_okv002_timestamp_date_property_raises_without_annotation`, `test_okv002_timestamp_non_date_name_passes_compiler` added to test_compiler.py
-
-**D3 — SIGNIFICANT: Diagnostic counts added**
-- Rewrote `_validate_parquet_date_precision` to count all rejected values per property (`rejected_count`)
-- Track affected entity types (`affected_entity_names`)
-- Error message: `{rejected_count} partial date value(s) across {N} entity type(s). Sample values: [...]`
-- Tests: TestValidateParquetDatePrecisionCounts (5 tests) added to test_ontology_integrity_pipeline.py
-
-**D4 — MODERATE: Read-back failure now blocks publication**
-- Removed broad `except Exception`; only `ImportError` caught narrowly (optional dependency protection)
-- Added explicit guard: if `total_edges < 0` OR `total_nodes < 0` (internal failure markers), abort with sys.exit(1)
-- Zero-edge check only runs when read-back succeeded
-- Tests: TestReadGraphCountsFailureBlocking (2 tests) added to test_ontology_integrity_pipeline.py
-
-**Additional fixes:**
-- pyproject.toml: Reverted duplicate `[dependency-groups] dev` block
-- uv.lock: Reverted generated-artifact changes
-- test_deploy_ontology_cmd.py: 3 tests updated to mock `read_graph_counts` with valid result
-
-**Test results (Hockney re-review):**
-- test_identity_validation.py (70 Hockney tests): 70 passed
-- test_compiler.py (52 existing + 4 new): 52 passed
-- test_ontology_integrity_pipeline.py (7 new): 7 passed
-- Full non-integration suite: 2264 passed, 0 failed
-
-**Status:** APPROVED for merge
-
----
-
-### Hockney — Final Independent Re-Review
-**Date:** 2026-07-23  
-**Status:** ✅ APPROVED (263 targeted, 2264 full suite, 0 failures)  
-**Reviewer:** Hockney (Test Engineer, independent re-review role)
-
-**Probe coverage:**
-- Targeted tests (issues #7, #8): 263 passed
-- Full relevant suite: 2264 passed, 4 deselected, 5 warnings, 0 failed
-
-**Acceptance verified:**
-- Issue #7 contract: Relationship identity validation gate (OKV-001) fires at compile time for cross-table domain mismatches; post-deploy structural check counts definition parts
-- Issue #8 contract: Partial-date detection (OKV-002) fires without annotation; pre-deploy data validation includes rejected-value and entity counts; dry-run output includes identity/partial-date diagnostics
-
-**Ready for merge:** YES
-
-
----
-
-## Agent Capability Implementation (Issues #12, #13, #14)
-
-### Keyser — ADR: Capability-Aware Data Agent Grounding, Example Gating, and Property Assurance
-**Date:** 2026-07-23  
-**Author:** Keyser (Lead / Architect)  
-**Scope:** scope/agent-capability (Issues #12, #13, #14)  
-**Reviewer gate:** Hockney (independent — rejection requires a different revision author)  
-**Builds on:** scope/agent-contract ADR (#9, #10)
-
-**Key findings:** Three coupled issues require capability-bound grounding:
-- **#12** Generate instructions/descriptions from intersection of contract + persisted projection + live Graph validation
-- **#13** Gate few-shot examples on observed relationship row counts
-- **#14** Preserve Fabric-supported Graph property selection through publication; validate against original requirement
-
-**Decisions (D1-D8):**
-- D1: Reuse existing publication path; no new deploy pipeline
-- D2: Module ownership: Pydantic models in `semantic/schemas.py`, validation functions in `knowledge/validation.py`, grounding in `knowledge/agent_validation.py`, text rendering in `semantic/instructions.py`
-- D3: New shared vocabulary (immutable): relationship availability classification, `CompetencyExampleReceipt`, extend `QueryReadiness` with per-relationship observed rows, extend `AgentPublicationReceipt` with property/text-count fields
-- D4: New error codes: `DATA_AGENT_PROPERTY_OMITTED`, `DATA_AGENT_REQUIRED_EXAMPLE_EMPTY`, `DATA_AGENT_UNAVAILABLE_RELATIONSHIP_CLAIMED`
-- D5: `build_public_graph_source_projection` must project selected graph properties instead of stripping; three-way comparison (required vs draft vs published)
-- D6: `gate_competency_examples` stays pure function; wire into both CLI pre-flights
-- D7: Parameterize text builders with availability view; descriptions enumerate only observed-available paths
-- D8: Extend dry-run reporting with property selection, grounding text, and example gating status
-
-**Implementation sequence:** Schemas → property preservation → example gating → capability-aware text → CLI wiring. Single author (Verbal) owns all production code; Hockney writes independent tests.
-
-**Test commands:**
-- Targeted: `pytest tests/unit/test_deploy_data_agent.py tests/unit/test_agent_instructions.py tests/unit/test_agent_contract_validation.py tests/unit/test_data_agent_grounding.py tests/unit/test_knowledge_data_agent_helpers.py`
-- Full gate: `pytest`
-
----
-
-### Verbal — Team: Agent Capability Implementation Decisions
-**Date:** 2026-07-23  
-**Author:** Verbal  
-**For:** Hockney (test ownership), Keyser (ADR author)
-
-**Interface changes for testing:**
-- `gate_competency_examples(contract, availability, *, min_required_rows=1)` accepts both `list[DataAvailability]` and `dict[str, DataAvailability]`
-- `graph_few_shots_from_competency_contract(contract, *, limit=5, availability=None)` skips cases not in published receipt set when availability provided
-- `build_agent_publication_receipt(...)` accepts optional char-count params; populates property/text-count fields
-- `deploy_and_validate_data_agent(...)` passes char-count params through
-- Error classes: `DataAgentPropertyOmitted`, `DataAgentRequiredExampleEmpty`, `DataAgentUnavailableRelationshipClaimed`
-- `CompetencyExampleReceipt` and `CompetencyExampleStatus` with five status values
-- `AgentPublicationReceipt` extended with property/text-count fields
-- `QueryReadiness` extended with `observed_relationship_rows` dict
-- Text builders (`build_graph_source_description`, `build_graph_source_instructions`, `build_ontology_source_*`) accept `availability` parameter; unavailable relationships omitted from descriptions
-
-**Property child preservation (#14):** `build_public_graph_source_projection` no longer strips `children`; draft payload reflects real property counts
-
-**CLI parity (D1):** Both `deploy_cmd.py` and `build_deploy_cmd.py` compute availability dict, pass to `graph_few_shots_from_competency_contract`, and pass char counts to `deploy_and_validate_data_agent`
-
----
-
-### Hockney — Agent Capability Test Coverage Note
-**Date:** 2026-07-23  
-**Author:** Hockney (Test Engineer)  
-**Sprint:** scope/agent-capability (issues #12, #13, #14)  
-**Status:** Tests authored. 182 passed, **2 RED** production gaps initially.
-
-**Production gap:** `graph_few_shots_from_competency_contract` did not use receipts to filter optional-absent cases.
-
-**Failing tests:**
-- `test_optional_case_with_zero_rows_is_silently_omitted`
-- `test_unrelated_required_case_unaffected_by_unavailable_optional`
-
-**Root cause:** `gate_competency_examples` called for raise-on-required side effect; receipts discarded. Optional-absent cases leaked into output.
-
-**Fix required:** Use receipts to build allowed set; skip cases not in published receipt set.
-
-**Coverage completeness:** All other requirements from ADR passing:
-- classify_relationship_availability (4 states): 7 tests PASS
-- New validation errors: 3 tests PASS
-- CompetencyExampleReceipt: 3 tests PASS
-- gate_competency_examples: 9 tests PASS (except 2 RED noted above)
-- observed_relationship_rows in receipt: 1 test PASS
-- QueryReadiness.observed_relationship_rows: 2 tests PASS
-- AgentPublicationReceipt char-count fields: 7 tests PASS
-- Property children preserved: 3 tests PASS
-- Property selection hash/char counts deterministic: 2 tests PASS
-- Capability-aware descriptions (#12): 5 tests PASS
-- Global instruction boundary (#12): 3 tests PASS
-- Property omission not self-referential (#14): 3 tests PASS
-- graph_few_shots required-absent raises: 1 test PASS
-- graph_few_shots backward compat: 1 test PASS
-
-**Backward compatibility:** gate_competency_examples(None, {}) returns []; graph_few_shots without availability uses existing filtering
-
----
-
-### McManus — Agent Capability Revision Decision Note
-**Date:** 2026-07-23  
-**Author:** McManus (KG/Ontology Dev)  
-**Branch:** `scope/agent-capability`  
-**Status:** Complete — all formal blockers resolved, 2409 tests passing  
-**Context:** Verbal locked out following Hockney rejection; McManus independently owns all production changes
-
-**Blockers fixed:**
-
-**Blocker 1 — `DataAgentRequiredExampleEmpty` escapes uncaught at CLI boundaries**
-- Added early deferred import of `DataAgentRequiredExampleEmpty` before grounding try block in both CLI files
-- Added dedicated except clause before general catch; raises `ClickException`/`BuildDeployError`
-- Applies in dry-run and live paths
-
-**Blocker 2 — `_capability_availability` not wired into graph builders**
-- Added `availability=_capability_availability or None` to `build_graph_source_instructions` and `build_graph_source_description` call sites
-- Both CLI paths now pass availability to builders
-
-**Blocker 3 — Count-only property selection hashes**
-- Added `selected_property_ids` property to `DataAgentStageSnapshot`; returns sorted canonical property IDs
-- Changed hash computation to use `{"property_ids": selected_property_ids}` instead of count only
-- Two selections with same count but different IDs now produce different hashes
-
-**Blocker 4 — Compiled property count not validated before draft/published**
-- Added compiled property count check immediately after counts set
-- Raises if compiled_count != required_count before draft/published checks
-
-**Dependency cleanup:** Reverted duplicate `[dependency-groups]` in `pyproject.toml` and `uv.lock`
-
-**Test results:**
-- Five-file targeted suite: 202 passed (184 existing + 18 new)
-- Full suite: 2409 passed, 4 deselected, 5 warnings
-- All Hockney RED tests now GREEN (optional filtering fix in graph_few_shots)
-
-**New regression tests (18 in `test_agent_contract_validation.py`):**
-- `TestPropertySelectionHashContentBased` (5): sorted IDs, empty list, different-IDs-different-hashes, same-IDs-same-hash, valid SHA256
-- `TestCompiledPropertyOmissionBlocks` (2): compiled omission raises, equal counts pass
-- `TestRequiredExampleEmptyBoundaryClassification` (4): error type, actionable message, structured attributes accessible
-- `TestGraphSourceAvailabilityWiring` (6): both builders accept availability, unavailable relationships named, available named in description, no-availability fallback, unavailable-only warning
-
-**Status:** Ready for merge
-
-
----
-
-### Keyser — ADR: Single Deployment Manifest as the Fabric Item Naming Authority (Issue #6)
-**Date:** 2026-07-24  
-**Status:** APPROVED  
-**Author:** Keyser (Lead / Architect)  
-**Scope:** scope/deploy-manifest (Issue #6)  
-**Implementer:** Verbal (all `src/**` + docs)  
-**Reviewer gate:** Hockney (independent tests + final diff review)  
-**Test gates:** Focused suite 122 passed; full default suite 2542 passed, 4 deselected
-
-**Root cause:** Compilation and deployment create multiple dependent Fabric items (Ontology, Lakehouse, Semantic Model, Graph model, Data Agent, AI Search index) with five competing naming authorities: (1) Environment JSON untyped dict, (2) Click `--option` defaults, (3) generated semantic titles (silent-override in `semantic/compiler.py:1161`), (4) generated `.platform` metadata, (5) command-line names. Naming logic duplicated between standalone `deploy_cmd.py` and orchestrated `build_deploy_cmd.py`; no conflict detection.
-
-**Decision:** One authoritative deployment manifest (`deploy/manifest.py`: `DeploymentManifest` Pydantic + `load_deployment_manifest`, reusing `infra/manifest.py` interpolation + error pattern); new pure `deploy/name_authority.py` (`ResolvedName`, `resolve_item_name`, `validate_readback_name`, `render_name_resolution`, `manifest_from_env_config`, `NameAuthorityConflict`). All names resolve through single resolver; other sources validated against manifest (conflict → hard `NAME_AUTHORITY_CONFLICT` error) or treated as migration inputs (legacy env fields warn, manifest wins).
-
-**Manifest schema:**
-```yaml
-workspace: ${FABRIC_WORKSPACE_ID}
-items:
-  ontology:       { display_name: demo-ontology, prefix: "", configured_id: "" }
-  lakehouse:      { display_name: kg_lakehouse, configured_id: "" }
-  semantic_model: { display_name: kg_semantic, configured_id: "" }
-  graph_model:    { display_name: KG Graph, configured_id: "" }
-  data_agent:     { display_name: fkg-dev-data-agent, configured_id: "" }
-  search_index:   { prefix: kg-dev-, display_name: kg-chunks, configured_id: "" }
-dependencies:
-  - { item: data_agent, depends_on: [ontology, semantic_model, graph_model] }
-  - { item: graph_model, depends_on: [ontology] }
-```
-
-**Name resolution rules:** Manifest name always effective. Generated metadata or command name differing → raise `NameAuthorityConflict` (hard fail, never silent). Legacy env names → migration inputs only (warn on divergence, manifest wins). Dry-run: print `render_name_resolution` block. Rename/replace: require explicit `--approve-replace`.
-
-**Surfaces changed (Verbal):** NEW `src/fabric_kg_builder/deploy/manifest.py` + `src/fabric_kg_builder/deploy/name_authority.py`; modified `cli/deploy_cmd.py`, `cli/build_deploy_cmd.py`, `deploy/fabric_ontology.py`, `ontology/fabric_def.py`, `semantic/compiler.py`, `deploy/data_agent.py`, `deploy/search_deployer.py`; docs + `deployment.yaml.example`.
-
-**Error contract:** `NameAuthorityConflict` (code `"NAME_AUTHORITY_CONFLICT"`); reuse project's `ERROR <CODE>:\n<message>\n<remediation>` format.
-
-**Implementation choices (Verbal):**
-- `manifest_from_env_config` accepts both full env JSON and extracted `fabric` section (CLI flexibility)
-- `ManifestItemSpec.configured_id` only set when `display_name` also present in synthesized manifests (legacy env IDs still read from JSON)
-- `--display-name` conflict detection in `deploy-ontology` runs before env config loading (dry-run failures actionable)
-- `--semantic-contract` optional at Click level in `build-deploy` (manual guard for dry-run planning; relax `required=True` + `exists=True` for contract/mappings/vocabulary)
-- Name plan emitted early in `build-deploy` dry-run before infra manifest load (appears even in unprovisioned environments)
-- Dual item-type key support: snake_case + CamelCase in `_ITEM_TYPE_FIELD` (CLI clarity + test flexibility)
-
-**Test contract (Hockney—independent):**
-- `tests/unit/test_deployment_manifest.py` (29 tests): schema validation, `${ENV_VAR}` interpolation, error handling
-- `tests/unit/test_name_authority.py` (65 tests): manifest-wins precedence, conflict detection, migration warning path, read-back validation, render format (exact match to issue's success block), error text, validator reuse
-- `tests/contract/test_deploy_name_authority.py` (19 tests): `.platform` `displayName` = resolved name, CLI `--dry-run --manifest` CliRunner tests, conflict detection
-
-**Behavioral contract updates (Keyser review):** Rejected source-text inspection tests; replaced with 7 behavioral contracts (4 read-back, 2 orchestrated, 1 integration). Current state: 121/122 focused tests pass; 1 intentional RED awaiting McManus fix (`_deploy_knowledge` conflict detection wiring).
-
-**Invariants:**
-1. Single naming authority; exactly one resolved display name per item
-2. Generated-metadata / command-supplied name differing from manifest → `NAME_AUTHORITY_CONFLICT` (hard fail, never silent)
-3. Legacy env JSON names are migration inputs only; on divergence warn, manifest wins
-4. Deployed display name must equal manifest name (read-back enforced)
-5. Rename/replace requires explicit `--approve-replace`; implicit rename impossible
-6. No name-resolution duplication between standalone and orchestrated paths
-
-**Risks mitigated:**
-- Manifest concept collision with Azure `InfraManifest`: distinct `DeploymentManifest` class + module + docs
-- Golden-hash drift in `semantic/compiler.py:1161`: keep output byte-identical when manifest name == contract name; only enforce at deploy boundary
-- `--mock` vs `--dry-run` inconsistency: treat `--mock` as ontology's dry-run; do not rename flags in this scope
-- Fabric read-back via `/items/{id}` metadata: name read-back feasible without graph-level queries
-
-**Approval gates:**
-- ✅ Targeted: `pytest tests/unit/test_deployment_manifest.py tests/unit/test_name_authority.py tests/contract/test_deploy_name_authority.py` — 121/122 pass (1 intentional RED)
-- ✅ Full: `pytest` (unit + contract default markers, 4 deselected) — 2542 pass, 0 fail
-- ✅ Review: Hockney final diff review approved
-- ✅ Commit: references `#6`; stays on `scope/deploy-manifest`; no merge/push
-### 2026-07-24: McKinstry / Wharton HS `kgv22` Demo Pipeline — Design Review Outcome
-**By:** Keyser (Lead / Architect)
-**Ceremony:** Pre-work Design Review (autopilot). Non-destructive discovery only — no artifacts/resources changed.
-
----
-
-#### What (decision summary)
-Build and live-deploy the full fabric-kg-builder pipeline for the Wharton HS facilities/HVAC document
-corpus, reusing existing Azure resources in `EXP-BEL-SDBX-RG` and Fabric workspace
-`hyssh-dev-fabricdemo` (`570d838d-88ff-437f-93cd-a639908b397f`). All new artifacts carry the `kgv22`
-prefix. All generated artifacts live **outside** the repo under `/Users/hyssh/workspace/mckinstry/kgv22-run/`.
-PROHIBITED: reading or modifying the repo's Python source. ALLOWED: custom Python glue in `/Users/hyssh/workspace/mckinstry/kgv22-run/` only if needed to integrate the package-supported `fabric-kg` CLI entrypoint and `az`. PREFERRED: CLI commands and help before custom Python.
-
----
-
-#### Resolved environment contract (verified via `az`, local creds — no secrets stored)
-- **Auth:** Azure CLI authentication active — DefaultAzureCredential path.
-- **Document Intelligence:** `hyssh-docintel` — kind `FormRecognizer`, `https://hyssh-docintel.cognitiveservices.azure.com/`, westus. Layout model → tables as HTML, figures as images.
-- **Foundry (enrichment + embeddings):** `aif-exp-bel-sdbx-eus2b` — kind `AIServices`, `https://aif-exp-bel-sdbx-eus2b.cognitiveservices.azure.com/`, eastus2. Projects: `ai-gateway-workshop`, `proj2`.
-  - Enrichment deployment: **`gpt-4o`** (2024-11-20) available (also gpt-4.1 / gpt-5.6-sol as fallbacks).
-  - Embeddings: **`text-embedding-3-large`** — matches the LOCKED 1536-dim search coupling. No dimension risk.
-- **AI Search:** `hyssh-dev-search`, westus2.
-- **Blob Storage:** `hysshseattlehub` (only storage account in RG), westus.
-- **Fabric:** workspace `hyssh-dev-fabricdemo` / `570d838d-88ff-437f-93cd-a639908b397f`.
-- Regions are mixed (westus / westus2 / eastus2) — functional; minor cross-region latency only.
-
-#### Source corpus (read-only): `/Users/hyssh/workspace/mckinstry/Wharton HS/` — 13 files
-- `1995 Original Facility Combined.pdf` (15.5MB, scanned — OCR risk)
-- `Wharton 2014 Chiller Replacement Combined.pdf` (2.1MB — the **2014 replacement** doc)
-- `HS_WHARTON_MappingInfo_2022_06_28 - Copy.xlsx` (asset/mapping registry — tabular)
-- `Wharton HS - Equipment Map.pdf`
-- `Trane Chiller Replacement/` (the **2021 replacement** project): 100% Drawings, As-Builts, Water-Cooled Chiller IOM, Submittal, Test & Balance, Cooling-Tower IO, Contact List (docx), and two warranties:
-  - `…Unit L19G03148-Chiller 1.pdf` → **serial L19G03148**
-  - `…Unit L19G03274-Chiller 2.pdf` → **serial L19G03274**
-
----
-
-#### Component boundaries & interface contracts
-1. **Extraction (Doc Intelligence)** → per-file element JSON (text + HTML tables + figure refs); figures/images → Blob. *Contract:* inspect-source element schema; provenance element IDs preserved for lineage.
-2. **Enrichment (Foundry gpt-4o)** → per-file enriched JSON (entities, relationships, evidence), resume-safe. *Contract:* entity identity column = equipment **serial number** (keeps L19G03148 vs L19G03274 distinct — OKV-001 identity gate).
-3. **Compile-data** → 8 canonical Parquet tables (entities, relationships, chunks, document_elements, evidence, …). Durable data contract; source of truth for both Search and Fabric.
-4. **Compile-search** → vector (1536) + keyword indexes on `hyssh-dev-search`.
-5. **Compile-ontology** → Fabric Ontology definition (node/edge types over Lakehouse tables).
-6. **Deploy (fabric-cicd)** → Lakehouse tables, Ontology, Search docs; then Semantic Model + Data Agent.
-7. **Data Agent** → source policy `required={ontology, graph}` (per ADR #9); text/dedup limits per ADR #10.
-
----
-
-#### Naming rules (prefix `kgv22`, separators adapted per service)
-- Blob container / OneLake paths / hyphen-services: `kgv22-*` → `kgv22-assets`, `kgv22-source`.
-- AI Search indexes (lowercase, start letter): `kgv22-chunks`, `kgv22-entities`.
-- Fabric items (prefer underscore, no hyphen): `kgv22_lakehouse` (user typo "bakehouse"), `kgv22_ontology`, `kgv22_semantic_model`, `kgv22_data_agent`.
-- Where separators disallowed: `kgv22` + CamelSuffix.
-
-#### Work-folder structure (external — never in repo)
-`/Users/hyssh/workspace/mckinstry/kgv22-run/`
-`  ├─ config/`  (fabric-kg.yaml, environments/<env>.json → resolved endpoints above)
-`  ├─ build/`   (inspect/, enriched/, parquet/, ontology/, search/)
-`  ├─ dist/`    (packaged bundle: fabric-kg-package/parquet)
-`  ├─ logs/`    (per-stage run logs, extraction-quality metrics)
-`  └─ manifest/` (run manifest, dry-run plans, evidence)
-
----
-
-#### Deployment sequence (idempotent state machine → CLI stages)
-validate_auth → prepare/ inspect-source (DocIntel + Blob upload) → enrich (Foundry) → compile-data →
-compile-ontology + compile-search → package → **validate (VAL/BRG/OKV gates)** →
-**deploy-lakehouse `--dry-run` → verify plan → live** → deploy-ontology → ensure graph model →
-deploy-search → deploy-semantic-model → deploy-data-agent. Dry-run gate is mandatory before every live mutation.
-
-**Honest automation boundary:** the CLI deploys the Ontology *definition*; **Fabric graph materialization/enable may require one manual Fabric portal step**. This is a known boundary, not automation to claim. Hockney confirms the exact click and documents it.
-
----
-
-#### Validation / evidence criteria
-- **Extraction quality (honest):** per-doc DocIntel confidence + table/figure success; call out scanned 1995/2014 OCR degradation explicitly.
-- **Graph-superiority test:** a question AI Search top-k cannot answer but graph traversal can — e.g. *"What connects the 2014 chiller replacement to the 2021 replacement at Wharton HS?"* Search returns disjoint top-k chunks; graph traverses Location→Asset→ReplacementEvent across both docs.
-- **Bonus 1:** two **distinct** Asset nodes for serials L19G03148 and L19G03274 (identity gate OKV-001).
-- **Bonus 2:** an edge connecting the 2014 replacement document and the 2021 replacement documents at the same Location (Wharton HS).
-- **Lineage:** evidence table links every entity/relationship to a source document element.
-
----
-
-#### Risks & gates
-- R1 Scanned-PDF OCR (1995/2014) → report confidence honestly. R2 Foundry project ambiguity → default account endpoint + `gpt-4o` (use `proj2` if project-scoped endpoint required). R3 1536 lock ✓ satisfied. R4 Graph materialization manual boundary → flag, don't claim. R6 Serial disambiguation → OKV-001 identity = serial. R7 Data Agent policy → ontology+graph required. R8 Custom Python allowed only under `/Users/hyssh/workspace/mckinstry/kgv22-run/` as integration glue; prefer package CLI + `az` + shell.
-
----
-
-#### Parallel assignments
-- **Verbal (CLI/Azure AI):** install package-supported `fabric-kg` entrypoint, auth wiring, Foundry `gpt-4o`+`text-embedding-3-large` binding, DocIntel + Search config, compile-search + deploy-search. (Custom Python glue under `/Users/hyssh/workspace/mckinstry/kgv22-run/` only if needed.) *Owns Azure integration + CLI ops.*
-- **Fenster (data pipeline):** work-folder scaffold + config, inspect-source over 13 files, Blob upload → `kgv22-assets`, enrich, compile-data (Parquet). *Owns extraction→enrichment→canonical Parquet.*
-- **McManus (KG/ontology/Fabric):** compile-ontology, deploy-lakehouse `kgv22_lakehouse`, deploy-ontology `kgv22_ontology`, graph model + portal-boundary, semantic model, deploy-data-agent `kgv22_data_agent`. *Owns Fabric items + graph + agent.*
-- **Hockney (validation, Reviewer):** verify every dry-run plan before live, extraction-quality report, graph-vs-search comparison, bonus + lineage verification, honest findings. *Reviewer gate.*
-
-Dependency spine: Verbal(config/auth) → Fenster(parquet) → McManus(Fabric) ∥ Verbal(search) → Hockney(final). 
-
-#### Blockers
-- Resolvable from environment (done): auth, resources, models, embeddings, DocIntel Layout.
-- Safe autopilot assumptions: Foundry endpoint = account + `gpt-4o`; Fabric workspace write access granted (verify at ensure_workspace); graph-materialization portal step is manual and documented, not blocking pipeline build.
-
-### 2026-07-24: kgv22 SemanticModel Gap — No CLI Deploy Command
-**By:** McManus (KG/Ontology Dev)
-**Context:** Non-destructive Fabric capability discovery for kgv22 Wharton HS demo.
-
----
-
-#### Finding
-`fabric-kg v0.2.2` has NO `deploy-semantic-model` command. The kgv22 naming convention (from `keyser-mckinstry-kgv22-demo.md`) lists `kgv22_semantic_model` as a named target Fabric item, but there is no CLI path to create a separately-named SemanticModel.
-
-#### What Fabric does automatically
-When `deploy-lakehouse` creates `kgv22_lakehouse`, Fabric auto-creates:
-- A `SemanticModel` item named `kgv22_lakehouse` (type SemanticModel)
-- A `SQLEndpoint` item named `kgv22_lakehouse`
-
-This auto-created SemanticModel is sufficient for Data Agent grounding and graph model binding.
-
-#### Options if `kgv22_semantic_model` (distinct name) is required
-1. **Manual Fabric portal:** New item → Semantic Model → connect to kgv22_lakehouse SQL endpoint, define tables/relationships. Name it `kgv22_semantic_model`.
-2. **Fabric REST API (not in CLI):** `POST /workspaces/{workspaceId}/semanticModels` with TMDL or PBIX definition payload.
-
-#### Recommendation
-Unless Hockney's validation gate specifically requires a distinct `kgv22_semantic_model` item (separate from auto-created `kgv22_lakehouse` SemanticModel), use the auto-created one. This avoids an unnecessary manual portal step.
-
-**If distinct naming is required:** scope a new CLI command or document the manual portal step explicitly in the Hockney validation checklist before the live deploy.
-
-#### Action
-No immediate action required for discovery batch. Keyser/Hockney to confirm SemanticModel naming requirement before deploy-lakehouse live run.
