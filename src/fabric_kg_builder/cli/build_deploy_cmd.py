@@ -2405,15 +2405,14 @@ def build_deploy_cmd(
                 render_name_resolution,
                 resolve_item_name,
             )
-            from fabric_kg_builder.cli.deploy_cmd import (  # type: ignore[attr-defined]  # noqa: PLC0415
-                _read_fabric_env_config,
-            )
-            _dry_fabric_cfg = _read_fabric_env_config(env, allow_placeholders=True)
-            _dry_bd_manifest = (
-                load_deployment_manifest(deploy_manifest_path)
-                if deploy_manifest_path
-                else manifest_from_env_config(_dry_fabric_cfg)
-            )
+            if deploy_manifest_path:
+                _dry_bd_manifest = load_deployment_manifest(deploy_manifest_path)
+            else:
+                from fabric_kg_builder.cli.deploy_cmd import (  # type: ignore[attr-defined]  # noqa: PLC0415
+                    _read_fabric_env_config,
+                )
+                _dry_fabric_cfg = _read_fabric_env_config(env, allow_placeholders=True)
+                _dry_bd_manifest = manifest_from_env_config(_dry_fabric_cfg)
             click.echo("\n[build-deploy] Name resolution plan:")
             for _item_type in ("Ontology", "Lakehouse", "GraphModel", "DataAgent"):
                 try:
