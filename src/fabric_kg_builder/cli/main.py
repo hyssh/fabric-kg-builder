@@ -46,12 +46,13 @@ from fabric_kg_builder.cli.runtime_cmd import (
     validate_deployment_cmd,
 )
 from fabric_kg_builder.cli.diagnostics_cmd import inspect_diagnostics_cmd
+from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 
 
 _GROUP_EPILOG = """\b
 Recommended production pipeline (run in dependency order):
   1. Author and approve
-     init -> domain review -> domain approve -> inspect-source -> inspect-ontology
+     init -> init-domain --input <source-path> -> domain review -> domain approve -> inspect-ontology
   2. Extract and compile
      enrich -> [densify] -> compile-data -> compile-semantic
      -> compile-ontology + compile-graph + compile-agent + compile-search
@@ -209,6 +210,7 @@ cli.add_command(collect_evidence_cmd, name="collect-evidence")
 cli.add_command(evaluate_cmd, name="evaluate")
 cli.add_command(report_cmd, name="report")
 cli.add_command(inspect_diagnostics_cmd, name="inspect-diagnostics")
+cli.add_command(init_domain_cmd, name="init-domain")
 
 
 def _configure_utf8_console() -> None:

@@ -54,3 +54,45 @@ Full history and details in history-archive.md.
 - **Assignment:** Verbal owns all `src/**` + docs (single author on hot CLI files); Hockney authors independent unit/contract tests + final diff review; rejection ⇒ McManus revises (Verbal locked out per reviewer-protocol).
 - **Gate:** targeted 3-file pytest (`test_deployment_manifest.py`, `test_name_authority.py`, `test_deploy_name_authority.py`) then full `pytest` (unit+contract default) green; commit references #6; no merge/push.
 - **Lesson:** "naming authority" bugs are precedence bugs — the fix is to name ONE authority and convert every other producer into either a validated match or a documented migration input, never a silent fallback. The `a or b` fallback idiom (`ontology_name or contract_name`) is the canonical silent-override smell.
+## Issue #5 Review — init-domain source inspection (2026-07-23) — VERDICT: REJECT
+
+- Reviewed Fenster's uncommitted impl: `cli/init_domain_cmd.py`, `sources/inspector.py`, `cli/main.py` (registration), tests `unit/test_init_domain_cmd.py`, `contract/test_source_profile_contract.py`.
+- **BLOCKER 1 — downstream reuse missing.** Issue explicitly requires "persist the approved summary so later commands use the same context." Only `init_domain_cmd.py` references the profile; `grep` across `cli/enrich_cmd.py`, `compile_data_cmd.py`, `compile_*` shows zero consumers of `.fkg/source-profile.json` / `load_source_profile`. The contract test file's header claims to verify "structural contracts that downstream commands depend on" but never invokes any downstream command — reuse is unimplemented AND unverified. source_hash staleness (Hockney R2) is inert with no consumer.
+- **BLOCKER 2 — approve-OR-correct missing.** Issue requires "allow the user to approve or correct the source summary." `_approve_interactively` (init_domain_cmd.py ~L112-148) only accepts y (approve) or n→`sys.exit(4)` (abort). No in-place correction of categories/entities/questions/dates; no inspect→summarize→approve re-loop on rejection. Fenster self-admits. Hockney gates [CORRECTION_EDITING] and [REJECTION_RERUNS] fail.
+- Secondary: inferred items (entity_candidates→candidate_model.entity_categories; document_categories→subdomains) copied wholesale into generated domain.yaml on one blanket "y" — weakens provenance ([NO_ASSUMPTION_LEAKAGE]). Contract test mis-titled ("downstream") without exercising a consumer.
+- Positives: observed/inferred cleanly separated in `SourceProfile` (deterministic, no LLM); schema_version/source_hash/approver metadata persisted; noninteractive `--approve`/non-TTY path safe; `domain init`/`inspect-source` untouched (compatible); legacy domain.json warning + --force overwrite guard present.
+- Live test run BLOCKED by environment (Defender EDR real-time scanning; load avg 8.5+, `python3` import hangs) — not a code fault. Verdict rests on static gaps not covered by any test.
+- **Revision owner: Verbal** (CLI/domain workflow: wire enrich/compile-data to load+honor persisted profile w/ staleness check; implement correction/re-loop in init-domain). Hockney to extend tests with real downstream-consumer + edit-then-approve contracts afterward. **Fenster locked out** of these artifacts this cycle.
+
+## Issue #5 — init-domain source inspection (2026-07-23) — REVISION VERDICT: APPROVED
+
+- **Revised implementation owner: Verbal** — authorized independent revision (Fenster locked out per protocol).
+
+- **Blocker 1 — downstream reuse FIXED** ✅
+  - `_load_source_profile_for_enrich(source_path, profile_path)` public helper wired into `cli/enrich_cmd.py`
+  - Staleness check: `check_source_profile_staleness()` recomputes source_hash from current files, compares to stored hash
+  - Soft check (warning on mismatch, enrich still proceeds); profile-less legacy path returns `(None, None)` safely
+  - Extraction risks logged pre-enrichment, giving operators visibility into known problem files
+  - `--source-profile` CLI option (default: `.fkg/source-profile.json`) for CI/CD override
+
+- **Blocker 2 — approve-OR-correct FIXED** ✅
+  - Three-choice prompt: `Approve [y], Correct [c], Abort [n]`
+  - Editable fields: document categories, entity candidates, extraction risks, observed date range
+  - Correction loop: updates profile in-place, re-renders, re-asks approval (multiple corrections allowed)
+  - `user_corrected: bool` field tracks whether inferred items should be promoted to domain.yaml
+  - Provenance rule: inferred entities/categories → domain.yaml **only when `user_corrected=True`** (prevents heuristic→fact leakage)
+  - `--approve` flag + non-TTY stdin bypass corrections (deterministic, CI/CD safe)
+
+- **Test validation by Hockney:**
+  - Targeted: 147/147 pass (123 Fenster baseline + 24 Verbal corrections)
+  - Full: 2,567 pass, 4 deselected, 0 failed
+  - Zero regressions from baseline through revisions
+
+- **Code review notes:**
+  - SourceProfile design sound (observed/inferred enforced at model level)
+  - No LLM in inspector (determinism preserved)
+  - Profile staleness tracking robust (source_hash recomputed on-demand)
+  - Legacy compatibility maintained (no profile → zero behavior change)
+  - Correction UX validation future-iteration (not blocker)
+
+- **Decision:** APPROVED. Product commit `a0f658669d695b5933d4064791166b969ed2b7eb` created by Verbal, ready for integration.

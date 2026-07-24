@@ -413,6 +413,86 @@ No regressions. All existing and new tests pass.
 
 ---
 
+---
+
+# Issue #5: Inspect and Summarize Source Data Before Domain Questioning
+
+## Decision 1: Source-First Profile for Domain Initialization
+
+**Author:** Fenster (Data Engineer)
+**Date:** 2026-07-23
+**Branch:** scope/source-inspect
+**Status:** APPROVED
+
+Implemented a source-inspect-first workflow for domain contract authoring via a new `fabric-kg init-domain` command and a companion `SourceProfile` model.
+
+### Key Architectural Choices
+
+1. **SourceProfile model — strict observed/inferred separation**
+   - Prevents accidental promotion of suggestions to facts
+   - Downstream commands that need hard data read `observed`; suggestions stay in `inferred`
+
+2. **No LLM calls in inspector**
+   - Keyword-based inference only (determinism requirement)
+   - Same source files produce identical profile every run
+
+3. **--approve flag for noninteractive mode**
+   - TTY detection for automatic noninteractive fallback
+   - Positive-intent flag for CI/CD automation
+
+4. **Profile persisted to `.fkg/source-profile.json`**
+   - Allows downstream commands to load profile without re-inspection
+   - `source_hash` field enables staleness detection
+
+5. **init-domain as a top-level command**
+   - Distinct entry point for inspect-first workflow
+   - Existing commands unchanged, 2,510 passing tests (no regressions)
+
+### Test Results
+
+- Targeted: 123/123 pass
+- Full suite: 2,535 pass, 0 fail (+63 from baseline)
+- All Hockney matrix contracts covered
+
+---
+
+## Decision 2: Source Profile Downstream Reuse + Correction Flow
+
+**Author:** Verbal (AI Integration Dev)
+**Date:** 2026-07-23
+**Branch:** scope/source-inspect
+**Status:** APPROVED
+
+Resolved blocking gaps for downstream reuse and interactive correction:
+
+### B1: Downstream Reuse — enrich loads and honors the approved profile
+
+- Public helper `_load_source_profile_for_enrich(source_path, profile_path)`
+- Staleness check: recomputes source_hash and compares to stored hash (soft check)
+- Logs extraction risks before enrichment
+- `--source-profile` CLI option (default: `.fkg/source-profile.json`)
+- Legacy projects: zero behavior change
+
+### B2: Correction Flow — interactive init-domain allows edit before approval
+
+- Three-choice prompt: Approve [y], Correct [c], Abort [n]
+- Editable fields: categories, entities, extraction risks, date range
+- `user_corrected: bool` field tracks user confirmation
+- Inferred items copied to domain.yaml only when `user_corrected=True`
+- `--approve` and non-TTY stdin bypass corrections (deterministic path)
+
+### Remaining Risks
+
+- `compile-data` not yet wired (enrich is)
+- Correction UX has no field validation (future iteration)
+- Interactive tests use `--interactive` flag (auto-detect not tested)
+- `user_corrected` field unversioned for schema migrations
+
+### Test Results
+
+- Targeted: 147/147 pass
+- Full suite: 2,567 pass, 4 deselected, 0 failed
+
 ## Archive (entries older than 2026-07-16)
 
 
