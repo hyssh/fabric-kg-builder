@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 MAX_GLOBAL_INSTRUCTION_CHARS: int = 4_000
 MAX_SOURCE_INSTRUCTION_CHARS: int = 2_000
 MAX_SOURCE_DESCRIPTION_CHARS: int = 500
-MAX_FEW_SHOT_COUNT: int = 5
+MAX_FEW_SHOT_COUNT: int = 7
 MAX_FEW_SHOT_PAYLOAD_CHARS: int = 10_000
 
 # ---------------------------------------------------------------------------
@@ -861,6 +861,40 @@ class DataAgentRequiredExampleEmpty(ValidationError):
             f"'{relationship_id}' to have ≥{expected_minimum} row(s) "
             f"(observed: {observed_rows}) at stage '{stage}'.\n"
             + remediation
+        )
+
+
+class DataAgentExampleValidationFailed(ValidationError):
+    """Raised when a required Data Agent example fails a live validation gate."""
+
+    def __init__(
+        self,
+        *,
+        competency_id: str,
+        stage: str,
+        reason: str,
+        remediation: str,
+        required: bool = True,
+        result_category: str = "",
+    ) -> None:
+        self.code = "DATA_AGENT_EXAMPLE_VALIDATION_FAILED"
+        self.competency_id = competency_id
+        self.stage = stage
+        self.reason = reason
+        self.remediation = remediation
+        self.required = required
+        self.result_category = result_category
+        requirement = "required" if required else "optional"
+        suffix = (
+            f"\nresult_category={result_category}"
+            if result_category
+            else ""
+        )
+        super().__init__(
+            f"ERROR DATA_AGENT_EXAMPLE_VALIDATION_FAILED:\n"
+            f"Competency '{competency_id}' ({requirement}) failed at stage "
+            f"'{stage}': {reason}.{suffix}\n"
+            f"{remediation}"
         )
 
 

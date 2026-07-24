@@ -7,6 +7,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 import yaml
@@ -1900,7 +1901,7 @@ Grounding inputs:
   - --domain-context and repeated --question values: deployment-specific context
 
 The CLI generates Data Agent data-source instructions, compact source
-descriptions, selected elements, and up to five validated Graph few-shots from
+descriptions, selected elements, and up to seven validated Graph few-shots from
 these inputs. Do not hand-author labels that disagree with the sealed manifest.
 
 Template to adapt before compile-agent (replace every {{...}} token):
@@ -2060,12 +2061,13 @@ def deploy_data_agent_cmd(
         deploy_and_validate_data_agent,
     )
     from fabric_kg_builder.knowledge.data_agent import (  # noqa: PLC0415
+        compare_graph_few_shot_semantics,
         DataAgentDefinitionError,
         DataAgentSpec,
         DataAgentTargetError,
         DataSourceSpec,
         FabricDataAgentClient,
-        graph_few_shots_from_competency_contract,
+        validate_graph_few_shot_examples,
         stage_snapshot_from_spec,
     )
     from fabric_kg_builder.knowledge.transport import RequestsTransport  # noqa: PLC0415
@@ -2078,9 +2080,18 @@ def deploy_data_agent_cmd(
         build_ontology_source_instructions,
         load_semantic_model_artifacts,
     )
+    from fabric_kg_builder.serving.graph_model import GraphModelGQLClient  # noqa: PLC0415
     # Import early so the except clause below can reference the type (#13 blocker fix).
-    from fabric_kg_builder.knowledge.validation import DataAgentRequiredExampleEmpty  # noqa: PLC0415
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        DataAgentExampleValidationFailed,
+        DataAgentRequiredExampleEmpty,
+    )
     _competency_contract_exists = False
+    _competency_contract_payload: dict[str, Any] = {}
+    _example_receipts: list[Any] = []
+    _example_direct_results: dict[str, dict[str, Any]] = {}
+    _example_candidate_count = 0
+    credential = None
     try:
         loaded = load_semantic_model_artifacts(semantic_dir)
         persisted = PersistedProjectionReceipt.model_validate_json(
@@ -2133,18 +2144,48 @@ def deploy_data_agent_cmd(
         )
         competency_path = agent_dir / "competency-contract.json"
         _competency_contract_exists = competency_path.exists()
+        _competency_contract_payload = (
+            json.loads(competency_path.read_text(encoding="utf-8"))
+            if _competency_contract_exists
+            else {}
+        )
         # Build availability dict from the persisted materialization plan for
         # capability-aware example gating (#13).
         _capability_availability = {
             item.semantic_id: item
             for item in loaded.materialization_plan.data_availability
         }
-        graph_few_shots = graph_few_shots_from_competency_contract(
-            json.loads(competency_path.read_text(encoding="utf-8"))
-            if _competency_contract_exists
-            else {},
-            availability=_capability_availability if _capability_availability else None,
+        _graph_executor = None
+        if not dry_run:
+            from azure.identity import DefaultAzureCredential  # type: ignore[import]
+
+            credential = credential or DefaultAzureCredential()
+            _graph_client = GraphModelGQLClient(
+                token_provider=lambda: credential.get_token(
+                    "https://api.fabric.microsoft.com/.default"
+                ).token,
+            )
+            def _graph_executor(query: str) -> dict[str, Any]:
+                return _graph_client.execute_query_all_pages(
+                    workspace_id,
+                    graph_model_id,
+                    query,
+                )
+        _example_validation = validate_graph_few_shot_examples(
+            _competency_contract_payload,
+            availability=(
+                _capability_availability if _capability_availability else None
+            ),
+            limit=7,
+            dry_run=dry_run,
+            execute_graph_query=_graph_executor,
+            query_schema=_competency_contract_payload.get("query_schema"),
+            require_schema=_competency_contract_exists,
         )
+        graph_few_shots = _example_validation.examples
+        _example_receipts = _example_validation.receipts
+        _example_direct_results = _example_validation.direct_results
+        _example_candidate_count = _example_validation.candidate_count
         spec = DataAgentSpec(
             display_name=data_agent_name,
             instruction=instructions,
@@ -2199,6 +2240,8 @@ def deploy_data_agent_cmd(
         )
         expected = stage_snapshot_from_spec(spec)
     except DataAgentRequiredExampleEmpty as exc:
+        raise click.ClickException(str(exc)) from exc
+    except DataAgentExampleValidationFailed as exc:
         raise click.ClickException(str(exc)) from exc
     except (AgentPublicationError, OSError, ValueError) as exc:
         raise click.ClickException(
@@ -2321,16 +2364,31 @@ def deploy_data_agent_cmd(
     )
     click.echo(f"  graph description:        {_da_graph_desc_chars:,} chars")
 
-    # Example gating reporting (#13)
     if _competency_contract_exists:
-        _da_few_shot_count = sum(
-            len(s.few_shots or [])
-            for s in spec.sources
-            if str(s.source_type) == "graph"
-        )
-        click.echo("\nExample gating:")
-        click.echo(f"  examples published: {_da_few_shot_count}")
-        click.echo("  Example gating: PASS")
+        click.echo("\nGraph example validation:")
+        click.echo(f"  candidates discovered: {_example_candidate_count}")
+        for receipt in _example_receipts:
+            status = "PASS" if receipt.published else "OMIT"
+            rows = receipt.direct_graph_row_count or 0
+            evidence = (
+                f"{int(round(receipt.evidence_coverage * 100)):d}%"
+                if receipt.evidence_coverage > 0
+                else (
+                    "n/a"
+                    if receipt.direct_result_category == "dry_run"
+                    else "0%"
+                )
+            )
+            click.echo(
+                f"  {status:4} {receipt.competency_id} "
+                f"rows={rows} evidence={evidence}"
+            )
+        click.echo(f"  examples selected: {len(graph_few_shots)} / 7")
+        if dry_run:
+            click.echo(
+                "  planned live gates: direct Graph execution, then Data Agent "
+                "semantic comparison."
+            )
 
     if dry_run:
         click.echo("[deploy-data-agent] SUCCESS (dry-run)")
@@ -2338,7 +2396,7 @@ def deploy_data_agent_cmd(
 
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    credential = DefaultAzureCredential()
+    credential = credential or DefaultAzureCredential()
     client = FabricDataAgentClient(
         workspace_id=workspace_id,
         transport=RequestsTransport(),
@@ -2367,9 +2425,39 @@ def deploy_data_agent_cmd(
             global_instruction_chars=_da_global_instr_chars,
             instruction_chars=_da_instruction_chars,
             description_chars=_da_description_chars,
+            competency_examples=_example_receipts,
         )
+        if _competency_contract_exists and _example_receipts:
+            from fabric_kg_builder.runtime.contract import CompetencyCase  # noqa: PLC0415
+            from fabric_kg_builder.runtime.executors import DataAgentMcpExecutor  # noqa: PLC0415
+
+            mcp_endpoint = (
+                "https://api.fabric.microsoft.com/v1/workspaces/"
+                f"{workspace_id}/dataagents/{result.item_id}/agent"
+            )
+            mcp_executor = DataAgentMcpExecutor(
+                endpoint=mcp_endpoint,
+                token_provider=lambda: credential.get_token(
+                    "https://api.fabric.microsoft.com/.default"
+                ).token,
+            )
+
+            def _execute_data_agent_case(case_payload: dict[str, Any]) -> dict[str, Any]:
+                case_model = CompetencyCase.model_validate(case_payload)
+                return mcp_executor.execute(case_model)
+
+            _example_receipts = compare_graph_few_shot_semantics(
+                _competency_contract_payload,
+                _example_receipts,
+                direct_results=_example_direct_results,
+                execute_data_agent_case=_execute_data_agent_case,
+            )
+            receipt = receipt.model_copy(update={
+                "competency_examples": _example_receipts
+            })
     except (
         AgentPublicationError,
+        DataAgentExampleValidationFailed,
         DataAgentDefinitionError,
         DataAgentTargetError,
         RuntimeError,

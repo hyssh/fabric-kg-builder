@@ -25,6 +25,7 @@ import json
 import pytest
 
 from fabric_kg_builder.knowledge.data_agent import (
+    compare_graph_few_shot_semantics,
     DataAgentDefinitionError,
     DataAgentPublishResult,
     DataAgentStageSnapshot,
@@ -45,7 +46,9 @@ from fabric_kg_builder.knowledge.data_agent import (
     build_definition_parts,
     decode_stage_snapshot,
     graph_few_shots_from_competency_contract,
+    normalize_graph_query_for_fabric,
     stage_snapshot_from_spec,
+    validate_graph_few_shot_examples,
 )
 
 # ---------------------------------------------------------------------------
@@ -706,3 +709,302 @@ class TestDataSourceElementPropertyChildren:
         assert snap.property_child_count == 1, (
             f"Expected 1 selected property child, got {snap.property_child_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #11 — live Graph/Data Agent example validation contract
+# ---------------------------------------------------------------------------
+
+
+class TestGraphFewShotLiveValidation:
+    _H1 = "sha256:" + "1" * 64
+    _H2 = "sha256:" + "2" * 64
+    _H3 = "sha256:" + "3" * 64
+
+    def _query_schema(self) -> dict:
+        return {
+            "manifest_hash": self._H1,
+            "schema_hash": self._H2,
+            "nodes": [
+                {
+                    "semantic_id": "entity-type:asset",
+                    "label": "Asset",
+                    "owner_properties": {
+                        "asset_id": "asset_id",
+                        "evidence_id": "evidence_id",
+                    },
+                },
+                {
+                    "semantic_id": "entity-type:location",
+                    "label": "Location",
+                    "owner_properties": {
+                        "location_id": "location_id",
+                    },
+                },
+            ],
+            "relationships": [
+                {
+                    "semantic_id": "relationship-type:located_at",
+                    "label": "located_at",
+                    "source_type_id": "entity-type:asset",
+                    "target_type_id": "entity-type:location",
+                    "source_label": "Asset",
+                    "target_label": "Location",
+                    "direction": "source_to_target",
+                }
+            ],
+        }
+
+    def _semantic_plan(self) -> dict:
+        return {
+            "plan_hash": self._H3,
+            "manifest_hash": self._H1,
+            "intent": "Locate an asset.",
+            "required_types": ["entity-type:asset", "entity-type:location"],
+            "required_relationships": ["relationship-type:located_at"],
+            "optional_relationships": [],
+            "requested_properties": ["asset_id", "evidence_id"],
+            "evidence_required": True,
+            "path_steps": [
+                {
+                    "step_id": "s1",
+                    "from_type_id": "entity-type:asset",
+                    "via_relationship_id": "relationship-type:located_at",
+                    "to_type_id": "entity-type:location",
+                    "direction": "source_to_target",
+                    "optional": False,
+                    "max_depth": 1,
+                }
+            ],
+            "budget": {
+                "max_hops": 4,
+                "max_nodes": 6,
+                "max_relationships": 5,
+                "max_rows_per_subquery": 25,
+                "max_subqueries": 4,
+            },
+        }
+
+    def _case(
+        self,
+        *,
+        case_id: str = "case-1",
+        query: str = (
+            "MATCH (a:`Asset`)-[:`located_at`]->(l:`Location`) "
+            "RETURN a.asset_id AS asset_id, a.evidence_id AS evidence_id "
+            "LIMIT 10"
+        ),
+        required: bool = True,
+        evidence_required: bool = True,
+    ) -> dict:
+        case: dict = {
+            "id": case_id,
+            "question": f"Where is asset for {case_id}?",
+            "expected": {
+                "relationship_types": ["relationship-type:located_at"],
+                "evidence_required": evidence_required,
+            },
+            "probes": {
+                "direct_graph": {
+                    "query": query,
+                    "static_validation_passed": True,
+                    "semantic_plan": self._semantic_plan(),
+                    "canonical_id_columns": ["asset_id"],
+                }
+            },
+        }
+        if not required:
+            case["routes"] = {"direct_graph": "optional"}
+        return case
+
+    @staticmethod
+    def _graph_response(
+        *,
+        rows: list[dict[str, object]],
+        code: str = "00",
+        description: str = "OK",
+        request_id: str = "req-graph-1",
+    ) -> dict[str, object]:
+        return {
+            "status": {
+                "code": code,
+                "description": description,
+                "requestId": request_id,
+            },
+            "result": {"kind": "TABLE", "data": rows},
+        }
+
+    def test_normalization_strips_fence_and_single_quotes(self):
+        query = (
+            "```gql\nMATCH (a:`Asset`) "
+            "WHERE a.name = 'Chiller 1' RETURN a LIMIT 5\n```"
+        )
+        normalized = normalize_graph_query_for_fabric(query)
+        assert "```" not in normalized
+        assert '"Chiller 1"' in normalized
+        assert "'Chiller 1'" not in normalized
+
+    def test_dry_run_skips_live_calls(self):
+        contract = {"cases": [self._case()]}
+        calls = {"count": 0}
+
+        def _execute(_: str) -> dict[str, object]:
+            calls["count"] += 1
+            return self._graph_response(
+                rows=[{"asset_id": "asset-1", "evidence_id": "ev-1"}]
+            )
+
+        summary = validate_graph_few_shot_examples(
+            contract,
+            dry_run=True,
+            execute_graph_query=_execute,
+            query_schema=self._query_schema(),
+            require_schema=True,
+        )
+        assert calls["count"] == 0
+        assert len(summary.examples) == 1
+        assert summary.examples[0].query.startswith("MATCH")
+        assert summary.receipts[0].direct_result_category == "dry_run"
+
+    def test_required_empty_rows_block_publication(self):
+        from fabric_kg_builder.knowledge.validation import DataAgentRequiredExampleEmpty
+
+        contract = {"cases": [self._case()]}
+        with pytest.raises(DataAgentRequiredExampleEmpty):
+            validate_graph_few_shot_examples(
+                contract,
+                dry_run=False,
+                execute_graph_query=lambda _: self._graph_response(rows=[]),
+                query_schema=self._query_schema(),
+                require_schema=True,
+            )
+
+    def test_optional_empty_rows_are_omitted(self):
+        contract = {"cases": [self._case(required=False)]}
+        summary = validate_graph_few_shot_examples(
+            contract,
+            dry_run=False,
+            execute_graph_query=lambda _: self._graph_response(rows=[]),
+            query_schema=self._query_schema(),
+            require_schema=True,
+        )
+        assert summary.examples == []
+        assert len(summary.receipts) == 1
+        assert summary.receipts[0].published is False
+        assert summary.receipts[0].direct_result_category == "optional_data_absent"
+
+    def test_missing_evidence_blocks_required_case(self):
+        from fabric_kg_builder.knowledge.validation import DataAgentExampleValidationFailed
+
+        contract = {"cases": [self._case()]}
+        with pytest.raises(DataAgentExampleValidationFailed) as exc_info:
+            validate_graph_few_shot_examples(
+                contract,
+                dry_run=False,
+                execute_graph_query=lambda _: self._graph_response(
+                    rows=[{"asset_id": "asset-1"}],
+                ),
+                query_schema=self._query_schema(),
+                require_schema=True,
+            )
+        assert exc_info.value.stage == "direct-graph"
+        assert "Evidence coverage" in exc_info.value.reason
+
+    def test_fabric_syntax_failure_blocks_required_case(self):
+        from fabric_kg_builder.knowledge.validation import DataAgentExampleValidationFailed
+
+        contract = {"cases": [self._case()]}
+        with pytest.raises(DataAgentExampleValidationFailed) as exc_info:
+            validate_graph_few_shot_examples(
+                contract,
+                dry_run=False,
+                execute_graph_query=lambda _: self._graph_response(
+                    rows=[],
+                    code="400",
+                    description="Syntax error near MATCH.",
+                ),
+                query_schema=self._query_schema(),
+                require_schema=True,
+            )
+        assert exc_info.value.stage == "direct-graph"
+        assert exc_info.value.result_category == "invalid_physical_query"
+
+    def test_limit_seven_examples_executes_all_candidates(self):
+        cases = [
+            self._case(case_id=f"case-{index}", required=False)
+            for index in range(8)
+        ]
+        contract = {"cases": cases}
+        calls = {"count": 0}
+
+        def _execute(_: str) -> dict[str, object]:
+            calls["count"] += 1
+            return self._graph_response(
+                rows=[{
+                    "asset_id": f"asset-{calls['count']}",
+                    "evidence_id": f"ev-{calls['count']}",
+                }],
+                request_id=f"req-{calls['count']}",
+            )
+
+        summary = validate_graph_few_shot_examples(
+            contract,
+            dry_run=False,
+            execute_graph_query=_execute,
+            query_schema=self._query_schema(),
+            require_schema=True,
+            limit=7,
+        )
+        assert calls["count"] == 8
+        assert len(summary.examples) == 7
+        published = [r for r in summary.receipts if r.published]
+        omitted = [r for r in summary.receipts if not r.published]
+        assert len(published) == 7
+        assert len(omitted) == 1
+        assert omitted[0].direct_result_category == "limit_exceeded"
+
+
+class TestGraphFewShotSemanticComparison:
+    def test_required_semantic_mismatch_blocks_publication(self):
+        from fabric_kg_builder.knowledge.validation import DataAgentExampleValidationFailed
+        from fabric_kg_builder.semantic.schemas import CompetencyExampleReceipt
+
+        contract = {
+            "cases": [
+                {
+                    "id": "case-1",
+                    "question": "Where is asset A?",
+                }
+            ]
+        }
+        receipts = [
+            CompetencyExampleReceipt(
+                competency_id="case-1",
+                required=True,
+                required_relationship_ids=["relationship-type:located_at"],
+                observed_rows={"relationship-type:located_at": 1},
+                min_required_rows=1,
+                status="published",
+                remediation="",
+                published=True,
+            )
+        ]
+        direct_results = {
+            "case-1": {
+                "canonical_ids": ["asset-1"],
+                "row_count": 1,
+                "result_category": "success",
+            }
+        }
+
+        with pytest.raises(DataAgentExampleValidationFailed):
+            compare_graph_few_shot_semantics(
+                contract,
+                receipts,
+                direct_results=direct_results,
+                execute_data_agent_case=lambda _: {
+                    "result_category": "success",
+                    "request_ids": ["req-da-1"],
+                    "citations": [{"canonical_id": "asset-x"}],
+                },
+            )

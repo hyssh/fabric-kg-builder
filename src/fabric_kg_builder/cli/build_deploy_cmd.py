@@ -804,12 +804,13 @@ def _deploy_knowledge(
         deploy_and_validate_data_agent,
     )
     from fabric_kg_builder.knowledge.data_agent import (
+        compare_graph_few_shot_semantics,
         DataAgentDefinitionError,
         DataAgentSpec,
         DataSourceSpec,
         DataAgentTargetError,
         FabricDataAgentClient,
-        graph_few_shots_from_competency_contract,
+        validate_graph_few_shot_examples,
         stage_snapshot_from_spec,
     )
     from fabric_kg_builder.knowledge.models import (
@@ -832,8 +833,12 @@ def _deploy_knowledge(
         build_ontology_source_instructions,
         load_semantic_model_artifacts,
     )
+    from fabric_kg_builder.serving.graph_model import GraphModelGQLClient
     # Import early so the except clause below can reference the type (#13 blocker fix).
-    from fabric_kg_builder.knowledge.validation import DataAgentRequiredExampleEmpty  # noqa: PLC0415
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        DataAgentExampleValidationFailed,
+        DataAgentRequiredExampleEmpty,
+    )
     config = _read_environment_config(environment)
     fabric = config.get("fabric", {})
     search = config.get("ai_search", {})
@@ -887,7 +892,12 @@ def _deploy_knowledge(
     source_name = f"fkg-{run_token}-search-source"
     kb_name = f"fkg-{run_token}-knowledge-base"
     data_agent_name = configured_name
+    credential = DefaultAzureCredential()
     _bd_competency_contract_exists = False
+    _bd_competency_payload: dict[str, Any] = {}
+    _bd_example_receipts: list[Any] = []
+    _bd_example_direct_results: dict[str, dict[str, Any]] = {}
+    _bd_example_candidate_count = 0
     try:
         loaded_semantic = load_semantic_model_artifacts(semantic_dir)
         projection_receipt = PersistedProjectionReceipt.model_validate_json(
@@ -940,18 +950,43 @@ def _deploy_knowledge(
         )
         competency_path = semantic_context_path.parent / "competency-contract.json"
         _bd_competency_contract_exists = competency_path.exists()
+        _bd_competency_payload = (
+            json.loads(competency_path.read_text(encoding="utf-8"))
+            if _bd_competency_contract_exists
+            else {}
+        )
         # Build availability dict from materialization plan for capability-aware
         # example gating (#13).
         _bd_availability = {
             item.semantic_id: item
             for item in loaded_semantic.materialization_plan.data_availability
         }
-        graph_few_shots = graph_few_shots_from_competency_contract(
-            json.loads(competency_path.read_text(encoding="utf-8"))
-            if _bd_competency_contract_exists
-            else {},
-            availability=_bd_availability if _bd_availability else None,
+        _bd_graph_client = GraphModelGQLClient(
+            token_provider=lambda: credential.get_token(
+                "https://api.fabric.microsoft.com/.default"
+            ).token,
         )
+
+        def _bd_graph_executor(query: str) -> dict[str, Any]:
+            return _bd_graph_client.execute_query_all_pages(
+                workspace_id,
+                graph_model_id,
+                query,
+            )
+
+        _bd_example_validation = validate_graph_few_shot_examples(
+            _bd_competency_payload,
+            availability=_bd_availability if _bd_availability else None,
+            limit=7,
+            dry_run=False,
+            execute_graph_query=_bd_graph_executor,
+            query_schema=_bd_competency_payload.get("query_schema"),
+            require_schema=_bd_competency_contract_exists,
+        )
+        graph_few_shots = _bd_example_validation.examples
+        _bd_example_receipts = _bd_example_validation.receipts
+        _bd_example_direct_results = _bd_example_validation.direct_results
+        _bd_example_candidate_count = _bd_example_validation.candidate_count
         data_agent_spec = DataAgentSpec(
             display_name=data_agent_name,
             instruction=agent_instructions,
@@ -1005,6 +1040,8 @@ def _deploy_knowledge(
             ],
         )
     except DataAgentRequiredExampleEmpty as exc:
+        raise BuildDeployError(str(exc)) from exc
+    except DataAgentExampleValidationFailed as exc:
         raise BuildDeployError(str(exc)) from exc
     except (
         AgentPublicationError,
@@ -1130,16 +1167,23 @@ def _deploy_knowledge(
     )
     click.echo(f"  graph description:        {_bd_graph_desc_chars:,} chars")
 
-    # Example gating reporting (#13)
+    # Graph example validation reporting (#11/#13)
     if _bd_competency_contract_exists:
-        _bd_few_shot_count = sum(
-            len(s.few_shots or [])
-            for s in data_agent_spec.sources
-            if str(s.source_type) == "graph"
-        )
-        click.echo("[build-deploy] Example gating:")
-        click.echo(f"  examples published: {_bd_few_shot_count}")
-        click.echo("[build-deploy] Example gating: PASS")
+        click.echo("[build-deploy] Graph example validation:")
+        click.echo(f"  candidates discovered: {_bd_example_candidate_count}")
+        for receipt in _bd_example_receipts:
+            status = "PASS" if receipt.published else "OMIT"
+            rows = receipt.direct_graph_row_count or 0
+            evidence = (
+                f"{int(round(receipt.evidence_coverage * 100)):d}%"
+                if receipt.evidence_coverage > 0
+                else "0%"
+            )
+            click.echo(
+                f"  {status:4} {receipt.competency_id} "
+                f"rows={rows} evidence={evidence}"
+            )
+        click.echo(f"  examples selected: {len(graph_few_shots)} / 7")
 
     capability = CapabilityResult(
         endpoint=search_endpoint,
@@ -1180,7 +1224,6 @@ def _deploy_knowledge(
         )
     )
 
-    credential = DefaultAzureCredential()
     fabric_token = credential.get_token(
         "https://api.fabric.microsoft.com/.default"
     ).token
@@ -1214,9 +1257,39 @@ def _deploy_knowledge(
             global_instruction_chars=_bd_global_instr_chars,
             instruction_chars=_bd_instruction_chars,
             description_chars=_bd_description_chars,
+            competency_examples=_bd_example_receipts,
         )
+        if _bd_competency_contract_exists and _bd_example_receipts:
+            from fabric_kg_builder.runtime.contract import CompetencyCase
+            from fabric_kg_builder.runtime.executors import DataAgentMcpExecutor
+
+            mcp_endpoint = (
+                "https://api.fabric.microsoft.com/v1/workspaces/"
+                f"{workspace_id}/dataagents/{data_agent_result.item_id}/agent"
+            )
+            mcp_executor = DataAgentMcpExecutor(
+                endpoint=mcp_endpoint,
+                token_provider=lambda: credential.get_token(
+                    "https://api.fabric.microsoft.com/.default"
+                ).token,
+            )
+
+            def _execute_data_agent_case(case_payload: dict[str, Any]) -> dict[str, Any]:
+                case_model = CompetencyCase.model_validate(case_payload)
+                return mcp_executor.execute(case_model)
+
+            _bd_example_receipts = compare_graph_few_shot_semantics(
+                _bd_competency_payload,
+                _bd_example_receipts,
+                direct_results=_bd_example_direct_results,
+                execute_data_agent_case=_execute_data_agent_case,
+            )
+            agent_publication_receipt = agent_publication_receipt.model_copy(
+                update={"competency_examples": _bd_example_receipts}
+            )
     except (
         AgentPublicationError,
+        DataAgentExampleValidationFailed,
         DataAgentDefinitionError,
         DataAgentTargetError,
         RuntimeError,
