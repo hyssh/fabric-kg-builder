@@ -171,6 +171,49 @@ def _created_item_id(operation: dict[str, Any]) -> str:
     return next((str(value) for value in candidates if value), "")
 
 
+def _get_item_display_name(
+    workspace_id: str,
+    item_id: str,
+    headers: dict[str, str],
+    requests_mod: Any,
+) -> str:
+    """GET /workspaces/{ws}/items/{item_id} and return the Fabric displayName.
+
+    Reuses the same API endpoint as ``get_ontology_refresh_state``.
+    No requested-name fallback — raises on failure or absent displayName.
+
+    Raises
+    ------
+    PermissionError
+        On HTTP 401 or 403.
+    RuntimeError
+        On network failure, non-OK HTTP status, or absent/empty displayName.
+    """
+    url = f"{_FABRIC_API_BASE}/workspaces/{workspace_id}/items/{item_id}"
+    try:
+        resp = requests_mod.get(url, headers=headers, timeout=30)
+    except Exception as exc:
+        raise RuntimeError(f"GET /items/{item_id} request failed: {exc}") from exc
+    if resp.status_code in {401, 403}:
+        raise PermissionError(
+            f"Fabric rejected GET /items/{item_id}. "
+            "Check workspace and Ontology item permissions."
+        )
+    if not resp.ok:
+        raise RuntimeError(
+            f"GET /items/{item_id} returned HTTP {resp.status_code}: "
+            f"{resp.text[:300]}"
+        )
+    body = resp.json()
+    display_name = str(body.get("displayName") or "")
+    if not display_name:
+        raise RuntimeError(
+            f"GET /items/{item_id} succeeded but response contains no displayName. "
+            f"Response keys: {list(body.keys())}"
+        )
+    return display_name
+
+
 def _default_token_provider() -> str:
     """Obtain a Bearer token via DefaultAzureCredential."""
     try:
@@ -240,7 +283,7 @@ def create_or_get_ontology_item(
             f"MOCK: would create-or-get Ontology item '{name}' in workspace "
             f"{workspace_id}. No network call made. " + _NOTE_DEFINITION_API
         )
-        return {"item_id": _MOCK_ITEM_ID, "created": False, "note": note}
+        return {"item_id": _MOCK_ITEM_ID, "created": False, "display_name": name, "note": note}
 
     import requests  # noqa: PLC0415 — lazy import keeps offline mode working
 
@@ -291,7 +334,7 @@ def create_or_get_ontology_item(
             + _NOTE_DEFINITION_API
         )
         logger.info("[fabric_ontology] REUSE existing Ontology item id=%s", item_id)
-        return {"item_id": item_id, "created": False, "note": note}
+        return {"item_id": item_id, "created": False, "display_name": existing["displayName"], "note": note}
 
     # --- CREATE: item does not exist ---
     create_url = f"{_FABRIC_API_BASE}/workspaces/{workspace_id}/items"
@@ -355,7 +398,7 @@ def create_or_get_ontology_item(
             + _NOTE_DEFINITION_API
         )
         logger.info("[fabric_ontology] CREATED Ontology item id=%s (201)", item_id)
-        return {"item_id": item_id, "created": True, "note": note}
+        return {"item_id": item_id, "created": True, "display_name": body.get("displayName", name), "note": note}
 
     if create_resp.status_code == 202:
         location = _operation_location(create_resp.headers)
@@ -375,6 +418,7 @@ def create_or_get_ontology_item(
             sys.exit(1)
 
         item_id = _created_item_id(operation)
+        _lro_display_name: str = ""
         if not item_id:
             try:
                 refresh_resp = requests.get(list_url, headers=headers, timeout=30)
@@ -403,6 +447,23 @@ def create_or_get_ontology_item(
                 None,
             )
             item_id = str((created_item or {}).get("id", ""))
+            # Extract displayName from Fabric list response (actual server value).
+            _lro_display_name = str((created_item or {}).get("displayName", ""))
+        else:
+            # item_id resolved from LRO operation payload — fetch actual displayName
+            # via GET /items/{id} (same endpoint as get_ontology_refresh_state).
+            try:
+                _lro_display_name = _get_item_display_name(
+                    workspace_id, item_id, headers, requests
+                )
+            except (RuntimeError, PermissionError) as exc:
+                logger.warning(
+                    "[fabric_ontology] Could not read back displayName for new "
+                    "Ontology item %s: %s",
+                    item_id,
+                    exc,
+                )
+                _lro_display_name = ""
         if not item_id:
             logger.error(
                 "[fabric_ontology] Ontology create LRO succeeded but no item id "
@@ -421,6 +482,7 @@ def create_or_get_ontology_item(
         return {
             "item_id": item_id,
             "created": True,
+            "display_name": _lro_display_name,
             "note": note,
             "operation_location": location,
         }
@@ -880,6 +942,39 @@ def get_ontology_refresh_state(
         resp.status_code,
     )
     sys.exit(1)
+
+
+def get_ontology_item_display_name(
+    workspace_id: str,
+    item_id: str,
+    *,
+    token_provider: Callable[[], str] | None = None,
+) -> str:
+    """Fetch the Fabric displayName for an existing item by ID.
+
+    Uses GET /workspaces/{ws}/items/{item_id} — the same endpoint as
+    ``get_ontology_refresh_state`` — to read the server-authoritative name.
+
+    No requested-name fallback; raises on any failure.
+
+    Raises
+    ------
+    PermissionError
+        On HTTP 401/403.
+    RuntimeError
+        On network failure, non-OK HTTP status, or absent/empty displayName.
+    SystemExit(6)
+        When the token provider fails authentication.
+    """
+    import requests  # noqa: PLC0415
+
+    tp = token_provider or _default_token_provider
+    token = tp()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    return _get_item_display_name(workspace_id, item_id, headers, requests)
 
 
 # ---------------------------------------------------------------------------

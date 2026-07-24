@@ -790,6 +790,7 @@ def _deploy_knowledge(
     data_agent_display_name: str | None,
     approve_data_agent_replace: bool,
     require_foundry_search_connection: bool = False,
+    deploy_manifest_path: str | None = None,
 ) -> dict[str, Any]:
     from azure.identity import DefaultAzureCredential
 
@@ -872,6 +873,30 @@ def _deploy_knowledge(
         or fabric.get("data_agent_display_name")
         or f"fkg-{environment}-data-agent"
     ).strip()
+    # Manifest is the single naming authority. Load it and resolve the data agent
+    # name — pass the CLI display_name as command_name so any conflict raises
+    # NameAuthorityConflict (hard fail, never silent override).
+    if deploy_manifest_path:
+        from fabric_kg_builder.deploy.manifest import (  # noqa: PLC0415
+            load_deployment_manifest,
+            DeploymentManifestError,
+        )
+        from fabric_kg_builder.deploy.name_authority import (  # noqa: PLC0415
+            resolve_item_name,
+        )
+        try:
+            _dk_manifest = load_deployment_manifest(deploy_manifest_path)
+        except DeploymentManifestError as exc:
+            raise BuildDeployError(
+                f"Could not load deployment manifest for data-agent resolution: {exc}"
+            ) from exc
+        # NameAuthorityConflict propagates as-is — hard fail per ADR.
+        _dk_resolved = resolve_item_name(
+            _dk_manifest,
+            "data_agent",
+            command_name=data_agent_display_name or None,
+        )
+        configured_name = _dk_resolved.display_name
     if data_agent_mode not in {"update", "create", "replace"}:
         raise BuildDeployError(
             f"Unsupported Data Agent target mode: {data_agent_mode!r}."
@@ -2102,29 +2127,30 @@ def _run_runtime_acceptance(
 )
 @click.option(
     "--semantic-contract",
-    required=True,
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=False,
+    default=None,
+    type=click.Path(path_type=Path, dir_okay=False),
     help="Approved canonical semantic contract YAML.",
 )
 @click.option(
     "--semantic-mappings",
     default="ontology/mappings.yaml",
     show_default=True,
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    type=click.Path(path_type=Path, dir_okay=False),
     help="Physical mappings for the canonical semantic contract.",
 )
 @click.option(
     "--semantic-vocabulary",
     default="ontology/vocabulary.yaml",
     show_default=True,
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    type=click.Path(path_type=Path, dir_okay=False),
     help="Controlled vocabulary for the canonical semantic contract.",
 )
 @click.option(
     "--semantic-ids-lock",
     default="ontology/ids.lock.json",
     show_default=True,
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    type=click.Path(path_type=Path, dir_okay=False),
     help="Stable semantic and Fabric ID lock.",
 )
 @click.option(
@@ -2214,6 +2240,9 @@ def _run_runtime_acceptance(
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--resume", is_flag=True, default=False)
 @click.option("--force", is_flag=True, default=False)
+@click.option("--manifest", "deploy_manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority for all Fabric items). "
+                   "Defaults to env-config names (legacy mode).")
 @click.pass_context
 def build_deploy_cmd(
     ctx: click.Context,
@@ -2228,7 +2257,7 @@ def build_deploy_cmd(
     recursive: bool,
     drawing_mode: str,
     densify_config: str | None,
-    semantic_contract: Path,
+    semantic_contract: Path | None,
     semantic_mappings: Path,
     semantic_vocabulary: Path,
     semantic_ids_lock: Path,
@@ -2251,6 +2280,7 @@ def build_deploy_cmd(
     dry_run: bool,
     resume: bool,
     force: bool,
+    deploy_manifest_path: str | None,
 ) -> None:
     """Build, provision, deploy, and validate the complete knowledge platform."""
     if resume and force:
@@ -2341,7 +2371,13 @@ def build_deploy_cmd(
         str((ctx.obj or {}).get("config", "fabric-kg.yaml"))
     ).resolve()
     domain_path = Path(domain_contract).resolve()
-    semantic_contract_path = semantic_contract.resolve()
+    # --semantic-contract is optional; required for non-dry-run builds.
+    if semantic_contract is None and not dry_run:
+        raise BuildDeployError(
+            "--semantic-contract is required for live builds. "
+            "Provide the approved canonical semantic contract YAML."
+        )
+    semantic_contract_path = semantic_contract.resolve() if semantic_contract else None
     semantic_mappings_path = semantic_mappings.resolve()
     semantic_vocabulary_path = semantic_vocabulary.resolve()
     semantic_ids_lock_path = semantic_ids_lock.resolve()
@@ -2355,7 +2391,40 @@ def build_deploy_cmd(
     )
     source_path = Path(input_path).resolve()
     infra_root = Path(infra_dir).resolve()
-    manifest_path = infra_root / "environments" / f"{env}.yaml"
+
+    # Emit name resolution plan early (before loading infra manifest) so that
+    # --dry-run --manifest always shows resolved names even when infra files
+    # are not yet provisioned.
+    if dry_run:
+        try:
+            from fabric_kg_builder.deploy.manifest import (  # noqa: PLC0415
+                load_deployment_manifest,
+            )
+            from fabric_kg_builder.deploy.name_authority import (  # noqa: PLC0415
+                manifest_from_env_config,
+                render_name_resolution,
+                resolve_item_name,
+            )
+            from fabric_kg_builder.cli.deploy_cmd import (  # type: ignore[attr-defined]  # noqa: PLC0415
+                _read_fabric_env_config,
+            )
+            _dry_fabric_cfg = _read_fabric_env_config(env, allow_placeholders=True)
+            _dry_bd_manifest = (
+                load_deployment_manifest(deploy_manifest_path)
+                if deploy_manifest_path
+                else manifest_from_env_config(_dry_fabric_cfg)
+            )
+            click.echo("\n[build-deploy] Name resolution plan:")
+            for _item_type in ("Ontology", "Lakehouse", "GraphModel", "DataAgent"):
+                try:
+                    _resolved = resolve_item_name(_dry_bd_manifest, _item_type)
+                    click.echo(render_name_resolution(_resolved))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    infra_manifest_path = infra_root / "environments" / f"{env}.yaml"
 
     from fabric_kg_builder.domain import (
         load_domain_contract,
@@ -2364,7 +2433,7 @@ def build_deploy_cmd(
     from fabric_kg_builder.infra.manifest import load_manifest
 
     domain = load_domain_contract(domain_path)
-    manifest = load_manifest(manifest_path)
+    manifest = load_manifest(infra_manifest_path)
 
     click.echo(f"[build-deploy] run_id      : {effective_run_id}")
     click.echo(f"[build-deploy] environment : {env}")
@@ -2470,6 +2539,7 @@ def build_deploy_cmd(
             *(["runtime_config", "runtime_acceptance"] if runtime_config_template else []),
         ]
         state.complete(dry_run=True)
+        # Name plan was already emitted at function start; just signal completion.
         click.echo("[build-deploy] DRY RUN complete; no build or deployment mutations ran.")
         return
 
@@ -2863,6 +2933,7 @@ def build_deploy_cmd(
                     "--parquet-dir",
                     str(paths["parquet"]),
                     "--no-mock",
+                    *(["--manifest", deploy_manifest_path] if deploy_manifest_path else []),
                 ],
                 config_path=config_path,
                 environment=env,
@@ -2886,6 +2957,7 @@ def build_deploy_cmd(
                     "--no-mock",
                     "--receipt-out",
                     str(paths["release"] / "ontology-deployment.json"),
+                    *(["--manifest", deploy_manifest_path] if deploy_manifest_path else []),
                 ],
                 config_path=config_path,
                 environment=env,
@@ -2935,6 +3007,7 @@ def build_deploy_cmd(
                     "--graph-preview-acknowledged",
                     "--receipt-out",
                     str(paths["release"] / "serving-deployment.json"),
+                    *(["--manifest", deploy_manifest_path] if deploy_manifest_path else []),
                 ],
                 config_path=config_path,
                 environment=env,
@@ -3006,6 +3079,7 @@ def build_deploy_cmd(
                     approve_data_agent_replace
                 ),
                 require_foundry_search_connection=deploy_agent,
+                deploy_manifest_path=deploy_manifest_path,
             ),
             resume=resume,
         )

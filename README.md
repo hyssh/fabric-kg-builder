@@ -672,6 +672,83 @@ CI enforces ≥ 80 % coverage on core modules (`--cov-fail-under=80`).
 
 ---
 
+## Deployment Manifest — Fabric Item Naming Authority
+
+Starting with Issue #6, a `deployment.yaml` file is the **single authority** for Fabric item
+display names. This replaces the previous approach where names could come from five different
+sources (env JSON fields, CLI defaults, generated metadata, semantic titles, command flags).
+
+### Why a single manifest?
+
+Without a unified authority, a generated semantic title (e.g. `"Equipment semantic contract"`)
+could silently override a configured ontology name (`"demo-ontology"`). The manifest makes this
+conflict visible and actionable.
+
+### Using the deployment manifest
+
+1. Copy `deployment.yaml.example` to `deployment.yaml` in your project root.
+2. Fill in your display names and workspace ID:
+   ```yaml
+   workspace: ${FABRIC_WORKSPACE_ID}
+   items:
+     ontology:    { display_name: my_ontology }
+     lakehouse:   { display_name: my_lakehouse }
+     graph_model: { display_name: My Graph Model }
+     data_agent:  { display_name: my-dev-agent }
+   ```
+3. Pass `--manifest deployment.yaml` to any deploy command:
+   ```powershell
+   fabric-kg deploy-ontology --env dev --manifest deployment.yaml --no-mock
+   fabric-kg deploy-graph    --env dev --manifest deployment.yaml --no-dry-run
+   fabric-kg build-deploy    --env dev --manifest deployment.yaml --dry-run
+   ```
+
+### Conflict detection
+
+When a manifest is provided and a generated metadata name or CLI `--*-name` flag differs from
+the manifest, the CLI raises:
+```
+ERROR NAME_AUTHORITY_CONFLICT:
+Generated display name "Equipment semantic contract" conflicts with
+manifest display name "demo-ontology".
+Update deployment.yaml items.ontology.display_name or remove the
+conflicting source; names must be defined once in the manifest.
+```
+
+### Dry-run name resolution
+
+`--dry-run` (or `--mock`) always prints the resolved name block before any Fabric mutation:
+```
+Resolved item:
+  type: Ontology
+  display name: demo-ontology
+  name authority: deployment.yaml
+  generated metadata: compatible
+
+No naming conflicts detected.
+```
+
+### Migration from legacy env JSON
+
+If `--manifest` is **not** supplied, the CLI synthesises an in-memory manifest from your
+existing `ontology/environments/{env}.json` `fabric.*_display_name` fields (legacy mode).
+Existing deployments continue to work without changes.
+
+To migrate:
+1. Copy display names from your env JSON into `deployment.yaml`.
+2. Add `--manifest deployment.yaml` to your deploy commands.
+3. When both are present and differ, a **migration warning** is emitted and the manifest wins.
+4. Remove the legacy `fabric.*_display_name` fields from the env JSON once migrated.
+
+| Source | Behaviour |
+|--------|-----------|
+| `deployment.yaml` (via `--manifest`) | **Authoritative** — always wins |
+| Generated metadata / semantic title | Must match manifest, else `NAME_AUTHORITY_CONFLICT` |
+| `--*-name` CLI flags | Must match manifest, else `NAME_AUTHORITY_CONFLICT` |
+| Legacy env JSON name fields | Migration input only; migration warning if manifest differs; manifest wins |
+
+---
+
 ## Notes & Limitations
 
 - **`build-deploy` is not yet fully implemented** — use the step-by-step commands for now.  

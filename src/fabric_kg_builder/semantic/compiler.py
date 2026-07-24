@@ -1158,7 +1158,7 @@ def build_ontology_projection(
         )
 
     ontology_model = {
-        "name": ontology_name or contract_name,
+        "name": ontology_name if ontology_name is not None else contract_name,
         "description": contract_description,
         "version": contract_version,
         "modules": [

@@ -4037,3 +4037,74 @@ This keeps Data Agent grounding examples from drifting away from real graph sema
 
 **Status:** Ready for merge
 
+
+---
+
+### Keyser — ADR: Single Deployment Manifest as the Fabric Item Naming Authority (Issue #6)
+**Date:** 2026-07-24  
+**Status:** APPROVED  
+**Author:** Keyser (Lead / Architect)  
+**Scope:** scope/deploy-manifest (Issue #6)  
+**Implementer:** Verbal (all `src/**` + docs)  
+**Reviewer gate:** Hockney (independent tests + final diff review)  
+**Test gates:** Focused suite 122 passed; full default suite 2542 passed, 4 deselected
+
+**Root cause:** Compilation and deployment create multiple dependent Fabric items (Ontology, Lakehouse, Semantic Model, Graph model, Data Agent, AI Search index) with five competing naming authorities: (1) Environment JSON untyped dict, (2) Click `--option` defaults, (3) generated semantic titles (silent-override in `semantic/compiler.py:1161`), (4) generated `.platform` metadata, (5) command-line names. Naming logic duplicated between standalone `deploy_cmd.py` and orchestrated `build_deploy_cmd.py`; no conflict detection.
+
+**Decision:** One authoritative deployment manifest (`deploy/manifest.py`: `DeploymentManifest` Pydantic + `load_deployment_manifest`, reusing `infra/manifest.py` interpolation + error pattern); new pure `deploy/name_authority.py` (`ResolvedName`, `resolve_item_name`, `validate_readback_name`, `render_name_resolution`, `manifest_from_env_config`, `NameAuthorityConflict`). All names resolve through single resolver; other sources validated against manifest (conflict → hard `NAME_AUTHORITY_CONFLICT` error) or treated as migration inputs (legacy env fields warn, manifest wins).
+
+**Manifest schema:**
+```yaml
+workspace: ${FABRIC_WORKSPACE_ID}
+items:
+  ontology:       { display_name: demo-ontology, prefix: "", configured_id: "" }
+  lakehouse:      { display_name: kg_lakehouse, configured_id: "" }
+  semantic_model: { display_name: kg_semantic, configured_id: "" }
+  graph_model:    { display_name: KG Graph, configured_id: "" }
+  data_agent:     { display_name: fkg-dev-data-agent, configured_id: "" }
+  search_index:   { prefix: kg-dev-, display_name: kg-chunks, configured_id: "" }
+dependencies:
+  - { item: data_agent, depends_on: [ontology, semantic_model, graph_model] }
+  - { item: graph_model, depends_on: [ontology] }
+```
+
+**Name resolution rules:** Manifest name always effective. Generated metadata or command name differing → raise `NameAuthorityConflict` (hard fail, never silent). Legacy env names → migration inputs only (warn on divergence, manifest wins). Dry-run: print `render_name_resolution` block. Rename/replace: require explicit `--approve-replace`.
+
+**Surfaces changed (Verbal):** NEW `src/fabric_kg_builder/deploy/manifest.py` + `src/fabric_kg_builder/deploy/name_authority.py`; modified `cli/deploy_cmd.py`, `cli/build_deploy_cmd.py`, `deploy/fabric_ontology.py`, `ontology/fabric_def.py`, `semantic/compiler.py`, `deploy/data_agent.py`, `deploy/search_deployer.py`; docs + `deployment.yaml.example`.
+
+**Error contract:** `NameAuthorityConflict` (code `"NAME_AUTHORITY_CONFLICT"`); reuse project's `ERROR <CODE>:\n<message>\n<remediation>` format.
+
+**Implementation choices (Verbal):**
+- `manifest_from_env_config` accepts both full env JSON and extracted `fabric` section (CLI flexibility)
+- `ManifestItemSpec.configured_id` only set when `display_name` also present in synthesized manifests (legacy env IDs still read from JSON)
+- `--display-name` conflict detection in `deploy-ontology` runs before env config loading (dry-run failures actionable)
+- `--semantic-contract` optional at Click level in `build-deploy` (manual guard for dry-run planning; relax `required=True` + `exists=True` for contract/mappings/vocabulary)
+- Name plan emitted early in `build-deploy` dry-run before infra manifest load (appears even in unprovisioned environments)
+- Dual item-type key support: snake_case + CamelCase in `_ITEM_TYPE_FIELD` (CLI clarity + test flexibility)
+
+**Test contract (Hockney—independent):**
+- `tests/unit/test_deployment_manifest.py` (29 tests): schema validation, `${ENV_VAR}` interpolation, error handling
+- `tests/unit/test_name_authority.py` (65 tests): manifest-wins precedence, conflict detection, migration warning path, read-back validation, render format (exact match to issue's success block), error text, validator reuse
+- `tests/contract/test_deploy_name_authority.py` (19 tests): `.platform` `displayName` = resolved name, CLI `--dry-run --manifest` CliRunner tests, conflict detection
+
+**Behavioral contract updates (Keyser review):** Rejected source-text inspection tests; replaced with 7 behavioral contracts (4 read-back, 2 orchestrated, 1 integration). Current state: 121/122 focused tests pass; 1 intentional RED awaiting McManus fix (`_deploy_knowledge` conflict detection wiring).
+
+**Invariants:**
+1. Single naming authority; exactly one resolved display name per item
+2. Generated-metadata / command-supplied name differing from manifest → `NAME_AUTHORITY_CONFLICT` (hard fail, never silent)
+3. Legacy env JSON names are migration inputs only; on divergence warn, manifest wins
+4. Deployed display name must equal manifest name (read-back enforced)
+5. Rename/replace requires explicit `--approve-replace`; implicit rename impossible
+6. No name-resolution duplication between standalone and orchestrated paths
+
+**Risks mitigated:**
+- Manifest concept collision with Azure `InfraManifest`: distinct `DeploymentManifest` class + module + docs
+- Golden-hash drift in `semantic/compiler.py:1161`: keep output byte-identical when manifest name == contract name; only enforce at deploy boundary
+- `--mock` vs `--dry-run` inconsistency: treat `--mock` as ontology's dry-run; do not rename flags in this scope
+- Fabric read-back via `/items/{id}` metadata: name read-back feasible without graph-level queries
+
+**Approval gates:**
+- ✅ Targeted: `pytest tests/unit/test_deployment_manifest.py tests/unit/test_name_authority.py tests/contract/test_deploy_name_authority.py` — 121/122 pass (1 intentional RED)
+- ✅ Full: `pytest` (unit + contract default markers, 4 deselected) — 2542 pass, 0 fail
+- ✅ Review: Hockney final diff review approved
+- ✅ Commit: references `#6`; stays on `scope/deploy-manifest`; no merge/push

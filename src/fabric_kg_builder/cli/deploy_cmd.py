@@ -16,6 +16,19 @@ from fabric_kg_builder.deploy.onelake_writer import (
     LAKEHOUSE_TABLE_PROJECTION,
     LAKEHOUSE_TABLES,
 )
+from fabric_kg_builder.deploy.manifest import (
+    DeploymentManifest,
+    DeploymentManifestError,
+    load_deployment_manifest,
+)
+from fabric_kg_builder.deploy.name_authority import (
+    NameAuthorityConflict,
+    ResolvedName,
+    manifest_from_env_config,
+    render_name_resolution,
+    resolve_item_name,
+    validate_readback_name,
+)
 
 # Default Lakehouse table list — graph/ontology scope only.
 # Imported from onelake_writer so the projection constant and this list stay in sync.
@@ -180,6 +193,54 @@ def _persist_data_agent_identity(
     temporary.replace(path)
 
 
+def _load_or_synthesize_manifest(
+    manifest_path: str | None,
+    fabric_cfg: dict,
+) -> DeploymentManifest:
+    """Load a deployment manifest from file or synthesize from env config.
+
+    When ``--manifest`` is not provided, builds an in-memory
+    :class:`DeploymentManifest` from the legacy env JSON names (migration mode).
+    When ``--manifest`` is provided, loads and validates the YAML file.
+
+    Raises:
+        click.ClickException: On manifest load/parse failures.
+    """
+    if manifest_path:
+        try:
+            return load_deployment_manifest(manifest_path)
+        except DeploymentManifestError as exc:
+            raise click.ClickException(str(exc)) from exc
+    return manifest_from_env_config(fabric_cfg)
+
+
+def _warn_manifest_vs_env(
+    cmd_prefix: str,
+    item_type: str,
+    manifest: DeploymentManifest,
+    env_name: str | None,
+    field: str,
+) -> None:
+    """Emit a migration warning when manifest and env config names diverge.
+
+    Called only when ``--manifest`` is explicitly provided (file-loaded
+    manifest). The manifest always wins; the warning guides the user to
+    remove the legacy env field.
+    """
+    from fabric_kg_builder.deploy.name_authority import _item_spec
+
+    if not env_name:
+        return
+    manifest_name = _item_spec(manifest, item_type).display_name
+    if manifest_name and manifest_name != env_name:
+        click.echo(
+            f"[{cmd_prefix}] WARN: deployment.yaml sets {item_type} display name "
+            f"'{manifest_name}'; env config has '{env_name}'. "
+            "Manifest wins. Remove the legacy env field to silence this warning.",
+            err=True,
+        )
+
+
 _DEPLOY_LAKEHOUSE_EPILOG = """\b
 Example:
   fabric-kg deploy-lakehouse --env dev --mock
@@ -208,6 +269,9 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 @click.option("--mock/--no-mock", "use_mock", default=False, show_default=True,
               help="Mock mode: log planned actions without any network call (--mock). "
                    "Use --no-mock for a live deploy.")
+@click.option("--manifest", "manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority). "
+                   "Defaults to env-config names (legacy mode).")
 def deploy_lakehouse_cmd(
     env: str,
     dist_path: str,
@@ -215,6 +279,7 @@ def deploy_lakehouse_cmd(
     tables: str | None,
     force: bool,
     use_mock: bool,
+    manifest_path: str | None,
 ) -> None:
     """Upload canonical structured Parquet tables to Fabric Lakehouse via OneLake.
 
@@ -241,7 +306,26 @@ def deploy_lakehouse_cmd(
 
     workspace_id = fabric_cfg["workspace_id"]
     lakehouse_item_id = fabric_cfg["lakehouse_item_id"]
-    lakehouse_name = fabric_cfg.get("lakehouse_display_name") or "kg_lakehouse"
+
+    # --- Name authority: resolve Lakehouse display name ---
+    deployment_manifest = _load_or_synthesize_manifest(manifest_path, fabric_cfg)
+    if manifest_path:
+        _warn_manifest_vs_env(
+            "deploy-lakehouse", "Lakehouse", deployment_manifest,
+            fabric_cfg.get("lakehouse_display_name"), "lakehouse_display_name",
+        )
+    try:
+        resolved_lakehouse = resolve_item_name(deployment_manifest, "Lakehouse")
+    except NameAuthorityConflict as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1) from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    lakehouse_name = resolved_lakehouse.display_name or "kg_lakehouse"
+    if use_mock:
+        click.echo(render_name_resolution(resolved_lakehouse))
+
     onelake_tables_path = fabric_cfg.get("onelake_tables_path") or (
         f"https://onelake.dfs.fabric.microsoft.com"
         f"/{workspace_id}/{lakehouse_item_id}/Tables"
@@ -734,6 +818,12 @@ def _load_compiled_ontology_parts(dist_path: str) -> list[dict]:
     type=click.Path(),
     help="Write a non-secret deployment receipt containing the Fabric item ID.",
 )
+@click.option("--manifest", "manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority). "
+                   "Defaults to env-config names (legacy mode).")
+@click.option("--display-name", "display_name_override", default=None,
+              help="Override the Ontology display name. When --manifest is supplied "
+                   "this must match the manifest name or NAME_AUTHORITY_CONFLICT is raised.")
 def deploy_ontology_cmd(
     env: str, dist_path: str, semantic_dir: str | None,
     poll_timeout: int, use_mock: bool,
@@ -744,6 +834,8 @@ def deploy_ontology_cmd(
     create_agent_instruction: bool, agent_instruction_out: str | None,
     domain_brief_path: str | None,
     receipt_out: str | None,
+    manifest_path: str | None,
+    display_name_override: str | None,
 ) -> None:
     """Deploy the Fabric Ontology definition to the target workspace.
 
@@ -759,9 +851,31 @@ def deploy_ontology_cmd(
     from fabric_kg_builder.deploy.fabric_ontology import (  # noqa: PLC0415
         create_or_get_ontology_item,
         delete_ontology_item,
+        get_ontology_item_display_name,
         update_ontology_definition,
     )
     from fabric_kg_builder.ontology.fabric_def import build_ontology_parts  # noqa: PLC0415
+
+    # --- Early manifest authority check: --display-name must match manifest ---
+    # This runs before env config loading so conflict errors are always emitted.
+    if manifest_path and display_name_override:
+        try:
+            _early_manifest = _load_or_synthesize_manifest(manifest_path, {})
+            _early_resolved = resolve_item_name(_early_manifest, "Ontology")
+            if display_name_override != _early_resolved.display_name:
+                conflict = NameAuthorityConflict(
+                    item_type="Ontology",
+                    manifest_name=_early_resolved.display_name,
+                    conflicting_name=display_name_override,
+                    source="--display-name",
+                )
+                click.echo(str(conflict), err=True)
+                sys.exit(1)
+        except NameAuthorityConflict as exc:
+            click.echo(str(exc), err=True)
+            sys.exit(1)
+        except Exception:
+            pass  # defer full manifest errors to the main resolution below
 
     # Read env config (workspace_id, lakehouse_item_id, schema_name)
     try:
@@ -786,7 +900,31 @@ def deploy_ontology_cmd(
         sys.exit(1)
 
     ontology_item_id = fabric_cfg.get("ontology_item_id") or ""
-    ontology_name = fabric_cfg.get("ontology_display_name") or "kg_ontology"
+
+    # --- Name authority: resolve Ontology display name ---
+    deployment_manifest = _load_or_synthesize_manifest(manifest_path, fabric_cfg)
+    if manifest_path:
+        _warn_manifest_vs_env(
+            "deploy-ontology", "Ontology", deployment_manifest,
+            fabric_cfg.get("ontology_display_name"), "ontology_display_name",
+        )
+    try:
+        resolved_ontology = resolve_item_name(deployment_manifest, "Ontology")
+    except NameAuthorityConflict as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if display_name_override and not manifest_path:
+        # No manifest: --display-name is used directly.
+        resolved_display = display_name_override
+    else:
+        resolved_display = resolved_ontology.display_name
+
+    ontology_name = resolved_display or "kg_ontology"
+    if use_mock:
+        click.echo(render_name_resolution(resolved_ontology))
 
     click.echo(f"[deploy-ontology] env             : {env}")
     click.echo(f"[deploy-ontology] workspace_id    : {workspace_id}")
@@ -1181,12 +1319,38 @@ def deploy_ontology_cmd(
         ontology_item_id = ""
     if ontology_item_id:
         click.echo(
-            f"[deploy-ontology] LIVE: using configured Ontology item '{ontology_name}' ..."
+            f"[deploy-ontology] LIVE: fetching metadata for configured Ontology "
+            f"item '{ontology_item_id}' ..."
+        )
+        try:
+            _cfg_display_name = get_ontology_item_display_name(
+                workspace_id,
+                ontology_item_id,
+            )
+        except PermissionError as exc:
+            click.echo(
+                f"[deploy-ontology] AUTH ERROR fetching Ontology item metadata: {exc}",
+                err=True,
+            )
+            sys.exit(6)
+        except RuntimeError as exc:
+            click.echo(
+                f"[deploy-ontology] ERROR fetching Ontology item metadata: {exc}",
+                err=True,
+            )
+            sys.exit(1)
+        click.echo(
+            f"[deploy-ontology] LIVE: using configured Ontology item "
+            f"'{_cfg_display_name}' (id={ontology_item_id}) ..."
         )
         item_result = {
             "item_id": ontology_item_id,
             "created": False,
-            "note": "Using configured Ontology item.",
+            "display_name": _cfg_display_name,
+            "note": (
+                f"Using configured Ontology item "
+                f"(fetched display_name='{_cfg_display_name}')."
+            ),
         }
     else:
         click.echo(
@@ -1204,6 +1368,21 @@ def deploy_ontology_cmd(
     action = "CREATED" if item_result["created"] else "REUSED"
     click.echo(f"[deploy-ontology] {action} Ontology item '{ontology_name}'")
     click.echo(f"[deploy-ontology] item_id : {item_id}")
+
+    # Read-back name validation: the deployed item must match the manifest name.
+    # Only validate when display_name is known (absent means GET was unavailable).
+    if not use_mock and item_id and item_id != "MOCK_ITEM_ID_00000000":
+        _deployed_name = item_result.get("display_name")
+        if _deployed_name:
+            try:
+                validate_readback_name("Ontology", _deployed_name, deployment_manifest)
+            except NameAuthorityConflict as exc:
+                click.echo(
+                    f"[deploy-ontology] ERROR: {exc}",
+                    err=True,
+                )
+                sys.exit(1)
+
     if recreate:
         _persist_ontology_item_id(env, item_id)
         click.echo("[deploy-ontology] persisted replacement ontology_item_id")
@@ -1425,6 +1604,9 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 @click.option("--mock/--no-mock", "use_mock", default=False, show_default=True,
               help="Mock mode: log planned actions without any network call. "
                    "Use --no-mock for a live deploy (default).")
+@click.option("--manifest", "manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority). "
+                   "Defaults to env-config names (legacy mode).")
 def deploy_search_cmd(
     env: str,
     dist_path: str,
@@ -1432,6 +1614,7 @@ def deploy_search_cmd(
     recreate: bool,
     integrated_vectorization: bool,
     use_mock: bool,
+    manifest_path: str | None,
 ) -> None:
     """Upload AI Search index schemas and document batches to Azure AI Search.
 
@@ -1471,11 +1654,26 @@ def deploy_search_cmd(
     index_doc_elements: str = ai_search.get("index_document_elements", "kg-document-elements")
     index_visual_assets: str = ai_search.get("index_visual_assets", "kg-visual-assets")
 
+    # --- Name authority: resolve SearchIndex prefix/name from manifest ---
+    _fabric_cfg_for_manifest = env_cfg.get("fabric", {})
+    deployment_manifest = _load_or_synthesize_manifest(manifest_path, _fabric_cfg_for_manifest)
+    try:
+        resolved_search = resolve_item_name(deployment_manifest, "SearchIndex")
+    except NameAuthorityConflict as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1) from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if use_mock:
+        click.echo(render_name_resolution(resolved_search))
+
     _all_indexes = {
         "kg-chunks": f"{index_prefix}{index_chunks}",
         "kg-document-elements": f"{index_prefix}{index_doc_elements}",
         "kg-visual-assets": f"{index_prefix}{index_visual_assets}",
     }
+
 
     selected_names = (
         [i.strip() for i in indexes.split(",") if i.strip()]
@@ -1749,6 +1947,9 @@ Ontologies, or Data Agents.
                    "persist its new ID.")
 @click.option("--dry-run/--no-dry-run", default=False, show_default=True,
               help="Show the Graph Model update without calling Fabric.")
+@click.option("--manifest", "manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority). "
+                   "Defaults to env-config names (legacy mode).")
 def deploy_graph_cmd(
     env: str,
     parquet_dir: str,
@@ -1757,6 +1958,7 @@ def deploy_graph_cmd(
     recreate: bool,
     replace: bool,
     dry_run: bool,
+    manifest_path: str | None,
 ) -> None:
     """Refresh the configured Fabric Graph Model from semantic serving tables."""
     try:
@@ -1817,6 +2019,25 @@ def deploy_graph_cmd(
         raise click.ClickException("Semantic entity table contains no graph nodes.")
 
     graph_name = fabric_cfg["graph_model_display_name"]
+
+    # --- Name authority: resolve GraphModel display name ---
+    deployment_manifest = _load_or_synthesize_manifest(manifest_path, fabric_cfg)
+    if manifest_path:
+        _warn_manifest_vs_env(
+            "deploy-graph", "GraphModel", deployment_manifest,
+            fabric_cfg.get("graph_model_display_name"), "graph_model_display_name",
+        )
+    try:
+        resolved_graph = resolve_item_name(deployment_manifest, "GraphModel")
+    except NameAuthorityConflict as exc:
+        raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    graph_name = resolved_graph.display_name or fabric_cfg["graph_model_display_name"]
+    if dry_run:
+        click.echo(render_name_resolution(resolved_graph))
+
     parts = build_graph_model_parts(
         entity_types=entity_types,
         relationship_pairs=relationship_pairs,
@@ -1999,6 +2220,9 @@ PowerShell example:
 )
 @click.option("--dry-run/--no-dry-run", default=False, show_default=True,
               help="Build the source-preserving Data Agent definition without updating Fabric.")
+@click.option("--manifest", "manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority). "
+                   "Defaults to env-config names (legacy mode).")
 def deploy_data_agent_cmd(
     env: str,
     target_mode: str,
@@ -2012,6 +2236,7 @@ def deploy_data_agent_cmd(
     questions: tuple[str, ...],
     receipt_out: Path,
     dry_run: bool,
+    manifest_path: str | None,
 ) -> None:
     """Publish one exact Data Agent after persisted Ontology/Graph validation."""
     try:
@@ -2045,11 +2270,35 @@ def deploy_data_agent_cmd(
         raise click.ClickException(
             "Replace mode requires --approve-replace."
         )
+
+    # --- Name authority: resolve DataAgent display name ---
+    deployment_manifest = _load_or_synthesize_manifest(manifest_path, fabric_cfg)
+    if manifest_path:
+        _warn_manifest_vs_env(
+            "deploy-data-agent", "DataAgent", deployment_manifest,
+            fabric_cfg.get("data_agent_display_name"), "data_agent_display_name",
+        )
+    try:
+        # If --display-name supplied, check it doesn't conflict with manifest.
+        resolved_agent = resolve_item_name(
+            deployment_manifest,
+            "DataAgent",
+            command_name=display_name or None,
+        )
+    except NameAuthorityConflict as exc:
+        raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     data_agent_name = str(
-        display_name
+        resolved_agent.display_name
+        or display_name
         or fabric_cfg.get("data_agent_display_name")
         or f"fkg-{env}-data-agent"
     ).strip()
+    if dry_run:
+        click.echo(render_name_resolution(resolved_agent))
+
     if not data_agent_name:
         raise click.ClickException("Data Agent display name must not be empty.")
 
@@ -2588,6 +2837,9 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
     type=click.Path(),
     help="Write a non-secret serving receipt with Search and Fabric item IDs.",
 )
+@click.option("--manifest", "manifest_path", default=None, type=click.Path(),
+              help="Path to deployment.yaml (naming authority). "
+                   "Defaults to env-config names (legacy mode).")
 def deploy_serving_cmd(
     env: str,
     base_index_name: str | None,
@@ -2607,6 +2859,7 @@ def deploy_serving_cmd(
     graph_preview_acknowledged: bool,
     graph_canvas_visibility: str,
     receipt_out: str | None,
+    manifest_path: str | None,
 ) -> None:
     """Full serving deployment: Lakehouse + AI Search index + alias + verification.
 
@@ -2637,6 +2890,30 @@ def deploy_serving_cmd(
             f"{search_cfg.get('index_chunks', 'kg-chunks')}"
         )
     graph_name = graph_model_name or fabric_cfg["graph_model_display_name"]
+
+    # --- Name authority: resolve GraphModel display name ---
+    deployment_manifest = _load_or_synthesize_manifest(manifest_path, fabric_cfg)
+    if manifest_path:
+        _warn_manifest_vs_env(
+            "deploy-serving", "GraphModel", deployment_manifest,
+            fabric_cfg.get("graph_model_display_name"), "graph_model_display_name",
+        )
+    try:
+        resolved_graph = resolve_item_name(
+            deployment_manifest,
+            "GraphModel",
+            command_name=graph_model_name or None,
+        )
+    except NameAuthorityConflict as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1) from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    graph_name = resolved_graph.display_name or graph_name
+    if dry_run:
+        click.echo(render_name_resolution(resolved_graph))
+
     semantic_loaded = None
     if semantic_dir:
         if not graph_definition_file:
