@@ -82,11 +82,17 @@ def make_cli_runner():
 
 def combined_output(result) -> str:
     """Return stdout + stderr from a click Result, tolerant of Click versions."""
-    out = result.output or ""
+    out = ""
+    try:
+        out = result.stdout or ""
+    except (ValueError, AttributeError):
+        out = result.output or ""
     try:
         err = result.stderr or ""
     except (ValueError, AttributeError):
         err = ""
+    if not out:
+        out = result.output or ""
     return out + err
 
 
