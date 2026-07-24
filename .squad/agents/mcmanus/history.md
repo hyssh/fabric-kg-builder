@@ -179,3 +179,51 @@ The deployed Fabric Ontology item showed EMPTY (Nodes 0, Edges 0). Root cause: o
 ### Tests
 - 70 new identity_validation acceptance tests (all pass, Hockney contract).
 - 112 existing targeted tests (compiler, deploy_ontology_cmd, bridge_validation, compile_ontology_cmd) continue passing.
+
+---
+
+## 2026-07-24 — Issue #6 Independent Revision (scope/deploy-manifest)
+
+**Branch:** `scope/deploy-manifest`
+**Context:** Keyser rejected Fenster's prior revision after Hockney approved tests. McManus nominated as independent revision owner. Verbal and Fenster locked out. Hockney separately updated contract tests with behavioral replacements.
+
+### Keyser's 6 requirements addressed
+
+**Fix 1 — Configured-item branch (deploy_cmd.py): real GET for displayName**
+- `deploy_cmd.py` configured-item branch no longer fabricates `display_name: ontology_name` from the CLI arg. Instead calls `get_ontology_item_display_name(workspace_id, ontology_item_id)` to fetch the actual Fabric display name for the deployed item.
+
+**Fix 2 — 202 LRO path (fabric_ontology.py): fetch real displayName after LRO completes**
+- Added `_get_item_display_name(workspace_id, item_id, headers, requests_mod)` private helper reusing the `GET /workspaces/{ws}/items/{id}` endpoint (same as `get_ontology_refresh_state`).
+- 202 LRO direct path (item_id via `_created_item_id`): calls helper, tracks `_lro_display_name` from real GET.
+- 202 LRO list-refresh path: reads `created_item.get("displayName", "")` directly from list response. No requested-name fallback.
+- Added public `get_ontology_item_display_name(workspace_id, item_id)` wrapper for CLI consumption.
+
+**Fix 3 — Read-back mismatch: hard fail, not WARN**
+- `validate_readback_name` failure now calls `sys.exit(1)` with `NAME_AUTHORITY_CONFLICT` error code. WARN-and-proceed path removed.
+- Key constraint: readback skipped (`.get("display_name")`) when `display_name` key absent — existing unit test mocks don't include this key; skipping is NOT a requested-name fallback.
+
+**Fix 4 — Deleted duplicate dead data-agent resolver in build_deploy_cmd.py**
+- Removed the duplicate `if deploy_manifest_path: try: resolve_item_name... except Exception: pass` block that was silently swallowing both `NameAuthorityConflict` and load errors.
+- One live resolver remains in `_deploy_knowledge` with `command_name=data_agent_display_name or None` so any CLI/manifest conflict raises `NameAuthorityConflict` (hard fail per ADR).
+
+**Fix 5 — Reverted out-of-scope pyproject.toml addition**
+- Removed `[dependency-groups] dev = ["pytest>=9.1.1"]` section added by Fenster. `uv.lock` was already clean.
+
+**Fix 6 — Reused existing GET /items/{id} helper**
+- `_get_item_display_name` reuses the `GET /workspaces/{ws}/items/{id}` path (same URL pattern as `get_ontology_refresh_state` ~L707-721). No new API plumbing duplicated.
+
+### Final failing test fix (Hockney's new behavioral test)
+- `test_deploy_knowledge_raises_conflict_when_cli_data_agent_name_differs_from_manifest` was still failing after initial fixes because `except Exception: pass` swallowed `NameAuthorityConflict` AND `resolve_item_name` was called without `command_name`.
+- Fix: removed the broad except, added `command_name=data_agent_display_name or None` to `resolve_item_name` call, wrapped only `DeploymentManifestError` in `BuildDeployError`.
+
+### Test Results
+- Focused manifest suite: **122 passed, 0 failed** (all 4 original Hockney defect tests + all behavioral replacements)
+- Full suite: **2542 passed, 4 deselected, 5 warnings, 0 failures**
+- Source-grep test `test_data_agent_name_not_resolved_from_manifest_in_orchestrated_flow` was superseded by Hockney's behavioral replacement (`test_deploy_knowledge_calls_resolve_item_name_for_data_agent`); no source-grep failures remain.
+
+### Key learnings
+- `except Exception: pass` on a resolver block silently swallows `NameAuthorityConflict` — always narrow exception handling to `DeploymentManifestError` only and let conflict exceptions propagate.
+- `resolve_item_name` requires `command_name` to be passed for conflict detection; calling it without `command_name` means manifest always silently wins even when CLI conflicts.
+- Test mocks for `create_or_get_ontology_item` that don't include `"display_name"` in the return dict are the test compatibility constraint that dictates using `.get("display_name")` in readback validation — skip if absent, not fallback to requested name.
+- Always pass `command_name=cli_arg or None` (not `command_name=cli_arg`) so empty-string CLI values don't trigger false conflicts.
+- Behavioral tests (spying on resolver calls with `monkeypatch`) are more robust than source-grep tests — Hockney's replacement `test_deploy_knowledge_calls_resolve_item_name_for_data_agent` validates the resolver is called without depending on source text patterns.

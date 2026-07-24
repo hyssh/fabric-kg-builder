@@ -60,7 +60,38 @@ Implemented issues #12 (capability-aware descriptions), #13 (few-shot example ga
 
 **Result:** 184 targeted tests passing (was 128 baseline); 2391 full-suite passing, 0 failures.
 
-**Issue #11 — Live Graph/Data Agent Example Validation (2026-07-24):**
+**Issue #6 — Deployment Manifest (Single Fabric Item Naming Authority) — 2026-07-23:**
+
+Implemented the deployment manifest as the single authority for all Fabric item display names, prefixes, configured IDs, target workspace, and dependencies per Keyser's ADR.
+
+**Files created:**
+- `src/fabric_kg_builder/deploy/manifest.py`: `DeploymentManifest` Pydantic v2 schema + `load_deployment_manifest()` loader with `${ENV_VAR}` interpolation (same pattern as `infra/manifest.py`). Post-validation enforces non-empty `workspace` for file-loaded manifests. `ManifestItemSpec` model-validator enforces `display_name` required when `configured_id` is set.
+- `src/fabric_kg_builder/deploy/name_authority.py`: `ResolvedName` dataclass, `NameAuthorityConflict` exception (structured with `NAME_AUTHORITY_CONFLICT` error code), `resolve_item_name()`, `validate_readback_name()`, `render_name_resolution()`, `manifest_from_env_config()`. Supports both CamelCase (`"Ontology"`) and snake_case (`"ontology"`) item type keys for CLI and test compatibility.
+- `deployment.yaml.example`: Fully annotated sample manifest with migration guidance.
+
+**Files modified:**
+- `cli/deploy_cmd.py`: `--manifest` added to all 6 commands (lakehouse, ontology, graph, data-agent, search, serving). `deploy-ontology` also gets `--display-name` with early conflict detection. Helpers `_load_or_synthesize_manifest`, `_warn_manifest_vs_env` added.
+- `cli/build_deploy_cmd.py`: `--manifest` (`deploy_manifest_path`) added; `--semantic-contract` made optional (required=False) and `--semantic-mappings`/`--semantic-vocabulary` have `exists=True` removed so dry-run works before infrastructure is provisioned. Name plan emitted early in dry-run before infra manifest load.
+- `semantic/compiler.py`: Guarded `ontology_name if ontology_name is not None else contract_name`.
+- `README.md`: Added `## Deployment Manifest — Fabric Item Naming Authority` section.
+
+**Key learnings:**
+
+1. **Variable name collision**: The parameter name `manifest_path` collided with the local variable `manifest_path = infra_root / "environments" / f"{env}.yaml"` in `build_deploy_cmd`. Renamed to `deploy_manifest_path`.
+
+2. **Early vs deferred conflict detection**: `deploy-ontology --display-name <name>` conflict must be detected BEFORE `_read_fabric_env_config()` so the error is always emitted (even when env config file is missing). Pattern: eager conflict check early, full resolution after env config.
+
+3. **`ManifestItemSpec` validator scope**: The `configured_id requires display_name` validator is correct for file-loaded manifests but must NOT fire for synthesized manifests. Fix: in `manifest_from_env_config`, only set `configured_id` when `display_name` is also non-empty.
+
+4. **Click exists=True on defaults**: Click validates defaults through `exists=True` when Click 8.2+. Removing `exists=True` from `--semantic-mappings`, `--semantic-vocabulary`, `--semantic-contract` is required for `--dry-run` to work before infrastructure is provisioned.
+
+5. **Item type duality**: Hockney's tests use snake_case (`"ontology"`, `"graph_model"`); CLI code uses CamelCase (`"Ontology"`, `"GraphModel"`). Both must be accepted by `_ITEM_TYPE_FIELD` dict.
+
+6. **`manifest_from_env_config` accepts full or extracted env JSON**: Tests pass the full env dict with `{"fabric": {...}}` nesting. Added detection to handle both the full dict and the extracted fabric section.
+
+7. **Test runner**: `uv run --extra dev pytest` required throughout; bare `python3` on this machine recurses.
+
+**Result:** 2525 unit+contract tests passing, 0 failures.
 
 Implemented end-to-end live Graph example validation + Data Agent semantic parity for deploy flows (`deploy-data-agent`, `build-deploy`):
 - Normalize generated GQL to Fabric syntax (strip fences, single-quote literal normalization).
