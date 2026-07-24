@@ -1286,6 +1286,16 @@ class CompetencyExampleReceipt(_StrictPersistedModel):
     status: CompetencyExampleStatus = "pass"
     remediation: str = ""
     published: bool = False
+    original_query_hash: str = ""
+    normalized_query_hash: str = ""
+    direct_graph_row_count: int = Field(default=0, ge=0)
+    data_agent_row_count: int = Field(default=0, ge=0)
+    evidence_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    direct_result_category: str = ""
+    data_agent_result_category: str = ""
+    direct_request_ids: list[str] = Field(default_factory=list)
+    data_agent_request_ids: list[str] = Field(default_factory=list)
+    semantic_match: bool | None = None
 
 
 class AgentSelectedSource(_StrictPersistedModel):
@@ -1340,6 +1350,9 @@ class AgentPublicationReceipt(_StrictPersistedModel):
     global_instruction_chars: int = Field(default=0, ge=0)
     instruction_chars: dict[str, int] = Field(default_factory=dict)
     description_chars: dict[str, int] = Field(default_factory=dict)
+    competency_examples: list[CompetencyExampleReceipt] = Field(
+        default_factory=list
+    )
 
     _check_hash_fields = field_validator(
         "semantic_model_manifest_hash",

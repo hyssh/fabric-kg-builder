@@ -12,6 +12,7 @@ from typing import Any, Literal, Mapping
 from fabric_kg_builder.semantic.schemas import (
     AgentPublicationReceipt,
     AgentSelectedSource,
+    CompetencyExampleReceipt,
     MaterializationPlan,
     PersistedProjectionReceipt,
     SemanticCrosswalk,
@@ -483,6 +484,7 @@ def build_agent_publication_receipt(
     global_instruction_chars: int = 0,
     instruction_chars: "dict[str, int] | None" = None,
     description_chars: "dict[str, int] | None" = None,
+    competency_examples: "list[CompetencyExampleReceipt] | None" = None,
 ) -> AgentPublicationReceipt:
     """Fail closed on stale, empty, draft-only, or mismatched publication."""
     if target_mode == "update" and configured_target_item_id != data_agent_item_id:
@@ -711,6 +713,7 @@ def build_agent_publication_receipt(
         global_instruction_chars=global_instruction_chars,
         instruction_chars=instruction_chars or {},
         description_chars=description_chars or {},
+        competency_examples=competency_examples or [],
     )
 
 
@@ -734,6 +737,7 @@ def deploy_and_validate_data_agent(
     global_instruction_chars: int = 0,
     instruction_chars: "dict[str, int] | None" = None,
     description_chars: "dict[str, int] | None" = None,
+    competency_examples: "list[CompetencyExampleReceipt] | None" = None,
 ) -> tuple[
     DataAgentUpsertResult,
     DataAgentPublishResult,
@@ -791,5 +795,6 @@ def deploy_and_validate_data_agent(
         global_instruction_chars=global_instruction_chars,
         instruction_chars=instruction_chars,
         description_chars=description_chars,
+        competency_examples=competency_examples,
     )
     return result, publish_result, receipt

@@ -3746,6 +3746,38 @@ git branch -d scope/<scope-name>
 
 ---
 
+### Verbal — Live Graph/Data Agent Example Validation Publication Contract
+
+**Date:** 2026-07-23  
+**Author:** Verbal  
+**For:** Issue #11 implementation  
+**Status:** ✅ Complete & Approved  
+
+**Decision — Three-Gate Publication Contract**
+
+Adopt a deterministic three-gate contract for competency Graph example publication:
+
+1. **Static gate** — normalize GQL + validate against persisted query schema (labels, relationships, properties, directions, projection/bounded shape)
+2. **Live Graph gate** — execute candidate query against deployed Graph and require successful status, required non-empty rows, and evidence coverage for evidence-bearing cases
+3. **Semantic parity gate** — execute published examples through the Data Agent MCP endpoint and require semantic match with direct Graph results
+
+**Publication Policy**
+
+- Cap published Graph examples at **7**
+- Enforce cap after candidate validation/execution so all candidates are evaluated
+- Optional overflow is omitted; required overflow blocks publication
+- Persist per-example receipts inside `AgentPublicationReceipt.competency_examples` with request IDs/hashes for triage
+
+**Status Values**
+
+Examples progress through: `CANDIDATE` → `VALIDATED_STATIC` → `VALIDATED_LIVE` → `VALIDATED_SEMANTIC` → `PUBLISHED`
+
+**Why This Matters**
+
+This keeps Data Agent grounding examples from drifting away from real graph semantics, and makes failures actionable with persisted request IDs/hashes for triage. Availability-aware filtering ensures optional relationships don't leak into published examples.
+
+---
+
 ## Ontology Identity & Partial-Date Integrity (#7, #8)
 
 ### Keyser ADR: Ontology Identity-Key Integrity & Partial Date Preservation

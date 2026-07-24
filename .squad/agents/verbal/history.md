@@ -59,3 +59,18 @@ Implemented issues #12 (capability-aware descriptions), #13 (few-shot example ga
 - Three-way property invariant holds because the raise happens before receipt construction, keeping `property_child_coverage == 1.0` validator clean.
 
 **Result:** 184 targeted tests passing (was 128 baseline); 2391 full-suite passing, 0 failures.
+
+**Issue #11 — Live Graph/Data Agent Example Validation (2026-07-24):**
+
+Implemented end-to-end live Graph example validation + Data Agent semantic parity for deploy flows (`deploy-data-agent`, `build-deploy`):
+- Normalize generated GQL to Fabric syntax (strip fences, single-quote literal normalization).
+- Validate each candidate probe against persisted query schema (`validate_physical_query`) before execution.
+- Execute candidates against deployed Graph; enforce required non-empty rows and evidence coverage.
+- Publish only passed examples (max 7), block required failures, omit optional failures.
+- Run post-publish Data Agent execution for published cases and compare semantic outcomes to direct Graph results.
+- Persist per-example receipts in `AgentPublicationReceipt.competency_examples` with query hashes, row counts, coverage, result categories, and request IDs.
+
+**Key learnings (Issue #11):**
+- Fabric Graph success statuses are app-level prefixes (`"00".."03"`), not HTTP `"200"`; tests and gates must key off status-code prefixes.
+- Max-example enforcement should happen after per-candidate validation/execution to keep “execute every candidate” semantics while still enforcing the ≤7 publication cap.
+- This workstation’s `python3` points to a recursive shell wrapper; use `uv run --extra dev pytest ...` for reliable test execution.

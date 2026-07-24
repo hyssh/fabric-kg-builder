@@ -72,10 +72,11 @@ import binascii
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 from urllib.parse import quote, urljoin
 
 from .transport import HttpError, HttpRequest, HttpTransport
@@ -137,6 +138,7 @@ _PREVIEW_DATASOURCE_TYPES: frozenset[str] = frozenset({"ontology", "search"})
 
 _DEFAULT_LRO_POLL_INTERVAL = 5  # seconds
 _DEFAULT_LRO_TIMEOUT = 300  # seconds
+_GQL_SUCCESS_PREFIXES = ("00", "01", "02", "03")
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -285,7 +287,7 @@ class FewShotExample:
 def graph_few_shots_from_competency_contract(
     contract: dict[str, Any],
     *,
-    limit: int = 5,
+    limit: int = 7,
     availability: "dict[str, Any] | None" = None,
 ) -> list[FewShotExample]:
     """Return validated Graph question/query examples from a compiled contract.
@@ -332,7 +334,9 @@ def graph_few_shots_from_competency_contract(
             or graph.get("static_validation_passed") is not True
         ):
             continue
-        query = str(graph.get("query") or "").strip()
+        query = normalize_graph_query_for_fabric(
+            str(graph.get("query") or "")
+        )
         if not query:
             continue
         stable_key = "\n".join(
@@ -348,6 +352,819 @@ def graph_few_shots_from_competency_contract(
         if len(examples) >= limit:
             break
     return examples
+
+
+@dataclass(frozen=True)
+class GraphFewShotValidationSummary:
+    """Outcome of validating competency Graph examples for publication."""
+
+    examples: list[FewShotExample]
+    receipts: list[Any]
+    direct_results: dict[str, dict[str, Any]]
+    candidate_count: int
+
+
+_FENCE_BLOCK_RE = re.compile(
+    r"^\s*```(?:[A-Za-z0-9_-]+)?\s*\n(?P<body>.*)\n```\s*$",
+    re.DOTALL,
+)
+
+
+def _strip_query_fence(query: str) -> str:
+    match = _FENCE_BLOCK_RE.match(query)
+    if match:
+        return str(match.group("body") or "").strip()
+    return query.strip()
+
+
+def _normalize_single_quoted_literals(query: str) -> str:
+    """Convert single-quoted string literals to Fabric-compatible double quotes."""
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    in_backtick = False
+    index = 0
+    while index < len(query):
+        char = query[index]
+        if in_single:
+            if char == "\\" and index + 1 < len(query):
+                out.extend((char, query[index + 1]))
+                index += 2
+                continue
+            if char == "'" and index + 1 < len(query) and query[index + 1] == "'":
+                out.append("'")
+                index += 2
+                continue
+            if char == "'":
+                out.append('"')
+                in_single = False
+                index += 1
+                continue
+            if char == '"':
+                out.append('\\"')
+                index += 1
+                continue
+            out.append(char)
+            index += 1
+            continue
+        if in_double:
+            out.append(char)
+            if char == "\\" and index + 1 < len(query):
+                out.append(query[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_double = False
+            index += 1
+            continue
+        if in_backtick:
+            out.append(char)
+            if char == "`":
+                in_backtick = False
+            index += 1
+            continue
+        if char == "`":
+            in_backtick = True
+            out.append(char)
+        elif char == '"':
+            in_double = True
+            out.append(char)
+        elif char == "'":
+            in_single = True
+            out.append('"')
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def normalize_graph_query_for_fabric(query: str) -> str:
+    """Normalize generated GQL into Fabric-compatible syntax."""
+    return _normalize_single_quoted_literals(
+        _strip_query_fence(query)
+    ).strip()
+
+
+def _case_required(case: dict[str, Any]) -> bool:
+    routes = case.get("routes")
+    if isinstance(routes, dict):
+        return str(routes.get("direct_graph", "required")) != "optional"
+    return True
+
+
+def _required_relationship_ids(case: dict[str, Any]) -> list[str]:
+    from fabric_kg_builder.runtime.acceptance import _required_relationships  # noqa: PLC0415
+
+    probes = case.get("probes")
+    direct_graph = probes.get("direct_graph") if isinstance(probes, dict) else {}
+    from_probe = (
+        direct_graph.get("required_relationship_ids")
+        if isinstance(direct_graph, dict)
+        else None
+    )
+    probe_ids = (
+        [str(item) for item in from_probe if item]
+        if isinstance(from_probe, list)
+        else []
+    )
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    relationship_specs = _required_relationships(expected.get("relationship_types"))
+    expected_ids = list(relationship_specs.keys())
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for rel_id in [*probe_ids, *expected_ids]:
+        if rel_id not in seen:
+            ordered.append(rel_id)
+            seen.add(rel_id)
+    return ordered
+
+
+def _response_request_ids(payload: dict[str, Any]) -> list[str]:
+    identifiers: list[str] = []
+    for key in (
+        "requestId",
+        "request_id",
+        "correlationId",
+        "correlation_id",
+        "operationId",
+        "operation_id",
+    ):
+        value = payload.get(key)
+        if value:
+            identifiers.append(str(value))
+    status = payload.get("status")
+    if isinstance(status, dict):
+        for key in ("requestId", "request_id", "correlationId", "correlation_id"):
+            value = status.get(key)
+            if value:
+                identifiers.append(str(value))
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in ("requestId", "request_id", "correlationId", "correlation_id"):
+            value = result.get(key)
+            if value:
+                identifiers.append(str(value))
+    return list(dict.fromkeys(identifiers))
+
+
+def _graph_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    result = payload.get("result")
+    if not isinstance(result, dict) or result.get("kind") != "TABLE":
+        return []
+    rows = result.get("data")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _collect_canonical_ids(
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> set[str]:
+    identifiers: set[str] = set()
+    for row in rows:
+        for column in columns:
+            value = row.get(column)
+            if isinstance(value, list):
+                identifiers.update(str(item) for item in value if item not in {None, ""})
+            elif value not in {None, ""}:
+                identifiers.add(str(value))
+    return identifiers
+
+
+def _evidence_coverage(
+    rows: list[dict[str, Any]],
+    evidence_columns: list[str],
+) -> float:
+    if not rows:
+        return 0.0
+    if not evidence_columns:
+        return 0.0
+    covered = 0
+    for row in rows:
+        has_evidence = False
+        for column in evidence_columns:
+            value = row.get(column)
+            if isinstance(value, list):
+                if any(item not in {None, ""} for item in value):
+                    has_evidence = True
+                    break
+            elif value not in {None, ""}:
+                has_evidence = True
+                break
+        if has_evidence:
+            covered += 1
+    return covered / len(rows)
+
+
+def validate_graph_few_shot_examples(
+    contract: dict[str, Any],
+    *,
+    availability: "dict[str, Any] | None" = None,
+    limit: int = 7,
+    dry_run: bool = False,
+    execute_graph_query: "Callable[[str], dict[str, Any]] | None" = None,
+    query_schema: Any | None = None,
+    require_schema: bool = False,
+) -> GraphFewShotValidationSummary:
+    """Validate, execute, and gate competency Graph examples for publication."""
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        DataAgentExampleValidationFailed,
+        DataAgentRequiredExampleEmpty,
+        gate_competency_examples,
+    )
+    from fabric_kg_builder.semantic.query_validation import (  # noqa: PLC0415
+        compute_physical_query_hash,
+        validate_physical_query,
+    )
+    from fabric_kg_builder.semantic.schemas import (  # noqa: PLC0415
+        CompetencyExampleReceipt,
+        PersistedQuerySchema,
+        SemanticQueryPlan,
+    )
+
+    if not isinstance(contract, dict) or limit < 1:
+        return GraphFewShotValidationSummary(
+            examples=[],
+            receipts=[],
+            direct_results={},
+            candidate_count=0,
+        )
+    cases = contract.get("cases")
+    if not isinstance(cases, list):
+        return GraphFewShotValidationSummary(
+            examples=[],
+            receipts=[],
+            direct_results={},
+            candidate_count=0,
+        )
+    resolved_schema: PersistedQuerySchema | None = None
+    schema_payload = query_schema
+    if schema_payload is None and isinstance(contract.get("query_schema"), dict):
+        schema_payload = contract.get("query_schema")
+    if isinstance(schema_payload, PersistedQuerySchema):
+        resolved_schema = schema_payload
+    elif isinstance(schema_payload, dict):
+        resolved_schema = PersistedQuerySchema.model_validate(schema_payload)
+
+    receipt_map: dict[str, Any] = {}
+    if availability is not None:
+        gate_receipts = gate_competency_examples(contract, availability)
+        receipt_map = {
+            receipt.competency_id: receipt for receipt in gate_receipts
+        }
+    else:
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            case_id = str(case.get("id") or "").strip()
+            if not case_id:
+                continue
+            receipt_map[case_id] = CompetencyExampleReceipt(
+                competency_id=case_id,
+                required=_case_required(case),
+                required_relationship_ids=_required_relationship_ids(case),
+                observed_rows={},
+                min_required_rows=1,
+                status="published",
+                remediation="",
+                published=True,
+            )
+
+    candidate_count = 0
+    examples: list[FewShotExample] = []
+    receipts: list[Any] = []
+    direct_results: dict[str, dict[str, Any]] = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        case_id = str(case.get("id") or "").strip()
+        if not case_id:
+            continue
+        question = str(case.get("question") or "").strip()
+        probes = case.get("probes")
+        graph_probe = probes.get("direct_graph") if isinstance(probes, dict) else None
+        if not question or not isinstance(graph_probe, dict):
+            continue
+        query = str(graph_probe.get("query") or "").strip()
+        if not query:
+            continue
+        candidate_count += 1
+        base_receipt = receipt_map.get(case_id)
+        if base_receipt is None:
+            base_receipt = CompetencyExampleReceipt(
+                competency_id=case_id,
+                required=_case_required(case),
+                required_relationship_ids=_required_relationship_ids(case),
+                observed_rows={},
+                min_required_rows=1,
+                status="published",
+                remediation="",
+                published=True,
+            )
+        if base_receipt.published is not True:
+            receipts.append(base_receipt)
+            continue
+
+        normalized_query = normalize_graph_query_for_fabric(query)
+        original_query_hash = compute_physical_query_hash(query)
+        normalized_query_hash = compute_physical_query_hash(normalized_query)
+
+        if require_schema and resolved_schema is None:
+            reason = (
+                "query_schema is missing; label/relationship/property/"
+                "direction/projection validation cannot run."
+            )
+            remediation = (
+                "Rebuild the agent package with compile-agent so "
+                "competency-contract.json embeds query_schema."
+            )
+            if base_receipt.required:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="static-validation",
+                    reason=reason,
+                    remediation=remediation,
+                    required=True,
+                )
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+            }))
+            continue
+
+        plan_payload = (
+            graph_probe.get("semantic_plan")
+            if isinstance(graph_probe.get("semantic_plan"), dict)
+            else case.get("semantic_plan")
+        )
+        try:
+            plan = (
+                SemanticQueryPlan.model_validate(plan_payload)
+                if isinstance(plan_payload, dict)
+                else None
+            )
+        except Exception as exc:
+            remediation = (
+                "Recompile competency-contract.json against the current "
+                "persisted query schema."
+            )
+            if base_receipt.required:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="static-validation",
+                    reason=f"Invalid semantic_plan payload: {exc}",
+                    remediation=remediation,
+                    required=True,
+                    result_category="invalid_semantic_plan",
+                ) from exc
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_result_category": "invalid_semantic_plan",
+            }))
+            continue
+        findings = validate_physical_query(
+            normalized_query,
+            plan,
+            schema=resolved_schema,
+            raise_on_findings=False,
+        )
+        if findings:
+            finding_text = "; ".join(
+                f"{finding.code}: {finding.message}"
+                for finding in findings
+            )
+            remediation = (
+                "Fix the competency Graph probe so it uses Fabric-compatible "
+                "GQL with valid labels, relationships, properties, "
+                "direction, projection, and bounded LIMIT."
+            )
+            if base_receipt.required:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="static-validation",
+                    reason=finding_text,
+                    remediation=remediation,
+                    required=True,
+                    result_category="invalid_physical_query",
+                )
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_result_category": "invalid_physical_query",
+            }))
+            continue
+
+        if dry_run:
+            if len(examples) >= limit:
+                reason = (
+                    f"Graph example limit exceeded (maximum {limit})."
+                )
+                remediation = (
+                    f"Reduce published Graph competency examples to ≤{limit}."
+                )
+                if base_receipt.required:
+                    raise DataAgentExampleValidationFailed(
+                        competency_id=case_id,
+                        stage="limit",
+                        reason=reason,
+                        remediation=remediation,
+                        required=True,
+                    )
+                receipts.append(base_receipt.model_copy(update={
+                    "status": "omitted",
+                    "published": False,
+                    "remediation": remediation,
+                    "original_query_hash": original_query_hash,
+                    "normalized_query_hash": normalized_query_hash,
+                    "direct_result_category": "limit_exceeded",
+                }))
+                continue
+            examples.append(FewShotExample(
+                id=str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "\n".join([case_id, question, normalized_query]),
+                )),
+                question=question,
+                query=normalized_query,
+            ))
+            receipts.append(base_receipt.model_copy(update={
+                "status": "published",
+                "published": True,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_result_category": "dry_run",
+            }))
+            continue
+
+        if execute_graph_query is None:
+            raise ValueError(
+                "execute_graph_query is required when dry_run is False."
+            )
+        response = execute_graph_query(normalized_query)
+        if not isinstance(response, dict):
+            raise DataAgentExampleValidationFailed(
+                competency_id=case_id,
+                stage="direct-graph",
+                reason="Graph query response is not an object.",
+                remediation=(
+                    "Capture the request ID and Graph response payload, then "
+                    "verify workspace, Graph Model ID, and query compatibility."
+                ),
+                required=base_receipt.required,
+                result_category="platform_failure",
+            )
+        status = response.get("status")
+        status_code = str(status.get("code") if isinstance(status, dict) else "")
+        status_description = str(
+            status.get("description") if isinstance(status, dict) else ""
+        )
+        status_ok = (
+            len(status_code) >= 2 and status_code[:2] in _GQL_SUCCESS_PREFIXES
+        )
+        request_ids = _response_request_ids(response)
+        rows = _graph_rows(response)
+        row_count = len(rows)
+        if not status_ok:
+            result_category = (
+                "invalid_physical_query"
+                if "query" in status_description.casefold()
+                or "syntax" in status_description.casefold()
+                else "platform_failure"
+            )
+            remediation = (
+                "Fix the Graph probe GQL and verify Fabric Graph readiness. "
+                "If this is a syntax failure, regenerate the query using "
+                "Fabric-compatible literals and projections."
+            )
+            if base_receipt.required:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="direct-graph",
+                    reason=(
+                        f"Fabric application status failed "
+                        f"(code={status_code or 'missing'}): {status_description}"
+                    ),
+                    remediation=remediation,
+                    required=True,
+                    result_category=result_category,
+                )
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_graph_row_count": row_count,
+                "direct_result_category": result_category,
+                "direct_request_ids": request_ids,
+            }))
+            continue
+
+        if row_count <= 0 and base_receipt.required:
+            relationship_id = (
+                base_receipt.required_relationship_ids[0]
+                if base_receipt.required_relationship_ids
+                else "unknown"
+            )
+            raise DataAgentRequiredExampleEmpty(
+                competency_id=case_id,
+                relationship_id=relationship_id,
+                observed_rows=0,
+                expected_minimum=1,
+                stage="pre-publication-live",
+                remediation=(
+                    "Direct Graph execution returned no rows for a required "
+                    f"example ('{case_id}'). Validate deployed data and "
+                    "relationship materialization before publishing."
+                ),
+            )
+        if row_count <= 0 and not base_receipt.required:
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_graph_row_count": row_count,
+                "direct_result_category": "optional_data_absent",
+                "direct_request_ids": request_ids,
+            }))
+            continue
+
+        evidence_columns = ["evidence_id", "evidenceId"]
+        relationship_bindings = (
+            graph_probe.get("relationship_bindings")
+            if isinstance(graph_probe.get("relationship_bindings"), list)
+            else []
+        )
+        for binding in relationship_bindings:
+            if isinstance(binding, dict):
+                column = str(binding.get("evidence_column") or "").strip()
+                if column:
+                    evidence_columns.append(column)
+        coverage = _evidence_coverage(rows, list(dict.fromkeys(evidence_columns)))
+        expected = case.get("expected")
+        evidence_required = True
+        if isinstance(expected, dict) and "evidence_required" in expected:
+            evidence_required = bool(expected.get("evidence_required"))
+        if evidence_required and coverage < 1.0:
+            remediation = (
+                "Required evidence IDs are missing in one or more result rows. "
+                "Ensure the direct Graph probe returns evidence_id for every "
+                "row before publishing this example."
+            )
+            if base_receipt.required:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="direct-graph",
+                    reason=(
+                        f"Evidence coverage is {coverage:.2%}; "
+                        "100% is required."
+                    ),
+                    remediation=remediation,
+                    required=True,
+                    result_category="invalid_physical_query",
+                )
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_graph_row_count": row_count,
+                "evidence_coverage": coverage,
+                "direct_result_category": "invalid_physical_query",
+                "direct_request_ids": request_ids,
+            }))
+            continue
+
+        canonical_columns = [
+            str(column)
+            for column in (
+                graph_probe.get("canonical_id_columns")
+                if isinstance(graph_probe.get("canonical_id_columns"), list)
+                else []
+            )
+            if column
+        ]
+        if len(examples) >= limit:
+            reason = (
+                f"Graph example limit exceeded (maximum {limit})."
+            )
+            remediation = (
+                f"Reduce published Graph competency examples to ≤{limit}."
+            )
+            if base_receipt.required:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="limit",
+                    reason=reason,
+                    remediation=remediation,
+                    required=True,
+                )
+            receipts.append(base_receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "original_query_hash": original_query_hash,
+                "normalized_query_hash": normalized_query_hash,
+                "direct_graph_row_count": row_count,
+                "evidence_coverage": coverage if evidence_required else 1.0,
+                "direct_result_category": "limit_exceeded",
+                "direct_request_ids": request_ids,
+            }))
+            continue
+        direct_results[case_id] = {
+            "canonical_ids": sorted(
+                _collect_canonical_ids(rows, canonical_columns)
+            ),
+            "row_count": row_count,
+            "result_category": "success",
+        }
+        examples.append(FewShotExample(
+            id=str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "\n".join([case_id, question, normalized_query]),
+            )),
+            question=question,
+            query=normalized_query,
+        ))
+        receipts.append(base_receipt.model_copy(update={
+            "status": "published",
+            "published": True,
+            "original_query_hash": original_query_hash,
+            "normalized_query_hash": normalized_query_hash,
+            "direct_graph_row_count": row_count,
+            "evidence_coverage": coverage if evidence_required else 1.0,
+            "direct_result_category": "success",
+            "direct_request_ids": request_ids,
+        }))
+
+    return GraphFewShotValidationSummary(
+        examples=examples,
+        receipts=receipts,
+        direct_results=direct_results,
+        candidate_count=candidate_count,
+    )
+
+
+def compare_graph_few_shot_semantics(
+    contract: dict[str, Any],
+    receipts: list[Any],
+    *,
+    direct_results: Mapping[str, Mapping[str, Any]],
+    execute_data_agent_case: "Callable[[dict[str, Any]], dict[str, Any]]",
+) -> list[Any]:
+    """Run published examples through Data Agent and compare semantic outcomes."""
+    from fabric_kg_builder.knowledge.validation import (  # noqa: PLC0415
+        DataAgentExampleValidationFailed,
+    )
+
+    if not isinstance(contract, dict):
+        return list(receipts)
+    cases = contract.get("cases")
+    if not isinstance(cases, list):
+        return list(receipts)
+    case_map = {
+        str(case.get("id") or ""): case
+        for case in cases
+        if isinstance(case, dict) and case.get("id")
+    }
+    updated: list[Any] = []
+    successful_categories = {"success", "optional_data_absent"}
+    for receipt in receipts:
+        if getattr(receipt, "published", False) is not True:
+            updated.append(receipt)
+            continue
+        competency_id = str(getattr(receipt, "competency_id", "") or "")
+        case = case_map.get(competency_id)
+        if case is None:
+            raise DataAgentExampleValidationFailed(
+                competency_id=competency_id or "<unknown>",
+                stage="semantic-compare",
+                reason="Published example is missing from competency contract.",
+                remediation=(
+                    "Rebuild the agent package and ensure competency-contract "
+                    "contains every published example case."
+                ),
+                required=bool(getattr(receipt, "required", True)),
+                result_category="invalid_semantic_plan",
+            )
+        response = execute_data_agent_case(case)
+        if not isinstance(response, dict):
+            raise DataAgentExampleValidationFailed(
+                competency_id=competency_id,
+                stage="semantic-compare",
+                reason="Data Agent response is not an object.",
+                remediation=(
+                    "Capture Data Agent request IDs and verify the MCP tool "
+                    "response envelope."
+                ),
+                required=bool(getattr(receipt, "required", True)),
+                result_category="platform_failure",
+            )
+        result_category = str(
+            response.get("result_category")
+            or response.get("final_semantic_status")
+            or ""
+        ).strip()
+        if not result_category and str(response.get("status") or "") == "success":
+            result_category = "success"
+        request_ids = response.get("request_ids")
+        request_ids = (
+            [str(item) for item in request_ids if item]
+            if isinstance(request_ids, list)
+            else []
+        )
+        citations = (
+            response.get("citations")
+            if isinstance(response.get("citations"), list)
+            else []
+        )
+        data_agent_ids: set[str] = set()
+        for citation in citations:
+            if not isinstance(citation, dict):
+                continue
+            if citation.get("canonical_id") not in {None, ""}:
+                data_agent_ids.add(str(citation.get("canonical_id")))
+            if isinstance(citation.get("canonical_ids"), list):
+                data_agent_ids.update(
+                    str(value)
+                    for value in citation.get("canonical_ids")
+                    if value not in {None, ""}
+                )
+        data_agent_row_count = len(citations)
+        if data_agent_row_count == 0 and str(response.get("answer") or "").strip():
+            data_agent_row_count = 1
+        direct = direct_results.get(competency_id, {})
+        direct_ids = {
+            str(value)
+            for value in (
+                direct.get("canonical_ids")
+                if isinstance(direct.get("canonical_ids"), list)
+                else []
+            )
+            if value not in {None, ""}
+        }
+        semantic_match = (
+            bool(direct_ids & data_agent_ids)
+            if direct_ids
+            else (
+                result_category in successful_categories
+                and data_agent_row_count > 0
+            )
+        )
+        if (
+            result_category not in successful_categories
+            or not semantic_match
+        ):
+            remediation = (
+                "Review the published Data Agent answer/citations and align "
+                "its semantic output with the direct Graph query results."
+            )
+            if bool(getattr(receipt, "required", True)):
+                raise DataAgentExampleValidationFailed(
+                    competency_id=competency_id,
+                    stage="semantic-compare",
+                    reason=(
+                        "Data Agent semantic output does not match the direct "
+                        "Graph execution result."
+                    ),
+                    remediation=remediation,
+                    required=True,
+                    result_category=result_category or "platform_failure",
+                )
+            updated.append(receipt.model_copy(update={
+                "status": "omitted",
+                "published": False,
+                "remediation": remediation,
+                "data_agent_result_category": (
+                    result_category or "platform_failure"
+                ),
+                "data_agent_row_count": data_agent_row_count,
+                "data_agent_request_ids": request_ids,
+                "semantic_match": False,
+            }))
+            continue
+        updated.append(receipt.model_copy(update={
+            "status": "published",
+            "published": True,
+            "data_agent_result_category": result_category,
+            "data_agent_row_count": data_agent_row_count,
+            "data_agent_request_ids": request_ids,
+            "semantic_match": True,
+        }))
+    return updated
 
 
 @dataclass

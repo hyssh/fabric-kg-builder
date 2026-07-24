@@ -118,7 +118,7 @@ class TestNamedConstants:
         assert MAX_SOURCE_DESCRIPTION_CHARS == 500
 
     def test_few_shot_count_limit(self):
-        assert MAX_FEW_SHOT_COUNT == 5
+        assert MAX_FEW_SHOT_COUNT == 7
 
     def test_few_shot_payload_limit(self):
         assert MAX_FEW_SHOT_PAYLOAD_CHARS == 10_000
@@ -1952,4 +1952,3 @@ class TestGraphSourceAvailabilityWiring:
         avail = {"warranty:covered_by": self._make_avail("unavailable")}
         result = build_graph_source_description(self._ctx(), availability=avail)
         assert "no verified published data" in result or "no relationship paths" in result.lower() or "unavailable" in result.lower()
-
