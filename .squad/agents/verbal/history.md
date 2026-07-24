@@ -74,3 +74,71 @@ Implemented end-to-end live Graph example validation + Data Agent semantic parit
 - Fabric Graph success statuses are app-level prefixes (`"00".."03"`), not HTTP `"200"`; tests and gates must key off status-code prefixes.
 - Max-example enforcement should happen after per-candidate validation/execution to keep “execute every candidate” semantics while still enforcing the ≤7 publication cap.
 - This workstation’s `python3` points to a recursive shell wrapper; use `uv run --extra dev pytest ...` for reliable test execution.
+
+## Issue #5 Revision — Source Profile Downstream Reuse + Correction Flow (2026-07-23)
+
+**Role:** Revision owner under Keyser lockout of Fenster. Independent revision of Fenster's rejected impl.
+
+**Blocking findings addressed:**
+
+### B1: Downstream Reuse (enrich_cmd.py)
+- Added `_load_source_profile_for_enrich(source_path, profile_path)` public helper in `enrich_cmd.py`.
+  - Tries to load `.fkg/source-profile.json` via `load_source_profile`.
+  - Calls `check_source_profile_staleness(profile, source_path)` → returns `(profile, stale_warning)`.
+  - Returns `(None, None)` when absent or malformed — full legacy backward compat.
+- Added `check_source_profile_staleness(profile, source_path)` to `inspector.py`.
+  - Computes current `source_hash` from files; compares to profile's stored hash.
+  - Returns `None` when hash matches or profile has no stored hash (empty dir case).
+- Added `--source-profile` option to `enrich_cmd` (default: `.fkg/source-profile.json`).
+- At startup, `enrich_cmd` loads the profile, logs extraction risks, and emits staleness warning when stale.
+- Projects without `init-domain` output are unaffected (profile absent → skip, no error).
+
+### B2: Correction Flow (init_domain_cmd.py)
+- Replaced `_approve_interactively` with a 3-choice prompt: `Approve [y], Correct [c], Abort [n]`.
+- Added `_apply_corrections(profile)` that covers all four user-facing profile fields:
+  - Document categories: show current → prompt for new comma-separated list.
+  - Entity candidates: show current → prompt for new comma-separated list.
+  - Extraction risks: show current → prompt "Clear all? [y/N]".
+  - Observed date range: show current → prompt for new range (e.g. "2001,2024").
+- After each correction pass, the profile is re-rendered and re-presented for approval (re-loop).
+- `user_corrected: bool = False` field added to `SourceProfile` — True when any field changed.
+- `--approve` / non-TTY path completely unaffected (auto-approves, zero prompts).
+
+### Secondary Finding Fix
+- `_build_contract_from_profile` no longer copies `inferred.entity_candidates` to `domain.yaml entity_categories` unconditionally.
+- Rule: inferred items only propagate to the domain contract when `profile.user_corrected=True` (user explicitly confirmed them through the correction flow).
+- Auto-approved profiles leave `entity_categories` and `subdomains` as TODO placeholders — no mislabelling of inference as ground truth.
+
+**Key learnings:**
+- The `_apply_corrections` function uses `model_copy(update=...)` on immutable Pydantic models — safer than in-place mutation.
+- `any_change` tracking across all four correction fields before setting `user_corrected` avoids setting it to `True` when user presses Enter everywhere.
+- `_load_source_profile_for_enrich` placed at orchestration-boundary level in `enrich_cmd.py` so contract tests can import and invoke it directly without running the full enrichment pipeline.
+- The CLI test for the correction full-flow uses `--interactive` to bypass TTY detection in `CliRunner`.
+- Staleness detection: compute `_compute_source_hash(collect_source_files(source_path))` at enrich time and compare. Gracefully returns `None` when profile's stored hash is empty (empty-dir profiles).
+- `check_source_profile_staleness` in `inspector.py` is intentionally soft (returns string | None, never raises) — keeps enrich non-blocking even on profile errors.
+
+**Files changed:**
+| File | Change |
+|------|--------|
+| `src/fabric_kg_builder/sources/inspector.py` | Added `user_corrected` field to `SourceProfile`; added `check_source_profile_staleness()`; render shows "(profile contains user corrections)" when true |
+| `src/fabric_kg_builder/cli/init_domain_cmd.py` | Replaced `_approve_interactively` with 3-choice flow; added `_apply_corrections()`; fixed `_build_contract_from_profile` provenance rule |
+| `src/fabric_kg_builder/cli/enrich_cmd.py` | Added `_load_source_profile_for_enrich()`, `--source-profile` option, profile loading block; `_DEFAULT_SOURCE_PROFILE_PATH` constant; fixed duplicate `input_p` declaration |
+| `tests/contract/test_source_profile_contract.py` | Added `TestDownstreamProfileReuse` (6 tests), `TestCorrectionFlowContract` (7 tests), `_click_input` helper |
+| `tests/unit/test_init_domain_cmd.py` | Added `TestCorrectionFlow` (7 tests), `TestSourceProfileStaleness` (4 tests) |
+
+**Test results:**
+- Targeted (both test files): **147/147 pass** (+24 new from 123 baseline)
+- Full suite (`tests/unit/ tests/contract/`): **2559 pass, 0 fail** (+24 from 2535 baseline)
+
+**Final status:**
+- **Blocker B1 (downstream reuse):** FIXED ✅ — enrich loads profile, checks staleness, logs risks
+- **Blocker B2 (correction flow):** FIXED ✅ — 3-choice approval, editable fields, provenance rule enforced
+- **Keyser verdict (2026-07-23):** APPROVED
+- **Hockney validation:** 147/147 pass; full suite 2567 pass, 4 deselected, 0 failed
+- **Product commit:** `a0f658669d695b5933d4064791166b969ed2b7eb` created and approved, not pushed per constraints
+
+**Key learnings:**
+- Downstream integration (enrich profile loading) requires both the profile-save contract and the profile-load helper to be defined at orchestration boundaries (public, importable, testable).
+- Correction loops with Pydantic immutable models use `model_copy(update=dict(...))` — cleaner than mutation + re-serialization.
+- Soft staleness checks (warning, no block) preserve compatibility while surfacing risks; hard checks would break pipelines on source changes (not appropriate here).
+- Provenance rule enforces that heuristic inference doesn't leak into the authoritative domain contract until user explicitly confirms it through the correction flow.
