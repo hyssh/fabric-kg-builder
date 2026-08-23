@@ -23,6 +23,11 @@ from fabric_kg_builder.deploy.data_agent import (
     build_semantic_data_agent_spec,
 )
 from fabric_kg_builder.knowledge.data_agent import DataAgentSpec
+from fabric_kg_builder.knowledge.data_agent import (
+    DataAgentLroFailedError,
+    FabricDataAgentClient,
+)
+from fabric_kg_builder.knowledge.transport import FakeTransport, HttpResponse
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +369,113 @@ class TestPublicationReceiptPropertyCountFields:
         receipt = AgentPublicationReceipt.model_validate(kwargs)
         assert receipt.required_property_count == 0
         assert receipt.published_property_count == 0
+
+
+class TestDataAgentLroDiagnostics:
+    def test_failed_lro_preserves_operation_and_request_details(
+        self, monkeypatch
+    ):
+        transport = FakeTransport().register(
+            "GET",
+            "/operations/op-123",
+            HttpResponse(
+                status_code=200,
+                headers={"x-ms-request-id": "req-456"},
+                body={
+                    "status": "Failed",
+                    "error": {
+                        "errorCode": "UnknownError",
+                        "message": "An error occurred while processing the operation",
+                    },
+                },
+            ),
+        )
+        client = FabricDataAgentClient(
+            workspace_id="ws-001",
+            transport=transport,
+            token="test-token",
+            lro_poll_interval=1,
+        )
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with pytest.raises(DataAgentLroFailedError) as exc_info:
+            client._poll_lro(
+                "https://api.fabric.microsoft.com/v1/operations/op-123",
+                1,
+            )
+
+        error = exc_info.value
+        assert error.operation_url.endswith("/operations/op-123")
+        assert error.request_id == "req-456"
+        assert error.body["error"]["errorCode"] == "UnknownError"
+        assert "UnknownError" in str(error)
+
+    def test_failed_create_lro_deletes_created_shell(self, monkeypatch):
+        transport = (
+            FakeTransport()
+            .register(
+                "POST",
+                "/dataAgents",
+                HttpResponse(
+                    status_code=202,
+                    headers={"Location": "https://fabric/operations/op-123"},
+                    body={},
+                ),
+            )
+            .register(
+                "GET",
+                "/operations/op-123",
+                HttpResponse(
+                    status_code=200,
+                    headers={"x-ms-request-id": "req-456"},
+                    body={
+                        "status": "Failed",
+                        "error": {
+                            "errorCode": "UnknownError",
+                            "message": "definition rejected",
+                        },
+                    },
+                ),
+            )
+            .register(
+                "GET",
+                "/items",
+                HttpResponse(
+                    status_code=200,
+                    body={
+                        "value": [
+                            {
+                                "id": "agent-shell",
+                                "displayName": "Agent",
+                                "type": "DataAgent",
+                            }
+                        ]
+                    },
+                ),
+            )
+            .register(
+                "DELETE",
+                "/dataAgents/agent-shell",
+                HttpResponse(status_code=204, body={}),
+            )
+        )
+        client = FabricDataAgentClient(
+            workspace_id="ws-001",
+            transport=transport,
+            token="test-token",
+            lro_poll_interval=1,
+        )
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with pytest.raises(DataAgentLroFailedError):
+            client._create(
+                DataAgentSpec(
+                    display_name="Agent",
+                    instruction="Use grounded sources.",
+                )
+            )
+
+        assert any(
+            call.method == "DELETE" and call.url.endswith("/dataAgents/agent-shell")
+            for call in transport.calls
+        )

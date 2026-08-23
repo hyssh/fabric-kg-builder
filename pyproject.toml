@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fabric-kg-builder"
-version = "0.2.2"
+version = "0.2.3"
 description = "CLI tool to build and deploy knowledge graphs to Microsoft Fabric"
 requires-python = ">=3.10"
 dependencies = [

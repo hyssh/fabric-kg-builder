@@ -148,6 +148,46 @@ def _contract(domain: str = "supply-chain") -> SemanticContract:
     )
 
 
+def test_compiler_projects_common_and_domain_ontology_layers(
+    tmp_path: Path,
+) -> None:
+    contract = _approve(_contract())
+    paths = _write_bundle(tmp_path, contract)
+    compiled = compile_semantic_bundle(
+        load_semantic_bundle(
+            contract_path=paths[0],
+            mappings_path=paths[1],
+            vocabulary_path=paths[2],
+            ids_lock_path=paths[3],
+        )
+    )
+
+    entity_layers = {
+        entity.canonical_name: entity.semantic_layer
+        for entity in compiled.semantic_model_manifest.entity_types
+    }
+    relationship_layers = {
+        relationship.predicate: relationship.semantic_layer
+        for relationship in compiled.semantic_model_manifest.relationship_types
+    }
+    modules = {
+        module["name"]: module
+        for module in compiled.ontology_model["modules"]
+    }
+
+    assert entity_layers["BusinessObject"] == "common"
+    assert entity_layers["Subject"] == "domain"
+    assert relationship_layers["has_event"] == "domain"
+    assert set(modules) == {
+        "common-entities",
+        "common-relationships",
+        "domain",
+    }
+    assert "BusinessObject" in modules["common-entities"]["entityTypeNames"]
+    assert "Subject" in modules["domain"]["entityTypeNames"]
+    assert "has_event" in modules["domain"]["relationshipTypeNames"]
+
+
 def _mappings(contract: SemanticContract) -> PhysicalMappings:
     return PhysicalMappings(
         entity_types=[

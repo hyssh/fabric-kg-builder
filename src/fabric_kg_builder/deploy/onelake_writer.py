@@ -46,6 +46,10 @@ import logging
 from pathlib import Path
 from typing import Callable
 
+import pyarrow as pa
+
+from fabric_kg_builder.model.arrow_schemas import ALL_TABLE_SCHEMAS
+
 logger = logging.getLogger(__name__)
 
 # Status strings returned per table
@@ -71,9 +75,26 @@ STATUS_ERROR = "error"
 #   Keep  → structural + graph linkage columns (IDs, page, path, sort, blob refs)
 #   Drop  → content, content_html  (heavy text — lives in kg-document-elements)
 #   Drop  → row_index, col_index   (sparse table-HTML concerns — AI Search only)
-LAKEHOUSE_TABLE_PROJECTION: dict[str, list[str] | None] = {
+def _sql_scalar_columns(table_name: str) -> list[str]:
+    """Return columns that Fabric's SQL endpoint can materialize."""
+    schema = ALL_TABLE_SCHEMAS[table_name]
+    return [
+        field.name
+        for field in schema
+        if not (
+            pa.types.is_list(field.type)
+            or pa.types.is_large_list(field.type)
+            or pa.types.is_fixed_size_list(field.type)
+            or pa.types.is_map(field.type)
+            or pa.types.is_struct(field.type)
+            or pa.types.is_union(field.type)
+        )
+    ]
+
+
+LAKEHOUSE_TABLE_PROJECTION: dict[str, list[str]] = {
     # ── Core content tables ───────────────────────────────────────────────
-    "source_files": None,   # all columns — file provenance / graph root
+    "source_files": _sql_scalar_columns("source_files"),
     "document_elements": [  # lean — structural + graph linkage only
         "document_element_id",
         "source_file_id",
@@ -88,34 +109,61 @@ LAKEHOUSE_TABLE_PROJECTION: dict[str, list[str] | None] = {
         "blob_url",
         "content_hash",
     ],
-    "entities": None,        # all columns — graph nodes + ontology bindings
-    "relationships": None,   # all columns — graph edges
-    "evidence": None,        # all columns — provenance links
+    "entities": _sql_scalar_columns("entities"),
+    "relationships": _sql_scalar_columns("relationships"),
+    "evidence": _sql_scalar_columns("evidence"),
     # Deterministic canonicalized maintenance serving layer.  Graph Model and
     # multi-type Ontology bind these tables; raw observations above stay intact.
-    "semantic_entities": None,
-    "semantic_relationships": None,
-    "visual_assets": None,   # all columns — visual ontology assets
-    "visual_regions": None,  # all columns — visual ontology regions
+    "semantic_entities": _sql_scalar_columns("semantic_entities"),
+    "semantic_relationships": _sql_scalar_columns("semantic_relationships"),
+    "visual_assets": _sql_scalar_columns("visual_assets"),
+    "visual_regions": _sql_scalar_columns("visual_regions"),
     # "chunks" intentionally omitted — text retrieval only → AI Search (kg-chunks)
     # ── v2 graph/lineage tables (M6 SRV-001) ─────────────────────────────
-    "claims": None,               # all columns — claims graph
-    "claim_evidence": None,       # all columns — claim provenance links
-    "clusters": None,             # all columns — entity cluster hierarchy
-    "cluster_memberships": None,  # all columns — entity/rel/claim → cluster membership
-    "assets": None,               # all columns — immutable asset registry root
-    "asset_versions": None,       # all columns — immutable observed version rows
-    "processing_runs": None,      # all columns — pipeline execution manifests
-    "deployments": None,          # all columns — deployment sink locators
+    "claims": _sql_scalar_columns("claims"),
+    "claim_evidence": _sql_scalar_columns("claim_evidence"),
+    "clusters": _sql_scalar_columns("clusters"),
+    "cluster_memberships": _sql_scalar_columns("cluster_memberships"),
+    "assets": _sql_scalar_columns("assets"),
+    "asset_versions": _sql_scalar_columns("asset_versions"),
+    "processing_runs": _sql_scalar_columns("processing_runs"),
+    "deployments": _sql_scalar_columns("deployments"),
     # ── M5 drawing tables (SPEC-006 §7.3) — schema owned by M5 ──────────
     # Included here so OneLake write picks them up when M5 ships the Parquet
     # files; M5 owns Pydantic/Arrow schema definitions for both tables.
-    "drawing_elements": None,     # all columns — drawing observation elements
-    "drawing_relationships": None,  # all columns — drawing spatial/topology rels
+    "drawing_elements": _sql_scalar_columns("drawing_elements"),
+    "drawing_relationships": _sql_scalar_columns("drawing_relationships"),
 }
 
 # Ordered list of tables included in the default Lakehouse projection (no chunks).
 LAKEHOUSE_TABLES: list[str] = list(LAKEHOUSE_TABLE_PROJECTION.keys())
+
+
+class LakehouseSchemaError(ValueError):
+    """Raised when a SQL-facing Lakehouse table contains nested columns."""
+
+
+def validate_sql_endpoint_schema(table_name: str, schema: pa.Schema) -> None:
+    """Reject Delta column types unsupported by Fabric SQL endpoint discovery."""
+    unsupported = [
+        f"{field.name} ({field.type})"
+        for field in schema
+        if (
+            pa.types.is_list(field.type)
+            or pa.types.is_large_list(field.type)
+            or pa.types.is_fixed_size_list(field.type)
+            or pa.types.is_map(field.type)
+            or pa.types.is_struct(field.type)
+            or pa.types.is_union(field.type)
+        )
+    ]
+    if unsupported:
+        raise LakehouseSchemaError(
+            f"Table '{table_name}' contains columns unsupported by the Fabric "
+            "SQL analytics endpoint: "
+            + ", ".join(unsupported)
+            + ". Exclude them from the serving projection or provide scalar JSON columns."
+        )
 
 
 def _default_token_provider() -> str:
@@ -239,6 +287,8 @@ def deploy_parquet_to_onelake(
                     )
                 if present:
                     arrow_table = arrow_table.select(present)
+
+            validate_sql_endpoint_schema(table, arrow_table.schema)
 
             write_deltalake(
                 onelake_path,

@@ -24,13 +24,18 @@ from .data_agent import (
     ELEMENT_TYPE_NODE,
     ELEMENT_TYPE_PROPERTY,
     DataAgentPublishResult,
+    DataAgentDefinitionError,
+    DataAgentLroFailedError,
     DataAgentSpec,
     DataAgentStageSnapshot,
+    DataAgentTargetError,
     DataAgentUpsertResult,
     DataSourceElement,
     FabricDataAgentClient,
+    LROTimeoutError,
     stage_snapshot_from_spec,
 )
+from .transport import HttpError
 
 
 class AgentPublicationError(RuntimeError):
@@ -769,32 +774,52 @@ def deploy_and_validate_data_agent(
         configured_item_id=configured_target_item_id,
         replace_approved=replace_approved,
     )
-    publish_result = client.publish(
-        result.item_id,
-        description=published_description,
-    )
-    draft, published = client.get_stage_snapshots(result.item_id)
-    if source_policy is not None:
-        validate_published_source_policy(published, source_policy)
-    receipt = build_agent_publication_receipt(
-        target_mode=target_mode,
-        configured_target_item_id=configured_target_item_id,
-        workspace_name=workspace_name,
-        workspace_id=workspace_id,
-        data_agent_name=spec.display_name,
-        data_agent_item_id=result.item_id,
-        package_instruction_hash=package_instruction_hash,
-        expected=expected,
-        draft=draft,
-        published=published,
-        grounding=grounding,
-        projection_receipt=projection_receipt,
-        projection_receipt_hash=projection_receipt_hash,
-        publication_status=publish_result.status,
-        required_source_type=required_source_type,
-        global_instruction_chars=global_instruction_chars,
-        instruction_chars=instruction_chars,
-        description_chars=description_chars,
-        competency_examples=competency_examples,
-    )
+    try:
+        publish_result = client.publish(
+            result.item_id,
+            description=published_description,
+        )
+        draft, published = client.get_stage_snapshots(result.item_id)
+        if source_policy is not None:
+            validate_published_source_policy(published, source_policy)
+        receipt = build_agent_publication_receipt(
+            target_mode=target_mode,
+            configured_target_item_id=configured_target_item_id,
+            workspace_name=workspace_name,
+            workspace_id=workspace_id,
+            data_agent_name=spec.display_name,
+            data_agent_item_id=result.item_id,
+            package_instruction_hash=package_instruction_hash,
+            expected=expected,
+            draft=draft,
+            published=published,
+            grounding=grounding,
+            projection_receipt=projection_receipt,
+            projection_receipt_hash=projection_receipt_hash,
+            publication_status=publish_result.status,
+            required_source_type=required_source_type,
+            global_instruction_chars=global_instruction_chars,
+            instruction_chars=instruction_chars,
+            description_chars=description_chars,
+            competency_examples=competency_examples,
+        )
+    except (
+        AgentPublicationError,
+        DataAgentDefinitionError,
+        DataAgentLroFailedError,
+        DataAgentTargetError,
+        HttpError,
+        LROTimeoutError,
+        SourcePolicyViolation,
+    ) as exc:
+        if result.created:
+            try:
+                client.delete_data_agent(result.item_id)
+            except (DataAgentLroFailedError, DataAgentTargetError, HttpError, LROTimeoutError) as cleanup_exc:
+                raise AgentPublicationError(
+                    "AGENT_CLEANUP_FAILED",
+                    f"Publication failed with {exc}; cleanup of newly created "
+                    f"item {result.item_id} also failed with {cleanup_exc}.",
+                ) from exc
+        raise
     return result, publish_result, receipt

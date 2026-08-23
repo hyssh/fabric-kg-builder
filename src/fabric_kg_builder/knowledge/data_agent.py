@@ -164,6 +164,44 @@ class LROTimeoutError(Exception):
         )
 
 
+class DataAgentLroFailedError(RuntimeError):
+    """Raised with complete diagnostics when a Fabric Data Agent LRO fails."""
+
+    def __init__(
+        self,
+        *,
+        operation_url: str,
+        status_code: int,
+        body: dict[str, Any],
+        response_headers: dict[str, str],
+        elapsed_seconds: float,
+    ) -> None:
+        self.operation_url = operation_url
+        self.status_code = status_code
+        self.body = body
+        self.response_headers = response_headers
+        self.elapsed_seconds = elapsed_seconds
+        self.request_id = (
+            response_headers.get("x-ms-request-id")
+            or response_headers.get("request-id")
+            or response_headers.get("x-ms-correlation-request-id")
+            or ""
+        )
+        error = body.get("error") if isinstance(body.get("error"), dict) else body
+        code = error.get("errorCode") or error.get("code") or "UnknownError"
+        message = (
+            error.get("message")
+            or error.get("errorMessage")
+            or "Fabric reported a failed Data Agent operation."
+        )
+        request_text = f", request_id={self.request_id}" if self.request_id else ""
+        super().__init__(
+            f"Data Agent LRO failed: {code} — {message} "
+            f"(operation={operation_url}{request_text}, "
+            f"elapsed={elapsed_seconds:.1f}s, response={body!r})"
+        )
+
+
 class UnsupportedDataSourceType(Exception):
     """Raised when a datasource type is unrecognised and not flagged as preview.
 
@@ -2018,8 +2056,13 @@ class FabricDataAgentClient:
                     logger.info("[data_agent] LRO completed: %s", operation_url)
                     return body
             elif status_str in ("failed", "canceled", "cancelled"):
-                error_detail = body.get("error") or body
-                raise HttpError(resp.status_code or 500, error_detail)
+                raise DataAgentLroFailedError(
+                    operation_url=operation_url,
+                    status_code=resp.status_code,
+                    body=body,
+                    response_headers=dict(resp.headers),
+                    elapsed_seconds=elapsed,
+                )
             # else: still running — loop
 
     # ------------------------------------------------------------------
@@ -2083,6 +2126,10 @@ class FabricDataAgentClient:
 
         if resp.status_code == 202:
             location = resp.headers.get("Location") or resp.headers.get("location", "")
+            if not location:
+                raise DataAgentDefinitionError(
+                    "Data Agent create returned 202 without a Location header."
+                )
             ra_str = resp.headers.get("Retry-After") or resp.headers.get("retry-after", "")
             retry_after = int(ra_str) if ra_str else self._lro_poll
             logger.info(
@@ -2090,7 +2137,26 @@ class FabricDataAgentClient:
                 spec.display_name,
                 location,
             )
-            lro_result = self._poll_lro(location, retry_after)
+            try:
+                lro_result = self._poll_lro(location, retry_after)
+            except DataAgentLroFailedError as exc:
+                try:
+                    shell = self.get_data_agent(spec.display_name)
+                    shell_id = str((shell or {}).get("id") or "")
+                    if shell_id:
+                        self._delete(shell_id)
+                except (
+                    DataAgentDefinitionError,
+                    DataAgentLroFailedError,
+                    DataAgentTargetError,
+                    HttpError,
+                    LROTimeoutError,
+                ) as cleanup_exc:
+                    raise DataAgentTargetError(
+                        f"{exc} Cleanup of the failed create target also failed: "
+                        f"{cleanup_exc}"
+                    ) from exc
+                raise
             nested_result = lro_result.get("result")
             item_id = str(
                 lro_result.get("id")
@@ -2169,6 +2235,10 @@ class FabricDataAgentClient:
 
         if resp.status_code == 202:
             location = resp.headers.get("Location") or resp.headers.get("location", "")
+            if not location:
+                raise DataAgentDefinitionError(
+                    "Data Agent updateDefinition returned 202 without a Location header."
+                )
             ra_str = resp.headers.get("Retry-After") or resp.headers.get("retry-after", "")
             retry_after = int(ra_str) if ra_str else self._lro_poll
             self._poll_lro(location, retry_after)
@@ -2224,6 +2294,10 @@ class FabricDataAgentClient:
             resp.body,
             response_headers=resp.headers,
         )
+
+    def delete_data_agent(self, item_id: str) -> None:
+        """Delete an exact Data Agent item, including any delete LRO."""
+        self._delete(item_id)
 
     # ------------------------------------------------------------------
     # Public API

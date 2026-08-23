@@ -37,6 +37,7 @@ derive_visual_docs(assets, regions, entities)              → list[dict]
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from typing import Any, Optional
@@ -347,6 +348,14 @@ def derive_document_element_doc(
         Flat AI Search document.  element_vector is absent — attach separately.
     """
     entities_by_id = entities_by_id or {}
+    source_quote = str(element.get("content") or "").strip()
+    if not source_quote:
+        source_quote = str(element.get("title") or "").strip()
+    if not source_quote and element.get("content_html"):
+        source_quote = html.unescape(
+            re.sub(r"<[^>]+>", " ", str(element["content_html"]))
+        )
+        source_quote = " ".join(source_quote.split())
 
     entity_ids: list[str] = _to_list(element.get("related_entity_ids")) or []
     if not entity_ids and entity_mention_index:
@@ -374,7 +383,9 @@ def derive_document_element_doc(
 
     doc: dict[str, Any] = {
         "document_element_id": element["document_element_id"],
-        "content": element.get("content") or "",
+        "content": source_quote,
+        "source_quote": source_quote,
+        "source_quote_is_verbatim": bool(source_quote),
         "content_html": element.get("content_html"),
         "element_type": element.get("element_type", ""),
         "page_number": element.get("page_number"),

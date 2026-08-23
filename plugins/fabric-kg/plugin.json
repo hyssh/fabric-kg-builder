@@ -1,7 +1,7 @@
 {
   "name": "fabric-kg",
   "description": "Drive the fabric-kg CLI from Copilot CLI: turn documents into a Microsoft Fabric knowledge graph (Lakehouse + multi-type Ontology + AI Search + Data Agent grounding). Includes a pipeline skill, a Surface troubleshooting reproduction skill, and a guided KG-builder agent.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": {
     "name": "hyssh"
   },

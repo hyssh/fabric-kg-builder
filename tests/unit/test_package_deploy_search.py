@@ -132,6 +132,20 @@ def _make_build(tmp: Path, with_parquet: bool = True, with_ontology: bool = True
         s_dir2 = s_search / "kg-chunks"
         s_dir2.mkdir(parents=True)
         (s_dir2 / "index.schema.json").write_text('{"name":"kg-chunks"}', encoding="utf-8")
+        (s_dir2 / "docs.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "chunk_id": "chunk-1",
+                        "content": "Original source passage.",
+                        "source_quote": "Original source passage.",
+                        "source_quote_is_verbatim": True,
+                        "source_file_id": "source-1",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     return build
 
@@ -189,6 +203,42 @@ class TestPackageCmd:
         assert "artifacts" in manifest
         assert "parquet" in manifest["artifacts"]
         assert "ontology" in manifest["artifacts"]
+
+    def test_package_generates_ontology_search_connection_guide(self, tmp_path):
+        build = _make_build(tmp_path, with_search=True)
+        dist = tmp_path / "dist"
+
+        result = CliRunner().invoke(
+            package_cmd,
+            [
+                "--build-dir",
+                str(build),
+                "--out",
+                str(dist),
+                "--include-search",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        guide_path = (
+            dist
+            / "fabric-kg-package"
+            / "ONTOLOGY_SEARCH_CONNECTION.md"
+        )
+        guide = guide_path.read_text(encoding="utf-8")
+        assert "## Ontology layers" in guide
+        assert "Common entities" in guide
+        assert "Domain entities" in guide
+        assert "Fabric Ontology" in guide
+        assert "Fabric Graph" in guide
+        assert "source_quote" in guide
+        assert "| `kg-chunks` | 1 | 1 | 1 |" in guide
+        manifest = json.loads(
+            (
+                dist / "fabric-kg-package" / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert "connection_guide" in manifest["artifacts"]
 
     def test_manifest_lists_bundled_files(self, tmp_path):
         """manifest.json must list individual files in each artifact section."""
@@ -488,6 +538,16 @@ class TestCompileSearchCmd:
         field = next((f for f in schema["fields"] if f["name"] == "graph_path"), None)
         assert field is not None, "graph_path field missing from kg-chunks schema"
         assert field.get("retrievable") is True
+
+    def test_text_indexes_expose_verbatim_source_quote_fields(self):
+        for schema in (
+            _build_chunks_schema(),
+            _build_document_elements_schema(),
+        ):
+            fields = {field["name"]: field for field in schema["fields"]}
+            assert fields["source_quote"]["searchable"] is True
+            assert fields["source_quote"]["retrievable"] is True
+            assert fields["source_quote_is_verbatim"]["filterable"] is True
 
     def test_chunks_schema_blob_url_present(self, tmp_path):
         """blob_url field must be present with filterable + retrievable."""

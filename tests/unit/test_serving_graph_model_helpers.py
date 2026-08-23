@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from fabric_kg_builder.cli import cli
 from fabric_kg_builder.serving.graph_model import (
     _graph_alias,
     _stable_id,
@@ -14,6 +16,7 @@ from fabric_kg_builder.serving.graph_model import (
     extract_entity_types_from_parquet,
     extract_relationship_pairs_from_parquet,
     onelake_abfss_path,
+    validate_graph_data_source_paths,
     write_graph_mapping_artifact,
 )
 
@@ -225,6 +228,84 @@ class TestBuildGraphModelParts:
         )
         assert isinstance(parts, list)
         assert len(parts) > 0
+
+
+class TestGraphDataSourcePaths:
+    def test_accepts_relative_schema_table_path(self):
+        parts = build_graph_model_parts(
+            entity_types=["Person"],
+            workspace_id="ws-001",
+            lakehouse_item_id="lh-001",
+        )
+        validate_graph_data_source_paths(parts)
+
+    def test_rejects_absolute_path_with_item_reference(self):
+        parts = build_graph_model_parts(
+            entity_types=["Person"],
+            workspace_id="ws-001",
+            lakehouse_item_id="lh-001",
+        )
+        data_source = parts[0]["payload_json"]["dataSources"][0]
+        data_source["properties"]["path"] = (
+            "abfss://ws-001@onelake.dfs.fabric.microsoft.com/"
+            "lh-001/Tables/dbo/entities"
+        )
+
+        with pytest.raises(ValueError, match="absolute path"):
+            validate_graph_data_source_paths(parts)
+
+
+class TestDeployGraphCompiledArtifact:
+    def test_dry_run_accepts_compiled_graph_definition(self, tmp_path, monkeypatch):
+        env_dir = tmp_path / "ontology" / "environments"
+        env_dir.mkdir(parents=True)
+        (env_dir / "dev.json").write_text(
+            json.dumps(
+                {
+                    "fabric": {
+                        "workspace_id": "ws-001",
+                        "lakehouse_item_id": "lh-001",
+                        "graph_model_item_id": "gm-001",
+                        "graph_model_display_name": "KG Graph",
+                        "schema_name": "dbo",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        graph_dir = tmp_path / "build" / "graph"
+        graph_dir.mkdir(parents=True)
+        parts = build_graph_model_parts(
+            entity_types=["Person"],
+            workspace_id="ws-001",
+            lakehouse_item_id="lh-001",
+        )
+        graph_definition = graph_dir / "graph-definition.json"
+        graph_definition.write_text(
+            json.dumps({"parts": parts}),
+            encoding="utf-8",
+        )
+        (graph_dir / "label-catalog.json").write_text(
+            json.dumps({"contract_hash": "sha256:test"}),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "deploy-graph",
+                "--env",
+                "dev",
+                "--graph-definition-file",
+                str(graph_definition),
+                "--dry-run",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert str(graph_definition) in result.output
+        assert "SUCCESS (dry-run)" in result.output
 
 
 # ---------------------------------------------------------------------------

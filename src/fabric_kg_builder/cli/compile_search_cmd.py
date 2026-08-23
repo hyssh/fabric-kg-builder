@@ -359,6 +359,32 @@ def _build_chunks_schema() -> dict:
             "_comment": "Full chunk text; primary BM25 search field.",
         },
         {
+            "name": "source_quote",
+            "type": "Edm.String",
+            "searchable": True,
+            "filterable": False,
+            "sortable": False,
+            "facetable": False,
+            "retrievable": True,
+            "_comment": (
+                "Source passage retained for quotation and citation. "
+                "Use source_quote_is_verbatim before presenting it as a direct quote."
+            ),
+        },
+        {
+            "name": "source_quote_is_verbatim",
+            "type": "Edm.Boolean",
+            "searchable": False,
+            "filterable": True,
+            "sortable": False,
+            "facetable": True,
+            "retrievable": True,
+            "_comment": (
+                "True only when source_quote is original extracted source text; "
+                "false for derived descriptions."
+            ),
+        },
+        {
             "name": "evidence_ids",
             "type": "Collection(Edm.String)",
             "searchable": False,
@@ -449,6 +475,26 @@ def _build_document_elements_schema() -> dict:
             "facetable": False,
             "retrievable": True,
             "_comment": "Element text content or HTML rendering; primary BM25 field.",
+        },
+        {
+            "name": "source_quote",
+            "type": "Edm.String",
+            "searchable": True,
+            "filterable": False,
+            "sortable": False,
+            "facetable": False,
+            "retrievable": True,
+            "_comment": "Original extracted element text retained for quotation.",
+        },
+        {
+            "name": "source_quote_is_verbatim",
+            "type": "Edm.Boolean",
+            "searchable": False,
+            "filterable": True,
+            "sortable": False,
+            "facetable": True,
+            "retrievable": True,
+            "_comment": "True when source_quote is original extracted source text.",
         },
         {
             "name": "content_html",
@@ -1237,6 +1283,7 @@ def compile_search_cmd(
                     if evidence is None:
                         continue
                     content = str(evidence.get("text") or "").strip()
+                    source_quote_is_verbatim = bool(content)
                     if not content:
                         content = "\n".join(
                             dict.fromkeys(
@@ -1272,8 +1319,25 @@ def compile_search_cmd(
                         entity_mention_index=entity_mention_index,
                     )
                     document["evidence_ids"] = [evidence_id]
+                    document["source_quote"] = content
+                    document["source_quote_is_verbatim"] = (
+                        source_quote_is_verbatim
+                    )
                     docs.append(document)
         for document in docs:
+            if index_name in {"kg-chunks", "kg-document-elements"}:
+                source_quote = str(
+                    document.get("source_quote")
+                    or document.get("content")
+                    or ""
+                ).strip()
+                if not source_quote:
+                    raise click.ClickException(
+                        f"{index_name} document "
+                        f"{document.get(id_field)!r} has no source quotation."
+                    )
+                document["source_quote"] = source_quote
+                document.setdefault("source_quote_is_verbatim", True)
             document["semantic_contract_hash"] = semantic_contract_hash
             semantic_type_ids = _string_list(
                 document.get("semantic_type_ids")

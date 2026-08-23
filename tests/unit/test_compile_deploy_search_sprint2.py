@@ -275,6 +275,39 @@ class TestLinkageDerivation:
         doc = derive_document_element_doc(_DOC_ELEMENT_ROW)
         assert doc["section_path"] == "Chapter 2 > Connectivity"
 
+    @pytest.mark.parametrize(
+        ("element", "expected"),
+        [
+            (
+                {
+                    **_DOC_ELEMENT_ROW,
+                    "content": None,
+                    "title": "Overview",
+                    "content_html": None,
+                },
+                "Overview",
+            ),
+            (
+                {
+                    **_DOC_ELEMENT_ROW,
+                    "content": None,
+                    "title": None,
+                    "content_html": "<table><tr><td>Original value</td></tr></table>",
+                },
+                "Original value",
+            ),
+        ],
+    )
+    def test_derive_doc_element_source_quote_fallbacks(
+        self,
+        element,
+        expected,
+    ):
+        doc = derive_document_element_doc(element)
+        assert doc["content"] == expected
+        assert doc["source_quote"] == expected
+        assert doc["source_quote_is_verbatim"] is True
+
     def test_derive_visual_docs_returns_asset_and_region_docs_with_complete_fields(self):
         """Visual search docs retain image, region, text, Blob, and entity context."""
         docs = derive_visual_docs(

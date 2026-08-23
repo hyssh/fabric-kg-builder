@@ -16,6 +16,7 @@ _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _.-]*$")
 _PROPERTY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 PublicationStatus = Literal["core", "optional", "experimental", "excluded"]
+SemanticLayer = Literal["common", "domain"]
 PropertyType = Literal[
     "string",
     "integer",
@@ -97,6 +98,7 @@ class EntityTypeDefinition(StrictModel):
     properties: list[PropertyDefinition] = Field(min_length=1)
     lineage_properties: list[str] = Field(default_factory=list)
     publication_status: PublicationStatus = "core"
+    semantic_layer: SemanticLayer | None = None
 
     _dedupe_identifiers = field_validator("identifiers")(_unique_strings)
     _dedupe_aliases = field_validator("aliases")(_unique_strings)
@@ -176,6 +178,7 @@ class RelationshipTypeDefinition(StrictModel):
     assertion_policy: AssertionPolicy = Field(default_factory=AssertionPolicy)
     temporal: TemporalPolicy = "optional"
     publication_status: PublicationStatus = "core"
+    semantic_layer: SemanticLayer | None = None
 
     @field_validator("id")
     @classmethod
@@ -252,6 +255,13 @@ class SemanticContract(StrictModel):
         status_by_id = {
             entity.id: entity.publication_status for entity in self.entity_types
         }
+        layer_by_id = {
+            entity.id: (
+                entity.semantic_layer
+                or ("common" if entity.abstract or entity.parent is None else "domain")
+            )
+            for entity in self.entity_types
+        }
         for relationship in self.relationship_types:
             if relationship.source_type not in known_ids:
                 raise ValueError(
@@ -270,6 +280,14 @@ class SemanticContract(StrictModel):
                 raise ValueError(
                     f"Core relationship '{relationship.predicate}' cannot target "
                     "an excluded entity type."
+                )
+            if relationship.semantic_layer == "common" and (
+                layer_by_id[relationship.source_type] != "common"
+                or layer_by_id[relationship.target_type] != "common"
+            ):
+                raise ValueError(
+                    f"Common relationship '{relationship.predicate}' must connect "
+                    "common entity types."
                 )
             if (
                 relationship.inverse

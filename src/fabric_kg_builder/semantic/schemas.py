@@ -301,6 +301,7 @@ class ManifestEntityTypeEntry(_StrictPersistedModel):
     hierarchy: HierarchyMetadata = Field(default_factory=HierarchyMetadata)
     evidence_policy: EvidencePolicy = "optional"
     publication_status: PublicationStatus = "core"
+    semantic_layer: Literal["common", "domain"] = "domain"
     physical_source_table: str | None = None
     ontology_projection: OntologyEntityProjection = Field(
         default_factory=OntologyEntityProjection
@@ -372,6 +373,7 @@ class ManifestRelationshipEntry(_StrictPersistedModel):
     assertion_policy: AssertionPolicy = Field(default_factory=AssertionPolicy)
     evidence_policy: EvidencePolicy = "required_for_asserted"
     publication_status: PublicationStatus = "core"
+    semantic_layer: Literal["common", "domain"] = "domain"
     physical_source_table: str | None = None
     source_endpoint_column: str | None = None
     target_endpoint_column: str | None = None

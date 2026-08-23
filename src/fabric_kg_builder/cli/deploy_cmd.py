@@ -1920,12 +1920,13 @@ def deploy_search_cmd(
 _DEPLOY_GRAPH_EPILOG = """\b
 Example:
   fabric-kg deploy-graph --env dev --parquet-dir build\\parquet --dry-run
+  fabric-kg deploy-graph --env dev --graph-definition-file build\\graph\\graph-definition.json --dry-run
   fabric-kg deploy-graph --env dev --parquet-dir build\\parquet --no-dry-run \
     --graph-preview-acknowledged
 
-Refreshes the configured Graph Model from semantic_entities and
-semantic_relationships. It does not create or modify AI Search indexes,
-Ontologies, or Data Agents.
+Refreshes the configured Graph Model from a compiled graph-definition.json or
+from semantic_entities and semantic_relationships. It does not create or modify
+AI Search indexes, Ontologies, or Data Agents.
 """
 
 
@@ -1937,6 +1938,18 @@ Ontologies, or Data Agents.
               show_default=True, help="Directory containing compiled Parquet tables.")
 @click.option("--graph-artifact-out", default="build/graph", type=click.Path(),
               show_default=True, help="Directory for the Graph Model mapping artifact.")
+@click.option(
+    "--graph-definition-file",
+    default=None,
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="Deploy an already compiled graph-definition.json instead of rebuilding from Parquet.",
+)
+@click.option(
+    "--label-catalog-file",
+    default=None,
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="Label catalogue paired with --graph-definition-file; defaults to its sibling label-catalog.json.",
+)
 @click.option("--graph-preview-acknowledged", is_flag=True, default=False,
               help="Acknowledge use of the Fabric GraphModel preview API.")
 @click.option("--recreate", is_flag=True, default=False,
@@ -1954,6 +1967,8 @@ def deploy_graph_cmd(
     env: str,
     parquet_dir: str,
     graph_artifact_out: str,
+    graph_definition_file: Path | None,
+    label_catalog_file: Path | None,
     graph_preview_acknowledged: bool,
     recreate: bool,
     replace: bool,
@@ -1981,42 +1996,93 @@ def deploy_graph_cmd(
     if recreate and replace:
         raise click.ClickException("Use either --recreate or --replace, not both.")
 
-    source_dir = Path(parquet_dir)
-    entities_path = source_dir / "semantic_entities.parquet"
-    relationships_path = source_dir / "semantic_relationships.parquet"
-    if not entities_path.is_file() or not relationships_path.is_file():
-        raise click.ClickException(
-            "semantic_entities.parquet and semantic_relationships.parquet are "
-            f"required in {source_dir}. Run 'fabric-kg compile-data' first."
-        )
-
-    import pyarrow.parquet as pq  # type: ignore[import]
     from fabric_kg_builder.serving.graph_model import (
         build_graph_model_parts,
         create_or_get_graph_model,
         delete_graph_model,
         extract_entity_types_from_parquet,
         extract_relationship_pairs_from_parquet,
+        validate_graph_data_source_paths,
         write_graph_mapping_artifact,
     )
 
-    entity_rows = pq.read_table(str(entities_path)).to_pylist()
-    relationship_rows = pq.read_table(str(relationships_path)).to_pylist()
-    entity_types = extract_entity_types_from_parquet(entity_rows)
-    entities_by_id = {
-        str(row["entity_id"]) for row in entity_rows if row.get("entity_id")
-    }
-    relationship_pairs = extract_relationship_pairs_from_parquet(
-        relationship_rows,
-        {entity_id: row for entity_id, row in (
-            (str(row["entity_id"]), row) for row in entity_rows
-            if row.get("entity_id")
-        )},
-        min_pair_count=3,
-        max_pairs=40,
-    )
-    if not entity_types or not entities_by_id:
-        raise click.ClickException("Semantic entity table contains no graph nodes.")
+    if graph_definition_file is not None:
+        graph_artifact = _load_json_object(graph_definition_file)
+        parts = graph_artifact.get("parts")
+        if not isinstance(parts, list) or not parts:
+            raise click.ClickException(
+                f"{graph_definition_file} does not contain Graph definition parts."
+            )
+        catalog_path = label_catalog_file or graph_definition_file.with_name(
+            "label-catalog.json"
+        )
+        if not catalog_path.is_file():
+            raise click.ClickException(
+                "Compiled Graph deployment requires label-catalog.json."
+            )
+        _load_json_object(catalog_path)
+        try:
+            validate_graph_data_source_paths(parts)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        graph_type = next(
+            (
+                part.get("payload_json", {})
+                for part in parts
+                if Path(str(part.get("path", ""))).name == "graphType.json"
+            ),
+            {},
+        )
+        if not isinstance(graph_type, dict):
+            raise click.ClickException(
+                f"{graph_definition_file} has an invalid graphType.json payload."
+            )
+        entity_types = [
+            str(labels[0])
+            for item in graph_type.get("nodeTypes", [])
+            if isinstance(item, dict)
+            and isinstance((labels := item.get("labels")), list)
+            and labels
+        ]
+        relationship_pairs = [
+            item
+            for item in graph_type.get("edgeTypes", [])
+            if isinstance(item, dict)
+        ]
+        entity_row_count = 0
+        relationship_row_count = 0
+        graph_source = str(graph_definition_file)
+    else:
+        source_dir = Path(parquet_dir)
+        entities_path = source_dir / "semantic_entities.parquet"
+        relationships_path = source_dir / "semantic_relationships.parquet"
+        if not entities_path.is_file() or not relationships_path.is_file():
+            raise click.ClickException(
+                "semantic_entities.parquet and semantic_relationships.parquet are "
+                f"required in {source_dir}. Run 'fabric-kg compile-data' first."
+            )
+        import pyarrow.parquet as pq  # type: ignore[import]
+
+        entity_rows = pq.read_table(str(entities_path)).to_pylist()
+        relationship_rows = pq.read_table(str(relationships_path)).to_pylist()
+        entity_types = extract_entity_types_from_parquet(entity_rows)
+        entities_by_id = {
+            str(row["entity_id"]) for row in entity_rows if row.get("entity_id")
+        }
+        relationship_pairs = extract_relationship_pairs_from_parquet(
+            relationship_rows,
+            {entity_id: row for entity_id, row in (
+                (str(row["entity_id"]), row) for row in entity_rows
+                if row.get("entity_id")
+            )},
+            min_pair_count=3,
+            max_pairs=40,
+        )
+        if not entity_types or not entities_by_id:
+            raise click.ClickException("Semantic entity table contains no graph nodes.")
+        entity_row_count = len(entity_rows)
+        relationship_row_count = len(relationship_rows)
+        graph_source = str(source_dir)
 
     graph_name = fabric_cfg["graph_model_display_name"]
 
@@ -2038,17 +2104,18 @@ def deploy_graph_cmd(
     if dry_run:
         click.echo(render_name_resolution(resolved_graph))
 
-    parts = build_graph_model_parts(
-        entity_types=entity_types,
-        relationship_pairs=relationship_pairs,
-        workspace_id=workspace_id,
-        lakehouse_item_id=lakehouse_item_id,
-        schema=fabric_cfg["schema_name"],
-        model_name=graph_name,
-        entity_table="semantic_entities",
-        relationship_table="semantic_relationships",
-        include_semantic_properties=True,
-    )
+    if graph_definition_file is None:
+        parts = build_graph_model_parts(
+            entity_types=entity_types,
+            relationship_pairs=relationship_pairs,
+            workspace_id=workspace_id,
+            lakehouse_item_id=lakehouse_item_id,
+            schema=fabric_cfg["schema_name"],
+            model_name=graph_name,
+            entity_table="semantic_entities",
+            relationship_table="semantic_relationships",
+            include_semantic_properties=True,
+        )
     write_graph_mapping_artifact(
         Path(graph_artifact_out),
         parts,
@@ -2060,8 +2127,9 @@ def deploy_graph_cmd(
 
     click.echo(
         f"[deploy-graph] GraphModel: {graph_name} ({graph_model_id})\n"
-        f"[deploy-graph] Semantic tables: {len(entity_rows)} entities, "
-        f"{len(relationship_rows)} relationships\n"
+        f"[deploy-graph] Source: {graph_source}\n"
+        f"[deploy-graph] Semantic rows: {entity_row_count} entities, "
+        f"{relationship_row_count} relationships\n"
         f"[deploy-graph] Graph schema: {len(entity_types)} node labels, "
         f"{len(relationship_pairs)} edge bindings"
     )
@@ -3196,6 +3264,21 @@ def deploy_serving_cmd(
         )
 
     result = deploy_all(cfg, transports=tp, dry_run=dry_run)
+    if result.errors:
+        details = "\n".join(f"  - {error}" for error in result.errors)
+        partial = "\n".join(
+            f"  - {failure}" for failure in result.partial_failures
+        )
+        configured_graph_id = str(cfg.graph_model_id or "(not configured)")
+        message = (
+            "Serving deployment failed before persisted readiness checks.\n"
+            f"Configured Graph Model ID: {configured_graph_id}\n"
+            f"Returned Graph Model ID: {result.graph_model_id or '(none)'}\n"
+            f"Errors:\n{details}"
+        )
+        if partial:
+            message += f"\nPartial failures:\n{partial}"
+        raise click.ClickException(message)
     graph_persisted_evidence = None
     graph_query_readiness = None
     if semantic_loaded is not None and not dry_run:

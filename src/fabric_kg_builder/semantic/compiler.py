@@ -766,6 +766,9 @@ def _build_manifest(
             column_by_name[column_name]
             for column_name in sorted(column_by_name)
         ]
+        semantic_layer = entity.semantic_layer or (
+            "common" if entity.abstract or entity.parent is None else "domain"
+        )
         manifest_entities.append(
             ManifestEntityTypeEntry(
                 semantic_id=entity.id,
@@ -784,6 +787,7 @@ def _build_manifest(
                 ),
                 evidence_policy="optional",
                 publication_status=entity.publication_status,
+                semantic_layer=semantic_layer,
                 physical_source_table=table_name,
                 ontology_projection=OntologyEntityProjection(
                     ontology_type_id=ontology_type_id,
@@ -852,6 +856,10 @@ def _build_manifest(
         "relationship_semantics",
         {},
     )
+    entity_layer_by_id = {
+        entity.semantic_id: entity.semantic_layer
+        for entity in manifest_entities
+    }
     for relationship in selected_relationships:
         mapping = relationship_mappings[relationship.id]
         source_ontology_id = str(
@@ -876,6 +884,12 @@ def _build_manifest(
                 f"relationship_semantics entry for '{relationship.id}' "
                 "must be an object."
             )
+        semantic_layer = relationship.semantic_layer or (
+            "common"
+            if entity_layer_by_id.get(relationship.source_type) == "common"
+            and entity_layer_by_id.get(relationship.target_type) == "common"
+            else "domain"
+        )
         manifest_relationships.append(
             ManifestRelationshipEntry(
                 semantic_id=relationship.id,
@@ -906,6 +920,7 @@ def _build_manifest(
                 assertion_policy=relationship.assertion_policy,
                 evidence_policy=relationship.evidence_policy,
                 publication_status=relationship.publication_status,
+                semantic_layer=semantic_layer,
                 physical_source_table=table_name,
                 source_endpoint_column=mapping.source_entity_id_column,
                 target_endpoint_column=mapping.target_entity_id_column,
@@ -1144,6 +1159,26 @@ def build_ontology_projection(
         entity.semantic_id: entity.canonical_name
         for entity in manifest.entity_types
     }
+    common_entities = [
+        entity.canonical_name
+        for entity in manifest.entity_types
+        if entity.semantic_layer == "common"
+    ]
+    domain_entities = [
+        entity.canonical_name
+        for entity in manifest.entity_types
+        if entity.semantic_layer == "domain"
+    ]
+    common_relationships = [
+        relationship.predicate
+        for relationship in manifest.relationship_types
+        if relationship.semantic_layer == "common"
+    ]
+    domain_relationships = [
+        relationship.predicate
+        for relationship in manifest.relationship_types
+        if relationship.semantic_layer == "domain"
+    ]
 
     def physical_entity_id_property(entity_id: str) -> str:
         table = entity_table_by_id[entity_id]
@@ -1163,24 +1198,40 @@ def build_ontology_projection(
         "version": contract_version,
         "modules": [
             {
-                "name": "canonical-semantic-contract",
+                "name": "common-entities",
                 "description": (
-                    "Types projected from the sealed semantic model manifest."
+                    "Reusable thing and concept types shared across domains."
                 ),
-                "entityTypeNames": [
-                    entity.canonical_name
-                    for entity in manifest.entity_types
-                ],
-                "relationshipTypeNames": [
-                    relationship.predicate
-                    for relationship in manifest.relationship_types
-                ],
-            }
+                "entityTypeNames": common_entities,
+                "relationshipTypeNames": [],
+            },
+            {
+                "name": "common-relationships",
+                "description": (
+                    "Reusable directed verbs connecting common semantic types."
+                ),
+                "entityTypeNames": common_entities,
+                "relationshipTypeNames": common_relationships,
+            },
+            {
+                "name": "domain",
+                "description": (
+                    "Domain-specific nouns and directed verbs projected from "
+                    "the sealed semantic model manifest."
+                ),
+                "entityTypeNames": domain_entities,
+                "relationshipTypeNames": domain_relationships,
+            },
         ],
         "entityTypes": [
             {
                 "name": entity.canonical_name,
                 "description": entity.description,
+                "module": (
+                    "common-entities"
+                    if entity.semantic_layer == "common"
+                    else "domain"
+                ),
                 "properties": [
                     _ontology_property(prop)
                     for prop in properties_by_owner.get(
@@ -1216,6 +1267,11 @@ def build_ontology_projection(
             {
                 "name": relationship.predicate,
                 "description": relationship.description,
+                "module": (
+                    "common-relationships"
+                    if relationship.semantic_layer == "common"
+                    else "domain"
+                ),
                 "sourceType": entity_name_by_id[
                     relationship.source_type_id
                 ],
