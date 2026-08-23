@@ -4,6 +4,8 @@
 
 📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
+📋 **Current assessment and roadmap:** [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md)
+
 ---
 
 ## What It Does
@@ -32,6 +34,8 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 - **8-table canonical Parquet schema** — durable data contract; source-controlled and versionable  
 - **Fabric Ontology** — generates Ontology definition parts deployable to any Fabric workspace  
 - **Azure AI Search** — vector (text-embedding-3-large, 1536 dims) + keyword indexes for grounded retrieval  
+- **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
+- **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
 - **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  
 - **Multi-environment** — `dev` / `test` / `prod` configs in `ontology/environments/`  
 - **Resume-safe enrichment** — `--resume` skips already-processed files  

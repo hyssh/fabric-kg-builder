@@ -703,6 +703,53 @@ def encode_parts_for_api(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return encoded
 
 
+def validate_graph_data_source_paths(parts: list[dict[str, Any]]) -> None:
+    """Validate dataSources/1.1.0 Lakehouse reference and path semantics."""
+    payload = next(
+        (
+            part.get("payload_json")
+            for part in parts
+            if Path(str(part.get("path", ""))).name == "dataSources.json"
+        ),
+        None,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Graph definition is missing dataSources.json.")
+
+    references = {
+        str(reference.get("name"))
+        for reference in payload.get("itemReferences", [])
+        if isinstance(reference, dict) and reference.get("name")
+    }
+    for source in payload.get("dataSources", []):
+        if not isinstance(source, dict):
+            continue
+        properties = source.get("properties")
+        if not isinstance(properties, dict):
+            raise ValueError(
+                f"Graph data source {source.get('name')!r} has no properties object."
+            )
+        reference_name = str(properties.get("referenceName") or "")
+        path = str(properties.get("path") or "")
+        if reference_name and reference_name not in references:
+            raise ValueError(
+                f"Graph data source {source.get('name')!r} references unknown "
+                f"itemReference {reference_name!r}."
+            )
+        if reference_name and "://" in path:
+            raise ValueError(
+                f"Graph data source {source.get('name')!r} combines "
+                f"referenceName={reference_name!r} with an absolute path {path!r}. "
+                "dataSources/1.1.0 paths must be relative to the referenced "
+                "Lakehouse, for example 'Tables/dbo/<table>'."
+            )
+        if reference_name and not re.fullmatch(r"Tables/[^/]+/[^/]+", path):
+            raise ValueError(
+                f"Graph data source {source.get('name')!r} has invalid relative "
+                f"Lakehouse path {path!r}; expected 'Tables/<schema>/<table>'."
+            )
+
+
 def extract_entity_types_from_parquet(entities_rows: list[dict[str, Any]]) -> list[str]:
     """Extract distinct entity type names from observed entity rows (first-seen order)."""
     seen: dict[str, None] = {}
@@ -1027,6 +1074,7 @@ def create_or_get_graph_model(
     # Source: https://learn.microsoft.com/en-us/rest/api/fabric/graphmodel/items/update-graph-model-definition
     # URL: POST /v1/workspaces/{ws}/graphModels/{id}/updateDefinition?updateMetadata=true
     # NOT /items/{id}/updateDefinition
+    validate_graph_data_source_paths(parts)
     encoded_parts = encode_parts_for_api(parts)
     update_url = (
         f"{_FABRIC_API_BASE}/workspaces/{workspace_id}"

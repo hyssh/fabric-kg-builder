@@ -89,16 +89,29 @@ class TestLakehouseProjectionConstants:
         """Default scope covers all canonical tables (chunks excluded)."""
         assert len(LAKEHOUSE_TABLES) == 19
 
-    def test_graph_tables_have_none_projection(self) -> None:
-        """source_files, entities, relationships, evidence, visual_assets, visual_regions use None (all cols)."""
-        full_tables = [
+    def test_graph_tables_have_scalar_projection(self) -> None:
+        """Every SQL-facing table uses an explicit scalar-only projection."""
+        graph_tables = [
             "source_files", "entities", "relationships",
             "evidence", "visual_assets", "visual_regions",
         ]
-        for t in full_tables:
-            assert LAKEHOUSE_TABLE_PROJECTION[t] is None, (
-                f"{t} should have None projection (all columns)"
+        for table in graph_tables:
+            assert isinstance(LAKEHOUSE_TABLE_PROJECTION[table], list), (
+                f"{table} should have an explicit scalar projection"
             )
+
+    def test_entity_projection_excludes_native_lists(self) -> None:
+        projection = LAKEHOUSE_TABLE_PROJECTION["entities"]
+        assert "aliases" not in projection
+        assert "search_aliases" not in projection
+        assert "evidence_ids" not in projection
+        assert "cannot_link_keys" not in projection
+
+    def test_semantic_entity_projection_uses_json_aliases(self) -> None:
+        projection = LAKEHOUSE_TABLE_PROJECTION["semantic_entities"]
+        assert "aliases" not in projection
+        assert "aliases_json" in projection
+        assert "evidence_ids_json" in projection
 
     def test_document_elements_projection_is_list(self) -> None:
         """document_elements must have an explicit column list (lean projection)."""
@@ -237,8 +250,8 @@ class TestOneLakeWriterProjection:
         assert "element_type" in written_cols
         assert "content_hash" in written_cols
 
-    def test_live_full_table_keeps_all_columns(self, tmp_path: Path) -> None:
-        """Tables with None projection (e.g. entities) keep all columns."""
+    def test_live_scalar_table_keeps_present_projected_columns(self, tmp_path: Path) -> None:
+        """Scalar columns included in the serving projection are preserved."""
         ent_tbl = pa.table({
             "entity_id": ["e-1"],
             "entity_type": ["Component"],
@@ -271,6 +284,29 @@ class TestOneLakeWriterProjection:
         assert set(written.schema.names) == {
             "entity_id", "entity_type", "display_name", "canonical_key", "content_hash"
         }
+
+    def test_nested_column_is_rejected_before_write(self, tmp_path: Path) -> None:
+        tbl = pa.table({
+            "entity_id": ["e-1"],
+            "aliases": [["battery", "cell"]],
+        })
+        pq.write_table(tbl, str(tmp_path / "entities.parquet"))
+
+        with patch("deltalake.write_deltalake") as write_mock:
+            results = deploy_parquet_to_onelake(
+                parquet_dir=tmp_path,
+                workspace_id=_WS_ID,
+                lakehouse_item_id=_LH_ID,
+                schema=_SCHEMA,
+                tables=["entities"],
+                token_provider=lambda: "tok",
+                mock=False,
+                projection={"entities": ["entity_id", "aliases"]},
+            )
+
+        write_mock.assert_not_called()
+        assert results["entities"].startswith("error:")
+        assert "aliases" in results["entities"]
 
     def test_defensive_select_when_projection_col_absent(self, tmp_path: Path) -> None:
         """Projection columns absent from the parquet file are silently ignored (no crash)."""

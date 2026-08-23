@@ -11,9 +11,13 @@ from pathlib import Path
 
 import click
 
+from fabric_kg_builder import __version__
 from fabric_kg_builder.semantic.artifact_validation import (
     SemanticArtifactValidationError,
     validate_compiled_semantic_artifacts,
+)
+from fabric_kg_builder.semantic.connection_guide import (
+    build_ontology_search_connection_guide,
 )
 
 _REQUIRED_DIRS = ["parquet", "semantic", "ontology", "graph", "agents"]
@@ -223,6 +227,20 @@ def package_cmd(build_dir: str, output_path: str, include_search: bool) -> None:
                 err=True,
             )
 
+    guide_path = pkg_dir / "ONTOLOGY_SEARCH_CONNECTION.md"
+    guide_path.write_text(
+        build_ontology_search_connection_guide(pkg_dir),
+        encoding="utf-8",
+    )
+    guide_hash = "sha256:" + hashlib.sha256(guide_path.read_bytes()).hexdigest()
+    manifest_artifacts["connection_guide"] = {
+        "file_count": 1,
+        "total_bytes": guide_path.stat().st_size,
+        "files": [guide_path.name],
+        "file_hashes": {guide_path.name: guide_hash},
+    }
+    click.echo(f"[package]   connection guide: {guide_path.name}")
+
     # Write manifest.json
     package_hash = hashlib.sha256(
         json.dumps(
@@ -233,7 +251,7 @@ def package_cmd(build_dir: str, output_path: str, include_search: bool) -> None:
     ).hexdigest()
     manifest = {
         "schema_version": "1",
-        "package_version": "0.2.0",
+        "package_version": __version__,
         "contract_hash": contract_hash,
         "semantic_model_manifest_hash": validation_report.get(
             "semantic_model_manifest_hash"

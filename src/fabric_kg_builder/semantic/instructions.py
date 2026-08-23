@@ -45,10 +45,16 @@ def build_contract_agent_instructions(
         [
             "",
             "## Routing",
-            "- Use Ontology to interpret approved business concepts, properties, "
-            "and relationship meaning.",
+            "- Fabric Ontology and Fabric Graph are required for reliable structured "
+            "query execution.",
+            "- Use Ontology first to interpret approved common/domain entity nouns, "
+            "properties, and relationship verb meaning.",
             "- Use Graph for exact relationship traversal, paths, dependencies, "
             "ownership, location, coverage, installation, and replacement lineage.",
+            "- Use AI Search after Ontology/Graph resolution for detailed definitions, "
+            "descriptions, and verbatim source quotations. Filter Search with returned "
+            "canonical IDs when available.",
+            "- Never use Search text similarity alone to assert a structured relationship.",
             "- Do not use Lakehouse or infer a relationship from similar names or "
             "document proximity.",
             "",
