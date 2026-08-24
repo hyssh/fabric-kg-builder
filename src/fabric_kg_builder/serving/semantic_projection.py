@@ -916,30 +916,69 @@ def _schema2_entity_validation(
     if contract_hash != active_hash:
         reasons.append("STALE_CONTRACT_HASH")
 
-    verified = sorted(
-        set(_schema2_verified_evidence(row, values, evidence_by_id))
-        | (endpoint_evidence or set())
-    )
+    explicit_evidence_ids = _schema2_evidence_ids(row, values)
     source_file_id = str(row.get("source_file_id") or "")
-    if source_file_id:
-        verified = [
-            evidence_id
-            for evidence_id in verified
-            if str(evidence_by_id[evidence_id].get("source_file_id") or "")
+    dangling_evidence_ids = sorted(
+        evidence_id
+        for evidence_id in explicit_evidence_ids
+        if evidence_id not in evidence_by_id
+    )
+    unverified_evidence_ids = sorted(
+        evidence_id
+        for evidence_id in explicit_evidence_ids
+        if evidence_id in evidence_by_id
+        and evidence_by_id[evidence_id].get("runner_verified") is not True
+    )
+    source_mismatched_evidence_ids = sorted(
+        evidence_id
+        for evidence_id in explicit_evidence_ids
+        if source_file_id
+        and evidence_id in evidence_by_id
+        and str(evidence_by_id[evidence_id].get("source_file_id") or "")
+        != source_file_id
+    )
+    directly_verified = {
+        evidence_id
+        for evidence_id in explicit_evidence_ids
+        if evidence_id in evidence_by_id
+        and evidence_by_id[evidence_id].get("runner_verified") is True
+        and (
+            not source_file_id
+            or str(evidence_by_id[evidence_id].get("source_file_id") or "")
             == source_file_id
-        ]
+        )
+    }
+    verified_endpoint_evidence = {
+        evidence_id
+        for evidence_id in (endpoint_evidence or set())
+        if evidence_id in evidence_by_id
+        and evidence_by_id[evidence_id].get("runner_verified") is True
+        and (
+            not source_file_id
+            or str(evidence_by_id[evidence_id].get("source_file_id") or "")
+            == source_file_id
+        )
+    }
+    verified = sorted(directly_verified | verified_endpoint_evidence)
+    if dangling_evidence_ids:
+        reasons.append("ENTITY_EVIDENCE_DANGLING")
+    if unverified_evidence_ids:
+        reasons.append("ENTITY_EVIDENCE_UNVERIFIED")
+    if source_mismatched_evidence_ids:
+        reasons.append("ENTITY_EVIDENCE_SOURCE_MISMATCH")
     business_approved = bool(
         definition
         and definition.business_defined
         and _schema2_entity_approval(row, contract)
     )
     if not verified and not business_approved:
-        evidence_ids = _schema2_evidence_ids(row, values)
-        if not evidence_ids:
+        if not explicit_evidence_ids:
             reasons.append("ENTITY_EVIDENCE_MISSING")
-        elif not any(item in evidence_by_id for item in evidence_ids):
-            reasons.append("ENTITY_EVIDENCE_DANGLING")
-        else:
+        elif not (
+            dangling_evidence_ids
+            or unverified_evidence_ids
+            or source_mismatched_evidence_ids
+        ):
             reasons.append("ENTITY_EVIDENCE_UNVERIFIED")
     return {
         "assertion_state": assertion_state,
@@ -949,6 +988,9 @@ def _schema2_entity_validation(
         "definition": definition,
         "contract_hash": contract_hash,
         "verified_evidence_ids": verified,
+        "dangling_evidence_ids": dangling_evidence_ids,
+        "unverified_evidence_ids": unverified_evidence_ids,
+        "source_mismatched_evidence_ids": source_mismatched_evidence_ids,
         "business_approved": business_approved,
         "reasons": sorted(set(reasons)),
     }
@@ -1295,6 +1337,7 @@ def _schema2_projection(
         entity_groups.setdefault(group_key, []).append(item)
 
     entity_winners: dict[str, dict[str, Any]] = {}
+    entity_winner_item_by_id: dict[str, dict[str, Any]] = {}
     entity_conflict_violations: list[str] = []
     entity_winner_key_by_occurrence: dict[str, str] = {}
     for group_key, items in sorted(entity_groups.items()):
@@ -1320,6 +1363,7 @@ def _schema2_projection(
             merged["audit_reason_codes"] = reasons
         if entity_id:
             entity_winners[entity_id] = merged
+            entity_winner_item_by_id[entity_id] = winner_item
         for item in items:
             entity_winner_key_by_occurrence[item["occurrence_key"]] = (
                 winner_item["occurrence_key"]
@@ -1389,6 +1433,22 @@ def _schema2_projection(
             ),
         )
         item["validation"] = validation
+        if validation["assertion_state"] == "asserted" and validation["reasons"]:
+            entity_hard_violations.extend(
+                f"{item['occurrence_key']}:{reason}"
+                for reason in validation["reasons"]
+            )
+
+    verified_evidence_by_entity: dict[str, list[str]] = {}
+    for entity_id, items in sorted(entity_groups.items()):
+        verified_evidence_by_entity[entity_id] = sorted({
+            evidence_id
+            for item in items
+            for evidence_id in item["validation"]["verified_evidence_ids"]
+        })
+
+    for item in entity_occurrences:
+        validation = item["validation"]
         selected = (
             entity_winner_key_by_occurrence[item["occurrence_key"]]
             == item["occurrence_key"]
@@ -1398,11 +1458,6 @@ def _schema2_projection(
             reasons.add("ENTITY_AUTHORITY_CONFLICT")
         if not selected:
             reasons.add("ENTITY_OCCURRENCE_DEDUPLICATED")
-        if validation["assertion_state"] == "asserted" and validation["reasons"]:
-            entity_hard_violations.extend(
-                f"{item['occurrence_key']}:{reason}"
-                for reason in validation["reasons"]
-            )
         entity_reconciliation.append({
             "occurrence_key": item["occurrence_key"],
             "entity_id": item["entity_id"],
@@ -1410,6 +1465,13 @@ def _schema2_projection(
             "authority_hash": item["authority_hash"],
             "evidence_ids": item["evidence_ids"],
             "merged_evidence_ids": item["merged_evidence_ids"],
+            "verified_evidence_ids": validation["verified_evidence_ids"],
+            "merged_verified_evidence_ids": verified_evidence_by_entity.get(
+                item["entity_id"], []
+            ),
+            "source_mismatched_evidence_ids": validation[
+                "source_mismatched_evidence_ids"
+            ],
             "winner_occurrence_key": entity_winner_key_by_occurrence[
                 item["occurrence_key"]
             ],
@@ -1420,18 +1482,11 @@ def _schema2_projection(
     entity_reconciliation.sort(key=lambda row: row["occurrence_key"])
 
     for entity_id, row in sorted(entity_winners.items()):
-        validation = _schema2_entity_validation(
-            row,
-            contract=contract,
-            active_hash=active_hash,
-            entity_definitions=entity_definitions,
-            evidence_by_id=evidence_by_id,
-            endpoint_evidence=endpoint_evidence_by_entity.get(entity_id, set()),
-        )
+        validation = entity_winner_item_by_id[entity_id]["validation"]
         if validation["reasons"]:
             continue
         definition = validation["definition"]
-        verified = validation["verified_evidence_ids"]
+        verified = verified_evidence_by_entity.get(entity_id, [])
         supporting = [evidence_by_id[item] for item in verified]
         aliases = _schema2_strings(
             list(row.get("aliases") or [])

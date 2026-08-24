@@ -364,6 +364,68 @@ def test_duplicate_entity_evidence_is_merged_without_authority_conflict() -> Non
     )
 
 
+def test_duplicate_entity_occurrences_retain_verified_evidence_from_each_source() -> None:
+    entities = _entities()
+    entities[0]["source_file_id"] = "source:1"
+    second_occurrence = copy.deepcopy(entities[0])
+    second_occurrence["source_file_id"] = "source:2"
+    second_occurrence["evidence_ids"] = ["evidence:2"]
+    entities.append(second_occurrence)
+    evidence_2 = _evidence("evidence:2")
+    evidence_2["source_file_id"] = "source:2"
+
+    result = build_semantic_projection(
+        entities,
+        [_relationship("rel:valid")],
+        [_evidence(), evidence_2],
+        schema2_contract=_contract(),
+    )
+    assert isinstance(result, SemanticProjectionResult)
+    assert result.receipt["status"] == "succeeded"
+    facility = next(
+        row
+        for row in result.semantic_entities
+        if row["entity_id"] == "entity:facility"
+    )
+    assert facility["evidence_ids"] == ["evidence:1", "evidence:2"]
+    facility_records = [
+        record
+        for record in result.receipt["entity_reconciliation_records"]
+        if record["entity_id"] == "entity:facility"
+    ]
+    assert all(
+        record["merged_verified_evidence_ids"]
+        == ["evidence:1", "evidence:2"]
+        for record in facility_records
+    )
+
+
+def test_duplicate_entity_cross_source_evidence_is_rejected_per_occurrence() -> None:
+    entities = _entities()
+    entities[0]["source_file_id"] = "source:1"
+    mismatched = copy.deepcopy(entities[0])
+    mismatched["source_file_id"] = "source:2"
+    entities.append(mismatched)
+
+    result = build_semantic_projection(
+        entities,
+        [_relationship("rel:valid")],
+        [_evidence()],
+        schema2_contract=_contract(),
+    )
+    assert isinstance(result, SemanticProjectionResult)
+    assert result.receipt["status"] == "failed"
+    mismatch_record = next(
+        record
+        for record in result.receipt["entity_reconciliation_records"]
+        if record["source_mismatched_evidence_ids"] == ["evidence:1"]
+    )
+    assert "ENTITY_EVIDENCE_SOURCE_MISMATCH" in mismatch_record["reason_codes"]
+    assert mismatch_record["verified_evidence_ids"] == []
+    assert result.semantic_entities == []
+    assert result.semantic_relationships == []
+
+
 def test_hard_invariant_failure_returns_empty_atomic_serving_output() -> None:
     result = _project([
         _relationship("rel:invalid-asserted", evidence_id=None)
