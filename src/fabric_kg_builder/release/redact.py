@@ -89,10 +89,13 @@ _FREE_TEXT_SECRET_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 _REDACTED_PLACEHOLDER = "[REDACTED]"
+_CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _looks_like_secret(value: str) -> bool:
     """Return True when *value* matches a known secret pattern."""
+    if _CANONICAL_SHA256.fullmatch(value):
+        return False
     for pattern in _SECRET_VALUE_PATTERNS:
         if pattern.search(value):
             return True

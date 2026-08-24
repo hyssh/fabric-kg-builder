@@ -15,6 +15,7 @@
 | 2026-06-24T12:42:17.255-07:00 | Keyser | v4 — Canonical naming reconciliation: `compile-search-index` → `compile-search`; stage 2 `ingest` → `inspect-source`; config keys `vision_model_deployment` → `vision_deployment`, `foundry.project_name` → `foundry.project`; `.env` keys `AZURE_DOC_INTELLIGENCE_*` → `AZURE_DOCINTEL_*`; vision default = chat deployment (multimodal; gpt-4.1 interim / GPT-5.5-mini target), `example-vision`/`gpt-4o` as alternative; PRD coverage table updated; build-deploy pipeline sequence corrected. |
 | 2026-06-24T15:41:07.842-07:00 | Verbal | v5 — Enrichment default corrected to gpt-5.4-mini (deployment `gpt-5-4-mini`, 200K TPM GlobalStandard); 200K TPM minimum documented in §5.1 and §10 decisions; AI Search corrected to IN MVP scope (decision 8); reference REQUIREMENTS-001 for setup. |
 | 2026-08-23 | Copilot | v6 — Added the additive schema-2.0 domain foundation for new projects: strict version discrimination, bounded relationship vocabulary N, derived reasoning depth K, typed directed question paths, and explicit 1.0 compatibility. Interactive proposal and approval automation are specified but activate in a later implementation layer. |
+| 2026-08-24 | Copilot | v7 — Added schema-2.0 sealed projection/support-source authority, deterministic typed-table materialization receipts, Ontology/Graph read-back ordering, and semantic input fingerprint invalidation for resume. |
 
 ---
 
@@ -678,11 +679,12 @@ dist/                            # Stage: package
 | inspect-source | Raw source files | Schema profile (stdout/file) |
 | enrich | Raw source files + config + domain.json (optional) | `build/enriched/*.json` |
 | compile-data | `build/enriched/` + manifest-bound approved schema-2 contract | raw and semantic Parquet tables + `semantic-projection-receipt.json` |
-| compile-ontology | `ontology/model.yaml`, `ids.lock.json`, Parquet schemas | `build/ontology/` |
+| compile-ontology | sealed semantic manifest, crosswalk, materialization plan, and projection receipt binding (schema-2); legacy model/IDs (schema-1) | `build/ontology/` + authority-bound manifest |
 | compile-search | `build/parquet/` — **text/visual tables only** (chunks, document_elements, visual_assets) | `build/search/` |
 | package | `build/*` | `dist/` |
-| deploy-lakehouse | `dist/parquet/` + env config | Fabric Lakehouse / OneLake state (all structured data) |
-| deploy-ontology | `dist/ontology/` + env config | Fabric Ontology state |
+| deploy-lakehouse | `dist/parquet/` + sealed semantic authority + successful projection receipt + env config | Fabric Lakehouse / OneLake state + exact typed-table materialization receipt |
+| deploy-ontology | `dist/ontology/` + successful materialization receipt + env config | persisted/read-back Fabric Ontology receipt |
+| deploy-graph / deploy-serving | sealed Graph definition + materialization and Ontology receipts | persisted/read-back Graph receipt |
 | deploy-search | `dist/search/` + env config | AI Search index state (text/visual only) |
 | validate | Deployed state + env config | Validation report |
 
@@ -729,6 +731,34 @@ build/enriched/.checkpoint/
 | Force | `--force` flag deletes checkpoint; restarts from scratch |
 | Failure handling | Failed files recorded in state.json with error; exit code 4 |
 | Timeout | Per-file timeout configurable; default 120s per LLM call |
+
+For schema-2 semantic stages, `--resume` skips a successful stage only when its
+stored input fingerprint still matches. The fingerprint covers the layer-4
+projection receipt, exact Parquet/support sources, semantic manifest,
+materialization plan, compiled Ontology/Graph artifacts, and upstream deployment
+receipts as appropriate. Projection or materialization drift invalidates
+`compile-semantic`, `compile-ontology`, `compile-graph`,
+`deploy-lakehouse`, `deploy-ontology`, `deploy-serving`, and
+`validate-projection` without changing unrelated legacy recovery behavior.
+
+### 9.5 Schema-2 deployment authority
+
+Schema-2 typed publication uses a closed, versioned source taxonomy:
+
+| Category | Allowed sources | Rule |
+|---|---|---|
+| semantic entity projection | `semantic_entities` | asserted, approved, active-contract-bound published rows only |
+| semantic relationship projection | `semantic_relationships` | asserted rows with valid evidence and published canonical endpoints only |
+| canonical support entity | `source_files`, `chunks`, `document_elements`, `visual_assets`, `visual_regions` | crosswalk/plan approval plus identity membership in `semantic_entities` for the approved semantic type |
+| validation support | `evidence` | exact hash/count/schema authority for evidence FK validation |
+| denied candidate audit | `entities`, `relationships` | audit/lineage deployment only; never a schema-2 typed-table source |
+
+Every selected source is bound by primary key, canonical row hash, row count,
+and Arrow schema fingerprint. `DocumentChunk.entity_id` maps once to
+`chunks.chunk_id`; support rows not published in `semantic_entities` are not
+materialized. Receipts contain hashes, counts, stable resource identities, and
+redacted bounded errors only—never credentials, tokens, SAS strings, connection
+strings, or source content.
 
 ### 9.4 Determinism Guarantees
 

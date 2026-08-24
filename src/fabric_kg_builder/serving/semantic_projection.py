@@ -9,7 +9,6 @@ endpoints occur together in an existing evidence span.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -22,6 +21,13 @@ from typing import Any
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.domain.service import compute_contract_hash
 from fabric_kg_builder.model.ids import make_id
+from fabric_kg_builder.semantic.canonical_hash import (
+    canonical_hash as _schema2_hash,
+    canonical_json as _schema2_canonical_json,
+    canonical_row_hash as _schema2_row_hash,
+    canonical_table_hash as _schema2_table_hash,
+    canonicalize as _schema2_normalize,
+)
 
 _TYPE_MAP = {
     "facility": "Facility",
@@ -517,19 +523,6 @@ def _build_schema1_semantic_projection(
     }
 
 
-_SCHEMA2_SET_FIELDS = frozenset({
-    "aliases",
-    "search_aliases",
-    "evidence_ids",
-    "evidence_id_hints",
-    "source_span_ids",
-    "reason_codes",
-    "rejection_reasons",
-    "audit_reason_codes",
-    "audit_reasons",
-    "description_evidence_id_hints",
-    "cannot_link_keys",
-})
 _SCHEMA2_LIFECYCLE_RANK = {
     "asserted": 4,
     "unresolved": 3,
@@ -596,82 +589,6 @@ def _schema2_json_metadata(value: Any) -> dict[str, Any] | None:
     except (json.JSONDecodeError, TypeError):
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def _schema2_utc(value: datetime) -> str:
-    if value.tzinfo is None:
-        normalized = value.replace(tzinfo=timezone.utc)
-    else:
-        normalized = value.astimezone(timezone.utc)
-    return normalized.isoformat().replace("+00:00", "Z")
-
-
-def _schema2_normalize(value: Any, *, field_name: str = "") -> Any:
-    if isinstance(value, datetime):
-        return _schema2_utc(value)
-    if isinstance(value, float) and not math.isfinite(value):
-        return {"__invalid_non_finite_number__": repr(value)}
-    if isinstance(value, Mapping):
-        normalized: dict[str, Any] = {}
-        for original_key, item in sorted(
-            value.items(), key=lambda pair: str(pair[0])
-        ):
-            key = str(original_key)
-            if key.endswith("_json") and isinstance(item, str):
-                try:
-                    parsed = json.loads(item)
-                except (json.JSONDecodeError, TypeError):
-                    parsed = item
-                normalized[key] = _schema2_normalize(parsed, field_name=key)
-            else:
-                normalized[key] = _schema2_normalize(item, field_name=key)
-        return normalized
-    if isinstance(value, (list, tuple, set, frozenset)):
-        items = [_schema2_normalize(item) for item in value]
-        if field_name in _SCHEMA2_SET_FIELDS or isinstance(
-            value, (set, frozenset)
-        ):
-            by_json = {
-                _schema2_canonical_json(item): item
-                for item in items
-            }
-            return [by_json[key] for key in sorted(by_json)]
-        return items
-    return value
-
-
-def _schema2_canonical_json(value: Any) -> str:
-    return json.dumps(
-        _schema2_normalize(value),
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _schema2_hash(value: Any) -> str:
-    payload = _schema2_canonical_json(value).encode("utf-8")
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
-
-
-def _schema2_row_hash(row: Mapping[str, Any]) -> str:
-    return _schema2_hash(dict(row))
-
-
-def _schema2_table_hash(
-    rows: list[dict[str, Any]], *primary_keys: str
-) -> str:
-    decorated = [
-        (
-            tuple(str(row.get(key) or "") for key in primary_keys),
-            _schema2_row_hash(row),
-            _schema2_normalize(row),
-        )
-        for row in rows
-    ]
-    decorated.sort(key=lambda item: (item[0], item[1]))
-    return _schema2_hash([item[2] for item in decorated])
 
 
 def _schema2_has_nonfinite(value: Any) -> bool:

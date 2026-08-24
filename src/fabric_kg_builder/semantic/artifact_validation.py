@@ -1194,6 +1194,41 @@ def validate_compiled_semantic_artifacts(
                 "semantic-manifest.json does not bind the materialization plan.",
             ))
         if (
+            _parsed_plan is not None
+            and _parsed_plan.source_taxonomy_version is not None
+        ):
+            expected_sources = [
+                source.model_dump(mode="json")
+                for source in _parsed_plan.source_tables
+            ]
+            for surface_name, payload in (
+                ("semantic", semantic_manifest),
+                ("ontology", ontology_manifest),
+                ("graph", graph_manifest),
+            ):
+                if payload.get("projection_receipt_hash") != (
+                    _parsed_plan.projection_receipt_hash
+                ):
+                    _spec008a_findings.append(ArtifactFinding(
+                        "PROJECTION_RECEIPT_HASH_DRIFT",
+                        f"{surface_name} is not bound to the layer-4 "
+                        "projection receipt.",
+                    ))
+                if payload.get("source_taxonomy_version") != (
+                    _parsed_plan.source_taxonomy_version
+                ):
+                    _spec008a_findings.append(ArtifactFinding(
+                        "SOURCE_TAXONOMY_VERSION_DRIFT",
+                        f"{surface_name} is not bound to the closed source "
+                        "taxonomy.",
+                    ))
+                if payload.get("source_tables") != expected_sources:
+                    _spec008a_findings.append(ArtifactFinding(
+                        "SOURCE_TABLE_AUTHORITY_DRIFT",
+                        f"{surface_name} is not bound to the exact approved "
+                        "source tables.",
+                    ))
+        if (
             _parsed_quality is not None
             and semantic_manifest.get("model_quality_report_hash")
             != _parsed_quality.report_hash

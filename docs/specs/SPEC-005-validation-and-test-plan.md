@@ -13,6 +13,7 @@
 | 2 | 2026-06-24T11:46:10.517-07:00 | Hockney | Command rename `deploy-data` → `deploy-lakehouse` throughout; domain-intake tests with security assertion; graph→AI Search clue-chaining contract; Document Intelligence mocked tests; Foundry + .env config validation; VAL-023–VAL-028 added; mocking strategy updated to Microsoft Foundry SDK |
 | 3 | 2026-06-24T12:42:17.255-07:00 | Hockney | Canonical-naming reconciliation (coordinator-canonical-naming.md): §12 graph→search fixture rewritten to `search.in()` + `vectorFilterMode: preFilter` + provenance select fields; BRG-001–BRG-010 (SPEC-003 §12 bridge gates) and D-31/D-32 (SPEC-002 §11 alias validations) registered in gate catalog and traceability; config keys updated to `AZURE_AI_FOUNDRY_ENDPOINT`/`AZURE_AI_FOUNDRY_API_KEY` (removing `AZURE_OPENAI_*`/`FOUNDRY_DEPLOYMENT_NAME`); commands aligned to `compile-search`, `deploy-lakehouse`, `enrich --domain-prompt`; VAL-023 reworded to chunk (text) and visual AI Search indexes only — no entity/relationship AI Search index exists |
 | 4 | 2026-08-23 | Copilot | Added schema-2.0 DOM, EXT, SEM, DEP, and QRY gates and compatibility test requirements. |
+| 5 | 2026-08-24 | Copilot | Added layer-5 exact source/materialization/Ontology/Graph authority, support-identity, receipt-redaction, partial-write, and resume-invalidation coverage. |
 
 ---
 
@@ -1239,6 +1240,25 @@ SEM-100 through SEM-104 consume the shared semantic projection receipt; gates
 must not independently reimplement filtering. A failed receipt leaves serving
 outputs empty and reports every failed invariant.
 
+DEP-101 also rejects raw `entities` as a typed source. An approved canonical
+support source is allowed only when it is in source-taxonomy version 1.0, named
+by the sealed crosswalk/materialization plan, bound by exact primary key,
+hash/count/schema, and filtered to identities published in `semantic_entities`
+for the approved semantic type.
+
+DEP-102 compares all of:
+
+- layer-4 projection receipt and current semantic table hashes/counts;
+- approved support-table hashes/counts/schema fingerprints;
+- prepared typed-table row hashes/counts/schema fingerprints;
+- persisted Lakehouse typed-table read-back;
+- persisted Ontology bindings from `getDefinition`;
+- persisted Graph data-source mappings from `getDefinition`.
+
+Any extra row, unexplained drop, stale table, missing table, partial write,
+protected-label/read-back error, Graph LRO error, or receipt mismatch fails
+closed. Success and failure receipts pass secret/source-content canaries.
+
 Layer-4 fixtures reproduce the 0.2.3 mixed lifecycle: asserted with evidence,
 rejected with and without evidence, unresolved without evidence, discovery,
 subtype endpoints, duplicate overlap, unpublished endpoints, and legacy
@@ -1288,5 +1308,24 @@ Golden candidate/proposal/contract fixtures must prove stable selection and
 serialization. CLI tests inject a deterministic Foundry client and assert that
 user/source/correction content is sent only in the user message.
 
-Later layers add exact-span, subtype, lifecycle, materialization, query, isolated
-installation, and live-smoke evidence without weakening these gates.
+Layers 3-5 add exact-span, subtype, lifecycle, and materialization evidence.
+Later layers add runtime query, isolated installation, and live-smoke evidence
+without weakening these gates.
+
+### 15.2 Layer-5 deployment regression matrix
+
+- 1,723 mixed raw relationship candidates versus a smaller asserted semantic
+  projection; rejected/unresolved null evidence does not block serving rows.
+- 20 entity and 14 relationship typed tables (34 total), with exact count/hash/
+  schema equivalence through Graph mappings.
+- BusinessObject `evidenced_by` DocumentChunk, where the node is sourced from
+  approved `chunks`, only the published chunk materializes, and the edge target
+  equals `chunks.chunk_id`.
+- missing, malformed, failed, and stale projection/materialization receipts;
+- support source count/hash/schema drift and unapproved support sources;
+- partial typed-table write and stale/extra persisted typed tables;
+- Ontology update, protected-label, and `getDefinition` failures;
+- Graph missing table, update LRO, mapping, and `getDefinition` failures;
+- schema-1 compile/deploy/multitype compatibility;
+- resume invalidation on projection or materialization fingerprint changes;
+- bearer token, SAS, connection-string, and source-text receipt redaction.

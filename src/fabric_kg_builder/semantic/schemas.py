@@ -31,6 +31,7 @@ from .models import (
     PublicationStatus,
     StrictModel,
 )
+from .source_tables import SOURCE_TAXONOMY_VERSION
 
 # ---------------------------------------------------------------------------
 # Persisted-boundary base model (Blocker 2 — S8A-AUD-002 hardening)
@@ -57,6 +58,7 @@ class _StrictPersistedModel(StrictModel):
 # ---------------------------------------------------------------------------
 
 SEMANTIC_SCHEMAS_VERSION = "1.1"
+MATERIALIZATION_RECEIPT_VERSION = "1.0"
 
 # ---------------------------------------------------------------------------
 # Internal validators
@@ -781,6 +783,30 @@ ApprovalState = Literal["approved", "discovery", "excluded"]
 DataAvailabilityStatus = Literal[
     "sufficient", "insufficient", "unavailable", "not_observed"
 ]
+SourceCategory = Literal[
+    "semantic_entity_projection",
+    "semantic_relationship_projection",
+    "canonical_support_entity",
+    "validation_support",
+]
+
+
+class SourceTableAuthority(_StrictPersistedModel):
+    """Exact hash/count/schema authority for one approved schema-2 source."""
+
+    table_name: str = Field(min_length=1)
+    category: SourceCategory
+    primary_key: str = Field(min_length=1)
+    row_count: int = Field(ge=0)
+    table_hash: str
+    schema_hash: str
+
+    _check_table_hash = field_validator("table_hash", mode="after")(
+        _check_nonempty_hash
+    )
+    _check_schema_hash = field_validator("schema_hash", mode="after")(
+        _check_nonempty_hash
+    )
 
 
 class ColumnSpec(_StrictPersistedModel):
@@ -805,6 +831,17 @@ class EntityTableSpec(_StrictPersistedModel):
     entity_id_column: str = Field(default="entity_id")
     display_name_column: str = Field(default="display_name")
     columns: list[ColumnSpec] = Field(default_factory=list)
+    source_category: SourceCategory | None = None
+    planned_row_count: int | None = Field(default=None, ge=0)
+    planned_row_hash: str = ""
+    planned_schema_hash: str = ""
+
+    _check_planned_row_hash = field_validator("planned_row_hash", mode="after")(
+        _check_hash
+    )
+    _check_planned_schema_hash = field_validator(
+        "planned_schema_hash", mode="after"
+    )(_check_hash)
 
     @field_validator("semantic_id")
     @classmethod
@@ -825,6 +862,16 @@ class EntityTableSpec(_StrictPersistedModel):
                 "EntityTableSpec source_filter_column and "
                 "source_filter_value must be provided together."
             )
+        planned_fields = (
+            self.planned_row_count is not None,
+            bool(self.planned_row_hash),
+            bool(self.planned_schema_hash),
+        )
+        if any(planned_fields) and not all(planned_fields):
+            raise ValueError(
+                "EntityTableSpec planned row count, row hash, and schema hash "
+                "must be provided together."
+            )
         return self
 
 
@@ -843,6 +890,17 @@ class RelationshipTableSpec(_StrictPersistedModel):
     target_column: str = Field(default="target_entity_id")
     evidence_column: str | None = None
     columns: list[ColumnSpec] = Field(default_factory=list)
+    source_category: SourceCategory | None = None
+    planned_row_count: int | None = Field(default=None, ge=0)
+    planned_row_hash: str = ""
+    planned_schema_hash: str = ""
+
+    _check_planned_row_hash = field_validator("planned_row_hash", mode="after")(
+        _check_hash
+    )
+    _check_planned_schema_hash = field_validator(
+        "planned_schema_hash", mode="after"
+    )(_check_hash)
 
     @field_validator("semantic_id")
     @classmethod
@@ -863,6 +921,16 @@ class RelationshipTableSpec(_StrictPersistedModel):
             raise ValueError(
                 "RelationshipTableSpec source_filter_column and "
                 "source_filter_value must be provided together."
+            )
+        planned_fields = (
+            self.planned_row_count is not None,
+            bool(self.planned_row_hash),
+            bool(self.planned_schema_hash),
+        )
+        if any(planned_fields) and not all(planned_fields):
+            raise ValueError(
+                "RelationshipTableSpec planned row count, row hash, and schema "
+                "hash must be provided together."
             )
         return self
 
@@ -932,6 +1000,10 @@ class MaterializationPlan(_StrictPersistedModel):
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
     manifest_hash: str = Field(default="")
+    semantic_contract_hash: str = ""
+    projection_receipt_hash: str = ""
+    source_taxonomy_version: str | None = None
+    source_tables: list[SourceTableAuthority] = Field(default_factory=list)
     entity_tables: list[EntityTableSpec] = Field(default_factory=list)
     relationship_tables: list[RelationshipTableSpec] = Field(default_factory=list)
     data_availability: list[DataAvailability] = Field(default_factory=list)
@@ -940,6 +1012,12 @@ class MaterializationPlan(_StrictPersistedModel):
     _check_manifest_hash = field_validator("manifest_hash", mode="after")(
         _check_hash
     )
+    _check_contract_hash = field_validator(
+        "semantic_contract_hash", mode="after"
+    )(_check_hash)
+    _check_projection_receipt_hash = field_validator(
+        "projection_receipt_hash", mode="after"
+    )(_check_hash)
 
     @model_validator(mode="before")
     @classmethod
@@ -981,6 +1059,76 @@ class MaterializationPlan(_StrictPersistedModel):
                 "entry for every materialized entity and relationship table. "
                 f"Missing: {missing}; extra: {extra}."
             )
+        source_names = [source.table_name for source in self.source_tables]
+        if len(source_names) != len(set(source_names)):
+            raise ValueError(
+                "MaterializationPlan.source_tables contains duplicate table names."
+            )
+        strict_fields = (
+            self.semantic_contract_hash,
+            self.projection_receipt_hash,
+            self.source_taxonomy_version,
+        )
+        if any(strict_fields) and not all(strict_fields):
+            raise ValueError(
+                "MaterializationPlan schema-2 authority requires contract hash, "
+                "projection receipt hash, and source taxonomy version together."
+            )
+        if self.source_taxonomy_version is not None:
+            if self.source_taxonomy_version != SOURCE_TAXONOMY_VERSION:
+                raise ValueError(
+                    "Unsupported source taxonomy version "
+                    f"{self.source_taxonomy_version!r}."
+                )
+            if not self.source_tables:
+                raise ValueError(
+                    "Schema-2 materialization plan requires source table authority."
+                )
+            authority_names = set(source_names)
+            missing_authority = sorted({
+                str(table.source_table_name or "")
+                for table in [*self.entity_tables, *self.relationship_tables]
+            } - authority_names)
+            if missing_authority:
+                raise ValueError(
+                    "MaterializationPlan table specs reference sources without "
+                    f"authority: {missing_authority}."
+                )
+            unplanned = [
+                table.table_name
+                for table in [*self.entity_tables, *self.relationship_tables]
+                if table.source_category is None
+                or table.planned_row_count is None
+                or not table.planned_row_hash
+                or not table.planned_schema_hash
+            ]
+            if unplanned:
+                raise ValueError(
+                    "Schema-2 materialization tables require source category and "
+                    f"planned row authority: {sorted(unplanned)}."
+                )
+            invalid_entities = [
+                table.table_name
+                for table in self.entity_tables
+                if table.source_category not in {
+                    "semantic_entity_projection",
+                    "canonical_support_entity",
+                }
+            ]
+            invalid_relationships = [
+                table.table_name
+                for table in self.relationship_tables
+                if (
+                    table.source_category
+                    != "semantic_relationship_projection"
+                )
+            ]
+            if invalid_entities or invalid_relationships:
+                raise ValueError(
+                    "Schema-2 typed-table source categories are invalid. "
+                    f"Entity tables: {sorted(invalid_entities)}; relationship "
+                    f"tables: {sorted(invalid_relationships)}."
+                )
         return self
 
 
@@ -1125,6 +1273,153 @@ class QueryReadiness(_StrictPersistedModel):
         return self
 
 
+MaterializationTableStatus = Literal[
+    "planned",
+    "ok",
+    "failed",
+    "not_attempted",
+]
+
+
+class MaterializedTableReceipt(_StrictPersistedModel):
+    """Prepared and persisted evidence for one contract-owned typed table."""
+
+    semantic_id: str = Field(min_length=1)
+    table_name: str = Field(min_length=1)
+    deployed_identity: str = Field(min_length=1)
+    source_table_name: str = Field(min_length=1)
+    source_category: SourceCategory
+    source_table_hash: str
+    source_row_count: int = Field(ge=0)
+    source_schema_hash: str
+    planned_row_hash: str
+    planned_row_count: int = Field(ge=0)
+    planned_schema_hash: str
+    persisted_row_hash: str | None = None
+    persisted_row_count: int | None = Field(default=None, ge=0)
+    persisted_schema_hash: str | None = None
+    status: MaterializationTableStatus
+    failure_code: str | None = None
+    failure_type: str | None = None
+    failure_message: str | None = None
+
+    _check_source_table_hash = field_validator(
+        "source_table_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_source_schema_hash = field_validator(
+        "source_schema_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_planned_row_hash = field_validator(
+        "planned_row_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_planned_schema_hash = field_validator(
+        "planned_schema_hash", mode="after"
+    )(_check_nonempty_hash)
+
+    @field_validator("persisted_row_hash", "persisted_schema_hash")
+    @classmethod
+    def _valid_persisted_hash(cls, value: str | None) -> str | None:
+        if value is not None:
+            _check_nonempty_hash(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "MaterializedTableReceipt":
+        if self.status == "ok":
+            if (
+                self.persisted_row_hash != self.planned_row_hash
+                or self.persisted_row_count != self.planned_row_count
+                or self.persisted_schema_hash != self.planned_schema_hash
+            ):
+                raise ValueError(
+                    f"Successful materialization for '{self.table_name}' must "
+                    "match its planned row hash and count."
+                )
+            if any((self.failure_code, self.failure_type, self.failure_message)):
+                raise ValueError(
+                    f"Successful materialization for '{self.table_name}' cannot "
+                    "contain failure evidence."
+                )
+        elif self.persisted_row_hash is not None and (
+            self.persisted_row_count is None
+        ):
+            raise ValueError(
+                "persisted_row_hash requires persisted_row_count."
+            )
+        return self
+
+
+class MaterializationReceipt(_StrictPersistedModel):
+    """Fail-closed serving/materialization deployment authority."""
+
+    receipt_schema_version: Literal[MATERIALIZATION_RECEIPT_VERSION] = (
+        MATERIALIZATION_RECEIPT_VERSION
+    )
+    status: Literal["succeeded", "failed"]
+    environment: str = Field(min_length=1)
+    workspace_id: str = Field(min_length=1)
+    lakehouse_item_id: str = Field(min_length=1)
+    schema_name: str = Field(min_length=1)
+    source_taxonomy_version: Literal[SOURCE_TAXONOMY_VERSION] = (
+        SOURCE_TAXONOMY_VERSION
+    )
+    semantic_contract_hash: str
+    projection_receipt_hash: str
+    semantic_model_manifest_hash: str
+    semantic_crosswalk_hash: str
+    materialization_plan_hash: str
+    source_tables: list[SourceTableAuthority]
+    tables: list[MaterializedTableReceipt]
+    emitted_at_utc: str = Field(min_length=1)
+    mock: bool = False
+
+    _check_contract_hash = field_validator(
+        "semantic_contract_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_projection_receipt_hash = field_validator(
+        "projection_receipt_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_manifest_hash = field_validator(
+        "semantic_model_manifest_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_crosswalk_hash = field_validator(
+        "semantic_crosswalk_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_plan_hash = field_validator(
+        "materialization_plan_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_emitted_at = field_validator("emitted_at_utc", mode="after")(
+        _check_utc_timestamp
+    )
+
+    @model_validator(mode="after")
+    def _validate_receipt(self) -> "MaterializationReceipt":
+        if not self.source_tables:
+            raise ValueError(
+                "Materialization receipt requires source table authority."
+            )
+        if not self.tables:
+            raise ValueError(
+                "Materialization receipt requires per-table evidence."
+            )
+        table_names = [table.table_name for table in self.tables]
+        if len(table_names) != len(set(table_names)):
+            raise ValueError(
+                "Materialization receipt contains duplicate typed tables."
+            )
+        failures = [table for table in self.tables if table.status != "ok"]
+        if self.status == "succeeded" and failures:
+            raise ValueError(
+                "Successful materialization receipt cannot contain incomplete "
+                "or failed tables."
+            )
+        if self.status == "failed" and not failures:
+            raise ValueError(
+                "Failed materialization receipt must contain failure evidence."
+            )
+        return self
+
+
 class PersistedProjectionReceipt(_StrictPersistedModel):
     """Persisted semantic projection receipt (SPEC-008A §7.4).
 
@@ -1139,7 +1434,12 @@ class PersistedProjectionReceipt(_StrictPersistedModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
+    semantic_contract_hash: str = ""
+    projection_receipt_hash: str = ""
     semantic_model_manifest_hash: str
+    semantic_crosswalk_hash: str = ""
+    materialization_plan_hash: str = ""
+    materialization_receipt: MaterializationReceipt | None = None
     ontology_item_id: str = Field(min_length=1)
     ontology_persisted_projection_hash: str
     graph_model_id: str = Field(min_length=1)
@@ -1153,6 +1453,18 @@ class PersistedProjectionReceipt(_StrictPersistedModel):
     _check_manifest_hash = field_validator(
         "semantic_model_manifest_hash", mode="after"
     )(_check_nonempty_hash)
+    _check_contract_hash = field_validator(
+        "semantic_contract_hash", mode="after"
+    )(_check_hash)
+    _check_projection_receipt_hash = field_validator(
+        "projection_receipt_hash", mode="after"
+    )(_check_hash)
+    _check_crosswalk_hash = field_validator(
+        "semantic_crosswalk_hash", mode="after"
+    )(_check_hash)
+    _check_plan_hash = field_validator(
+        "materialization_plan_hash", mode="after"
+    )(_check_hash)
     _check_ontology_hash = field_validator(
         "ontology_persisted_projection_hash", mode="after"
     )(_check_nonempty_hash)
@@ -1165,6 +1477,26 @@ class PersistedProjectionReceipt(_StrictPersistedModel):
 
     @model_validator(mode="after")
     def _validate_receipt_integrity(self) -> "PersistedProjectionReceipt":
+        materialization = self.materialization_receipt
+        if materialization is not None:
+            if (
+                materialization.status != "succeeded"
+                or materialization.mock
+                or materialization.semantic_contract_hash
+                != self.semantic_contract_hash
+                or materialization.projection_receipt_hash
+                != self.projection_receipt_hash
+                or materialization.semantic_model_manifest_hash
+                != self.semantic_model_manifest_hash
+                or materialization.semantic_crosswalk_hash
+                != self.semantic_crosswalk_hash
+                or materialization.materialization_plan_hash
+                != self.materialization_plan_hash
+            ):
+                raise ValueError(
+                    "Persisted projection receipt materialization authority is "
+                    "incomplete or mismatched."
+                )
         for counts_field, label in (
             (self.ontology_definition_counts, "ontology_definition_counts"),
             (self.graph_definition_counts, "graph_definition_counts"),
@@ -1221,7 +1553,12 @@ class DraftProjectionReceipt(StrictModel):
     """
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
+    semantic_contract_hash: str = Field(default="")
+    projection_receipt_hash: str = Field(default="")
     semantic_model_manifest_hash: str = Field(default="")
+    semantic_crosswalk_hash: str = Field(default="")
+    materialization_plan_hash: str = Field(default="")
+    materialization_receipt: MaterializationReceipt | None = None
     ontology_item_id: str = Field(default="")
     ontology_persisted_projection_hash: str = Field(default="")
     graph_model_id: str = Field(default="")
@@ -1234,6 +1571,18 @@ class DraftProjectionReceipt(StrictModel):
 
     _check_manifest_hash = field_validator(
         "semantic_model_manifest_hash", mode="after"
+    )(_check_hash)
+    _check_contract_hash = field_validator(
+        "semantic_contract_hash", mode="after"
+    )(_check_hash)
+    _check_projection_receipt_hash = field_validator(
+        "projection_receipt_hash", mode="after"
+    )(_check_hash)
+    _check_crosswalk_hash = field_validator(
+        "semantic_crosswalk_hash", mode="after"
+    )(_check_hash)
+    _check_plan_hash = field_validator(
+        "materialization_plan_hash", mode="after"
     )(_check_hash)
     _check_ontology_hash = field_validator(
         "ontology_persisted_projection_hash", mode="after"

@@ -19,6 +19,7 @@ from .artifact_validation import (
     validate_manifest_model_completeness,
     validate_materialization_availability,
 )
+from .canonical_hash import arrow_schema_hash, arrow_table_hash
 from .enrichment import build_semantic_enrichment_context
 from .models import EntityMapping, PropertyDefinition, RelationshipMapping
 from .quality import EnrichmentQualityReport
@@ -57,16 +58,34 @@ from .schemas import (
     compute_manifest_hash,
     compute_model_quality_report_hash,
 )
+from .persisted_projection import (
+    Schema2ProjectionAuthority,
+    load_schema2_projection_authority,
+    prepare_semantic_tables,
+)
 from .service import (
     SemanticBundle,
     normalize_semantic_contract,
     validate_semantic_bundle,
 )
-from .source_tables import resolve_semantic_source_parquet
+from .source_tables import (
+    SOURCE_TAXONOMY_VERSION,
+    resolve_semantic_source_parquet,
+    source_category,
+)
 
 
 class SemanticCompileError(ValueError):
     """Raised when an approved semantic bundle cannot be compiled safely."""
+
+
+def _approved_source_category(table_name: str) -> str | None:
+    """Return a publishable source category; raw candidates remain legacy-only."""
+    try:
+        category = source_category(table_name)
+    except ValueError:
+        return None
+    return None if category == "denied_candidate_audit" else category
 
 
 @dataclass(frozen=True)
@@ -191,6 +210,16 @@ class CompiledSemanticArtifacts:
                 "materialization_plan_hash": _canonical_hash(
                     self.materialization_plan.model_dump(mode="json")
                 ),
+                "projection_receipt_hash": (
+                    self.materialization_plan.projection_receipt_hash or None
+                ),
+                "source_taxonomy_version": (
+                    self.materialization_plan.source_taxonomy_version
+                ),
+                "source_tables": [
+                    source.model_dump(mode="json")
+                    for source in self.materialization_plan.source_tables
+                ],
                 "model_quality_report_hash": (
                     self.model_quality_report.report_hash
                 ),
@@ -835,6 +864,7 @@ def _build_manifest(
                 entity_id_column=mapping.entity_id_column,
                 display_name_column=mapping.display_name_column,
                 columns=columns,
+                source_category=_approved_source_category(mapping.table),
             )
         )
         observed_rows, status = source_counts.get(
@@ -966,6 +996,7 @@ def _build_manifest(
                 source_column=mapping.source_entity_id_column,
                 target_column=mapping.target_entity_id_column,
                 evidence_column=mapping.evidence_id_column,
+                source_category=_approved_source_category(mapping.table),
                 columns=[
                     ColumnSpec(
                         column_name=mapping.relationship_id_column,
@@ -1135,6 +1166,114 @@ def _build_manifest(
             )
         )
     return manifest, crosswalk, plan, quality_findings
+
+
+def _seal_schema2_materialization_plan(
+    *,
+    plan: MaterializationPlan,
+    authority: Schema2ProjectionAuthority,
+    data_dir: Path,
+) -> MaterializationPlan:
+    """Bind every typed table to exact prepared rows and approved sources."""
+    invalid_entity_sources = [
+        table.semantic_id
+        for table in plan.entity_tables
+        if table.source_category not in {
+            "semantic_entity_projection",
+            "canonical_support_entity",
+        }
+    ]
+    if invalid_entity_sources:
+        raise SemanticCompileError(
+            "Schema-2 entity tables may source only semantic_entities or an "
+            "approved canonical support entity table. Invalid: "
+            f"{sorted(invalid_entity_sources)}."
+        )
+    strict_relationships: list[RelationshipTableSpec] = []
+    for table in plan.relationship_tables:
+        if table.source_category != "semantic_relationship_projection":
+            raise SemanticCompileError(
+                f"Schema-2 relationship '{table.semantic_id}' must source "
+                "semantic_relationships."
+            )
+        columns = list(table.columns)
+        evidence_column = table.evidence_column or "evidence_id"
+        if evidence_column not in {column.column_name for column in columns}:
+            columns.append(
+                ColumnSpec(
+                    column_name=evidence_column,
+                    data_type="string",
+                    nullable=False,
+                )
+            )
+        strict_relationships.append(table.model_copy(update={
+            "evidence_column": evidence_column,
+            "columns": sorted(columns, key=lambda column: column.column_name),
+        }))
+
+    preparable_plan = plan.model_copy(update={
+        "relationship_tables": strict_relationships,
+    })
+    try:
+        prepared = prepare_semantic_tables(
+            parquet_dir=data_dir,
+            plan=preparable_plan,
+            enforce_planned_hashes=False,
+            strict_schema2=True,
+        )
+    except Exception as exc:
+        raise SemanticCompileError(
+            f"Schema-2 typed-table preparation failed: {exc}"
+        ) from exc
+
+    def seal_table(table: Any) -> Any:
+        prepared_table, _evidence = prepared[table.table_name]
+        key_column = (
+            table.entity_id_column
+            if hasattr(table, "entity_id_column")
+            else table.relationship_id_column
+        )
+        return table.model_copy(update={
+            "planned_row_count": int(prepared_table.num_rows),
+            "planned_row_hash": arrow_table_hash(
+                prepared_table,
+                key_column,
+            ),
+            "planned_schema_hash": arrow_schema_hash(prepared_table.schema),
+        })
+
+    entity_tables = [seal_table(table) for table in preparable_plan.entity_tables]
+    relationship_tables = [
+        seal_table(table) for table in preparable_plan.relationship_tables
+    ]
+    planned_count_by_id = {
+        table.semantic_id: int(table.planned_row_count or 0)
+        for table in [*entity_tables, *relationship_tables]
+    }
+    availability = [
+        item.model_copy(update={
+            "observed_rows": planned_count_by_id[item.semantic_id],
+            "status": (
+                "sufficient"
+                if planned_count_by_id[item.semantic_id] >= item.required_rows
+                else "insufficient"
+            ),
+        })
+        for item in plan.data_availability
+    ]
+    sealed = plan.model_copy(update={
+        "semantic_contract_hash": authority.contract_hash,
+        "projection_receipt_hash": authority.receipt_hash,
+        "source_taxonomy_version": SOURCE_TAXONOMY_VERSION,
+        "source_tables": [
+            authority.source_tables[name]
+            for name in sorted(authority.source_tables)
+        ],
+        "entity_tables": entity_tables,
+        "relationship_tables": relationship_tables,
+        "data_availability": availability,
+    })
+    return MaterializationPlan.model_validate(sealed.model_dump(mode="json"))
 
 
 def build_ontology_projection(
@@ -1750,6 +1889,7 @@ def compile_semantic_bundle(
     ontology_name: str | None = None,
     data_version: str = "not-observed",
     data_dir: Path | str | None = None,
+    projection_receipt_path: Path | str | None = None,
     quality_report: EnrichmentQualityReport | Mapping[str, Any] | None = None,
 ) -> CompiledSemanticArtifacts:
     """Compile one approved bundle into a single sealed semantic authority."""
@@ -1778,6 +1918,37 @@ def compile_semantic_bundle(
         source_counts=source_counts,
         quality_report=parsed_quality,
     )
+    if projection_receipt_path is not None:
+        if data_dir is None:
+            raise SemanticCompileError(
+                "Schema-2 projection receipt requires data_dir."
+            )
+        support_tables = {
+            mapping.table
+            for mapping in bundle.mappings.entity_types
+            if mapping.table != "semantic_entities"
+        }
+        support_tables.update(
+            mapping.table
+            for mapping in bundle.mappings.relationship_types
+            if mapping.table != "semantic_relationships"
+        )
+        try:
+            authority = load_schema2_projection_authority(
+                parquet_dir=Path(data_dir),
+                receipt_path=projection_receipt_path,
+                expected_contract_hash=verified_hash,
+                support_tables=support_tables,
+            )
+        except Exception as exc:
+            raise SemanticCompileError(
+                f"Schema-2 projection authority failed validation: {exc}"
+            ) from exc
+        plan = _seal_schema2_materialization_plan(
+            plan=plan,
+            authority=authority,
+            data_dir=Path(data_dir),
+        )
     ontology_model, ontology_ids_lock = build_ontology_projection(
         manifest,
         plan,
@@ -1967,6 +2138,33 @@ def load_semantic_model_artifacts(
                     "match the sealed artifact.",
                 )
             )
+    if plan.source_taxonomy_version is not None:
+        if integration_manifest.get("projection_receipt_hash") != (
+            plan.projection_receipt_hash
+        ):
+            findings.append(ArtifactFinding(
+                    "INTEGRATION_PROJECTION_RECEIPT_DRIFT",
+                    "semantic-manifest.json projection receipt hash does not "
+                    "match the materialization plan.",
+            ))
+        if integration_manifest.get("source_taxonomy_version") != (
+            plan.source_taxonomy_version
+        ):
+            findings.append(ArtifactFinding(
+                    "INTEGRATION_SOURCE_TAXONOMY_DRIFT",
+                    "semantic-manifest.json source taxonomy version does not "
+                    "match the materialization plan.",
+            ))
+        expected_sources = [
+            source.model_dump(mode="json")
+            for source in plan.source_tables
+        ]
+        if integration_manifest.get("source_tables") != expected_sources:
+            findings.append(ArtifactFinding(
+                    "INTEGRATION_SOURCE_AUTHORITY_DRIFT",
+                    "semantic-manifest.json source table authority does not "
+                    "match the materialization plan.",
+            ))
     if (
         quality_report.report_hash
         != compute_model_quality_report_hash(quality_report)

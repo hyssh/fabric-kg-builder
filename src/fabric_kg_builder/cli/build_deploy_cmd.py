@@ -59,6 +59,43 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         Path(temp_name).unlink(missing_ok=True)
 
 
+def _input_fingerprint(
+    *,
+    files: dict[str, Path | None] | None = None,
+    directories: dict[str, Path | None] | None = None,
+    values: dict[str, Any] | None = None,
+) -> str:
+    """Hash stage inputs without persisting source content or secrets."""
+    payload: dict[str, Any] = {"files": {}, "directories": {}, "values": values or {}}
+    for label, path in sorted((files or {}).items()):
+        payload["files"][label] = (
+            "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            if path is not None and path.is_file()
+            else None
+        )
+    for label, root in sorted((directories or {}).items()):
+        entries: list[dict[str, str]] = []
+        if root is not None and root.is_dir():
+            for candidate in sorted(
+                path for path in root.rglob("*") if path.is_file()
+            ):
+                entries.append({
+                    "path": candidate.relative_to(root).as_posix(),
+                    "sha256": (
+                        "sha256:"
+                        + hashlib.sha256(candidate.read_bytes()).hexdigest()
+                    ),
+                })
+        payload["directories"][label] = entries
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 class _RunState:
     def __init__(
         self,
@@ -108,17 +145,30 @@ class _RunState:
         action: Callable[[], dict[str, Any] | None],
         *,
         resume: bool,
+        input_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         current = self.data.setdefault("stages", {}).get(name, {})
         if resume and current.get("status") == "succeeded":
-            click.echo(f"[build-deploy] SKIP {name} (already succeeded)")
-            return dict(current.get("details") or {})
+            if input_fingerprint is None:
+                click.echo(f"[build-deploy] SKIP {name} (already succeeded)")
+                return dict(current.get("details") or {})
+            if current.get("input_fingerprint") == input_fingerprint:
+                click.echo(
+                    f"[build-deploy] SKIP {name} "
+                    "(semantic input fingerprint unchanged)"
+                )
+                return dict(current.get("details") or {})
+            click.echo(
+                f"[build-deploy] INVALIDATE {name} "
+                "(semantic input fingerprint changed)"
+            )
 
         stage = {
             "status": "running",
             "started_at": _utc_now(),
             "completed_at": None,
             "details": {},
+            "input_fingerprint": input_fingerprint,
         }
         self.data["stages"][name] = stage
         self.data["status"] = "running"
@@ -2755,6 +2805,8 @@ def build_deploy_cmd(
         effective_run_id,
         "--data-dir",
         str(paths["parquet"]),
+        "--projection-receipt",
+        str(paths["parquet"] / "semantic-projection-receipt.json"),
     ]
     semantic_quality_report = next(
         (
@@ -2785,6 +2837,20 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                "contract": semantic_contract_path,
+                "mappings": semantic_mappings_path,
+                "vocabulary": semantic_vocabulary_path,
+                "ids_lock": semantic_ids_lock_path,
+                "quality_report": semantic_quality_report,
+                "projection_receipt": (
+                    paths["parquet"] / "semantic-projection-receipt.json"
+                ),
+            },
+            directories={"parquet": paths["parquet"]},
+            values={"data_version": effective_run_id},
+        ),
     )
     state.execute(
         "compile_ontology",
@@ -2803,6 +2869,10 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            directories={"semantic": paths["semantic"]},
+            values={"environment": env},
+        ),
     )
     state.execute(
         "compile_graph",
@@ -2823,6 +2893,13 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            directories={"semantic": paths["semantic"]},
+            values={
+                "workspace_id": str(outputs.get("fabricWorkspaceId") or ""),
+                "lakehouse_id": str(outputs.get("fabricLakehouseId") or ""),
+            },
+        ),
     )
     agent_args = [
         "compile-agent",
@@ -2931,6 +3008,18 @@ def build_deploy_cmd(
                     env,
                     "--parquet-dir",
                     str(paths["parquet"]),
+                    "--semantic-dir",
+                    str(paths["semantic"]),
+                    "--projection-receipt",
+                    str(
+                        paths["parquet"]
+                        / "semantic-projection-receipt.json"
+                    ),
+                    "--materialization-receipt-out",
+                    str(
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
                     "--no-mock",
                     *(["--manifest", deploy_manifest_path] if deploy_manifest_path else []),
                 ],
@@ -2939,6 +3028,24 @@ def build_deploy_cmd(
                 extra_env=runtime_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "projection_receipt": (
+                        paths["parquet"]
+                        / "semantic-projection-receipt.json"
+                    ),
+                    "manifest": (
+                        Path(deploy_manifest_path)
+                        if deploy_manifest_path
+                        else None
+                    ),
+                },
+                directories={
+                    "parquet": paths["parquet"],
+                    "semantic": paths["semantic"],
+                },
+                values={"environment": env},
+            ),
         )
         state.execute(
             "deploy_ontology",
@@ -2951,8 +3058,11 @@ def build_deploy_cmd(
                     str(paths["ontology"]),
                     "--semantic-dir",
                     str(paths["semantic"]),
-                    "--parquet-dir",
-                    str(paths["parquet"]),
+                    "--materialization-receipt",
+                    str(
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
                     "--no-mock",
                     "--receipt-out",
                     str(paths["release"] / "ontology-deployment.json"),
@@ -2963,6 +3073,24 @@ def build_deploy_cmd(
                 extra_env=runtime_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "materialization_receipt": (
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
+                    "manifest": (
+                        Path(deploy_manifest_path)
+                        if deploy_manifest_path
+                        else None
+                    ),
+                },
+                directories={
+                    "ontology": paths["ontology"],
+                    "semantic": paths["semantic"],
+                },
+                values={"environment": env},
+            ),
         )
         state.execute(
             "record_semantic_baseline",
@@ -3000,6 +3128,13 @@ def build_deploy_cmd(
                     str(paths["graph"] / "graph-definition.json"),
                     "--semantic-dir",
                     str(paths["semantic"]),
+                    "--materialization-receipt",
+                    str(
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
+                    "--ontology-receipt",
+                    str(paths["release"] / "ontology-deployment.json"),
                     "--label-catalog-file",
                     str(paths["graph"] / "label-catalog.json"),
                     "--skip-lakehouse",
@@ -3013,6 +3148,33 @@ def build_deploy_cmd(
                 extra_env=runtime_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "materialization_receipt": (
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
+                    "ontology_receipt": (
+                        paths["release"] / "ontology-deployment.json"
+                    ),
+                    "search_schema": schema_file,
+                    "search_documents": docs_file,
+                    "manifest": (
+                        Path(deploy_manifest_path)
+                        if deploy_manifest_path
+                        else None
+                    ),
+                },
+                directories={
+                    "graph": paths["graph"],
+                    "semantic": paths["semantic"],
+                },
+                values={
+                    "environment": env,
+                    "embedding_model": "text-embedding-3-large",
+                    "dimensions": 1536,
+                },
+            ),
         )
         state.execute(
             "validate_projection",
@@ -3023,6 +3185,11 @@ def build_deploy_cmd(
                     str(paths["semantic"]),
                     "--ontology-receipt",
                     str(paths["release"] / "ontology-deployment.json"),
+                    "--materialization-receipt",
+                    str(
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
                     "--serving-receipt",
                     str(paths["release"] / "serving-deployment.json"),
                     "--out",
@@ -3036,6 +3203,21 @@ def build_deploy_cmd(
                 extra_env=runtime_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "materialization_receipt": (
+                        paths["release"]
+                        / "materialization-deployment.json"
+                    ),
+                    "ontology_receipt": (
+                        paths["release"] / "ontology-deployment.json"
+                    ),
+                    "serving_receipt": (
+                        paths["release"] / "serving-deployment.json"
+                    ),
+                },
+                directories={"semantic": paths["semantic"]},
+            ),
         )
 
     if deploy_knowledge:

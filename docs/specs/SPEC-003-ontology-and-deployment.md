@@ -1628,15 +1628,31 @@ Because each table is indexed as its **own AI Search document** (`chunk_type="ta
 
 ### 12.11 Schema-2.0 Semantic Publication Invariant
 
-For schema-2.0 projects, Ontology and Graph publication must bind only the sealed
-`semantic_entities` and `semantic_relationships` sources. The raw `entities` and
-`relationships` tables remain audit and lineage surfaces and are not valid
-fallbacks. Deployment must never broaden the accepted lifecycle state beyond
-compilation.
+For schema-2.0 projects, candidate entity and relationship publication must bind
+only the sealed `semantic_entities` and `semantic_relationships` sources. The
+raw `entities` and `relationships` tables remain audit and lineage surfaces and
+are not valid fallbacks. Deployment must never broaden the accepted lifecycle
+state beyond compilation.
 
-The materialization plan records the semantic contract hash, source projection
-hash, expected row count, and exact source table for every bound type.
-Materialization validates the same projection before any Fabric mutation.
+First-class evidence/support entities may bind an explicitly approved canonical
+source from the closed source taxonomy (`source_files`, `chunks`,
+`document_elements`, `visual_assets`, or `visual_regions`) only when the sealed
+semantic crosswalk and materialization plan name the exact source, primary key,
+type/filter rule, schema fingerprint, row count, and canonical table hash.
+Selected support identities must also exist in `semantic_entities` for the
+approved semantic type. This prevents unrelated chunks, elements, or assets from
+being bulk-published.
+
+`evidence` is validation support: its exact hash/count/schema is bound so every
+published relationship evidence FK can be revalidated. It is not a substitute
+relationship source. `DocumentChunk.entity_id` maps directly and exactly once to
+physical `chunks.chunk_id`; `evidenced_by` endpoints must equal that same value.
+
+The materialization plan records the semantic contract hash, successful
+projection receipt hash, source taxonomy version, source hash/count/schema,
+expected typed row hash/count/schema, and exact source table for every bound
+type. Materialization validates and prepares the complete table set before any
+Fabric mutation.
 Persisted read-back must prove:
 
 - the Ontology and Graph definition hashes match their sealed artifacts;
@@ -1647,6 +1663,25 @@ Persisted read-back must prove:
 
 A hash, count, contract, source-table, evidence, or endpoint mismatch is a
 pre-mutation deployment failure.
+
+OneLake does not provide a cross-table transaction. Typed tables are written in
+deterministic name order and read back exactly. If a write fails, the
+materialization receipt records written-but-unverified, failed, and
+not-attempted tables; it is never success-shaped, and Ontology/Graph mutation is
+blocked. A retry overwrites and revalidates the full set.
+
+Mutation order is strict:
+
+1. validate projection/support/manifest/crosswalk/plan authority;
+2. prepare, write, and read back every typed table;
+3. persist a successful materialization receipt;
+4. update Ontology and require `getDefinition` read-back;
+5. update Graph, validate its LRO, and require `getDefinition` read-back;
+6. seal final compile/materialization/Ontology/Graph equivalence.
+
+Protected-label, permission, LRO, missing-table, and read-back errors are
+preserved as failures. Receipts are atomically written through the release
+redaction boundary and contain no source content or credentials.
 
 ## 13. Revision History
 
@@ -1659,6 +1694,7 @@ pre-mutation deployment failure.
 | 2026-06-24T15:41:07.842-07:00 | McManus | §9 deployment mechanism reframed per Hyunsuk Shin decision: `fabric-cicd` is the REQUIRED PRIMARY tool for deploy-lakehouse, deploy-ontology, and deploy-search — not an optional "wrap both" choice; Fabric REST API demoted to fallback only (item-level granularity when fabric-cicd cannot perform the operation); `fabric-cicd` added as CLI prerequisite (`pip install fabric-cicd`), reference to `docs/REQUIREMENTS-001-cli-prerequisites.md`; deploy flow documented as compile → dist/ → fabric-cicd publish; FabricDeployer defaults to fabric-cicd; deploy-search corrected from *(optional)* to in-MVP throughout; dev Lakehouse name updated to `kg_lakehouse` (item ID `44444444-4444-4444-4444-444444444444`, workspace `11111111-1111-1111-1111-111111111111`); §9.1.1 mechanism table, §9.4 deploy-ontology steps, §9.7 deploy-lakehouse steps, §9.8 CI/CD pipeline updated; `if: ENABLE_AI_SEARCH` gate removed from deploy-search job |
 | 2026-06-24T21:46:59.576-07:00 | McManus | §12 bridge — §12.10 added: Table document-element nodes (element_type="table", content_html, blob_url) participate in the evidenced_by / shown_in bridge, enabling graph↔table integration and AI Search indexing of tables as independent documents (coordinator-tables-via-docintel.md, verified 2026-06-24). |
 | 2026-08-23 | Copilot | Added §12.11: schema-2.0 Ontology/Graph publication is semantic-only and requires compile/deploy/persisted hash and count equivalence. |
+| 2026-08-24 | Copilot | Expanded §12.11 with the closed support-source taxonomy, published-identity joins, exact typed-table receipts, mutation ordering, partial-write evidence, and secret-free receipts. |
 
 ---
 

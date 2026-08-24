@@ -40,10 +40,19 @@ def _write_receipt(path: str | None, payload: dict) -> None:
     if not path:
         return
     target = Path(path)
+    from fabric_kg_builder.release.redact import (  # noqa: PLC0415
+        assert_no_secrets,
+        assert_no_source_content,
+        redact_dict,
+    )
+
+    safe_payload = redact_dict(payload)
+    assert_no_secrets(safe_payload)
+    assert_no_source_content(safe_payload)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
+        json.dumps(safe_payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     temporary.replace(target)
@@ -272,6 +281,24 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 @click.option("--manifest", "manifest_path", default=None, type=click.Path(),
               help="Path to deployment.yaml (naming authority). "
                    "Defaults to env-config names (legacy mode).")
+@click.option(
+    "--semantic-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Sealed schema-2 semantic authority for typed-table materialization.",
+)
+@click.option(
+    "--projection-receipt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Successful layer-4 semantic-projection-receipt.json.",
+)
+@click.option(
+    "--materialization-receipt-out",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Output path for the redacted typed-table materialization receipt.",
+)
 def deploy_lakehouse_cmd(
     env: str,
     dist_path: str,
@@ -280,6 +307,9 @@ def deploy_lakehouse_cmd(
     force: bool,
     use_mock: bool,
     manifest_path: str | None,
+    semantic_dir: str | None,
+    projection_receipt: str | None,
+    materialization_receipt_out: str | None,
 ) -> None:
     """Upload canonical structured Parquet tables to Fabric Lakehouse via OneLake.
 
@@ -370,6 +400,84 @@ def deploy_lakehouse_cmd(
         else []
     )
 
+    schema2_loaded = None
+    schema2_crosswalk_hash = None
+    schema2_prepared = None
+    if any((semantic_dir, projection_receipt, materialization_receipt_out)):
+        if not all((
+            semantic_dir,
+            projection_receipt,
+            materialization_receipt_out,
+        )):
+            raise click.ClickException(
+                "Schema-2 Lakehouse deployment requires --semantic-dir, "
+                "--projection-receipt, and --materialization-receipt-out together."
+            )
+        from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            PersistedProjectionError,
+            SemanticCompileError,
+            load_schema2_projection_authority,
+            load_semantic_model_artifacts,
+            prepare_semantic_tables,
+        )
+        from fabric_kg_builder.semantic.canonical_hash import (  # noqa: PLC0415
+            canonical_hash,
+        )
+
+        try:
+            schema2_loaded = load_semantic_model_artifacts(str(semantic_dir))
+            support_tables = {
+                source.table_name
+                for source in schema2_loaded.materialization_plan.source_tables
+                if source.table_name not in {
+                    "semantic_entities",
+                    "semantic_relationships",
+                    "evidence",
+                }
+            }
+            current_authority = load_schema2_projection_authority(
+                parquet_dir=resolved_parquet_dir,
+                receipt_path=str(projection_receipt),
+                expected_contract_hash=(
+                    schema2_loaded.manifest.semantic_contract_hash
+                ),
+                support_tables=support_tables,
+            )
+        except (PersistedProjectionError, SemanticCompileError) as exc:
+            raise click.ClickException(
+                f"Schema-2 pre-mutation authority validation failed: {exc}"
+            ) from exc
+        plan = schema2_loaded.materialization_plan
+        if (
+            current_authority.receipt_hash != plan.projection_receipt_hash
+            or [
+                current_authority.source_tables[name].model_dump(mode="json")
+                for name in sorted(current_authority.source_tables)
+            ]
+            != [
+                source.model_dump(mode="json")
+                for source in plan.source_tables
+            ]
+        ):
+            raise click.ClickException(
+                "Schema-2 projection/support source authority is stale relative "
+                "to the sealed materialization plan."
+            )
+        schema2_crosswalk_hash = canonical_hash(
+            schema2_loaded.crosswalk.model_dump(mode="json")
+        )
+        try:
+            schema2_prepared = prepare_semantic_tables(
+                parquet_dir=resolved_parquet_dir,
+                plan=plan,
+                enforce_planned_hashes=True,
+            )
+        except PersistedProjectionError as exc:
+            raise click.ClickException(
+                "Schema-2 typed-table preparation failed before Lakehouse "
+                f"mutation: {exc}"
+            ) from exc
+
     click.echo(f"[deploy-lakehouse] Environment  : {env}")
     click.echo(f"[deploy-lakehouse] Workspace    : {workspace_id}")
     click.echo(f"[deploy-lakehouse] Lakehouse    : {lakehouse_item_id} ({lakehouse_name})")
@@ -421,6 +529,36 @@ def deploy_lakehouse_cmd(
                     f"[deploy-lakehouse]   WOULD upload {table}.parquet "
                     f"-> Tables/{schema_name}/{table}"
                 )
+        if schema2_loaded is not None:
+            from fabric_kg_builder.semantic import (  # noqa: PLC0415
+                deploy_schema2_materialization,
+                write_safe_receipt,
+            )
+
+            materialization = deploy_schema2_materialization(
+                environment=env,
+                parquet_dir=resolved_parquet_dir,
+                plan=schema2_loaded.materialization_plan,
+                semantic_model_manifest_hash=(
+                    schema2_loaded.manifest.manifest_hash
+                ),
+                semantic_crosswalk_hash=str(schema2_crosswalk_hash),
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+                table_writer=lambda _name, _table: None,
+                table_reader=None,
+                prepared_tables=schema2_prepared,
+                mock=True,
+            )
+            write_safe_receipt(
+                str(materialization_receipt_out),
+                materialization,
+            )
+            click.echo(
+                "[deploy-lakehouse] Schema-2 typed tables planned: "
+                f"{len(materialization.tables)}"
+            )
         click.echo("[deploy-lakehouse] SUCCESS (mock)")
         return
 
@@ -458,6 +596,72 @@ def deploy_lakehouse_cmd(
             err=True,
         )
         raise SystemExit(1)
+
+    if schema2_loaded is not None:
+        from azure.identity import DefaultAzureCredential  # type: ignore[import]  # noqa: PLC0415
+        from deltalake import write_deltalake  # type: ignore[import]  # noqa: PLC0415
+
+        from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            deploy_schema2_materialization,
+            write_safe_receipt,
+        )
+        from fabric_kg_builder.serving.competency import (  # noqa: PLC0415
+            OneLakeDeltaClient,
+        )
+
+        credential = DefaultAzureCredential()
+        storage_options = {
+            "bearer_token": credential.get_token(
+                "https://storage.azure.com/.default"
+            ).token,
+            "use_fabric_endpoint": "true",
+        }
+
+        def write_typed_table(table_name: str, table: object) -> None:
+            uri = (
+                f"abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/"
+                f"{lakehouse_item_id}/Tables/{schema_name}/{table_name}"
+            )
+            write_deltalake(
+                uri,
+                table,
+                mode="overwrite",
+                schema_mode="overwrite",
+                storage_options=storage_options,
+            )
+
+        materialization = deploy_schema2_materialization(
+            environment=env,
+            parquet_dir=resolved_parquet_dir,
+            plan=schema2_loaded.materialization_plan,
+            semantic_model_manifest_hash=schema2_loaded.manifest.manifest_hash,
+            semantic_crosswalk_hash=str(schema2_crosswalk_hash),
+            workspace_id=workspace_id,
+            lakehouse_item_id=lakehouse_item_id,
+            schema=schema_name,
+            table_writer=write_typed_table,
+            table_reader=OneLakeDeltaClient(),
+            prepared_tables=schema2_prepared,
+            mock=False,
+        )
+        write_safe_receipt(
+            str(materialization_receipt_out),
+            materialization,
+        )
+        if materialization.status != "succeeded":
+            failed = [
+                f"{table.table_name}:{table.failure_code or table.status}"
+                for table in materialization.tables
+                if table.status != "ok"
+            ]
+            raise click.ClickException(
+                "Schema-2 typed-table materialization failed; Ontology/Graph "
+                f"remain blocked. {'; '.join(failed)}"
+            )
+        click.echo(
+            "[deploy-lakehouse] Schema-2 typed tables: "
+            f"{len(materialization.tables)} written and read back exactly"
+        )
 
     ok_count = sum(1 for s in results.values() if s == "ok")
     skipped = sum(1 for s in results.values() if s.startswith("skipped"))
@@ -766,8 +970,13 @@ def _load_compiled_ontology_parts(dist_path: str) -> list[dict]:
     "--semantic-dir",
     default=None,
     type=click.Path(exists=True, file_okay=False),
-    help="Sealed semantic authority directory. When provided, materializes its "
-         "contract-owned tables and validates persisted Ontology read-back.",
+    help="Sealed semantic authority directory for schema-2 deployment.",
+)
+@click.option(
+    "--materialization-receipt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Successful live typed-table materialization receipt.",
 )
 @click.option("--poll-timeout", default=300, show_default=True, type=int,
               help="Seconds to wait for long-running Fabric LRO operations.")
@@ -826,6 +1035,7 @@ def _load_compiled_ontology_parts(dist_path: str) -> list[dict]:
                    "this must match the manifest name or NAME_AUTHORITY_CONFLICT is raised.")
 def deploy_ontology_cmd(
     env: str, dist_path: str, semantic_dir: str | None,
+    materialization_receipt: str | None,
     poll_timeout: int, use_mock: bool,
     recreate: bool,
     legacy_ontology_ids: tuple[str, ...],
@@ -945,46 +1155,77 @@ def deploy_ontology_cmd(
     # --multitype path remains available for projects without semantic authority.
     mt_plan = None
     semantic_loaded = None
-    semantic_materialization = {}
+    semantic_materialization_receipt = None
+    semantic_materialization: dict[str, Any] = {}
+    ontology_submitted_projection_hash: str | None = None
     if semantic_dir:
         if multitype:
             raise click.ClickException(
                 "--semantic-dir and legacy --multitype are mutually exclusive."
             )
-        if not parquet_dir:
-            raise click.ClickException(
-                "--semantic-dir requires --parquet-dir so contract-owned "
-                "tables can be materialized before Ontology mutation."
-            )
         from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            load_materialization_receipt,
             load_semantic_model_artifacts,
             materialize_semantic_tables,
         )
+        from fabric_kg_builder.semantic.canonical_hash import (  # noqa: PLC0415
+            canonical_hash,
+        )
 
         semantic_loaded = load_semantic_model_artifacts(semantic_dir)
+        strict_schema2 = (
+            semantic_loaded.materialization_plan.source_taxonomy_version
+            is not None
+        )
+        if strict_schema2 and not materialization_receipt:
+            raise click.ClickException(
+                "Schema-2 --semantic-dir requires --materialization-receipt. "
+                "Typed tables must be deployed and read back before Ontology "
+                "mutation."
+            )
+        if not strict_schema2 and not parquet_dir:
+            raise click.ClickException(
+                "Legacy --semantic-dir requires --parquet-dir for compatible "
+                "contract-owned table materialization."
+            )
         parts = _load_compiled_ontology_parts(dist_path)
         if not parts:
             raise click.ClickException(
                 "--semantic-dir requires compiler-owned Ontology parts under "
                 f"{Path(dist_path) / 'definition.json'}."
             )
-        semantic_materialization = materialize_semantic_tables(
-            parquet_dir=Path(parquet_dir),
-            plan=semantic_loaded.materialization_plan,
-            workspace_id=workspace_id,
-            lakehouse_item_id=lakehouse_item_id,
-            schema=schema_name,
-            mock=use_mock,
-        )
+        if strict_schema2:
+            semantic_materialization_receipt = load_materialization_receipt(
+                str(materialization_receipt),
+                plan=semantic_loaded.materialization_plan,
+                semantic_model_manifest_hash=(
+                    semantic_loaded.manifest.manifest_hash
+                ),
+                semantic_crosswalk_hash=canonical_hash(
+                    semantic_loaded.crosswalk.model_dump(mode="json")
+                ),
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+            )
+        else:
+            semantic_materialization = materialize_semantic_tables(
+                parquet_dir=Path(str(parquet_dir)),
+                plan=semantic_loaded.materialization_plan,
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+                mock=use_mock,
+            )
         click.echo(
             "[deploy-ontology] semantic manifest : "
             f"{semantic_loaded.manifest.manifest_hash}"
         )
         click.echo(
             "[deploy-ontology] contract tables  : "
-            f"{len(semantic_materialization)}/"
+            f"{len(semantic_materialization_receipt.tables) if semantic_materialization_receipt is not None else len(semantic_materialization)}/"
             f"{len(semantic_loaded.materialization_plan.entity_tables) + len(semantic_loaded.materialization_plan.relationship_tables)} "
-            f"{'planned' if use_mock else 'written'}"
+            "validated"
         )
         click.echo(
             "[deploy-ontology] definition source : "
@@ -1110,6 +1351,69 @@ def deploy_ontology_cmd(
     ontology_manifest_path = Path(dist_path) / "ontology-manifest.json"
     ontology_manifest = _load_json_object(ontology_manifest_path)
     ontology_definition_path = Path(dist_path) / "definition.json"
+    if semantic_loaded is not None:
+        from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            persisted_parts_hash,
+            validate_ontology_projection_parts,
+        )
+        from fabric_kg_builder.semantic.canonical_hash import (  # noqa: PLC0415
+            canonical_hash,
+        )
+
+        plan = semantic_loaded.materialization_plan
+        expected_manifest_fields = {
+            "contract_hash": semantic_loaded.manifest.semantic_contract_hash,
+            "semantic_model_manifest_hash": (
+                semantic_loaded.manifest.manifest_hash
+            ),
+            "semantic_crosswalk_hash": canonical_hash(
+                semantic_loaded.crosswalk.model_dump(mode="json")
+            ),
+            "materialization_plan_hash": canonical_hash(
+                plan.model_dump(mode="json")
+            ),
+        }
+        if plan.source_taxonomy_version is not None:
+            expected_manifest_fields.update({
+                "projection_receipt_hash": plan.projection_receipt_hash,
+                "source_taxonomy_version": plan.source_taxonomy_version,
+                "source_tables": [
+                    source.model_dump(mode="json")
+                    for source in plan.source_tables
+                ],
+            })
+        for field, expected in expected_manifest_fields.items():
+            if ontology_manifest.get(field) != expected:
+                raise click.ClickException(
+                    f"Ontology manifest field '{field}' does not match the "
+                    "sealed schema-2 authority."
+                )
+        ontology_part_map = {
+                str(part.get("path")): dict(
+                    part.get("payload_json") or {}
+                )
+                for part in parts
+                if isinstance(part, dict) and part.get("path")
+            }
+        ontology_submitted_projection_hash = persisted_parts_hash(
+            ontology_part_map
+        )
+        ontology_findings = validate_ontology_projection_parts(
+            ontology_part_map,
+            semantic_loaded.manifest,
+            plan,
+            workspace_id=workspace_id,
+            lakehouse_item_id=lakehouse_item_id,
+            schema=schema_name,
+        )
+        if ontology_findings:
+            raise click.ClickException(
+                "Compiled Ontology does not match the typed-table plan: "
+                + "; ".join(
+                    f"{finding.code}: {finding.message}"
+                    for finding in ontology_findings
+                )
+            )
     entity_type_names = [
         p["payload_json"].get("name")
         for p in parts
@@ -1122,7 +1426,11 @@ def deploy_ontology_cmd(
     ]
 
     # Load model for identity mappings and date/key validation
-    _model = _load_model_yaml()
+    _model = (
+        _load_model_yaml(Path(semantic_dir))
+        if semantic_loaded is not None and semantic_dir is not None
+        else _load_model_yaml()
+    )
 
     # Model-level identity and partial-date pre-deployment validation (OKV-001 / OKV-002).
     # Fires without requiring a manual datePrecision annotation.
@@ -1178,6 +1486,22 @@ def deploy_ontology_cmd(
     click.echo(f"[deploy-ontology] entity types    : {entity_type_names}")
     click.echo(f"[deploy-ontology] relationship types: {rel_type_names}")
 
+    if semantic_loaded is not None and not use_mock:
+        from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            validate_bound_tables,
+        )
+        from fabric_kg_builder.serving.competency import (  # noqa: PLC0415
+            OneLakeDeltaClient,
+        )
+
+        validate_bound_tables(
+            plan=semantic_loaded.materialization_plan,
+            workspace_id=workspace_id,
+            lakehouse_item_id=lakehouse_item_id,
+            schema=schema_name,
+            table_reader=OneLakeDeltaClient(),
+            materialization_receipt=semantic_materialization_receipt,
+        )
 
     if use_mock:
         click.echo("")
@@ -1262,11 +1586,45 @@ def deploy_ontology_cmd(
                     if semantic_loaded is not None
                     else None
                 ),
-                "materialized_tables": {
-                    table_name: evidence.status
-                    for table_name, evidence
-                    in semantic_materialization.items()
-                },
+                "projection_receipt_hash": (
+                    semantic_materialization_receipt.projection_receipt_hash
+                    if semantic_materialization_receipt is not None
+                    else None
+                ),
+                "materialization_plan_hash": (
+                    semantic_materialization_receipt.materialization_plan_hash
+                    if semantic_materialization_receipt is not None
+                    else None
+                ),
+                "semantic_crosswalk_hash": (
+                    semantic_materialization_receipt.semantic_crosswalk_hash
+                    if semantic_materialization_receipt is not None
+                    else None
+                ),
+                "source_tables": [
+                    source.model_dump(mode="json")
+                    for source in (
+                        semantic_materialization_receipt.source_tables
+                        if semantic_materialization_receipt is not None
+                        else []
+                    )
+                ],
+                "materialized_tables": (
+                    {
+                        table.table_name: {
+                            "row_count": table.persisted_row_count,
+                            "row_hash": table.persisted_row_hash,
+                            "schema_hash": table.persisted_schema_hash,
+                        }
+                        for table in semantic_materialization_receipt.tables
+                    }
+                    if semantic_materialization_receipt is not None
+                    else {
+                        table_name: evidence.status
+                        for table_name, evidence
+                        in semantic_materialization.items()
+                    }
+                ),
                 "mock": True,
             },
         )
@@ -1401,7 +1759,7 @@ def deploy_ontology_cmd(
 
     # Post-deployment read-back: node and edge counts
     graph_counts: dict = {}
-    if lakehouse_item_id:
+    if lakehouse_item_id and semantic_loaded is None:
         from fabric_kg_builder.deploy.fabric_ontology import (  # noqa: PLC0415
             read_graph_counts,
         )
@@ -1485,6 +1843,9 @@ def deploy_ontology_cmd(
                 workspace_id=workspace_id,
                 lakehouse_item_id=lakehouse_item_id,
                 schema=schema_name,
+                expected_projection_hash=(
+                    ontology_submitted_projection_hash
+                ),
             )
             bound_table_counts = validate_bound_tables(
                 plan=semantic_loaded.materialization_plan,
@@ -1492,6 +1853,7 @@ def deploy_ontology_cmd(
                 lakehouse_item_id=lakehouse_item_id,
                 schema=schema_name,
                 table_reader=OneLakeDeltaClient(),
+                materialization_receipt=semantic_materialization_receipt,
             )
         except (
             PersistedProjectionError,
@@ -1541,10 +1903,36 @@ def deploy_ontology_cmd(
                 if semantic_loaded is not None
                 else None
             ),
+            "projection_receipt_hash": (
+                semantic_materialization_receipt.projection_receipt_hash
+                if semantic_materialization_receipt is not None
+                else None
+            ),
+            "materialization_plan_hash": (
+                semantic_materialization_receipt.materialization_plan_hash
+                if semantic_materialization_receipt is not None
+                else None
+            ),
+            "semantic_crosswalk_hash": (
+                semantic_materialization_receipt.semantic_crosswalk_hash
+                if semantic_materialization_receipt is not None
+                else None
+            ),
+            "source_tables": [
+                source.model_dump(mode="json")
+                for source in (
+                    semantic_materialization_receipt.source_tables
+                    if semantic_materialization_receipt is not None
+                    else []
+                )
+            ],
             "ontology_persisted_projection_hash": (
                 ontology_persisted_evidence.projection_hash
                 if ontology_persisted_evidence is not None
                 else None
+            ),
+            "ontology_submitted_projection_hash": (
+                ontology_submitted_projection_hash
             ),
             "ontology_definition_counts": (
                 ontology_persisted_evidence.definition_counts
@@ -1558,15 +1946,28 @@ def deploy_ontology_cmd(
                 "nodes_by_type": graph_counts.get("nodes_by_type", {}),
                 "edges_by_type": graph_counts.get("edges_by_type", {}),
             },
-            "materialized_tables": {
-                table_name: {
-                    "status": evidence.status,
-                    "row_count": evidence.row_count,
-                    "source_path": evidence.source_path,
+            "materialized_tables": (
+                {
+                    table.table_name: {
+                        "status": table.status,
+                        "row_count": table.persisted_row_count,
+                        "row_hash": table.persisted_row_hash,
+                        "schema_hash": table.persisted_schema_hash,
+                        "source_table": table.source_table_name,
+                        "source_hash": table.source_table_hash,
+                    }
+                    for table in semantic_materialization_receipt.tables
                 }
-                for table_name, evidence
-                in semantic_materialization.items()
-            },
+                if semantic_materialization_receipt is not None
+                else {
+                    table_name: {
+                        "status": evidence.status,
+                        "row_count": evidence.row_count,
+                    }
+                    for table_name, evidence
+                    in semantic_materialization.items()
+                }
+            ),
             "mock": False,
         },
     )
@@ -2008,6 +2409,18 @@ def deploy_graph_cmd(
 
     if graph_definition_file is not None:
         graph_artifact = _load_json_object(graph_definition_file)
+        sibling_manifest = graph_definition_file.with_name(
+            "graph-manifest.json"
+        )
+        if sibling_manifest.is_file():
+            graph_manifest = _load_json_object(sibling_manifest)
+            if graph_manifest.get("source_taxonomy_version"):
+                raise click.ClickException(
+                    "Schema-2 Graph deployment requires materialization and "
+                    "Ontology receipts plus persisted read-back. Use "
+                    "deploy-serving --semantic-dir with the sealed Graph "
+                    "definition; deploy-graph cannot bypass that authority chain."
+                )
         parts = graph_artifact.get("parts")
         if not isinstance(parts, list) or not parts:
             raise click.ClickException(
@@ -2874,6 +3287,18 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
          "and typed GQL readiness.",
 )
 @click.option(
+    "--materialization-receipt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Successful live typed-table materialization receipt.",
+)
+@click.option(
+    "--ontology-receipt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Successful persisted Ontology deployment/read-back receipt.",
+)
+@click.option(
     "--label-catalog-file",
     default=None,
     type=click.Path(exists=True, dir_okay=False),
@@ -2922,6 +3347,8 @@ def deploy_serving_cmd(
     graph_artifact_out: str,
     graph_definition_file: str | None,
     semantic_dir: str | None,
+    materialization_receipt: str | None,
+    ontology_receipt: str | None,
     label_catalog_file: str | None,
     deploy_lakehouse: bool,
     graph_preview_acknowledged: bool,
@@ -2983,17 +3410,84 @@ def deploy_serving_cmd(
         click.echo(render_name_resolution(resolved_graph))
 
     semantic_loaded = None
+    semantic_materialization_receipt = None
+    semantic_ontology_receipt: dict[str, Any] | None = None
+    graph_submitted_projection_hash: str | None = None
+    strict_schema2 = False
     if semantic_dir:
         if not graph_definition_file:
             raise click.ClickException(
-                "--semantic-dir requires --graph-definition-file so persisted "
-                "Graph state can be compared to the sealed projection."
+                "--semantic-dir requires --graph-definition-file."
             )
         from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            load_materialization_receipt,
             load_semantic_model_artifacts,
+        )
+        from fabric_kg_builder.semantic.canonical_hash import (  # noqa: PLC0415
+            canonical_hash,
         )
 
         semantic_loaded = load_semantic_model_artifacts(semantic_dir)
+        strict_schema2 = (
+            semantic_loaded.materialization_plan.source_taxonomy_version
+            is not None
+        )
+        if strict_schema2 and not all((
+            materialization_receipt,
+            ontology_receipt,
+        )):
+            raise click.ClickException(
+                "Schema-2 --semantic-dir requires --materialization-receipt "
+                "and --ontology-receipt."
+            )
+        semantic_crosswalk_hash = canonical_hash(
+            semantic_loaded.crosswalk.model_dump(mode="json")
+        )
+        if strict_schema2:
+            semantic_materialization_receipt = load_materialization_receipt(
+                str(materialization_receipt),
+                plan=semantic_loaded.materialization_plan,
+                semantic_model_manifest_hash=(
+                    semantic_loaded.manifest.manifest_hash
+                ),
+                semantic_crosswalk_hash=semantic_crosswalk_hash,
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+            )
+            semantic_ontology_receipt = _load_json_object(
+                Path(str(ontology_receipt))
+            )
+            required_ontology = {
+                "mock": False,
+                "workspace_id": workspace_id,
+                "lakehouse_item_id": lakehouse_item_id,
+                "schema_name": schema_name,
+                "semantic_model_manifest_hash": (
+                    semantic_loaded.manifest.manifest_hash
+                ),
+                "projection_receipt_hash": (
+                    semantic_materialization_receipt.projection_receipt_hash
+                ),
+                "materialization_plan_hash": (
+                    semantic_materialization_receipt.materialization_plan_hash
+                ),
+                "semantic_crosswalk_hash": semantic_crosswalk_hash,
+                "ontology_item_id": ontology_item_id,
+            }
+            for field, expected in required_ontology.items():
+                if semantic_ontology_receipt.get(field) != expected:
+                    raise click.ClickException(
+                        f"Ontology receipt field '{field}' does not match the "
+                        "schema-2 Graph authority."
+                    )
+            if not semantic_ontology_receipt.get(
+                "ontology_persisted_projection_hash"
+            ):
+                raise click.ClickException(
+                    "Ontology receipt does not prove persisted getDefinition "
+                    "read-back."
+                )
 
     if not workspace_id or not lakehouse_item_id:
         click.echo("[deploy-serving] ERROR: missing fabric.workspace_id / lakehouse_item_id", err=True)
@@ -3053,21 +3547,29 @@ def deploy_serving_cmd(
 
     from fabric_kg_builder.semantic.source_tables import (  # noqa: PLC0415
         resolve_semantic_source_parquet,
+        resolve_schema2_source_parquet,
     )
 
     try:
-        entities_path = resolve_semantic_source_parquet(
-            parquet_dir,
-            "semantic_entities",
+        resolver = (
+            resolve_schema2_source_parquet
+            if strict_schema2
+            else resolve_semantic_source_parquet
         )
-        relationships_path = resolve_semantic_source_parquet(
-            parquet_dir,
-            "semantic_relationships",
+        entities_path = resolver(parquet_dir, "semantic_entities")
+        relationships_path = resolver(
+            parquet_dir, "semantic_relationships"
         )
     except (FileNotFoundError, ValueError) as exc:
         click.echo(
-            "[deploy-serving] ERROR: entities.parquet and relationships.parquet "
-            f"(canonical or semantic) are required under {parquet_dir}: {exc}",
+            "[deploy-serving] ERROR: "
+            + (
+                "exact semantic_entities.parquet and "
+                "semantic_relationships.parquet"
+                if strict_schema2
+                else "entities/relationships canonical or semantic Parquet"
+            )
+            + f" are required under {parquet_dir}: {exc}",
             err=True,
         )
         raise SystemExit(1)
@@ -3174,6 +3676,104 @@ def deploy_serving_cmd(
             schema=schema_name,
             model_name=graph_name,
         )
+
+    if semantic_loaded is not None:
+        from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            PersistedProjectionError,
+            persisted_parts_hash,
+            validate_bound_tables,
+            validate_graph_projection_parts,
+            validate_graph_source_identity,
+        )
+
+        graph_manifest_path = Path(str(graph_definition_file)).with_name(
+            "graph-manifest.json"
+        )
+        graph_manifest = _load_json_object(graph_manifest_path)
+        expected_graph_manifest = {
+            "contract_hash": semantic_loaded.manifest.semantic_contract_hash,
+            "semantic_model_manifest_hash": (
+                semantic_loaded.manifest.manifest_hash
+            ),
+            "materialization_plan_hash": canonical_hash(
+                semantic_loaded.materialization_plan.model_dump(mode="json")
+            ),
+        }
+        if (
+            semantic_loaded.materialization_plan.source_taxonomy_version
+            is not None
+        ):
+            expected_graph_manifest.update({
+                "projection_receipt_hash": (
+                    semantic_loaded.materialization_plan
+                    .projection_receipt_hash
+                ),
+                "source_taxonomy_version": (
+                    semantic_loaded.materialization_plan
+                    .source_taxonomy_version
+                ),
+                "source_tables": [
+                    source.model_dump(mode="json")
+                    for source in (
+                        semantic_loaded.materialization_plan.source_tables
+                    )
+                ],
+            })
+        for field, expected in expected_graph_manifest.items():
+            if graph_manifest.get(field) != expected:
+                raise click.ClickException(
+                    f"Graph manifest field '{field}' does not match the "
+                    "sealed schema-2 authority."
+                )
+        graph_part_map = {
+            str(part.get("path")): dict(part.get("payload_json") or {})
+            for part in graph_parts
+            if isinstance(part, dict) and part.get("path")
+        }
+        graph_submitted_projection_hash = persisted_parts_hash(
+            graph_part_map
+        )
+        graph_findings = validate_graph_projection_parts(
+            graph_part_map,
+            semantic_loaded.manifest,
+            semantic_loaded.materialization_plan,
+        )
+        graph_findings.extend(validate_graph_source_identity(
+            parts=graph_part_map,
+            plan=semantic_loaded.materialization_plan,
+            workspace_id=workspace_id,
+            lakehouse_item_id=lakehouse_item_id,
+            schema=schema_name,
+        ))
+        if graph_findings:
+            raise click.ClickException(
+                "Compiled Graph does not match the typed-table plan: "
+                + "; ".join(
+                    f"{finding.code}: {finding.message}"
+                    for finding in graph_findings
+                )
+            )
+        if not dry_run:
+            from fabric_kg_builder.serving.competency import (  # noqa: PLC0415
+                OneLakeDeltaClient,
+            )
+
+            try:
+                validate_bound_tables(
+                    plan=semantic_loaded.materialization_plan,
+                    workspace_id=workspace_id,
+                    lakehouse_item_id=lakehouse_item_id,
+                    schema=schema_name,
+                    table_reader=OneLakeDeltaClient(),
+                    materialization_receipt=(
+                        semantic_materialization_receipt
+                    ),
+                )
+            except PersistedProjectionError as exc:
+                raise click.ClickException(
+                    "Graph pre-mutation typed-table validation failed: "
+                    f"{exc}"
+                ) from exc
 
     effective_run_id = run_id or str(uuid.uuid4())
 
@@ -3307,6 +3907,12 @@ def deploy_serving_cmd(
                 definition=persisted_graph,
                 manifest=semantic_loaded.manifest,
                 plan=semantic_loaded.materialization_plan,
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+                expected_projection_hash=(
+                    graph_submitted_projection_hash
+                ),
             )
             gql_client = getattr(tp, "gql_client", None)
             if gql_client is None:
@@ -3383,7 +3989,52 @@ def deploy_serving_cmd(
                 if semantic_loaded is not None
                 else None
             ),
+            "projection_receipt_hash": (
+                semantic_materialization_receipt.projection_receipt_hash
+                if semantic_materialization_receipt is not None
+                else None
+            ),
+            "materialization_plan_hash": (
+                semantic_materialization_receipt.materialization_plan_hash
+                if semantic_materialization_receipt is not None
+                else None
+            ),
+            "semantic_crosswalk_hash": (
+                semantic_materialization_receipt.semantic_crosswalk_hash
+                if semantic_materialization_receipt is not None
+                else None
+            ),
+            "source_tables": [
+                source.model_dump(mode="json")
+                for source in (
+                    semantic_materialization_receipt.source_tables
+                    if semantic_materialization_receipt is not None
+                    else []
+                )
+            ],
+            "materialized_tables": {
+                table.table_name: {
+                    "row_count": table.persisted_row_count,
+                    "row_hash": table.persisted_row_hash,
+                    "schema_hash": table.persisted_schema_hash,
+                }
+                for table in (
+                    semantic_materialization_receipt.tables
+                    if semantic_materialization_receipt is not None
+                    else []
+                )
+            },
+            "ontology_persisted_projection_hash": (
+                semantic_ontology_receipt.get(
+                    "ontology_persisted_projection_hash"
+                )
+                if semantic_ontology_receipt is not None
+                else None
+            ),
             "graph_definition_hash": _sha256_file(graph_definition_path),
+            "graph_submitted_projection_hash": (
+                graph_submitted_projection_hash
+            ),
             "label_catalog_hash": _sha256_file(label_catalog_path),
             "graph_persisted_projection_hash": (
                 graph_persisted_evidence.projection_hash
@@ -3463,6 +4114,12 @@ def deploy_serving_cmd(
     help="Sealed semantic authority directory.",
 )
 @click.option(
+    "--materialization-receipt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Successful live typed-table receipt (required for schema-2).",
+)
+@click.option(
     "--ontology-receipt",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
@@ -3483,6 +4140,7 @@ def deploy_serving_cmd(
 )
 def validate_projection_cmd(
     semantic_dir: str,
+    materialization_receipt: str | None,
     ontology_receipt: str,
     serving_receipt: str,
     output_path: str,
@@ -3492,7 +4150,11 @@ def validate_projection_cmd(
         PersistedSurfaceEvidence,
         QueryReadiness,
         build_persisted_projection_receipt,
+        load_materialization_receipt,
         load_semantic_model_artifacts,
+    )
+    from fabric_kg_builder.semantic.canonical_hash import (  # noqa: PLC0415
+        canonical_hash,
     )
 
     def load_required_object(path: str) -> dict:
@@ -3512,6 +4174,28 @@ def validate_projection_cmd(
     loaded = load_semantic_model_artifacts(semantic_dir)
     ontology = load_required_object(ontology_receipt)
     serving = load_required_object(serving_receipt)
+    strict_schema2 = (
+        loaded.materialization_plan.source_taxonomy_version is not None
+    )
+    if strict_schema2 and not materialization_receipt:
+        raise click.ClickException(
+            "Schema-2 validation requires --materialization-receipt."
+        )
+    materialization = (
+        load_materialization_receipt(
+            str(materialization_receipt),
+            plan=loaded.materialization_plan,
+            semantic_model_manifest_hash=loaded.manifest.manifest_hash,
+            semantic_crosswalk_hash=canonical_hash(
+                loaded.crosswalk.model_dump(mode="json")
+            ),
+            workspace_id=str(ontology.get("workspace_id") or ""),
+            lakehouse_item_id=str(ontology.get("lakehouse_item_id") or ""),
+            schema=str(ontology.get("schema_name") or ""),
+        )
+        if strict_schema2
+        else None
+    )
     if ontology.get("mock") is not False:
         raise click.ClickException(
             "Ontology receipt is mock or does not prove a live deployment."
@@ -3530,6 +4214,33 @@ def validate_projection_cmd(
                 f"{label} receipt does not match semantic model manifest "
                 f"{manifest_hash}."
             )
+        if materialization is not None:
+            for field, expected in (
+                (
+                    "projection_receipt_hash",
+                    materialization.projection_receipt_hash,
+                ),
+                (
+                    "materialization_plan_hash",
+                    materialization.materialization_plan_hash,
+                ),
+                (
+                    "semantic_crosswalk_hash",
+                    materialization.semantic_crosswalk_hash,
+                ),
+                (
+                    "source_tables",
+                    [
+                        source.model_dump(mode="json")
+                        for source in materialization.source_tables
+                    ],
+                ),
+            ):
+                if receipt.get(field) != expected:
+                    raise click.ClickException(
+                        f"{label} receipt field '{field}' does not match the "
+                        "materialization authority."
+                    )
     if ontology.get("workspace_id") != serving.get("workspace_id"):
         raise click.ClickException(
             "Ontology and serving receipts target different workspaces."
@@ -3544,6 +4255,37 @@ def validate_projection_cmd(
         raise click.ClickException(
             "Ontology and serving receipts target different Ontology items."
         )
+    if serving.get("ontology_persisted_projection_hash") != ontology.get(
+        "ontology_persisted_projection_hash"
+    ):
+        raise click.ClickException(
+            "Serving receipt is not bound to the persisted Ontology definition."
+        )
+    if strict_schema2:
+        for label, receipt, submitted_field, persisted_field in (
+            (
+                "Ontology",
+                ontology,
+                "ontology_submitted_projection_hash",
+                "ontology_persisted_projection_hash",
+            ),
+            (
+                "Graph",
+                serving,
+                "graph_submitted_projection_hash",
+                "graph_persisted_projection_hash",
+            ),
+        ):
+            if (
+                not receipt.get(submitted_field)
+                or receipt.get(submitted_field) != receipt.get(
+                    persisted_field
+                )
+            ):
+                raise click.ClickException(
+                    f"{label} persisted definition hash differs from the exact "
+                    "submitted compiler artifact."
+                )
 
     schema_name = str(ontology.get("schema_name") or "")
     if not schema_name:
@@ -3568,6 +4310,35 @@ def validate_projection_cmd(
             f"plan. Missing={sorted(expected_tables - set(bound_table_counts))}; "
             f"extra={sorted(set(bound_table_counts) - expected_tables)}."
         )
+    if materialization is not None:
+        expected_materialized = {
+            table.table_name: {
+                "row_count": table.persisted_row_count,
+                "row_hash": table.persisted_row_hash,
+                "schema_hash": table.persisted_schema_hash,
+            }
+            for table in materialization.tables
+        }
+        for label, receipt in (("Ontology", ontology), ("Serving", serving)):
+            observed = receipt.get("materialized_tables")
+            if not isinstance(observed, dict):
+                raise click.ClickException(
+                    f"{label} receipt omits exact materialized-table evidence."
+                )
+            normalized = {
+                table_name: {
+                    "row_count": evidence.get("row_count"),
+                    "row_hash": evidence.get("row_hash"),
+                    "schema_hash": evidence.get("schema_hash"),
+                }
+                for table_name, evidence in observed.items()
+                if isinstance(evidence, dict)
+            }
+            if normalized != expected_materialized:
+                raise click.ClickException(
+                    f"{label} receipt materialized-table hashes/counts differ "
+                    "from the serving/materialization receipt."
+                )
     try:
         receipt = build_persisted_projection_receipt(
             manifest=loaded.manifest,
@@ -3589,6 +4360,7 @@ def validate_projection_cmd(
                     serving.get("graph_definition_counts") or {}
                 ),
             ),
+            materialization_receipt=materialization,
             bound_table_counts={
                 str(key): int(value)
                 for key, value in bound_table_counts.items()

@@ -43,6 +43,7 @@ def _load_compiled_bundle(
     ontology_name: str | None = None,
     data_version: str = "not-observed",
     data_dir: str | None = None,
+    projection_receipt_path: str | None = None,
     quality_report_path: str | None = None,
 ):
     bundle = load_semantic_bundle(
@@ -66,6 +67,7 @@ def _load_compiled_bundle(
         ontology_name=ontology_name,
         data_version=data_version,
         data_dir=data_dir,
+        projection_receipt_path=projection_receipt_path,
         quality_report=quality_report,
     )
 
@@ -335,6 +337,16 @@ def inspect_ontology_cmd(
     type=click.Path(exists=True, dir_okay=False),
     help="Passed redacted semantic-quality-report.json from enrichment.",
 )
+@click.option(
+    "--projection-receipt",
+    "projection_receipt_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help=(
+        "Successful schema-2 semantic-projection-receipt.json. When supplied, "
+        "all typed-table sources and exact planned rows are sealed."
+    ),
+)
 def compile_semantic_cmd(
     contract_path: str,
     mappings_path: str,
@@ -345,6 +357,7 @@ def compile_semantic_cmd(
     data_version: str,
     data_dir: str | None,
     quality_report_path: str | None,
+    projection_receipt_path: str | None,
 ) -> None:
     """Compile one approved contract into Ontology, Graph, and agent inputs."""
     try:
@@ -356,6 +369,7 @@ def compile_semantic_cmd(
             ontology_name=ontology_name,
             data_version=data_version,
             data_dir=data_dir,
+            projection_receipt_path=projection_receipt_path,
             quality_report_path=quality_report_path,
         )
         out = compiled.write(output_path)
@@ -540,6 +554,16 @@ def compile_graph_cmd(
                             ).encode("utf-8")
                         ).hexdigest()
                     ),
+                    "projection_receipt_hash": (
+                        materialization_plan.projection_receipt_hash or None
+                    ),
+                    "source_taxonomy_version": (
+                        materialization_plan.source_taxonomy_version
+                    ),
+                    "source_tables": [
+                        source.model_dump(mode="json")
+                        for source in materialization_plan.source_tables
+                    ],
                     "artifact_set_hash": f"sha256:{graph_artifact_set_hash}",
                     "artifacts": graph_artifacts,
                 },

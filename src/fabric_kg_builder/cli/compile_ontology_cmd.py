@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import click
 import yaml
@@ -104,6 +105,9 @@ def compile_ontology_cmd(
     semantic_model_manifest_hash: str | None = None
     semantic_crosswalk_hash: str | None = None
     materialization_plan_hash: str | None = None
+    projection_receipt_hash: str | None = None
+    source_taxonomy_version: str | None = None
+    source_tables: list[dict[str, Any]] = []
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
 
     if semantic_dir and (contract_path or model_path):
@@ -197,6 +201,16 @@ def compile_ontology_cmd(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        projection_receipt_hash = (
+            loaded.materialization_plan.projection_receipt_hash or None
+        )
+        source_taxonomy_version = (
+            loaded.materialization_plan.source_taxonomy_version
+        )
+        source_tables = [
+            source.model_dump(mode="json")
+            for source in loaded.materialization_plan.source_tables
+        ]
         model_source = f"sealed semantic manifest {semantic_root}"
     elif contract_path:
         resolved_contract = Path(contract_path)
@@ -243,6 +257,16 @@ def compile_ontology_cmd(
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
+            projection_receipt_hash = (
+                compiled.materialization_plan.projection_receipt_hash or None
+            )
+            source_taxonomy_version = (
+                compiled.materialization_plan.source_taxonomy_version
+            )
+            source_tables = [
+                source.model_dump(mode="json")
+                for source in compiled.materialization_plan.source_tables
+            ]
             model_source = f"shared semantic contract {resolved_contract}"
         except (SemanticContractError, SemanticCompileError, OSError) as exc:
             if temp_dir is not None:
@@ -334,6 +358,9 @@ def compile_ontology_cmd(
                 ),
                 "semantic_crosswalk_hash": semantic_crosswalk_hash,
                 "materialization_plan_hash": materialization_plan_hash,
+                "projection_receipt_hash": projection_receipt_hash,
+                "source_taxonomy_version": source_taxonomy_version,
+                "source_tables": source_tables,
                 "artifact_set_hash": f"sha256:{artifact_set_hash}",
                 "artifacts": artifact_hashes,
             },

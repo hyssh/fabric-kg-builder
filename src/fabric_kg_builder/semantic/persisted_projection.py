@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,12 +19,23 @@ from fabric_kg_builder.semantic.artifact_validation import (
 )
 from fabric_kg_builder.semantic.schemas import (
     MaterializationPlan,
+    MaterializationReceipt,
+    MaterializedTableReceipt,
     PersistedProjectionReceipt,
     QueryReadiness,
     SemanticModelManifest,
+    SourceTableAuthority,
+)
+from fabric_kg_builder.semantic.canonical_hash import (
+    arrow_schema_hash,
+    arrow_table_hash,
+    canonical_hash,
 )
 from fabric_kg_builder.semantic.source_tables import (
     resolve_semantic_source_parquet,
+    resolve_schema2_source_parquet,
+    source_category,
+    source_primary_key,
     source_table_candidates,
 )
 from fabric_kg_builder.serving.competency import (
@@ -92,6 +105,15 @@ class PersistedSurfaceEvidence:
     definition_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class Schema2ProjectionAuthority:
+    """Validated layer-4 projection and approved support-table authority."""
+
+    contract_hash: str
+    receipt_hash: str
+    source_tables: dict[str, SourceTableAuthority]
+
+
 def _canonical_hash(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -100,6 +122,284 @@ def _canonical_hash(value: Any) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def write_safe_receipt(
+    path: Path | str,
+    payload: MaterializationReceipt | dict[str, Any],
+) -> Path:
+    """Atomically serialize a redacted receipt with secret/content canaries."""
+    from fabric_kg_builder.release.redact import (
+        assert_no_secrets,
+        assert_no_source_content,
+        redact_dict,
+    )
+
+    target = Path(path)
+    raw = (
+        payload.model_dump(mode="json")
+        if isinstance(payload, MaterializationReceipt)
+        else dict(payload)
+    )
+    safe = redact_dict(raw)
+    assert_no_secrets(safe)
+    assert_no_source_content(safe)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(target.parent),
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                safe,
+                handle,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            handle.write("\n")
+        os.replace(temp_name, target)
+    finally:
+        Path(temp_name).unlink(missing_ok=True)
+    return target
+
+
+def load_materialization_receipt(
+    path: Path | str,
+    *,
+    plan: MaterializationPlan,
+    semantic_model_manifest_hash: str,
+    semantic_crosswalk_hash: str,
+    workspace_id: str,
+    lakehouse_item_id: str,
+    schema: str,
+    require_live: bool = True,
+) -> MaterializationReceipt:
+    """Load a successful receipt and bind it to the current sealed authority."""
+    target = Path(path)
+    try:
+        receipt = MaterializationReceipt.model_validate_json(
+            target.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        raise PersistedProjectionError([
+            ArtifactFinding(
+                "MATERIALIZATION_RECEIPT_INVALID",
+                f"Could not load materialization receipt: {exc}.",
+            )
+        ]) from exc
+    findings: list[ArtifactFinding] = []
+    if receipt.status != "succeeded":
+        findings.append(ArtifactFinding(
+            "MATERIALIZATION_RECEIPT_FAILED",
+            "Materialization receipt does not prove a complete deployment.",
+        ))
+    if require_live and receipt.mock:
+        findings.append(ArtifactFinding(
+            "MATERIALIZATION_RECEIPT_MOCK",
+            "Mock materialization cannot authorize live Ontology or Graph.",
+        ))
+    expected = {
+        "workspace_id": workspace_id,
+        "lakehouse_item_id": lakehouse_item_id,
+        "schema_name": schema,
+        "semantic_contract_hash": plan.semantic_contract_hash,
+        "projection_receipt_hash": plan.projection_receipt_hash,
+        "semantic_model_manifest_hash": semantic_model_manifest_hash,
+        "semantic_crosswalk_hash": semantic_crosswalk_hash,
+        "materialization_plan_hash": canonical_hash(
+            plan.model_dump(mode="json")
+        ),
+    }
+    for field, expected_value in expected.items():
+        if getattr(receipt, field) != expected_value:
+            findings.append(ArtifactFinding(
+                "MATERIALIZATION_RECEIPT_AUTHORITY_DRIFT",
+                f"Materialization receipt field '{field}' does not match "
+                "the active sealed authority.",
+            ))
+    if receipt.source_tables != plan.source_tables:
+        findings.append(ArtifactFinding(
+            "MATERIALIZATION_RECEIPT_SOURCE_DRIFT",
+            "Materialization receipt source authority differs from the plan.",
+        ))
+    specs = {
+        table.table_name: table
+        for table in [*plan.entity_tables, *plan.relationship_tables]
+    }
+    receipt_tables = {table.table_name: table for table in receipt.tables}
+    if set(receipt_tables) != set(specs):
+        findings.append(ArtifactFinding(
+            "MATERIALIZATION_RECEIPT_TABLE_SET_DRIFT",
+            "Materialization receipt typed-table set differs from the plan.",
+        ))
+    else:
+        for table_name, spec in specs.items():
+            table = receipt_tables[table_name]
+            if (
+                table.semantic_id != spec.semantic_id
+                or table.source_table_name != spec.source_table_name
+                or table.source_category != spec.source_category
+                or table.planned_row_count != spec.planned_row_count
+                or table.planned_row_hash != spec.planned_row_hash
+                or table.planned_schema_hash != spec.planned_schema_hash
+            ):
+                findings.append(ArtifactFinding(
+                    "MATERIALIZATION_RECEIPT_TABLE_DRIFT",
+                    f"Materialization receipt table '{table_name}' differs "
+                    "from the sealed plan.",
+                ))
+    if findings:
+        raise PersistedProjectionError(findings)
+    return receipt
+
+
+def load_schema2_projection_authority(
+    *,
+    parquet_dir: Path | str,
+    receipt_path: Path | str,
+    expected_contract_hash: str,
+    support_tables: set[str] | frozenset[str] = frozenset(),
+) -> Schema2ProjectionAuthority:
+    """Validate the layer-4 receipt and bind exact approved support sources."""
+    receipt_file = Path(receipt_path)
+    try:
+        receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PersistedProjectionError([
+            ArtifactFinding(
+                "PROJECTION_RECEIPT_MISSING_OR_INVALID",
+                f"Could not read schema-2 projection receipt: {exc}.",
+            )
+        ]) from exc
+    if not isinstance(receipt, dict):
+        raise PersistedProjectionError([
+            ArtifactFinding(
+                "PROJECTION_RECEIPT_INVALID",
+                "Schema-2 projection receipt must contain an object.",
+            )
+        ])
+    findings: list[ArtifactFinding] = []
+    expected_fields = {
+        "receipt_schema_version": "1.0",
+        "schema_mode": "schema2",
+        "status": "succeeded",
+        "active_contract_hash": expected_contract_hash,
+    }
+    for field, expected in expected_fields.items():
+        if receipt.get(field) != expected:
+            findings.append(ArtifactFinding(
+                "PROJECTION_RECEIPT_AUTHORITY_MISMATCH",
+                f"Projection receipt field '{field}' must be {expected!r}, "
+                f"found {receipt.get(field)!r}.",
+            ))
+    invariant_rows = receipt.get("invariants")
+    invariant_by_gate = {
+        str(item.get("gate")): item
+        for item in invariant_rows
+        if isinstance(item, dict) and item.get("gate")
+    } if isinstance(invariant_rows, list) else {}
+    for gate in ("SEM-100", "SEM-101", "SEM-102", "SEM-103", "SEM-104"):
+        if invariant_by_gate.get(gate, {}).get("passed") is not True:
+            findings.append(ArtifactFinding(
+                "PROJECTION_RECEIPT_GATE_FAILED",
+                f"Projection receipt does not prove {gate}.",
+            ))
+
+    requested_sources = {
+        "semantic_entities",
+        "semantic_relationships",
+        "evidence",
+        *support_tables,
+    }
+    source_authority: dict[str, SourceTableAuthority] = {}
+    for table_name in sorted(requested_sources):
+        try:
+            category = source_category(table_name)
+            path = resolve_schema2_source_parquet(parquet_dir, table_name)
+            primary_key = source_primary_key(table_name)
+        except (FileNotFoundError, ValueError) as exc:
+            findings.append(ArtifactFinding(
+                "PROJECTION_SOURCE_INVALID",
+                str(exc),
+            ))
+            continue
+        try:
+            import pyarrow.parquet as pq  # type: ignore[import]
+
+            table = pq.read_table(str(path))
+        except Exception as exc:
+            findings.append(ArtifactFinding(
+                "PROJECTION_SOURCE_READ_FAILED",
+                f"Could not read schema-2 source '{table_name}': {exc}.",
+            ))
+            continue
+        if primary_key not in table.schema.names:
+            findings.append(ArtifactFinding(
+                "PROJECTION_SOURCE_KEY_MISSING",
+                f"Schema-2 source '{table_name}' omits primary key "
+                f"'{primary_key}'.",
+            ))
+            continue
+        source_authority[table_name] = SourceTableAuthority(
+            table_name=table_name,
+            category=category,
+            primary_key=primary_key,
+            row_count=int(table.num_rows),
+            table_hash=arrow_table_hash(table, primary_key),
+            schema_hash=arrow_schema_hash(table.schema),
+        )
+
+    aggregate_hashes = receipt.get("aggregate_table_hashes")
+    serving_counts = receipt.get("serving_counts")
+    if not isinstance(aggregate_hashes, dict):
+        findings.append(ArtifactFinding(
+            "PROJECTION_RECEIPT_HASHES_MISSING",
+            "Projection receipt omits aggregate_table_hashes.",
+        ))
+        aggregate_hashes = {}
+    if not isinstance(serving_counts, dict):
+        findings.append(ArtifactFinding(
+            "PROJECTION_RECEIPT_COUNTS_MISSING",
+            "Projection receipt omits serving_counts.",
+        ))
+        serving_counts = {}
+    for table_name in ("semantic_entities", "semantic_relationships"):
+        authority = source_authority.get(table_name)
+        if authority is None:
+            continue
+        if aggregate_hashes.get(table_name) != authority.table_hash:
+            findings.append(ArtifactFinding(
+                "PROJECTION_SOURCE_HASH_MISMATCH",
+                f"Source '{table_name}' hash does not match the successful "
+                "projection receipt.",
+            ))
+        if serving_counts.get(table_name) != authority.row_count:
+            findings.append(ArtifactFinding(
+                "PROJECTION_SOURCE_COUNT_MISMATCH",
+                f"Source '{table_name}' count does not match the successful "
+                "projection receipt.",
+            ))
+    evidence_authority = source_authority.get("evidence")
+    if evidence_authority is not None and (
+        aggregate_hashes.get("input_evidence") != evidence_authority.table_hash
+    ):
+        findings.append(ArtifactFinding(
+            "PROJECTION_EVIDENCE_HASH_MISMATCH",
+            "evidence.parquet hash does not match input_evidence in the "
+            "successful projection receipt.",
+        ))
+    if findings:
+        raise PersistedProjectionError(findings)
+    return Schema2ProjectionAuthority(
+        contract_hash=expected_contract_hash,
+        receipt_hash=canonical_hash(receipt),
+        source_tables=source_authority,
+    )
 
 
 def _utc_now() -> str:
@@ -435,9 +735,6 @@ def materialize_semantic_tables(
                 "Materialization plan contains duplicate physical table names.",
             )
         ])
-    availability = {
-        item.semantic_id: item for item in plan.data_availability
-    }
     if mock:
         return {
             spec.table_name: MaterializedTableEvidence(
@@ -453,72 +750,11 @@ def materialize_semantic_tables(
             for spec in specs
         }
 
-    import pyarrow.parquet as pq  # type: ignore[import]
-
-    source_cache: dict[Path, Any] = {}
-    prepared: dict[str, tuple[Any, MaterializedTableEvidence]] = {}
-    findings: list[ArtifactFinding] = []
-    for spec in specs:
-        try:
-            source_path = resolve_source_parquet(
-                parquet_dir,
-                str(spec.source_table_name or ""),
-            )
-        except PersistedProjectionError as exc:
-            findings.extend(exc.findings)
-            continue
-        if source_path not in source_cache:
-            source_cache[source_path] = pq.read_table(str(source_path))
-        try:
-            sliced = _filter_table(
-                source_cache[source_path],
-                spec.source_filter_column,
-                spec.source_filter_value,
-            )
-        except PersistedProjectionError as exc:
-            findings.extend(exc.findings)
-            continue
-        expected_names = [column.column_name for column in spec.columns]
-        missing = sorted(set(expected_names) - set(sliced.schema.names))
-        if missing:
-            findings.append(ArtifactFinding(
-                "MATERIALIZATION_SOURCE_COLUMNS_MISSING",
-                f"Source '{source_path.name}' for '{spec.semantic_id}' "
-                f"omits {missing}.",
-            ))
-            continue
-        projected = _coerce_complex_scalar_columns(
-            sliced.select(expected_names),
-            spec.columns,
-        )
-        required_rows = availability[spec.semantic_id].required_rows
-        key_column = (
-            spec.entity_id_column
-            if hasattr(spec, "entity_id_column")
-            else spec.relationship_id_column
-        )
-        findings.extend(_validate_arrow_table(
-            semantic_id=spec.semantic_id,
-            table_name=spec.table_name,
-            table=projected,
-            columns=spec.columns,
-            key_column=key_column,
-            required_rows=required_rows,
-            require_exact_columns=True,
-        ))
-        prepared[spec.table_name] = (
-            projected,
-            MaterializedTableEvidence(
-                semantic_id=spec.semantic_id,
-                table_name=spec.table_name,
-                source_path=str(source_path),
-                row_count=projected.num_rows,
-                columns=tuple(expected_names),
-                status="prepared",
-            ),
-        )
-    if findings:
-        raise PersistedProjectionError(findings)
+    prepared = prepare_semantic_tables(
+        parquet_dir=parquet_dir,
+        plan=plan,
+        enforce_planned_hashes=True,
+    )
 
     if table_writer is None:
         from deltalake import write_deltalake  # type: ignore[import]
@@ -563,6 +799,511 @@ def materialize_semantic_tables(
     return written
 
 
+def prepare_semantic_tables(
+    *,
+    parquet_dir: Path | str,
+    plan: MaterializationPlan,
+    enforce_planned_hashes: bool,
+    strict_schema2: bool | None = None,
+) -> dict[str, tuple[Any, MaterializedTableEvidence]]:
+    """Prepare all typed rows and enforce schema-2 publication boundaries."""
+    import pyarrow as pa  # type: ignore[import]
+    import pyarrow.compute as pc  # type: ignore[import]
+    import pyarrow.parquet as pq  # type: ignore[import]
+
+    specs = [*plan.entity_tables, *plan.relationship_tables]
+    availability = {
+        item.semantic_id: item for item in plan.data_availability
+    }
+    strict_schema2 = (
+        plan.source_taxonomy_version is not None
+        if strict_schema2 is None
+        else strict_schema2
+    )
+    source_cache: dict[Path, Any] = {}
+    prepared: dict[str, tuple[Any, MaterializedTableEvidence]] = {}
+    findings: list[ArtifactFinding] = []
+
+    published_by_type: dict[str, set[str]] = {}
+    all_published_ids: set[str] = set()
+    evidence_ids: set[str] = set()
+    evidence_chunk_by_id: dict[str, str] = {}
+    approved_chunk_ids: set[str] = set()
+    if strict_schema2:
+        semantic_entities_path = resolve_schema2_source_parquet(
+            parquet_dir,
+            "semantic_entities",
+        )
+        evidence_path = resolve_schema2_source_parquet(parquet_dir, "evidence")
+        semantic_entities = pq.read_table(str(semantic_entities_path))
+        evidence = pq.read_table(str(evidence_path))
+        entity_ids = semantic_entities["entity_id"].to_pylist()
+        semantic_type_ids = (
+            semantic_entities["semantic_type_id"].to_pylist()
+            if "semantic_type_id" in semantic_entities.schema.names
+            else [None] * semantic_entities.num_rows
+        )
+        for entity_id, semantic_type_id in zip(
+            entity_ids,
+            semantic_type_ids,
+        ):
+            if entity_id is None:
+                continue
+            identity = str(entity_id)
+            all_published_ids.add(identity)
+            if semantic_type_id:
+                published_by_type.setdefault(
+                    str(semantic_type_id), set()
+                ).add(identity)
+        evidence_ids = {
+            str(value)
+            for value in evidence["evidence_id"].to_pylist()
+            if value is not None
+        }
+        if "chunk_id" in evidence.schema.names:
+            evidence_chunk_by_id = {
+                str(evidence_id): str(chunk_id)
+                for evidence_id, chunk_id in zip(
+                    evidence["evidence_id"].to_pylist(),
+                    evidence["chunk_id"].to_pylist(),
+                )
+                if evidence_id is not None and chunk_id is not None
+            }
+        if any(
+            table.source_table_name == "chunks"
+            for table in plan.entity_tables
+        ):
+            chunks_path = resolve_schema2_source_parquet(
+                parquet_dir,
+                "chunks",
+            )
+            chunks = pq.read_table(str(chunks_path), columns=["chunk_id"])
+            approved_chunk_ids = {
+                str(chunk_id)
+                for chunk_id in chunks["chunk_id"].to_pylist()
+                if chunk_id is not None
+                and str(chunk_id) in all_published_ids
+            }
+
+    for spec in specs:
+        source_table_name = str(spec.source_table_name or "")
+        try:
+            source_path = (
+                resolve_schema2_source_parquet(
+                    parquet_dir,
+                    source_table_name,
+                )
+                if strict_schema2
+                else resolve_source_parquet(parquet_dir, source_table_name)
+            )
+        except (FileNotFoundError, ValueError, PersistedProjectionError) as exc:
+            if isinstance(exc, PersistedProjectionError):
+                findings.extend(exc.findings)
+            else:
+                findings.append(ArtifactFinding(
+                    "MATERIALIZATION_SOURCE_INVALID",
+                    str(exc),
+                ))
+            continue
+        if source_path not in source_cache:
+            source_cache[source_path] = pq.read_table(str(source_path))
+        try:
+            sliced = _filter_table(
+                source_cache[source_path],
+                spec.source_filter_column,
+                spec.source_filter_value,
+            )
+        except PersistedProjectionError as exc:
+            findings.extend(exc.findings)
+            continue
+
+        if strict_schema2:
+            if spec.source_category != source_category(source_table_name):
+                findings.append(ArtifactFinding(
+                    "MATERIALIZATION_SOURCE_CATEGORY_MISMATCH",
+                    f"Table '{spec.table_name}' source category does not match "
+                    f"the closed taxonomy for '{source_table_name}'.",
+                ))
+                continue
+            if hasattr(spec, "entity_id_column"):
+                identity_column = spec.entity_id_column
+                if (
+                    spec.source_category
+                    == "semantic_entity_projection"
+                    and "semantic_type_id" in sliced.schema.names
+                ):
+                    sliced = _filter_table(
+                        sliced,
+                        "semantic_type_id",
+                        spec.semantic_id,
+                    )
+                elif spec.source_category == "canonical_support_entity":
+                    if identity_column not in sliced.schema.names:
+                        findings.append(ArtifactFinding(
+                            "SUPPORT_IDENTITY_COLUMN_MISSING",
+                            f"Support source '{source_table_name}' omits "
+                            f"identity column '{identity_column}'.",
+                        ))
+                        continue
+                    allowed_ids = published_by_type.get(spec.semantic_id, set())
+                    mask = pc.is_in(
+                        sliced[identity_column],
+                        value_set=pa.array(
+                            sorted(allowed_ids),
+                            type=sliced.schema.field(identity_column).type,
+                        ),
+                    )
+                    sliced = sliced.filter(pc.fill_null(mask, False))
+            else:
+                if (
+                    spec.source_category
+                    != "semantic_relationship_projection"
+                ):
+                    findings.append(ArtifactFinding(
+                        "RELATIONSHIP_SOURCE_NOT_SEMANTIC",
+                        f"Schema-2 relationship table '{spec.table_name}' must "
+                        "source semantic_relationships.",
+                    ))
+                    continue
+                if "semantic_relationship_id" in sliced.schema.names:
+                    sliced = _filter_table(
+                        sliced,
+                        "semantic_relationship_id",
+                        spec.semantic_id,
+                    )
+                row_values = sliced.to_pylist()
+                is_evidenced_by = (
+                    spec.semantic_id.endswith(
+                        (":evidenced-by", ":evidenced_by")
+                    )
+                    or any(
+                        str(row.get("relationship_type") or "")
+                        .casefold()
+                        .replace("-", "_")
+                        == "evidenced_by"
+                        for row in row_values
+                    )
+                )
+                invalid_rows = [
+                    str(row.get(spec.relationship_id_column) or "<missing>")
+                    for row in row_values
+                    if (
+                        row.get("assertion_state") != "asserted"
+                        or not row.get(spec.evidence_column or "evidence_id")
+                        or str(
+                            row.get(spec.evidence_column or "evidence_id")
+                        ) not in evidence_ids
+                        or str(row.get(spec.source_column) or "")
+                        not in all_published_ids
+                        or str(row.get(spec.target_column) or "")
+                        not in all_published_ids
+                        or (
+                            is_evidenced_by
+                            and (
+                                evidence_chunk_by_id.get(str(
+                                    row.get(
+                                        spec.evidence_column or "evidence_id"
+                                    )
+                                    or ""
+                                ))
+                                != str(row.get(spec.target_column) or "")
+                                or str(row.get(spec.target_column) or "")
+                                not in approved_chunk_ids
+                            )
+                        )
+                    )
+                ]
+                if invalid_rows:
+                    findings.append(ArtifactFinding(
+                        "RELATIONSHIP_PUBLICATION_INVALID",
+                        f"Typed relationship table '{spec.table_name}' contains "
+                        f"{len(invalid_rows)} non-serving row(s).",
+                    ))
+                    continue
+
+        expected_names = [column.column_name for column in spec.columns]
+        missing = sorted(set(expected_names) - set(sliced.schema.names))
+        if missing:
+            findings.append(ArtifactFinding(
+                "MATERIALIZATION_SOURCE_COLUMNS_MISSING",
+                f"Source '{source_path.name}' for '{spec.semantic_id}' "
+                f"omits {missing}.",
+            ))
+            continue
+        projected = _coerce_complex_scalar_columns(
+            sliced.select(expected_names),
+            spec.columns,
+        )
+        required_rows = availability[spec.semantic_id].required_rows
+        key_column = (
+            spec.entity_id_column
+            if hasattr(spec, "entity_id_column")
+            else spec.relationship_id_column
+        )
+        findings.extend(_validate_arrow_table(
+            semantic_id=spec.semantic_id,
+            table_name=spec.table_name,
+            table=projected,
+            columns=spec.columns,
+            key_column=key_column,
+            required_rows=required_rows,
+            require_exact_columns=True,
+        ))
+        row_hash = arrow_table_hash(projected, key_column)
+        if enforce_planned_hashes and (
+            spec.planned_row_count != projected.num_rows
+            or spec.planned_row_hash != row_hash
+            or spec.planned_schema_hash != arrow_schema_hash(projected.schema)
+        ):
+            findings.append(ArtifactFinding(
+                "MATERIALIZATION_PLAN_ROW_DRIFT",
+                f"Prepared table '{spec.table_name}' differs from its sealed "
+                "planned row hash/count.",
+            ))
+        prepared[spec.table_name] = (
+            projected,
+            MaterializedTableEvidence(
+                semantic_id=spec.semantic_id,
+                table_name=spec.table_name,
+                source_path=source_table_name,
+                row_count=projected.num_rows,
+                columns=tuple(expected_names),
+                status="prepared",
+            ),
+        )
+    if findings:
+        raise PersistedProjectionError(findings)
+    return prepared
+
+
+def deploy_schema2_materialization(
+    *,
+    environment: str,
+    parquet_dir: Path | str,
+    plan: MaterializationPlan,
+    semantic_model_manifest_hash: str,
+    semantic_crosswalk_hash: str,
+    workspace_id: str,
+    lakehouse_item_id: str,
+    schema: str,
+    table_writer: Callable[[str, Any], None],
+    table_reader: BoundTableReader | None,
+    prepared_tables: dict[
+        str, tuple[Any, MaterializedTableEvidence]
+    ] | None = None,
+    mock: bool = False,
+) -> MaterializationReceipt:
+    """Deploy and read back one sealed schema-2 typed-table set."""
+    if (
+        plan.source_taxonomy_version is None
+        or not plan.projection_receipt_hash
+        or not plan.semantic_contract_hash
+    ):
+        raise PersistedProjectionError([
+            ArtifactFinding(
+                "MATERIALIZATION_AUTHORITY_UNSEALED",
+                "Schema-2 materialization requires a sealed source taxonomy "
+                "and projection receipt.",
+            )
+        ])
+    prepared = prepared_tables or prepare_semantic_tables(
+        parquet_dir=parquet_dir,
+        plan=plan,
+        enforce_planned_hashes=True,
+    )
+    expected_table_names = {
+        table.table_name
+        for table in [*plan.entity_tables, *plan.relationship_tables]
+    }
+    if set(prepared) != expected_table_names:
+        raise PersistedProjectionError([
+            ArtifactFinding(
+                "MATERIALIZATION_PREPARED_SET_DRIFT",
+                "Prepared typed-table set differs from the sealed plan.",
+            )
+        ])
+    source_by_name = {
+        source.table_name: source for source in plan.source_tables
+    }
+    spec_by_table = {
+        spec.table_name: spec
+        for spec in [*plan.entity_tables, *plan.relationship_tables]
+    }
+
+    def receipt_row(
+        table_name: str,
+        *,
+        status: str,
+        persisted_table: Any | None = None,
+        failure_code: str | None = None,
+        failure: Exception | str | None = None,
+    ) -> MaterializedTableReceipt:
+        spec = spec_by_table[table_name]
+        source = source_by_name[str(spec.source_table_name)]
+        persisted_row_hash = None
+        persisted_row_count = None
+        persisted_schema_hash = None
+        if persisted_table is not None:
+            key_column = (
+                spec.entity_id_column
+                if hasattr(spec, "entity_id_column")
+                else spec.relationship_id_column
+            )
+            persisted_row_hash = arrow_table_hash(
+                persisted_table,
+                key_column,
+            )
+            persisted_row_count = int(persisted_table.num_rows)
+            persisted_schema_hash = arrow_schema_hash(persisted_table.schema)
+        failure_message = None
+        failure_type = None
+        if failure is not None:
+            failure_type = (
+                type(failure).__name__
+                if isinstance(failure, Exception)
+                else "MaterializationFailure"
+            )
+            failure_message = "[REDACTED]"
+        return MaterializedTableReceipt(
+            semantic_id=spec.semantic_id,
+            table_name=table_name,
+            deployed_identity=(
+                f"{workspace_id}/{lakehouse_item_id}/Tables/{schema}/"
+                f"{table_name}"
+            ),
+            source_table_name=source.table_name,
+            source_category=source.category,
+            source_table_hash=source.table_hash,
+            source_row_count=source.row_count,
+            source_schema_hash=source.schema_hash,
+            planned_row_hash=str(spec.planned_row_hash),
+            planned_row_count=int(spec.planned_row_count or 0),
+            planned_schema_hash=str(spec.planned_schema_hash),
+            persisted_row_hash=persisted_row_hash,
+            persisted_row_count=persisted_row_count,
+            persisted_schema_hash=persisted_schema_hash,
+            status=status,
+            failure_code=failure_code,
+            failure_type=failure_type,
+            failure_message=failure_message,
+        )
+
+    table_receipts: dict[str, MaterializedTableReceipt] = {}
+    ordered_tables = sorted(prepared)
+    if mock:
+        for table_name in ordered_tables:
+            table_receipts[table_name] = receipt_row(
+                table_name,
+                status="planned",
+            )
+    else:
+        write_failed = False
+        written_tables: list[str] = []
+        for table_name in ordered_tables:
+            if write_failed:
+                table_receipts[table_name] = receipt_row(
+                    table_name,
+                    status="not_attempted",
+                    failure_code="PRIOR_TABLE_WRITE_FAILED",
+                )
+                continue
+            table, _evidence = prepared[table_name]
+            try:
+                table_writer(table_name, table)
+                written_tables.append(table_name)
+            except Exception as exc:
+                write_failed = True
+                table_receipts[table_name] = receipt_row(
+                    table_name,
+                    status="failed",
+                    failure_code="TABLE_WRITE_FAILED",
+                    failure=exc,
+                )
+        if write_failed:
+            for table_name in written_tables:
+                table_receipts[table_name] = receipt_row(
+                    table_name,
+                    status="failed",
+                    failure_code="UNVERIFIED_PARTIAL_WRITE",
+                    failure=(
+                        "Table write completed before a later table failed; "
+                        "the partial deployment is not authoritative."
+                    ),
+                )
+        if not write_failed:
+            if table_reader is None:
+                raise ValueError(
+                    "Live schema-2 materialization requires table_reader."
+                )
+            for table_name in ordered_tables:
+                spec = spec_by_table[table_name]
+                try:
+                    persisted = table_reader.read_table(
+                        workspace_id,
+                        lakehouse_item_id,
+                        schema,
+                        table_name,
+                    )
+                    key_column = (
+                        spec.entity_id_column
+                        if hasattr(spec, "entity_id_column")
+                        else spec.relationship_id_column
+                    )
+                    persisted_hash = arrow_table_hash(
+                        persisted,
+                        key_column,
+                    )
+                    persisted_schema_hash = arrow_schema_hash(
+                        persisted.schema
+                    )
+                    if (
+                        persisted.num_rows != spec.planned_row_count
+                        or persisted_hash != spec.planned_row_hash
+                        or persisted_schema_hash != spec.planned_schema_hash
+                    ):
+                        raise ValueError(
+                            "Persisted row hash/count/schema does not match "
+                            "the sealed typed-table plan."
+                        )
+                    table_receipts[table_name] = receipt_row(
+                        table_name,
+                        status="ok",
+                        persisted_table=persisted,
+                    )
+                except Exception as exc:
+                    table_receipts[table_name] = receipt_row(
+                        table_name,
+                        status="failed",
+                        failure_code="TABLE_READBACK_FAILED",
+                        failure=exc,
+                    )
+
+    succeeded = bool(table_receipts) and all(
+        receipt.status == "ok" for receipt in table_receipts.values()
+    )
+    return MaterializationReceipt(
+        status="succeeded" if succeeded else "failed",
+        environment=environment,
+        workspace_id=workspace_id,
+        lakehouse_item_id=lakehouse_item_id,
+        schema_name=schema,
+        semantic_contract_hash=plan.semantic_contract_hash,
+        projection_receipt_hash=plan.projection_receipt_hash,
+        semantic_model_manifest_hash=semantic_model_manifest_hash,
+        semantic_crosswalk_hash=semantic_crosswalk_hash,
+        materialization_plan_hash=canonical_hash(
+            plan.model_dump(mode="json")
+        ),
+        source_tables=plan.source_tables,
+        tables=[
+            table_receipts[table_name]
+            for table_name in sorted(table_receipts)
+        ],
+        emitted_at_utc=_utc_now(),
+        mock=mock,
+    )
+
+
 def validate_bound_tables(
     *,
     plan: MaterializationPlan,
@@ -570,6 +1311,7 @@ def validate_bound_tables(
     lakehouse_item_id: str,
     schema: str,
     table_reader: BoundTableReader,
+    materialization_receipt: MaterializationReceipt | None = None,
 ) -> dict[str, int]:
     """Read persisted bound tables and validate exact schema, keys, and counts."""
     availability = {
@@ -577,6 +1319,14 @@ def validate_bound_tables(
     }
     findings: list[ArtifactFinding] = []
     counts: dict[str, int] = {}
+    receipt_by_table = {
+        table.table_name: table
+        for table in (
+            materialization_receipt.tables
+            if materialization_receipt is not None
+            else []
+        )
+    }
     for spec in [*plan.entity_tables, *plan.relationship_tables]:
         try:
             table = table_reader.read_table(
@@ -605,6 +1355,38 @@ def validate_bound_tables(
             required_rows=availability[spec.semantic_id].required_rows,
             require_exact_columns=True,
         ))
+        key_column = (
+            spec.entity_id_column
+            if hasattr(spec, "entity_id_column")
+            else spec.relationship_id_column
+        )
+        row_hash = arrow_table_hash(table, key_column)
+        schema_hash = arrow_schema_hash(table.schema)
+        if (
+            spec.planned_row_count is not None
+            and (
+                table.num_rows != spec.planned_row_count
+                or row_hash != spec.planned_row_hash
+                or schema_hash != spec.planned_schema_hash
+            )
+        ):
+            findings.append(ArtifactFinding(
+                "BOUND_TABLE_EXACT_DRIFT",
+                f"Persisted table '{spec.table_name}' differs from the sealed "
+                "planned hash/count/schema.",
+            ))
+        receipt_table = receipt_by_table.get(spec.table_name)
+        if materialization_receipt is not None and (
+            receipt_table is None
+            or receipt_table.persisted_row_count != table.num_rows
+            or receipt_table.persisted_row_hash != row_hash
+            or receipt_table.persisted_schema_hash != schema_hash
+        ):
+            findings.append(ArtifactFinding(
+                "BOUND_TABLE_RECEIPT_DRIFT",
+                f"Persisted table '{spec.table_name}' differs from the "
+                "materialization receipt.",
+            ))
         counts[f"{schema}.{spec.table_name}"] = int(table.num_rows)
     if findings:
         raise PersistedProjectionError(findings)
@@ -619,6 +1401,7 @@ def validate_persisted_ontology(
     workspace_id: str | None = None,
     lakehouse_item_id: str | None = None,
     schema: str | None = None,
+    expected_projection_hash: str | None = None,
 ) -> PersistedSurfaceEvidence:
     """Validate persisted Ontology types, properties, relationships, and bindings."""
     parts = decode_fabric_definition_parts(definition)
@@ -667,6 +1450,16 @@ def validate_persisted_ontology(
             f"manifest. Missing={sorted(expected_paths - actual_semantic_paths)}; "
             f"extra={sorted(actual_semantic_paths - expected_paths)}.",
         ))
+    projection_hash = persisted_parts_hash(parts)
+    if (
+        expected_projection_hash is not None
+        and projection_hash != expected_projection_hash
+    ):
+        findings.append(ArtifactFinding(
+            "ONTOLOGY_PERSISTED_HASH_DRIFT",
+            "Persisted Ontology definition differs from the exact submitted "
+            "compiler-owned parts.",
+        ))
     if findings:
         raise PersistedProjectionError(findings)
     property_count = sum(
@@ -680,7 +1473,7 @@ def validate_persisted_ontology(
         and path.endswith("/definition.json")
     )
     return PersistedSurfaceEvidence(
-        projection_hash=persisted_parts_hash(parts),
+        projection_hash=projection_hash,
         definition_counts={
             "parts": len(parts),
             "entity_types": len(manifest.entity_types),
@@ -697,10 +1490,22 @@ def validate_persisted_graph(
     definition: dict[str, Any],
     manifest: SemanticModelManifest,
     plan: MaterializationPlan,
+    workspace_id: str | None = None,
+    lakehouse_item_id: str | None = None,
+    schema: str | None = None,
+    expected_projection_hash: str | None = None,
 ) -> PersistedSurfaceEvidence:
     """Validate persisted Graph labels, properties, endpoints, and tables."""
     parts = decode_fabric_definition_parts(definition)
     findings = validate_graph_projection_parts(parts, manifest, plan)
+    if workspace_id and lakehouse_item_id and schema:
+        findings.extend(validate_graph_source_identity(
+            parts=parts,
+            plan=plan,
+            workspace_id=workspace_id,
+            lakehouse_item_id=lakehouse_item_id,
+            schema=schema,
+        ))
     graph_type = parts.get("graphType.json", {})
     graph_definition = parts.get("graphDefinition.json", {})
     data_sources = parts.get("dataSources.json", {})
@@ -731,10 +1536,20 @@ def validate_persisted_graph(
             "GRAPH_PERSISTED_EDGE_SET_DRIFT",
             "Persisted Graph edge aliases differ from the manifest.",
         ))
+    projection_hash = persisted_parts_hash(parts)
+    if (
+        expected_projection_hash is not None
+        and projection_hash != expected_projection_hash
+    ):
+        findings.append(ArtifactFinding(
+            "GRAPH_PERSISTED_HASH_DRIFT",
+            "Persisted Graph definition differs from the exact submitted "
+            "compiler-owned parts.",
+        ))
     if findings:
         raise PersistedProjectionError(findings)
     return PersistedSurfaceEvidence(
-        projection_hash=persisted_parts_hash(parts),
+        projection_hash=projection_hash,
         definition_counts={
             "parts": len(parts),
             "node_types": len(actual_node_aliases),
@@ -744,6 +1559,66 @@ def validate_persisted_graph(
             "data_sources": len(data_sources.get("dataSources", [])),
         },
     )
+
+
+def validate_graph_source_identity(
+    *,
+    parts: dict[str, dict[str, Any]],
+    plan: MaterializationPlan,
+    workspace_id: str,
+    lakehouse_item_id: str,
+    schema: str,
+) -> list[ArtifactFinding]:
+    """Validate exact Graph workspace/Lakehouse/schema/table data sources."""
+    findings: list[ArtifactFinding] = []
+    payload = parts.get("dataSources.json")
+    if not isinstance(payload, dict):
+        return [
+            ArtifactFinding(
+                "GRAPH_DATA_SOURCES_MISSING",
+                "Graph definition omits dataSources.json.",
+            )
+        ]
+    references = {
+        str(reference.get("name")): reference.get("item")
+        for reference in payload.get("itemReferences", [])
+        if isinstance(reference, dict) and reference.get("name")
+    }
+    expected_paths = {
+        f"Tables/{schema}/{table.table_name}"
+        for table in [*plan.entity_tables, *plan.relationship_tables]
+    }
+    actual_paths: set[str] = set()
+    for source in payload.get("dataSources", []):
+        if not isinstance(source, dict):
+            continue
+        properties = source.get("properties")
+        if not isinstance(properties, dict):
+            findings.append(ArtifactFinding(
+                "GRAPH_DATA_SOURCE_INVALID",
+                f"Graph data source {source.get('name')!r} has no properties.",
+            ))
+            continue
+        reference_name = str(properties.get("referenceName") or "")
+        item = references.get(reference_name)
+        if not isinstance(item, dict) or (
+            str(item.get("workspaceId") or "") != workspace_id
+            or str(item.get("itemId") or "") != lakehouse_item_id
+        ):
+            findings.append(ArtifactFinding(
+                "GRAPH_DATA_SOURCE_ITEM_DRIFT",
+                f"Graph data source {source.get('name')!r} is not bound to "
+                "the authoritative workspace/Lakehouse.",
+            ))
+        actual_paths.add(str(properties.get("path") or ""))
+    if actual_paths != expected_paths:
+        findings.append(ArtifactFinding(
+            "GRAPH_DATA_SOURCE_PATH_DRIFT",
+            "Graph data-source table paths differ from the sealed "
+            f"materialization plan. Missing={sorted(expected_paths - actual_paths)}; "
+            f"extra={sorted(actual_paths - expected_paths)}.",
+        ))
+    return findings
 
 
 def validate_graph_query_readiness(
@@ -949,13 +1824,35 @@ def build_persisted_projection_receipt(
     ontology_evidence: PersistedSurfaceEvidence,
     graph_model_id: str,
     graph_evidence: PersistedSurfaceEvidence,
+    materialization_receipt: MaterializationReceipt | None = None,
     bound_table_counts: dict[str, int],
     query_readiness: QueryReadiness,
     validated_at_utc: str | None = None,
 ) -> PersistedProjectionReceipt:
     """Seal independently observed H3 evidence into the downstream authority."""
     return PersistedProjectionReceipt(
+        semantic_contract_hash=(
+            manifest.semantic_contract_hash
+            if materialization_receipt is not None
+            else ""
+        ),
+        projection_receipt_hash=(
+            materialization_receipt.projection_receipt_hash
+            if materialization_receipt is not None
+            else ""
+        ),
         semantic_model_manifest_hash=manifest.manifest_hash,
+        semantic_crosswalk_hash=(
+            materialization_receipt.semantic_crosswalk_hash
+            if materialization_receipt is not None
+            else ""
+        ),
+        materialization_plan_hash=(
+            materialization_receipt.materialization_plan_hash
+            if materialization_receipt is not None
+            else ""
+        ),
+        materialization_receipt=materialization_receipt,
         ontology_item_id=ontology_item_id,
         ontology_persisted_projection_hash=(
             ontology_evidence.projection_hash
