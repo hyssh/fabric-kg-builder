@@ -325,6 +325,45 @@ def test_unresolved_raw_entity_is_excluded_without_failing_valid_projection() ->
     assert len(result.claims) == len(result.claim_evidence) == 1
 
 
+def test_duplicate_entity_evidence_is_merged_without_authority_conflict() -> None:
+    entities = _entities()
+    second_occurrence = copy.deepcopy(entities[0])
+    second_occurrence["evidence_ids"] = ["evidence:2"]
+    entities.append(second_occurrence)
+
+    result = build_semantic_projection(
+        entities,
+        [_relationship("rel:valid")],
+        [_evidence(), _evidence("evidence:2")],
+        schema2_contract=_contract(),
+    )
+    assert isinstance(result, SemanticProjectionResult)
+    assert result.receipt["status"] == "succeeded"
+    assert result.receipt["entity_reconciliation_counts"][
+        "authority_conflicts"
+    ] == 0
+    facility = next(
+        row
+        for row in result.semantic_entities
+        if row["entity_id"] == "entity:facility"
+    )
+    assert facility["evidence_ids"] == ["evidence:1", "evidence:2"]
+    facility_records = [
+        record
+        for record in result.receipt["entity_reconciliation_records"]
+        if record["entity_id"] == "entity:facility"
+    ]
+    assert len(facility_records) == 2
+    assert all(
+        record["merged_evidence_ids"] == ["evidence:1", "evidence:2"]
+        for record in facility_records
+    )
+    assert all(
+        "ENTITY_AUTHORITY_CONFLICT" not in record["reason_codes"]
+        for record in facility_records
+    )
+
+
 def test_hard_invariant_failure_returns_empty_atomic_serving_output() -> None:
     result = _project([
         _relationship("rel:invalid-asserted", evidence_id=None)

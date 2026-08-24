@@ -1216,6 +1216,7 @@ def _schema2_projection(
             _schema2_field(row, metadata, "semantic_contract_hash") or ""
         )
         evidence_ids = _schema2_evidence_ids(row, metadata)
+        definition = entity_definitions.get(type_id)
         approval = (
             _schema2_json_metadata(row.get("proposal_approval_json")) or {}
         )
@@ -1235,10 +1236,16 @@ def _schema2_projection(
             "review_status": review,
             "semantic_type_id": type_id,
             "semantic_contract_hash": contract_hash,
-            "evidence_ids": evidence_ids,
-            "proposal_approval": approval,
+            "canonical_key": str(row.get("canonical_key") or ""),
+            "business_defined": bool(
+                definition and definition.business_defined
+            ),
+            "business_defined_approval": (
+                approval
+                if definition is not None and definition.business_defined
+                else None
+            ),
         }
-        definition = entity_definitions.get(type_id)
         direct_verified = bool(
             _schema2_verified_evidence(row, metadata, evidence_by_id)
         )
@@ -1252,6 +1259,7 @@ def _schema2_projection(
             "metadata": metadata,
             "entity_id": str(row.get("entity_id") or ""),
             "row_hash": _schema2_row_hash(row),
+            "evidence_ids": evidence_ids,
             "authority": authority,
             "authority_hash": _schema2_hash(authority),
             "selection_key": (
@@ -1296,7 +1304,11 @@ def _schema2_projection(
         rows = [item["row"] for item in items]
         merged = dict(winner_item["row"])
         aliases = _schema2_merge_set_field(rows, "aliases", "search_aliases")
-        evidence_ids = _schema2_merge_set_field(rows, "evidence_ids")
+        evidence_ids = sorted({
+            evidence_id
+            for item in items
+            for evidence_id in item["evidence_ids"]
+        })
         reasons = _schema2_merge_set_field(
             rows, "audit_reason_codes", "audit_reasons", "reason_codes"
         )
@@ -1312,6 +1324,7 @@ def _schema2_projection(
             entity_winner_key_by_occurrence[item["occurrence_key"]] = (
                 winner_item["occurrence_key"]
             )
+            item["merged_evidence_ids"] = evidence_ids
         authority_hashes = {item["authority_hash"] for item in items}
         if len(authority_hashes) > 1:
             for item in items:
@@ -1395,6 +1408,8 @@ def _schema2_projection(
             "entity_id": item["entity_id"],
             "canonical_row_hash": item["row_hash"],
             "authority_hash": item["authority_hash"],
+            "evidence_ids": item["evidence_ids"],
+            "merged_evidence_ids": item["merged_evidence_ids"],
             "winner_occurrence_key": entity_winner_key_by_occurrence[
                 item["occurrence_key"]
             ],
