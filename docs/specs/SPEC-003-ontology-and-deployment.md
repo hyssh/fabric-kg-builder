@@ -28,7 +28,7 @@ This specification defines:
 
 ### 1.1 Boundaries
 
-This spec covers the **semantic layer** only. It does not redefine the canonical Parquet table schemas (those live in PRD §12 and SPEC-002). It does not cover Azure AI Search index definitions (see future SPEC-006). It does not cover the LLM extraction pipeline (see SPEC-004).
+This spec covers the **semantic layer** only. It does not redefine the canonical Parquet table schemas (those live in PRD §12 and SPEC-002). Azure AI Search index definitions remain in SPEC-001 and this spec's bridge sections; SPEC-006 owns only shared cross-layer contract primitives and projection headers. This spec does not cover the LLM extraction pipeline (see SPEC-004).
 
 **Canonical data home:** Structured Parquet tables are deployed to the **Fabric Lakehouse (OneLake)** via the `deploy-lakehouse` command. The Lakehouse is the queryable canonical store — it is **not** Azure AI Search. AI Search (`deploy-search`) is a separate **in-MVP** retrieval layer for text and visual retrieval artifacts only; it does not receive raw structured Parquet tables.
 
@@ -1647,6 +1647,13 @@ Persisted read-back must prove:
 
 A hash, count, contract, source-table, evidence, or endpoint mismatch is a
 pre-mutation deployment failure.
+
+The accepted source for future schema-2.0 publication is a sealed
+`SemanticServingProjection` registered by SPEC-006. It is a header over the
+existing semantic projection authority, not a replacement semantic model.
+Compilation and deployment may consume it only after its asserted-only
+membership, manifest hash, and canonical ID/row hashes validate. C0.Core does
+not activate this consumption path or any remote operation.
 
 ## 13. Revision History
 

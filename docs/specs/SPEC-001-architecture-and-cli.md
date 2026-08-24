@@ -15,6 +15,7 @@
 | 2026-06-24T12:42:17.255-07:00 | Keyser | v4 — Canonical naming reconciliation: `compile-search-index` → `compile-search`; stage 2 `ingest` → `inspect-source`; config keys `vision_model_deployment` → `vision_deployment`, `foundry.project_name` → `foundry.project`; `.env` keys `AZURE_DOC_INTELLIGENCE_*` → `AZURE_DOCINTEL_*`; vision default = chat deployment (multimodal; gpt-4.1 interim / GPT-5.5-mini target), `example-vision`/`gpt-4o` as alternative; PRD coverage table updated; build-deploy pipeline sequence corrected. |
 | 2026-06-24T15:41:07.842-07:00 | Verbal | v5 — Enrichment default corrected to gpt-5.4-mini (deployment `gpt-5-4-mini`, 200K TPM GlobalStandard); 200K TPM minimum documented in §5.1 and §10 decisions; AI Search corrected to IN MVP scope (decision 8); reference REQUIREMENTS-001 for setup. |
 | 2026-08-23 | Copilot | v6 — Added the additive schema-2.0 domain foundation for new projects: strict version discrimination, bounded relationship vocabulary N, derived reasoning depth K, typed directed question paths, and explicit 1.0 compatibility. Interactive proposal and approval automation are specified but activate in a later implementation layer. |
+| 2026-08-24 | Copilot | v7 — Corrected the duplicate section 11 numbering and assigned shared cross-layer identity, evidence, lifecycle, projection, receipt, resource, and version-negotiation ownership to SPEC-006 C0.Core. |
 
 ---
 
@@ -803,9 +804,9 @@ fabric-kg = "fabric_kg_builder.cli.main:cli"
 
 ---
 
-## 11. Domain Contract 2.0 Foundation
+## 12. Domain Contract 2.0 Foundation
 
-### 11.1 Version boundary
+### 12.1 Version boundary
 
 `domain.yaml` is a version-discriminated contract. The runtime schema artifact
 at `src/fabric_kg_builder/domain/domain.schema.json` accepts exactly:
@@ -824,7 +825,7 @@ The schema-foundation layer may load, hash, and deterministically validate 2.0
 contracts, but it must not activate 2.0 enrichment until the Copilot proposal
 and one-summary approval implementation is present.
 
-### 11.2 New-project CLI contract
+### 12.2 New-project CLI contract
 
 The completed 0.2.4 workflow will make `init-domain` interactive by default and
 will also accept deterministic YAML or JSON intake for automation. It will:
@@ -846,7 +847,7 @@ governance justification.
 Automation may supply inputs and corrections, but it may not silently approve a
 Copilot-authored proposal.
 
-### 11.3 N and K authority
+### 12.3 N and K authority
 
 - N counts approved relationship **types**, not relationship instances.
 - The advisory N range is 8-20. A valid minimal set may be below eight and must
@@ -862,7 +863,7 @@ Copilot-authored proposal.
 - The sealed K is shared by domain design, extraction validation, and Graph query
   planning. No downstream component may substitute an independent default.
 
-### 11.4 Deterministic identity
+### 12.4 Deterministic identity
 
 Schema-2.0 contract hashes use canonical JSON with sorted object keys and exclude
 approval metadata. Array order remains meaningful for ordered question paths.
@@ -870,6 +871,17 @@ Set-like publication state input is normalized to the exact order
 `[unresolved, rejected]` before hashing, with duplicates removed.
 Approval will additionally seal proposal, source-profile, prompt, and model
 identity. Schema-1.0 hashing remains unchanged.
+
+### 12.5 C0.Core boundary
+
+The package `fabric_kg_builder.contracts` and SPEC-006 own shared cross-layer
+contract envelopes, canonical JSON, immutable locators, evidence spans,
+candidate lifecycle/accounting, assertion references, projection headers,
+artifact manifests, stage receipts, resource metrics, and contract version
+negotiation. Existing domain, canonical row, lineage, semantic, checkpoint, and
+runtime modules retain their field semantics and are connected by equality
+adapters. C0.Core does not activate schema-2.0 proposal, extraction, publication,
+deployment, or runtime behavior.
 
 ---
 
