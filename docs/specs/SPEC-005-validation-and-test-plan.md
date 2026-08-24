@@ -14,6 +14,7 @@
 | 3 | 2026-06-24T12:42:17.255-07:00 | Hockney | Canonical-naming reconciliation (coordinator-canonical-naming.md): §12 graph→search fixture rewritten to `search.in()` + `vectorFilterMode: preFilter` + provenance select fields; BRG-001–BRG-010 (SPEC-003 §12 bridge gates) and D-31/D-32 (SPEC-002 §11 alias validations) registered in gate catalog and traceability; config keys updated to `AZURE_AI_FOUNDRY_ENDPOINT`/`AZURE_AI_FOUNDRY_API_KEY` (removing `AZURE_OPENAI_*`/`FOUNDRY_DEPLOYMENT_NAME`); commands aligned to `compile-search`, `deploy-lakehouse`, `enrich --domain-prompt`; VAL-023 reworded to chunk (text) and visual AI Search indexes only — no entity/relationship AI Search index exists |
 | 4 | 2026-08-23 | Copilot | Added schema-2.0 DOM, EXT, SEM, DEP, and QRY gates and compatibility test requirements. |
 | 5 | 2026-08-24 | Copilot | Added the C0.Core contract gate and corrected shared-contract ownership references to SPEC-006; no higher-layer feature gate is activated. |
+| 6 | 2026-08-25 | Copilot | Activated the L1 domain-design/approval test gate from SPEC-007; schema-2 downstream behavior remains fail-closed. |
 
 ---
 

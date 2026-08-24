@@ -1,0 +1,40 @@
+{
+  "contracts": {
+    "l1.design_sample_manifest": {
+      "schema": "l1-design-sample-manifest-1.0.0.schema.json",
+      "schema_hash": "e8f184c0ac9b7e4695600568ffd77d20fc335d71d9e65f94d3d2080e1778d8c5",
+      "version": "1.0.0"
+    },
+    "l1.domain_approval_context": {
+      "schema": "l1-domain-approval-context-1.0.0.schema.json",
+      "schema_hash": "003123e426848db06285ba8072ba55dce0082f84087e96ee2efef7fdd7a845cd",
+      "version": "1.0.0"
+    },
+    "l1.domain_design_context": {
+      "schema": "l1-domain-design-context-1.0.0.schema.json",
+      "schema_hash": "6acc5cd073b65b3a73c4608305b36966f360057fbf1f06c4ca2b3902bd3e6743",
+      "version": "1.0.0"
+    },
+    "l1.domain_intake": {
+      "schema": "l1-domain-intake-1.0.0.schema.json",
+      "schema_hash": "e177daa9a72b0ef7fdce45b1cfd6c6c762e9f9cbc06c8c978347fd48fb97d770",
+      "version": "1.0.0"
+    },
+    "l1.domain_proposal": {
+      "schema": "l1-domain-proposal-1.0.0.schema.json",
+      "schema_hash": "d8c615c8c23cb8b59fa1c814fe513a2eaf82647ca18c55d51752fb172d99e254",
+      "version": "1.0.0"
+    },
+    "l1.domain_source_profile": {
+      "schema": "l1-domain-source-profile-1.0.0.schema.json",
+      "schema_hash": "005763225ca97e7d18cf5209abc043d8346cae7a93e3199a7bfe47bfb751ee34",
+      "version": "1.0.0"
+    },
+    "l1.source_corpus_manifest": {
+      "schema": "l1-source-corpus-manifest-1.0.0.schema.json",
+      "schema_hash": "ce9526bb2f0f96a10f022162d56fe7d240c6b7b99c0986a3294878b181c713af",
+      "version": "1.0.0"
+    }
+  },
+  "registry_version": "1.0.0"
+}

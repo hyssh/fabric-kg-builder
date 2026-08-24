@@ -8,6 +8,12 @@ from .guard import (
     require_ready_domain_contract,
     write_domain_run_manifest,
 )
+from .contexts import (
+    DomainApprovalContext,
+    DomainDesignContext,
+    DomainIntake,
+    DomainSourceProfile,
+)
 from .models import (
     AnyDomainContract,
     ApprovalMetadata,
@@ -28,6 +34,19 @@ from .review import (
     render_review_diff,
     run_deterministic_validation,
     run_structured_review,
+)
+from .proposal import (
+    DomainProposal,
+    DomainProposalCandidatesV2,
+    ProposalArtifactError,
+)
+from .stage import (
+    L1StageError,
+    approve_persisted_l1_draft,
+    dry_run_l1,
+    finalize_l1_stage,
+    preflight_l1_inputs,
+    prepare_l1_stage,
 )
 from .service import (
     DomainContractCompatibilityError,
@@ -60,6 +79,12 @@ __all__ = [
     "CompetencyQuestionCoverage",
     "DomainContract",
     "DomainContractV2",
+    "DomainApprovalContext",
+    "DomainDesignContext",
+    "DomainIntake",
+    "DomainProposal",
+    "DomainProposalCandidatesV2",
+    "DomainSourceProfile",
     "DomainContractCompatibilityError",
     "DomainContractError",
     "DomainContractParseError",
@@ -70,10 +95,14 @@ __all__ = [
     "DomainReviewFinding",
     "DomainReviewPayload",
     "EnrichmentContractError",
+    "L1StageError",
+    "ProposalArtifactError",
+    "approve_persisted_l1_draft",
     "build_review_user_message",
     "compute_contract_hash",
     "convert_legacy_brief_to_contract",
     "default_domain_contract",
+    "dry_run_l1",
     "domain_contract_json_schema",
     "domain_contract_to_legacy_brief",
     "evaluate_domain_guard_status",
@@ -82,6 +111,8 @@ __all__ = [
     "load_legacy_domain_brief",
     "locate_domain_contract",
     "proposal_path_for_contract",
+    "preflight_l1_inputs",
+    "prepare_l1_stage",
     "render_domain_contract_yaml",
     "render_review_diff",
     "require_ready_domain_contract",
@@ -90,6 +121,7 @@ __all__ = [
     "run_structured_review",
     "save_domain_contract",
     "save_json_document",
+    "finalize_l1_stage",
     "utc_now_text",
     "write_domain_run_manifest",
 ]

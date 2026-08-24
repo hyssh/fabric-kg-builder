@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fabric_kg_builder.contracts.base import canonical_sha256
+from fabric_kg_builder.domain.stage import (
+    approve_persisted_l1_draft,
+    dry_run_l1,
+    finalize_l1_stage,
+    preflight_l1_inputs,
+    prepare_l1_stage,
+)
+
+
+def _intake(domain: str = "records") -> dict:
+    return {
+        "business_goal": f"Support evidence-backed {domain} decisions.",
+        "organization_context": "A generic organization.",
+        "users": ["analyst"],
+        "decisions": ["review governed records"],
+        "desired_outcomes": ["trace exact evidence"],
+        "in_scope": [domain],
+        "out_of_scope": ["unreviewed automation"],
+        "competency_questions": [
+            f"What evidence supports {domain} question number {index}?"
+            for index in range(1, 6)
+        ],
+    }
+
+
+def _candidates(domain: str = "records") -> dict:
+    question_ids = [f"cq:q{index}" for index in range(1, 6)]
+    score_inputs = {
+        "accepted_evidence_span_count": 0,
+        "required_evidence_span_count": 0,
+        "covered_competency_question_count": 5,
+        "total_relevant_competency_question_count": 5,
+        "ambiguity_conflict_count": 0,
+        "classification_fit": "exact",
+        "ip_governance_status": "eligible",
+    }
+    key_policy = {
+        "authority": "user_approved",
+        "namespace": domain,
+        "key_mode": "stable_source_identity",
+        "business_key_fields": [],
+        "normalization_version": "1",
+        "collision_behavior": "block",
+        "missing_key_behavior": "unresolved",
+        "type_independent": True,
+    }
+    sibling_policy = {
+        "mode": "unresolved",
+        "discriminator_property_id": None,
+        "rationale": "Ambiguous sibling observations remain unresolved.",
+    }
+
+    def proposed_type(type_id: str, semantic_key: str, classification: str) -> dict:
+        return {
+            "type_id": type_id,
+            "semantic_key": semantic_key,
+            "display_name": semantic_key.replace("_", " ").title(),
+            "description": f"A governed {semantic_key}.",
+            "aliases": [],
+            "classification": classification,
+            "parent_type_id": None,
+            "abstract": False,
+            "identity_root_type_id": type_id,
+            "identity_key_policy": {
+                **key_policy,
+                "namespace": f"{domain}.{semantic_key}",
+            },
+            "declared_properties": [],
+            "declared_constraints": [],
+            "sibling_classification_policy": sibling_policy,
+            "generalization_basis": None,
+            "evidence_span_ids": [],
+            "competency_question_ids": question_ids,
+            "governance_rationale": "Required by approved competency questions.",
+            "tombstoned": False,
+        }
+
+    record_type_id = f"semantic-type:{domain}.record"
+    subject_type_id = f"semantic-type:{domain}.subject"
+    relationship_type_id = f"relationship-type:{domain}.record-subject"
+    return {
+        "contract_version": "1.0.0",
+        "domain_boundary_candidates": [
+            {
+                "candidate_id": "candidate:boundary",
+                "domain_name": domain.title(),
+                "domain_description": f"Generic evidence-backed {domain}.",
+                "subdomains": [],
+                "in_scope": [domain],
+                "out_of_scope": [],
+                "evidence_span_ids": [],
+                "competency_question_ids": question_ids,
+                "governance_rationale": "User-approved scope.",
+                "score_inputs": score_inputs,
+            }
+        ],
+        "semantic_type_candidates": [
+            {
+                "candidate_id": "candidate:type-record",
+                "proposed_type": proposed_type(
+                    record_type_id, "record", "common"
+                ),
+                "score_inputs": score_inputs,
+            },
+            {
+                "candidate_id": "candidate:type-subject",
+                "proposed_type": proposed_type(
+                    subject_type_id, "subject", "domain"
+                ),
+                "score_inputs": score_inputs,
+            },
+        ],
+        "generalization_candidates": [],
+        "relationship_candidates": [
+            {
+                "candidate_id": "candidate:relationship",
+                "relationship_type_id": relationship_type_id,
+                "predicate_id": f"predicate:{domain}.describes",
+                "semantic_key": "describes",
+                "inverse_of_candidate_id": None,
+                "display_name": "describes",
+                "description": "A record describes a governed subject.",
+                "source_type_ids": [record_type_id],
+                "target_type_ids": [subject_type_id],
+                "endpoint_policy": "allow_subtypes",
+                "competency_question_ids": question_ids,
+                "evidence_span_ids": [],
+                "governance_rationale": "Required by approved questions.",
+                "identity_context_policy": "governed validity context",
+                "score_inputs": score_inputs,
+            }
+        ],
+        "completeness_candidates": [],
+        "question_routes": [
+            {
+                "question_id": question_id,
+                "start_type_id": record_type_id,
+                "end_type_id": subject_type_id,
+                "unsupported_reason": None,
+            }
+            for question_id in question_ids
+        ],
+        "external_reference_candidates": [],
+        "assumptions": [],
+        "warnings": [],
+    }
+
+
+def _preflight(tmp_path: Path, domain: str = "records"):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "records.txt").write_text(
+        "A governed record describes a governed subject.",
+        encoding="utf-8",
+    )
+    (source / "unsupported.bin").write_bytes(b"\x00\x01")
+    return preflight_l1_inputs(
+        source_path=source,
+        intake_raw=_intake(domain),
+        project_id=f"project:{domain}",
+        run_id=f"run:{domain}",
+        model_version="fixture/1.0.0",
+        model_hash=canonical_sha256({"fixture": domain}),
+    )
+
+
+def test_dry_run_inventories_complete_corpus_without_writes(tmp_path: Path) -> None:
+    preflight = _preflight(tmp_path)
+    state_root = tmp_path / ".fkg" / "l1"
+    domain_path = tmp_path / "domain.yaml"
+
+    result = dry_run_l1(
+        preflight,
+        state_root=state_root,
+        domain_path=domain_path,
+    )
+
+    assert preflight.corpus.total_entry_count == 2
+    assert result.receipt is None
+    assert not state_root.exists()
+    assert not domain_path.exists()
+
+
+def test_approved_l1_stage_binds_complete_corpus_and_bounded_sample(
+    tmp_path: Path,
+) -> None:
+    prepared = prepare_l1_stage(
+        _preflight(tmp_path, "equipment"),
+        candidates=_candidates("equipment"),
+    )
+
+    result = finalize_l1_stage(
+        prepared,
+        decision="approve",
+        actor="reviewer@example.test",
+        state_root=tmp_path / ".fkg" / "l1",
+        domain_path=tmp_path / "domain.yaml",
+    )
+
+    assert result.status == "succeeded"
+    assert result.receipt is not None and result.receipt.status == "succeeded"
+    assert result.contract is not None
+    assert result.contract.approval.status == "approved"
+    assert prepared.sample_manifest.source_corpus_manifest_hash == (
+        prepared.preflight.corpus.corpus_hash
+    )
+    assert {
+        entry.source_file_id for entry in prepared.sample_manifest.entries
+    } <= {
+        entry.source_file_id for entry in prepared.preflight.corpus.entries
+    }
+    assert prepared.preflight.corpus.total_entry_count == 2
+
+
+def test_noninteractive_stage_is_blocked_until_explicit_approval(
+    tmp_path: Path,
+) -> None:
+    prepared = prepare_l1_stage(
+        _preflight(tmp_path, "contracts"),
+        candidates=_candidates("contracts"),
+    )
+
+    result = finalize_l1_stage(
+        prepared,
+        decision=None,
+        actor=None,
+        state_root=tmp_path / ".fkg" / "l1",
+        domain_path=tmp_path / "domain.yaml",
+    )
+
+    assert result.status == "blocked"
+    assert result.receipt is not None
+    assert result.receipt.error_codes == ("L1_APPROVAL_REQUIRED",)
+    assert result.contract is not None
+    assert result.contract.approval.status == "draft"
+
+    approved = approve_persisted_l1_draft(
+        actor="automation-reviewer@example.test",
+        state_root=tmp_path / ".fkg" / "l1",
+        domain_path=tmp_path / "domain.yaml",
+    )
+    assert approved.status == "succeeded"
+    assert approved.contract is not None
+    assert approved.contract.approval.status == "approved"

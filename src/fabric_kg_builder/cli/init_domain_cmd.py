@@ -14,10 +14,15 @@ Existing commands (inspect-source, domain init, enrich) are unchanged.
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import click
+import yaml
+from pydantic import ValidationError
 
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
@@ -387,7 +392,66 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
     default=False,
     help="Force interactive approval prompt regardless of TTY detection.",
 )
+@click.option(
+    "--legacy-schema-1",
+    is_flag=True,
+    default=False,
+    help="Use the unchanged schema-1 source-profile and draft workflow.",
+)
+@click.option(
+    "--intake",
+    "intake_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Schema-2 YAML/JSON intake with five to ten competency questions.",
+)
+@click.option(
+    "--candidates",
+    "candidates_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Optional schema-2 proposal-candidate fixture for offline automation.",
+)
+@click.option(
+    "--source-corpus-manifest",
+    "source_corpus_manifest_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Existing immutable corpus manifest to reconcile against --input.",
+)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    default=False,
+    help="Write a blocked schema-2 draft; explicit 'domain approve' is required.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Inventory and validate only; make no remote calls and write nothing.",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Reuse an intact succeeded L1 output when all skip bindings match.",
+)
+@click.option(
+    "--state-dir",
+    default=str(Path(".fkg") / "l1"),
+    show_default=True,
+    type=click.Path(file_okay=False),
+    help="Schema-2 L1 runtime-state directory.",
+)
+@click.option(
+    "--project-id",
+    default=None,
+    help="Stable project identity for schema-2 artifacts.",
+)
+@click.pass_context
 def init_domain_cmd(
+    ctx: click.Context,
     input_path: str | None,
     output_path: str,
     profile_path: str,
@@ -396,6 +460,15 @@ def init_domain_cmd(
     force: bool,
     approve: bool,
     force_interactive: bool,
+    legacy_schema_1: bool,
+    intake_path: str | None,
+    candidates_path: str | None,
+    source_corpus_manifest_path: str | None,
+    non_interactive: bool,
+    dry_run: bool,
+    resume: bool,
+    state_dir: str,
+    project_id: str | None,
 ) -> None:
     """Inspect source files then guide domain contract authoring.
 
@@ -413,6 +486,25 @@ def init_domain_cmd(
 
     Exit codes: 0 success · 1 error · 4 user rejected profile.
     """
+    if not legacy_schema_1:
+        _run_schema_2_l1(
+            ctx=ctx,
+            input_path=input_path,
+            output_path=output_path,
+            intake_path=intake_path,
+            candidates_path=candidates_path,
+            source_corpus_manifest_path=source_corpus_manifest_path,
+            non_interactive=non_interactive,
+            force_interactive=force_interactive,
+            dry_run=dry_run,
+            resume=resume,
+            force=force,
+            approve=approve,
+            state_dir=state_dir,
+            project_id=project_id,
+        )
+        return
+
     import sys
 
     out_path = Path(output_path)
@@ -517,3 +609,273 @@ def _noninteractive_defaults(profile: SourceProfile) -> dict[str, str]:
         else:
             answers[field_path] = default
     return answers
+
+
+def _load_mapping(path: Path) -> dict:
+    try:
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".json":
+            loaded = json.loads(text)
+        elif path.suffix.lower() in {".yaml", ".yml"}:
+            loaded = yaml.safe_load(text)
+        else:
+            raise click.ClickException("automation files must be YAML or JSON")
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise click.ClickException(f"Could not load '{path}': {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise click.ClickException(f"'{path}' must contain a mapping")
+    return loaded
+
+
+def _collect_schema_2_intake() -> dict:
+    questions = [
+        item.strip()
+        for item in click.prompt(
+            "Competency questions (5-10, semicolon-separated)"
+        ).split(";")
+        if item.strip()
+    ]
+    return {
+        "business_goal": click.prompt("Business goal"),
+        "organization_context": click.prompt("Organization context"),
+        "users": _comma_list_prompt("Primary users (comma-separated)"),
+        "decisions": _comma_list_prompt("Supported decisions (comma-separated)"),
+        "desired_outcomes": _comma_list_prompt(
+            "Desired outcomes (comma-separated)"
+        ),
+        "in_scope": _comma_list_prompt("In-scope concepts (comma-separated)"),
+        "out_of_scope": _comma_list_prompt(
+            "Out-of-scope concepts (comma-separated)", "none"
+        ),
+        "competency_questions": questions,
+    }
+
+
+def _schema_2_actor() -> str:
+    return (
+        os.environ.get("FABRIC_KG_APPROVER")
+        or os.environ.get("GIT_AUTHOR_EMAIL")
+        or os.environ.get("USERNAME")
+        or os.environ.get("USER")
+        or "local-user"
+    )
+
+
+def _build_schema_2_client(ctx: click.Context):
+    from .domain_cmd import _build_foundry_client, _resolve_model_version
+
+    ctx.ensure_object(dict)
+    client = ctx.obj.get("_foundry_client") if ctx.obj else None
+    if client is None:
+        client = _build_foundry_client(ctx.obj or {})
+    return client, _resolve_model_version(client, ctx.obj or {})
+
+
+def _run_schema_2_l1(
+    *,
+    ctx: click.Context,
+    input_path: str | None,
+    output_path: str,
+    intake_path: str | None,
+    candidates_path: str | None,
+    source_corpus_manifest_path: str | None,
+    non_interactive: bool,
+    force_interactive: bool,
+    dry_run: bool,
+    resume: bool,
+    force: bool,
+    approve: bool,
+    state_dir: str,
+    project_id: str | None,
+) -> None:
+    import sys
+
+    from fabric_kg_builder.contracts.base import canonical_sha256
+    from fabric_kg_builder.domain.proposal import compute_model_hash
+    from fabric_kg_builder.domain.stage import (
+        L1StageError,
+        dry_run_l1,
+        finalize_l1_stage,
+        load_prepared_l1_stage,
+        preflight_l1_inputs,
+        prepare_l1_stage,
+        try_resume_l1,
+    )
+
+    if input_path is None:
+        raise click.ClickException(
+            "Schema-2 L1 requires --input for complete corpus inventory. "
+            "Use --legacy-schema-1 for the prior workflow."
+        )
+    if force_interactive and non_interactive:
+        raise click.ClickException(
+            "--interactive and --non-interactive are mutually exclusive"
+        )
+    if approve:
+        raise click.ClickException(
+            "--approve is schema-1-only. Schema-2 requires the one-summary "
+            "interactive decision or explicit 'fabric-kg domain approve'."
+        )
+    source_path = Path(input_path)
+    if not source_path.exists():
+        raise click.ClickException(f"Source path not found: {source_path}")
+    state_root = Path(state_dir)
+    out_path = Path(output_path)
+    if out_path.exists() and not force and not resume:
+        raise click.ClickException(
+            f"Domain contract already exists at '{out_path}'. "
+            "Use --resume or --force."
+        )
+    if intake_path is not None:
+        intake_raw = _load_mapping(Path(intake_path))
+    elif non_interactive or dry_run:
+        raise click.ClickException(
+            "--intake is required for schema-2 non-interactive and dry-run modes"
+        )
+    else:
+        intake_raw = _collect_schema_2_intake()
+
+    client = None
+    if candidates_path is not None:
+        candidates_raw = _load_mapping(Path(candidates_path))
+        candidates = candidates_raw
+        model_version = "offline-candidate-fixture/1.0.0"
+        model_hash = canonical_sha256(
+            {"model_version": model_version, "candidates": candidates_raw}
+        )
+    else:
+        candidates = None
+        if dry_run:
+            model_version = "planned-foundry-model"
+            model_hash = canonical_sha256(
+                {"model_version": model_version, "dry_run": True}
+            )
+        else:
+            try:
+                client, model_version = _build_schema_2_client(ctx)
+                model_hash = compute_model_hash(client, model_version)
+            except (EnvironmentError, ImportError, OSError, ValidationError) as exc:
+                raise click.ClickException(
+                    f"Could not build Foundry client for L1 design: {exc}"
+                ) from exc
+    effective_project_id = (
+        project_id
+        or os.environ.get("FABRIC_KG_PROJECT_ID")
+        or f"project:{source_path.resolve().name}"
+    )
+    run_id = f"run:{uuid.uuid4().hex}"
+    previous = None
+    if resume and (state_root / "stage-receipt.json").exists():
+        try:
+            previous = load_prepared_l1_stage(state_root=state_root)
+            run_id = previous.preflight.run_id
+        except L1StageError:
+            previous = None
+    try:
+        preflight = preflight_l1_inputs(
+            source_path=source_path,
+            intake_raw=intake_raw,
+            project_id=effective_project_id,
+            run_id=run_id,
+            model_version=model_version,
+            model_hash=model_hash,
+            source_corpus_manifest_path=(
+                Path(source_corpus_manifest_path)
+                if source_corpus_manifest_path is not None
+                else None
+            ),
+        )
+        if dry_run:
+            result = dry_run_l1(
+                preflight,
+                state_root=state_root,
+                domain_path=out_path,
+            )
+            click.echo(f"[init-domain] {result.summary}")
+            for path in result.planned_paths:
+                click.echo(f"[init-domain] planned artifact: {path}")
+            return
+        if previous is not None:
+            current_prepared = replace(previous, preflight=preflight)
+            resumed = try_resume_l1(
+                current_prepared,
+                state_root=state_root,
+                domain_path=out_path,
+            )
+            if resumed is not None:
+                click.echo("[init-domain] L1 skipped; prior output is intact.")
+                return
+        prepared = prepare_l1_stage(
+            preflight,
+            candidates=candidates,
+            client=client,
+        )
+        if non_interactive or not (force_interactive or sys.stdin.isatty()):
+            result = finalize_l1_stage(
+                prepared,
+                decision=None,
+                actor=None,
+                state_root=state_root,
+                domain_path=out_path,
+            )
+            click.echo(prepared.summary)
+            click.echo(
+                "[init-domain] schema-2 draft persisted with blocked receipt; "
+                "run 'fabric-kg domain approve --approved-by ...'."
+            )
+            return
+
+        while True:
+            click.echo("")
+            click.echo(prepared.summary)
+            click.echo("")
+            decision = click.prompt(
+                "Decision",
+                type=click.Choice(
+                    ["approve", "correct", "abort"],
+                    case_sensitive=False,
+                ),
+            ).lower()
+            actor = _schema_2_actor()
+            if decision == "correct":
+                correction = click.prompt("Correction instruction").strip()
+                correction_result = finalize_l1_stage(
+                    prepared,
+                    decision="correct",
+                    actor=actor,
+                    correction_text=correction,
+                    state_root=state_root,
+                    domain_path=out_path,
+                )
+                if candidates is not None:
+                    raise click.ClickException(
+                        "Offline candidate fixtures cannot regenerate after correction"
+                    )
+                prepared = prepare_l1_stage(
+                    preflight,
+                    client=client,
+                    correction_instruction=correction,
+                    parent_correction_context_id=(
+                        correction_result.approval_context.domain_approval_context_id
+                        if correction_result.approval_context is not None
+                        else None
+                    ),
+                )
+                continue
+            result = finalize_l1_stage(
+                prepared,
+                decision=decision,
+                actor=actor,
+                state_root=state_root,
+                domain_path=out_path,
+            )
+            if decision == "abort":
+                click.echo("[init-domain] aborted with a blocked L1 receipt.", err=True)
+                raise click.exceptions.Exit(4)
+            click.echo(
+                f"[init-domain] approved schema-2 domain → {out_path}; "
+                f"receipt={result.receipt.stage_receipt_id}"
+            )
+            return
+    except (L1StageError, ValidationError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc

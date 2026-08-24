@@ -46,6 +46,7 @@ def _run_init_domain(tmp_path: Path, extra_args: list[str] | None = None) -> dic
     runner = CliRunner()
     args = [
         "init-domain",
+        "--legacy-schema-1",
         "--input", str(tmp_path),
         "--out", str(out),
         "--profile-out", str(profile_out),
@@ -340,6 +341,7 @@ class TestDomainHashContract:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -364,6 +366,7 @@ class TestDomainHashContract:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "new.yaml"),
                 "--profile-out", str(profile_out),
@@ -388,6 +391,7 @@ class TestDomainHashContract:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "new.yaml"),
                 "--profile-out", str(profile_out),
@@ -640,6 +644,7 @@ class TestCorrectionFlowContract:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out_yaml),
                 "--profile-out", str(profile_out),
@@ -701,6 +706,7 @@ class TestCorrectionFlowContract:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out_yaml),
                 "--profile-out", str(profile_out),

@@ -318,6 +318,10 @@ def _run_v2_deterministic_validation(
     coverage: list[CompetencyQuestionCoverage] = []
     questions = {item.id: item for item in contract.competency_questions}
     plans = {item.question_id: item for item in contract.question_plans}
+    completeness = {
+        item.question_id: item
+        for item in contract.completeness_question_coverage
+    }
     relationship_count = contract.reasoning_policy.relationship_type_count
 
     if relationship_count < 8:
@@ -355,27 +359,41 @@ def _run_v2_deterministic_validation(
 
     for question_id, question in questions.items():
         plan = plans[question_id]
+        completeness_coverage = completeness[question_id]
         notes = None
-        if not plan.covered:
-            notes = plan.unsupported_reason
+        if not plan.covered or completeness_coverage.coverage_status != "covered":
+            notes = (
+                plan.unsupported_reason
+                or completeness_coverage.unsupported_reason
+                or "Question completeness is unsupported."
+            )
             _append_finding(
                 findings,
                 severity="error" if question.business_critical else "warning",
                 path=f"question_plans[{question_id}]",
                 code="DOM-104",
                 message=(
-                    "Business-critical question is unsupported."
+                    "Business-critical question lacks path or completeness coverage."
                     if question.business_critical
-                    else "Non-critical question is explicitly unsupported."
+                    else "Non-critical question has explicit unsupported coverage."
                 ),
             )
         coverage.append(
             CompetencyQuestionCoverage(
                 question=question.question,
-                supported=plan.covered,
-                required_concepts=[
-                    step.relationship_type for step in plan.required_path
-                ],
+                supported=(
+                    plan.covered
+                    and completeness_coverage.coverage_status == "covered"
+                ),
+                required_concepts=sorted(
+                    {
+                        *(
+                            step.relationship_type_id
+                            for step in plan.required_path
+                        ),
+                        *completeness_coverage.requirement_ids,
+                    }
+                ),
                 notes=notes,
             )
         )
