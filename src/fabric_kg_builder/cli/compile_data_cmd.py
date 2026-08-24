@@ -26,7 +26,7 @@ from typing import Any
 
 import click
 
-from fabric_kg_builder.domain.models import DomainContractV2
+from fabric_kg_builder.domain.models import DomainContract, DomainContractV2
 from fabric_kg_builder.domain.service import (
     DomainContractError,
     compute_contract_hash,
@@ -141,83 +141,102 @@ def _load_schema2_projection_authority(
             f"Invalid domain run manifest {manifest_path}: expected an object"
         )
     top_version = manifest.get("schema_version")
-    contract_meta = manifest.get("domain_contract")
-    nested_version = (
-        contract_meta.get("schema_version")
-        if isinstance(contract_meta, dict)
-        else None
-    )
-    v2_binding_marker = bool(
-        isinstance(contract_meta, dict)
-        and (
-            contract_meta.get("proposal_hash")
-            or contract_meta.get("source_profile_hash")
+    raw_contract_meta = manifest.get("domain_contract")
+    if raw_contract_meta is not None and not isinstance(raw_contract_meta, dict):
+        raise click.ClickException(
+            "Domain run manifest domain_contract must be an object."
+        )
+    contract_meta = raw_contract_meta or {}
+    nested_version = contract_meta.get("schema_version")
+    v2_binding_marker = any(
+        contract_meta.get(key)
+        for key in (
+            "proposal_hash",
+            "source_profile_hash",
+            "prompt_hash",
+            "model_hash",
         )
     )
-    top_schema2 = str(top_version) == "2.0"
-    nested_schema2 = str(nested_version) == "2.0"
-    if (
-        top_version is not None
-        and nested_version is not None
-        and str(top_version) != str(nested_version)
+    raw_path = contract_meta.get("path")
+    if raw_path is not None and (
+        not isinstance(raw_path, str) or not raw_path.strip()
     ):
         raise click.ClickException(
-            "Domain run manifest has conflicting schema-version markers."
-        )
-    if v2_binding_marker and (
-        top_version not in (None, "2.0") or nested_version != "2.0"
-    ):
-        raise click.ClickException(
-            "Domain run manifest has conflicting schema-2 approval markers."
-        )
-    if not top_schema2 and not nested_schema2 and not v2_binding_marker:
-        return None, manifest
-    if not isinstance(contract_meta, dict):
-        raise click.ClickException(
-            "Schema-2 domain run manifest is missing domain_contract."
-        )
-    if str(contract_meta.get("schema_version")) != "2.0":
-        raise click.ClickException(
-            "Schema-2 domain run manifest domain_contract marker is invalid."
+            "Domain run manifest contract path is invalid."
         )
 
-    raw_path = contract_meta.get("path")
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise click.ClickException(
-            "Schema-2 domain run manifest does not identify its approved contract."
+    contract: DomainContract | DomainContractV2 | None = None
+    contract_path: Path | None = None
+    if isinstance(raw_path, str) and raw_path.strip():
+        trusted_root = _project_root_for_input(input_dir)
+        supplied = Path(raw_path)
+        candidates = (
+            [supplied.resolve()]
+            if supplied.is_absolute()
+            else [
+                (trusted_root / supplied).resolve(),
+                (manifest_path.parent / supplied).resolve(),
+            ]
         )
-    trusted_root = _project_root_for_input(input_dir)
-    supplied = Path(raw_path)
-    candidates = (
-        [supplied.resolve()]
-        if supplied.is_absolute()
-        else [
-            (trusted_root / supplied).resolve(),
-            (manifest_path.parent / supplied).resolve(),
-        ]
-    )
-    resolved_candidates = {
-        candidate
-        for candidate in candidates
-        if candidate.exists()
-        and candidate.is_file()
-        and candidate.is_relative_to(trusted_root)
-    }
-    if len(resolved_candidates) != 1:
+        resolved_candidates = {
+            candidate
+            for candidate in candidates
+            if candidate.exists()
+            and candidate.is_file()
+            and candidate.is_relative_to(trusted_root)
+        }
+        if len(resolved_candidates) != 1:
+            raise click.ClickException(
+                "Manifest contract path is missing, ambiguous, or outside the "
+                f"trusted project root {trusted_root}: {raw_path!r}"
+            )
+        contract_path = next(iter(resolved_candidates))
+        try:
+            contract = load_domain_contract(contract_path)
+        except DomainContractError as exc:
+            raise click.ClickException(
+                f"Manifest-bound domain contract is invalid: {exc}"
+            ) from exc
+
+    if isinstance(contract, DomainContract):
+        if (
+            top_version not in (None, "1.0")
+            or nested_version not in (None, "1.0")
+            or v2_binding_marker
+        ):
+            raise click.ClickException(
+                "Manifest markers conflict with the referenced schema-1 contract."
+            )
+        expected_hash = contract_meta.get("contract_hash")
+        if expected_hash and expected_hash != compute_contract_hash(contract):
+            raise click.ClickException(
+                "Schema-1 domain run manifest contract hash mismatch."
+            )
+        return None, manifest
+
+    if contract is None:
+        if (
+            str(top_version) == "2.0"
+            or str(nested_version) == "2.0"
+            or v2_binding_marker
+        ):
+            raise click.ClickException(
+                "Schema-2 domain run manifest is missing a referenced contract."
+            )
+        if (
+            top_version not in (None, "1.0")
+            or nested_version not in (None, "1.0")
+        ):
+            raise click.ClickException(
+                "Domain run manifest has unsupported schema markers."
+            )
+        return None, manifest
+
+    assert isinstance(contract, DomainContractV2)
+    assert contract_path is not None
+    if str(top_version) != "2.0" or str(nested_version) != "2.0":
         raise click.ClickException(
-            "Schema-2 contract path is missing, ambiguous, or outside the "
-            f"trusted project root {trusted_root}: {raw_path!r}"
-        )
-    contract_path = next(iter(resolved_candidates))
-    try:
-        contract = load_domain_contract(contract_path)
-    except DomainContractError as exc:
-        raise click.ClickException(
-            f"Manifest-bound schema-2 contract is invalid: {exc}"
-        ) from exc
-    if not isinstance(contract, DomainContractV2):
-        raise click.ClickException(
-            f"Manifest-bound contract is not schema 2.0: {contract_path}"
+            "Manifest markers conflict with the referenced schema-2 contract."
         )
     actual_hash = compute_contract_hash(contract)
     expected_hash = contract_meta.get("contract_hash")
@@ -240,7 +259,9 @@ def _load_schema2_projection_authority(
         "approved_at_utc": contract.approval.approved_at_utc,
         "schema_version": contract.schema_version,
         "prompt_version": contract.approval.prompt_version,
+        "prompt_hash": contract.approval.prompt_hash,
         "model_version": contract.approval.model_version,
+        "model_hash": contract.approval.model_hash,
         "proposal_hash": contract.approval.proposal_hash,
         "source_profile_hash": contract.approval.source_profile_hash,
     }

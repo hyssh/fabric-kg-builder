@@ -724,6 +724,11 @@ existing compatibility projection.
 Any schema-2 marker in the run manifest activates this fail-closed path.
 Missing or conflicting top-level/nested markers and incomplete approval
 bindings must never downgrade to schema-1 compatibility.
+When a contract path is present, compilation safely resolves and parses that
+contract before choosing compatibility mode; a referenced schema-2 contract
+cannot be downgraded by removing or changing manifest markers. Schema-2
+approval bindings include exact `prompt_hash` and `model_hash` equality in
+addition to their versions.
 
 A succeeded receipt is published only after all intended Parquet files have
 been staged and committed. Any output failure removes stale semantic surfaces

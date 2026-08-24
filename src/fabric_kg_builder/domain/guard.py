@@ -237,7 +237,9 @@ def write_domain_run_manifest(
                     contract.schema_version,
                 ),
                 "prompt_version": approval.prompt_version,
+                "prompt_hash": getattr(approval, "prompt_hash", None),
                 "model_version": approval.model_version,
+                "model_hash": getattr(approval, "model_hash", None),
                 "review_quality_score": (
                     review.quality_score if review is not None else None
                 ),

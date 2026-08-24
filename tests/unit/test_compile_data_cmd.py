@@ -22,10 +22,19 @@ from click.testing import CliRunner
 
 from fabric_kg_builder.cli.compile_data_cmd import compile_data_cmd
 from fabric_kg_builder.cli.compile_data_cmd import _load_schema2_projection_authority
-from fabric_kg_builder.domain.models import ApprovalMetadataV2
+from fabric_kg_builder.domain.models import ApprovalMetadataV2, DomainContractV2
 from fabric_kg_builder.domain.proposal import DomainProposal
-from fabric_kg_builder.domain.service import compute_contract_hash, save_domain_contract
-from tests.conftest import combined_output, make_cli_runner  # noqa: F401
+from fabric_kg_builder.domain.guard import write_domain_run_manifest
+from fabric_kg_builder.domain.service import (
+    compute_contract_hash,
+    load_domain_contract,
+    save_domain_contract,
+)
+from tests.conftest import (  # noqa: F401
+    combined_output,
+    make_cli_runner,
+    write_approved_domain_contract,
+)
 from fabric_kg_builder.model.ids import (
     content_hash,
     make_chunk_id,
@@ -250,7 +259,9 @@ def _write_schema2_authority(tmp_path: Path) -> tuple[Path, Path]:
                     "approved_at_utc": contract.approval.approved_at_utc,
                     "schema_version": "2.0",
                     "prompt_version": contract.approval.prompt_version,
+                    "prompt_hash": contract.approval.prompt_hash,
                     "model_version": contract.approval.model_version,
+                    "model_hash": contract.approval.model_hash,
                     "proposal_hash": contract.approval.proposal_hash,
                     "source_profile_hash": contract.approval.source_profile_hash,
                 },
@@ -270,6 +281,44 @@ def test_schema2_authority_resolves_project_relative_manifest_path(
     assert manifest is not None
     assert compute_contract_hash(contract) == manifest["domain_contract"]["contract_hash"]
     assert contract_path.exists()
+
+
+def test_explicit_historical_schema1_manifest_without_contract_is_compatible(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "build" / "enriched"
+    input_dir.mkdir(parents=True)
+    (input_dir / "domain.run-manifest.json").write_text(
+        json.dumps({"schema_version": "1.0"}),
+        encoding="utf-8",
+    )
+    contract, manifest = _load_schema2_projection_authority(input_dir)
+    assert contract is None
+    assert manifest == {"schema_version": "1.0"}
+
+
+def test_referenced_schema1_contract_is_inspected_before_compatibility(
+    tmp_path: Path,
+) -> None:
+    contract_path = write_approved_domain_contract(tmp_path / "domain.yaml")
+    contract = load_domain_contract(contract_path)
+    input_dir = tmp_path / "build" / "enriched"
+    input_dir.mkdir(parents=True)
+    manifest = {
+        "schema_version": "1.0",
+        "domain_contract": {
+            "path": "domain.yaml",
+            "schema_version": "1.0",
+            "contract_hash": compute_contract_hash(contract),
+        },
+    }
+    (input_dir / "domain.run-manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    authority, loaded_manifest = _load_schema2_projection_authority(input_dir)
+    assert authority is None
+    assert loaded_manifest == manifest
 
 
 def test_schema2_authority_rejects_path_outside_project(tmp_path: Path) -> None:
@@ -301,7 +350,7 @@ def test_schema2_marker_without_domain_contract_fails_closed(
         json.dumps({"schema_version": "2.0"}),
         encoding="utf-8",
     )
-    with pytest.raises(Exception, match="missing domain_contract"):
+    with pytest.raises(Exception, match="missing a referenced contract"):
         _load_schema2_projection_authority(input_dir)
 
 
@@ -313,7 +362,7 @@ def test_conflicting_schema_markers_never_downgrade_to_schema1(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["schema_version"] = "1.0"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(Exception, match="conflicting schema-version markers"):
+    with pytest.raises(Exception, match="referenced schema-2 contract"):
         _load_schema2_projection_authority(input_dir)
 
 
@@ -326,7 +375,22 @@ def test_schema2_approval_marker_with_schema1_versions_fails_closed(
     manifest["schema_version"] = "1.0"
     manifest["domain_contract"]["schema_version"] = "1.0"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(Exception, match="schema-2 approval markers"):
+    with pytest.raises(Exception, match="referenced schema-2 contract"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_referenced_v2_contract_cannot_be_downgraded_by_manifest_markers(
+    tmp_path: Path,
+) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "1.0"
+    manifest["domain_contract"]["schema_version"] = "1.0"
+    del manifest["domain_contract"]["proposal_hash"]
+    del manifest["domain_contract"]["source_profile_hash"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="referenced schema-2 contract"):
         _load_schema2_projection_authority(input_dir)
 
 
@@ -340,6 +404,43 @@ def test_schema2_manifest_requires_complete_approval_binding(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(Exception, match="approval bindings"):
         _load_schema2_projection_authority(input_dir)
+
+
+@pytest.mark.parametrize("field", ["prompt_hash", "model_hash"])
+def test_schema2_manifest_rejects_prompt_or_model_hash_tampering(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["domain_contract"][field] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="approval bindings"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_domain_run_manifest_persists_prompt_and_model_hashes(
+    tmp_path: Path,
+) -> None:
+    _, contract_path = _write_schema2_authority(tmp_path)
+    contract = load_domain_contract(contract_path)
+    assert isinstance(contract, DomainContractV2)
+    output_dir = tmp_path / "manifest-output"
+    output_dir.mkdir()
+    manifest_path = write_domain_run_manifest(
+        output_dir,
+        contract_path=contract_path,
+        contract=contract,
+        review=None,
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["domain_contract"]["prompt_hash"] == (
+        contract.approval.prompt_hash
+    )
+    assert payload["domain_contract"]["model_hash"] == (
+        contract.approval.model_hash
+    )
 
 
 def _schema2_entity(
