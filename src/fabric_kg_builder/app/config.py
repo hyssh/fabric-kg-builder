@@ -18,7 +18,7 @@ Environment variables:
   FABRIC_KG_GRAPH_MODEL_ID — Fabric GraphModel item ID
   FABRIC_KG_MANAGED_IDENTITY_CLIENT_ID — user-assigned identity client ID
   FABRIC_KG_GRAPH_PREVIEW_ACKNOWLEDGED — must be true outside local mode
-  FABRIC_KG_API_VERSION   — app version string (default: "0.2.4")
+  FABRIC_KG_API_VERSION   — app version string (default: "0.2.3")
 
 Security contract:
   - "local" + FABRIC_KG_LOCAL_DEV=true → AllowAllVerifier (development only)
@@ -98,7 +98,7 @@ def load_app_config() -> AppConfig:
     )
     tenant_id = os.environ.get("FABRIC_KG_TENANT_ID", "")
     audience = os.environ.get("FABRIC_KG_AUDIENCE", "")
-    version = os.environ.get("FABRIC_KG_API_VERSION", "0.2.4")
+    version = os.environ.get("FABRIC_KG_API_VERSION", "0.2.3")
     search_endpoint = os.environ.get("FABRIC_KG_SEARCH_ENDPOINT", "").rstrip("/")
     kb_index = os.environ.get("FABRIC_KG_KB_INDEX", "")
     visual_index = os.environ.get("FABRIC_KG_VISUAL_INDEX", "")
