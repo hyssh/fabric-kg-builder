@@ -655,6 +655,14 @@ Duplicate relationship occurrences are reconciled before publication. The
 deterministic winner order is asserted, unresolved, rejected, discovery; a
 runner-verified evidence occurrence wins within a state, followed by canonical
 row hash. Every non-winning occurrence counts once as `deduplicated`.
+Every asserted occurrence is validated before winner selection; a deduplicated
+asserted occurrence retains its own reasons and can fail the semantic
+invariants even when the retained winner is valid.
+
+Duplicate entity occurrences are likewise reconciled from raw input with
+deterministic authority-field comparison and per-occurrence receipt accounting.
+Conflicting assertion, lane, review, type, contract-hash, evidence, or approval
+authority fails SEM-100 rather than relying on input order.
 
 Terminal precedence is discovery, endpoint unresolved, unresolved, rejected,
 endpoint unpublished, then asserted. The complete equation is:
@@ -712,6 +720,14 @@ Schema-2 compilation resolves the contract path from
 approval, and computed contract hashes agree. Missing, escaping, ambiguous, or
 stale authority fails closed. Manifest-free and schema-1 inputs retain the
 existing compatibility projection.
+
+Any schema-2 marker in the run manifest activates this fail-closed path.
+Missing or conflicting top-level/nested markers and incomplete approval
+bindings must never downgrade to schema-1 compatibility.
+
+A succeeded receipt is published only after all intended Parquet files have
+been staged and committed. Any output failure removes stale semantic surfaces
+and atomically replaces the receipt with deterministic failure evidence.
 
 ### 6.3 Column-to-Field Mapping Conventions
 

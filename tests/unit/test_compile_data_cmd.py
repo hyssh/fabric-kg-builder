@@ -246,7 +246,13 @@ def _write_schema2_authority(tmp_path: Path) -> tuple[Path, Path]:
                     "path": "domain.yaml",
                     "contract_hash": contract_hash,
                     "approval_status": "approved",
+                    "approved_by": contract.approval.approved_by,
+                    "approved_at_utc": contract.approval.approved_at_utc,
                     "schema_version": "2.0",
+                    "prompt_version": contract.approval.prompt_version,
+                    "model_version": contract.approval.model_version,
+                    "proposal_hash": contract.approval.proposal_hash,
+                    "source_profile_hash": contract.approval.source_profile_hash,
                 },
             }
         ),
@@ -283,6 +289,56 @@ def test_schema2_authority_rejects_stale_manifest_hash(tmp_path: Path) -> None:
     manifest["domain_contract"]["contract_hash"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(Exception, match="contract hash mismatch"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_schema2_marker_without_domain_contract_fails_closed(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "build" / "enriched"
+    input_dir.mkdir(parents=True)
+    (input_dir / "domain.run-manifest.json").write_text(
+        json.dumps({"schema_version": "2.0"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="missing domain_contract"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_conflicting_schema_markers_never_downgrade_to_schema1(
+    tmp_path: Path,
+) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "1.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="conflicting schema-version markers"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_schema2_approval_marker_with_schema1_versions_fails_closed(
+    tmp_path: Path,
+) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "1.0"
+    manifest["domain_contract"]["schema_version"] = "1.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="schema-2 approval markers"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_schema2_manifest_requires_complete_approval_binding(
+    tmp_path: Path,
+) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["domain_contract"]["proposal_hash"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="approval bindings"):
         _load_schema2_projection_authority(input_dir)
 
 
@@ -488,6 +544,40 @@ def test_compile_data_schema2_failure_keeps_receipt_without_serving_output(
     )
     assert receipt["status"] == "failed"
     assert receipt["terminal_counts"]["endpoint_unpublished"] == 1
+    assert not (out_dir / "semantic_entities.parquet").exists()
+    assert not (out_dir / "semantic_relationships.parquet").exists()
+
+
+def test_compile_data_write_failure_publishes_only_failed_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = _write_schema2_compile_input(tmp_path)
+    out_dir = tmp_path / "build" / "parquet"
+    out_dir.mkdir(parents=True)
+    for name in ("semantic_entities.parquet", "semantic_relationships.parquet"):
+        (out_dir / name).write_bytes(b"stale")
+
+    def fail_write(*args, **kwargs):
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(
+        "fabric_kg_builder.cli.compile_data_cmd.write_all_tables",
+        fail_write,
+    )
+    result = CliRunner().invoke(
+        compile_data_cmd,
+        ["--input", str(input_dir), "--out", str(out_dir)],
+    )
+    assert result.exit_code != 0
+    receipt = json.loads(
+        (out_dir / "semantic-projection-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "failed"
+    assert receipt["output_failure"] == {
+        "code": "OUTPUT_WRITE_FAILED",
+        "error_type": "OSError",
+    }
     assert not (out_dir / "semantic_entities.parquet").exists()
     assert not (out_dir / "semantic_relationships.parquet").exists()
 

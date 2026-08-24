@@ -865,6 +865,273 @@ def _schema2_type_path(
     return None
 
 
+def _schema2_entity_validation(
+    row: Mapping[str, Any],
+    *,
+    contract: DomainContractV2,
+    active_hash: str,
+    entity_definitions: Mapping[str, Any],
+    evidence_by_id: Mapping[str, Mapping[str, Any]],
+    endpoint_evidence: set[str] | None = None,
+) -> dict[str, Any]:
+    raw_properties = row.get("properties_json")
+    metadata = _schema2_json_metadata(raw_properties)
+    values = metadata or {}
+    raw_state = str(
+        _schema2_field(row, values, "assertion_state", "assertion_status") or ""
+    ).casefold()
+    assertion_state = "unresolved" if raw_state == "unverified" else raw_state
+    lane = str(_schema2_field(row, values, "semantic_lane") or "").casefold()
+    review_status = str(
+        _schema2_field(row, values, "review_status") or ""
+    ).casefold()
+    type_id = str(_schema2_field(row, values, "semantic_type_id") or "")
+    definition = entity_definitions.get(type_id)
+    contract_hash = str(
+        _schema2_field(row, values, "semantic_contract_hash") or ""
+    )
+    reasons: list[str] = []
+    entity_id = str(row.get("entity_id") or "")
+    if not entity_id.strip():
+        reasons.append("ENTITY_ID_INVALID")
+    if not str(row.get("display_name") or "").strip():
+        reasons.append("ENTITY_DISPLAY_NAME_INVALID")
+    if not str(row.get("canonical_key") or "").strip():
+        reasons.append("ENTITY_CANONICAL_KEY_INVALID")
+    if raw_properties not in (None, "") and metadata is None:
+        reasons.append("ENTITY_PROPERTIES_NOT_OBJECT")
+    if assertion_state != "asserted":
+        reasons.append("ENTITY_NOT_ASSERTED")
+    if lane != "authoritative":
+        reasons.append("ENTITY_NOT_AUTHORITATIVE")
+    if review_status != "approved":
+        reasons.append("ENTITY_TYPE_NOT_APPROVED")
+    if definition is None:
+        reasons.append("ENTITY_TYPE_UNAPPROVED")
+    elif str(row.get("entity_type") or "") not in {
+        definition.id,
+        definition.name,
+    }:
+        reasons.append("ENTITY_TYPE_MISMATCH")
+    if contract_hash != active_hash:
+        reasons.append("STALE_CONTRACT_HASH")
+
+    verified = sorted(
+        set(_schema2_verified_evidence(row, values, evidence_by_id))
+        | (endpoint_evidence or set())
+    )
+    source_file_id = str(row.get("source_file_id") or "")
+    if source_file_id:
+        verified = [
+            evidence_id
+            for evidence_id in verified
+            if str(evidence_by_id[evidence_id].get("source_file_id") or "")
+            == source_file_id
+        ]
+    business_approved = bool(
+        definition
+        and definition.business_defined
+        and _schema2_entity_approval(row, contract)
+    )
+    if not verified and not business_approved:
+        evidence_ids = _schema2_evidence_ids(row, values)
+        if not evidence_ids:
+            reasons.append("ENTITY_EVIDENCE_MISSING")
+        elif not any(item in evidence_by_id for item in evidence_ids):
+            reasons.append("ENTITY_EVIDENCE_DANGLING")
+        else:
+            reasons.append("ENTITY_EVIDENCE_UNVERIFIED")
+    return {
+        "assertion_state": assertion_state,
+        "lane": lane,
+        "review_status": review_status,
+        "type_id": type_id,
+        "definition": definition,
+        "contract_hash": contract_hash,
+        "verified_evidence_ids": verified,
+        "business_approved": business_approved,
+        "reasons": sorted(set(reasons)),
+    }
+
+
+def _schema2_relationship_occurrence_validation(
+    item: Mapping[str, Any],
+    *,
+    contract: DomainContractV2,
+    active_hash: str,
+    relationship_definitions: Mapping[str, Any],
+    evidence_by_id: Mapping[str, Mapping[str, Any]],
+    entity_winners: Mapping[str, Mapping[str, Any]],
+    entity_type_by_id: Mapping[str, str],
+    published_entity_ids: set[str],
+    parent_by_id: Mapping[str, str | None],
+) -> dict[str, Any]:
+    row = item["row"]
+    metadata = item["metadata"]
+    state = item["state"]
+    relationship_id = item["relationship_id"]
+    source_id = str(row.get("source_entity_id") or "")
+    target_id = str(row.get("target_entity_id") or "")
+    endpoint_unresolved = (
+        not source_id
+        or not target_id
+        or source_id.startswith("unresolved-endpoint:")
+        or target_id.startswith("unresolved-endpoint:")
+        or source_id not in entity_winners
+        or target_id not in entity_winners
+    )
+    endpoint_unpublished = (
+        not endpoint_unresolved
+        and (
+            source_id not in published_entity_ids
+            or target_id not in published_entity_ids
+        )
+    )
+    definition_id = str(
+        _schema2_field(row, metadata, "semantic_relationship_id") or ""
+    )
+    definition = relationship_definitions.get(definition_id)
+    primary_evidence_id = str(
+        _schema2_field(row, metadata, "evidence_id", "verified_evidence_id") or ""
+    )
+    verified_ids = _schema2_verified_evidence(row, metadata, evidence_by_id)
+    reasons: list[str] = []
+    if state == "asserted":
+        if not relationship_id:
+            reasons.append("RELATIONSHIP_ID_INVALID")
+        if (
+            str(_schema2_field(row, metadata, "semantic_contract_hash") or "")
+            != active_hash
+        ):
+            reasons.append("STALE_CONTRACT_HASH")
+        if definition is None:
+            reasons.append("UNAPPROVED_RELATION")
+        elif str(row.get("relationship_type") or "") != definition.predicate:
+            reasons.append("UNAPPROVED_PREDICATE")
+        if (
+            str(_schema2_field(row, metadata, "validation_authority") or "")
+            != "schema2"
+        ):
+            reasons.append("INVALID_VALIDATION_AUTHORITY")
+        if not primary_evidence_id:
+            reasons.append("EVIDENCE_MISSING")
+        elif primary_evidence_id not in evidence_by_id:
+            reasons.append("EVIDENCE_DANGLING")
+        elif evidence_by_id[primary_evidence_id].get("runner_verified") is not True:
+            reasons.append("EVIDENCE_NOT_RUNNER_VERIFIED")
+        verified_hint = str(
+            _schema2_field(row, metadata, "verified_evidence_id") or ""
+        )
+        if verified_hint and verified_hint != primary_evidence_id:
+            reasons.append("EVIDENCE_FK_MISMATCH")
+        if endpoint_unresolved:
+            reasons.append("ENDPOINT_UNRESOLVED")
+        elif endpoint_unpublished:
+            reasons.append("ENDPOINT_UNPUBLISHED")
+
+        if definition is not None and not endpoint_unresolved:
+            source_row = entity_winners[source_id]
+            target_row = entity_winners[target_id]
+            source_metadata = (
+                _schema2_json_metadata(source_row.get("properties_json")) or {}
+            )
+            target_metadata = (
+                _schema2_json_metadata(target_row.get("properties_json")) or {}
+            )
+            source_type = str(
+                _schema2_field(row, metadata, "resolved_source_type_id")
+                or entity_type_by_id.get(source_id)
+                or _schema2_field(
+                    source_row, source_metadata, "semantic_type_id"
+                )
+                or ""
+            )
+            target_type = str(
+                _schema2_field(row, metadata, "resolved_target_type_id")
+                or entity_type_by_id.get(target_id)
+                or _schema2_field(
+                    target_row, target_metadata, "semantic_type_id"
+                )
+                or ""
+            )
+            source_actual = str(
+                _schema2_field(
+                    source_row, source_metadata, "semantic_type_id"
+                )
+                or source_type
+            )
+            target_actual = str(
+                _schema2_field(
+                    target_row, target_metadata, "semantic_type_id"
+                )
+                or target_type
+            )
+            allow_subtypes = (
+                definition.endpoint_policy == "allow_subtypes"
+                and contract.extraction_policy.allow_subtype_endpoints
+            )
+            source_path = _schema2_type_path(
+                source_actual,
+                definition.source_types,
+                parent_by_id=parent_by_id,
+                allow_subtypes=allow_subtypes,
+            )
+            target_path = _schema2_type_path(
+                target_actual,
+                definition.target_types,
+                parent_by_id=parent_by_id,
+                allow_subtypes=allow_subtypes,
+            )
+            recorded_source_path = _schema2_field(
+                row, metadata, "source_inheritance_path"
+            )
+            recorded_target_path = _schema2_field(
+                row, metadata, "target_inheritance_path"
+            )
+            if (
+                source_path is None
+                or target_path is None
+                or source_type not in definition.source_types
+                or target_type not in definition.target_types
+                or (
+                    recorded_source_path
+                    and list(recorded_source_path) != source_path
+                )
+                or (
+                    recorded_target_path
+                    and list(recorded_target_path) != target_path
+                )
+            ):
+                reasons.append("INCOMPATIBLE_ENDPOINT")
+        direction = str(
+            _schema2_field(row, metadata, "direction") or ""
+        ).casefold()
+        if direction not in {"forward", "source_to_target"}:
+            reasons.append("INCOMPATIBLE_DIRECTION")
+    return {
+        "source_id": source_id,
+        "target_id": target_id,
+        "endpoint_unresolved": endpoint_unresolved,
+        "endpoint_unpublished": endpoint_unpublished,
+        "definition": definition,
+        "primary_evidence_id": primary_evidence_id,
+        "verified_evidence_ids": verified_ids,
+        "generated_reasons": sorted(set(reasons)),
+    }
+
+
+def _schema2_relationship_gate(reason: str) -> str:
+    if reason.startswith("EVIDENCE_"):
+        return "SEM-102"
+    if reason in {
+        "ENDPOINT_UNRESOLVED",
+        "ENDPOINT_UNPUBLISHED",
+        "INCOMPATIBLE_ENDPOINT",
+    }:
+        return "SEM-103"
+    return "SEM-101"
+
+
 def _schema2_projection(
     entities: list[dict[str, Any]],
     relationships: list[dict[str, Any]],
@@ -914,32 +1181,6 @@ def _schema2_projection(
         ):
             evidence_by_id[evidence_id] = row
 
-    entity_groups: dict[str, list[dict[str, Any]]] = {}
-    anonymous_entities: list[dict[str, Any]] = []
-    for row in entities:
-        entity_id = str(row.get("entity_id") or "")
-        if entity_id:
-            entity_groups.setdefault(entity_id, []).append(row)
-        else:
-            anonymous_entities.append(row)
-
-    entity_winners: dict[str, dict[str, Any]] = {}
-    for entity_id, rows in sorted(entity_groups.items()):
-        winner = min(rows, key=_schema2_row_hash)
-        merged = dict(winner)
-        aliases = _schema2_merge_set_field(rows, "aliases", "search_aliases")
-        evidence_ids = _schema2_merge_set_field(rows, "evidence_ids")
-        reasons = _schema2_merge_set_field(
-            rows, "audit_reason_codes", "audit_reasons", "reason_codes"
-        )
-        if aliases:
-            merged["aliases"] = aliases
-        if evidence_ids:
-            merged["evidence_ids"] = evidence_ids
-        if reasons:
-            merged["audit_reason_codes"] = reasons
-        entity_winners[entity_id] = merged
-
     entity_definitions = {
         definition.id: definition
         for definition in contract.candidate_model.entity_types
@@ -952,6 +1193,136 @@ def _schema2_projection(
         definition.id: definition
         for definition in contract.candidate_model.relationship_types
     }
+    entity_occurrences: list[dict[str, Any]] = []
+    for row in entities:
+        metadata = _schema2_json_metadata(row.get("properties_json")) or {}
+        raw_state = str(
+            _schema2_field(
+                row, metadata, "assertion_state", "assertion_status"
+            )
+            or ""
+        ).casefold()
+        state = "unresolved" if raw_state == "unverified" else raw_state
+        lane = str(
+            _schema2_field(row, metadata, "semantic_lane") or ""
+        ).casefold()
+        review = str(
+            _schema2_field(row, metadata, "review_status") or ""
+        ).casefold()
+        type_id = str(
+            _schema2_field(row, metadata, "semantic_type_id") or ""
+        )
+        contract_hash = str(
+            _schema2_field(row, metadata, "semantic_contract_hash") or ""
+        )
+        evidence_ids = _schema2_evidence_ids(row, metadata)
+        approval = (
+            _schema2_json_metadata(row.get("proposal_approval_json")) or {}
+        )
+        for approval_key in (
+            "proposal_hash",
+            "source_profile_hash",
+            "prompt_hash",
+            "prompt_version",
+            "model_version",
+            "model_hash",
+        ):
+            if row.get(approval_key) is not None:
+                approval[approval_key] = row[approval_key]
+        authority = {
+            "assertion_state": state,
+            "semantic_lane": lane,
+            "review_status": review,
+            "semantic_type_id": type_id,
+            "semantic_contract_hash": contract_hash,
+            "evidence_ids": evidence_ids,
+            "proposal_approval": approval,
+        }
+        definition = entity_definitions.get(type_id)
+        direct_verified = bool(
+            _schema2_verified_evidence(row, metadata, evidence_by_id)
+        )
+        business_approved = bool(
+            definition
+            and definition.business_defined
+            and _schema2_entity_approval(row, contract)
+        )
+        entity_occurrences.append({
+            "row": row,
+            "metadata": metadata,
+            "entity_id": str(row.get("entity_id") or ""),
+            "row_hash": _schema2_row_hash(row),
+            "authority": authority,
+            "authority_hash": _schema2_hash(authority),
+            "selection_key": (
+                -int(state == "asserted"),
+                -int(lane == "authoritative"),
+                -int(review == "approved"),
+                -int(definition is not None),
+                -int(contract_hash == active_hash),
+                -int(direct_verified or business_approved),
+                _schema2_row_hash(row),
+            ),
+        })
+    entity_occurrences.sort(
+        key=lambda item: (
+            item["entity_id"],
+            item["row_hash"],
+            _schema2_canonical_json(item["row"]),
+        )
+    )
+    entity_ordinal_by_key: Counter[tuple[str, str]] = Counter()
+    for item in entity_occurrences:
+        ordinal_key = (item["entity_id"], item["row_hash"])
+        item["ordinal"] = entity_ordinal_by_key[ordinal_key]
+        entity_ordinal_by_key[ordinal_key] += 1
+        item["occurrence_key"] = (
+            f"{item['entity_id'] or '<missing>'}:"
+            f"{item['row_hash']}:{item['ordinal']}"
+        )
+
+    entity_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in entity_occurrences:
+        group_key = item["entity_id"] or item["occurrence_key"]
+        entity_groups.setdefault(group_key, []).append(item)
+
+    entity_winners: dict[str, dict[str, Any]] = {}
+    entity_conflict_violations: list[str] = []
+    entity_winner_key_by_occurrence: dict[str, str] = {}
+    for group_key, items in sorted(entity_groups.items()):
+        ordered = sorted(items, key=lambda item: item["selection_key"])
+        winner_item = ordered[0]
+        entity_id = winner_item["entity_id"]
+        rows = [item["row"] for item in items]
+        merged = dict(winner_item["row"])
+        aliases = _schema2_merge_set_field(rows, "aliases", "search_aliases")
+        evidence_ids = _schema2_merge_set_field(rows, "evidence_ids")
+        reasons = _schema2_merge_set_field(
+            rows, "audit_reason_codes", "audit_reasons", "reason_codes"
+        )
+        if aliases:
+            merged["aliases"] = aliases
+        if evidence_ids:
+            merged["evidence_ids"] = evidence_ids
+        if reasons:
+            merged["audit_reason_codes"] = reasons
+        if entity_id:
+            entity_winners[entity_id] = merged
+        for item in items:
+            entity_winner_key_by_occurrence[item["occurrence_key"]] = (
+                winner_item["occurrence_key"]
+            )
+        authority_hashes = {item["authority_hash"] for item in items}
+        if len(authority_hashes) > 1:
+            for item in items:
+                item["authority_conflict"] = True
+            occurrence_keys = ",".join(
+                sorted(item["occurrence_key"] for item in items)
+            )
+            entity_conflict_violations.append(
+                f"{group_key}:ENTITY_AUTHORITY_CONFLICT:{occurrence_keys}"
+            )
+
     endpoint_evidence_by_entity: dict[str, set[str]] = {}
     for relationship in relationships:
         metadata = (
@@ -990,90 +1361,62 @@ def _schema2_projection(
                 ).update(verified)
 
     candidate_entities: list[dict[str, Any]] = []
-    entity_hard_violations: list[str] = []
+    entity_hard_violations: list[str] = list(entity_conflict_violations)
+    entity_reconciliation: list[dict[str, Any]] = []
     entity_type_by_id: dict[str, str] = {}
+    for item in entity_occurrences:
+        validation = _schema2_entity_validation(
+            item["row"],
+            contract=contract,
+            active_hash=active_hash,
+            entity_definitions=entity_definitions,
+            evidence_by_id=evidence_by_id,
+            endpoint_evidence=endpoint_evidence_by_entity.get(
+                item["entity_id"], set()
+            ),
+        )
+        item["validation"] = validation
+        selected = (
+            entity_winner_key_by_occurrence[item["occurrence_key"]]
+            == item["occurrence_key"]
+        )
+        reasons = set(validation["reasons"])
+        if item.get("authority_conflict"):
+            reasons.add("ENTITY_AUTHORITY_CONFLICT")
+        if not selected:
+            reasons.add("ENTITY_OCCURRENCE_DEDUPLICATED")
+        if validation["assertion_state"] == "asserted" and validation["reasons"]:
+            entity_hard_violations.extend(
+                f"{item['occurrence_key']}:{reason}"
+                for reason in validation["reasons"]
+            )
+        entity_reconciliation.append({
+            "occurrence_key": item["occurrence_key"],
+            "entity_id": item["entity_id"],
+            "canonical_row_hash": item["row_hash"],
+            "authority_hash": item["authority_hash"],
+            "winner_occurrence_key": entity_winner_key_by_occurrence[
+                item["occurrence_key"]
+            ],
+            "selected": selected,
+            "bucket": "selected" if selected else "deduplicated",
+            "reason_codes": sorted(reasons),
+        })
+    entity_reconciliation.sort(key=lambda row: row["occurrence_key"])
+
     for entity_id, row in sorted(entity_winners.items()):
-        raw_properties = row.get("properties_json")
-        metadata = _schema2_json_metadata(raw_properties)
-        values = metadata or {}
-        assertion_state = str(
-            _schema2_field(row, values, "assertion_state", "assertion_status")
-            or ""
-        ).casefold()
-        lane = str(
-            _schema2_field(row, values, "semantic_lane") or ""
-        ).casefold()
-        review_status = str(
-            _schema2_field(row, values, "review_status") or ""
-        ).casefold()
-        type_id = str(
-            _schema2_field(row, values, "semantic_type_id") or ""
+        validation = _schema2_entity_validation(
+            row,
+            contract=contract,
+            active_hash=active_hash,
+            entity_definitions=entity_definitions,
+            evidence_by_id=evidence_by_id,
+            endpoint_evidence=endpoint_evidence_by_entity.get(entity_id, set()),
         )
-        definition = entity_definitions.get(type_id)
-        row_hash = str(
-            _schema2_field(row, values, "semantic_contract_hash") or ""
-        )
-        reasons: list[str] = []
-        if not entity_id.strip():
-            reasons.append("ENTITY_ID_INVALID")
-        if not str(row.get("display_name") or "").strip():
-            reasons.append("ENTITY_DISPLAY_NAME_INVALID")
-        if not str(row.get("canonical_key") or "").strip():
-            reasons.append("ENTITY_CANONICAL_KEY_INVALID")
-        if raw_properties not in (None, "") and metadata is None:
-            reasons.append("ENTITY_PROPERTIES_NOT_OBJECT")
-        if assertion_state != "asserted":
-            reasons.append("ENTITY_NOT_ASSERTED")
-        if lane != "authoritative":
-            reasons.append("ENTITY_NOT_AUTHORITATIVE")
-        if review_status != "approved":
-            reasons.append("ENTITY_TYPE_NOT_APPROVED")
-        if definition is None:
-            reasons.append("ENTITY_TYPE_UNAPPROVED")
-        elif str(row.get("entity_type") or "") not in {
-            definition.id,
-            definition.name,
-        }:
-            reasons.append("ENTITY_TYPE_MISMATCH")
-        if row_hash != active_hash:
-            reasons.append("STALE_CONTRACT_HASH")
-
-        verified = sorted(set(
-            _schema2_verified_evidence(row, values, evidence_by_id)
-        ) | endpoint_evidence_by_entity.get(entity_id, set()))
-        source_file_id = str(row.get("source_file_id") or "")
-        if source_file_id:
-            verified = [
-                evidence_id
-                for evidence_id in verified
-                if str(
-                    evidence_by_id[evidence_id].get("source_file_id") or ""
-                )
-                == source_file_id
-            ]
-        business_approved = bool(
-            definition
-            and definition.business_defined
-            and _schema2_entity_approval(row, contract)
-        )
-        if not verified and not business_approved:
-            ids = _schema2_evidence_ids(row, values)
-            if not ids:
-                reasons.append("ENTITY_EVIDENCE_MISSING")
-            elif not any(item in evidence_by_id for item in ids):
-                reasons.append("ENTITY_EVIDENCE_DANGLING")
-            else:
-                reasons.append("ENTITY_EVIDENCE_UNVERIFIED")
-
-        eligible = not reasons
-        authoritative_candidate = assertion_state == "asserted"
-        if not eligible:
-            if authoritative_candidate:
-                entity_hard_violations.append(
-                    f"{entity_id}:{','.join(sorted(set(reasons)))}"
-                )
+        if validation["reasons"]:
             continue
-
+        definition = validation["definition"]
+        verified = validation["verified_evidence_ids"]
         supporting = [evidence_by_id[item] for item in verified]
         aliases = _schema2_strings(
             list(row.get("aliases") or [])
@@ -1097,13 +1440,6 @@ def _schema2_projection(
         }
         candidate_entities.append(projected)
         entity_type_by_id[entity_id] = definition.id
-
-    for index, row in enumerate(
-        sorted(anonymous_entities, key=_schema2_row_hash)
-    ):
-        entity_hard_violations.append(
-            f"<missing-entity-id>#{index}:ENTITY_ID_INVALID"
-        )
 
     candidate_entities.sort(key=lambda row: str(row.get("entity_id") or ""))
     published_entity_ids = {
@@ -1178,29 +1514,38 @@ def _schema2_projection(
         item["occurrence_key"]: "deduplicated" for item in losers
     }
     winner_hash_by_occurrence: dict[str, str] = {}
+    for item in occurrence_rows:
+        validation = _schema2_relationship_occurrence_validation(
+            item,
+            contract=contract,
+            active_hash=active_hash,
+            relationship_definitions=relationship_definitions,
+            evidence_by_id=evidence_by_id,
+            entity_winners=entity_winners,
+            entity_type_by_id=entity_type_by_id,
+            published_entity_ids=published_entity_ids,
+            parent_by_id=parent_by_id,
+        )
+        item.update(validation)
+        item["reasons"] = sorted(
+            set(item["reasons"]) | set(validation["generated_reasons"])
+        )
+        if item["state"] == "asserted":
+            for reason in validation["generated_reasons"]:
+                gate = _schema2_relationship_gate(reason)
+                relationship_gate_violations[gate].append(
+                    f"{item['occurrence_key']}:{reason}"
+                )
 
     for winner, group in winners:
         row = winner["row"]
         metadata = winner["metadata"]
         state = winner["state"]
         relationship_id = winner["relationship_id"]
-        source_id = str(row.get("source_entity_id") or "")
-        target_id = str(row.get("target_entity_id") or "")
-        endpoint_unresolved = (
-            not source_id
-            or not target_id
-            or source_id.startswith("unresolved-endpoint:")
-            or target_id.startswith("unresolved-endpoint:")
-            or source_id not in entity_winners
-            or target_id not in entity_winners
-        )
-        endpoint_unpublished = (
-            not endpoint_unresolved
-            and (
-                source_id not in published_entity_ids
-                or target_id not in published_entity_ids
-            )
-        )
+        source_id = winner["source_id"]
+        target_id = winner["target_id"]
+        endpoint_unresolved = winner["endpoint_unresolved"]
+        endpoint_unpublished = winner["endpoint_unpublished"]
         lane = str(
             _schema2_field(row, metadata, "semantic_lane") or ""
         ).casefold()
@@ -1265,175 +1610,19 @@ def _schema2_projection(
             "deduplicated_occurrence_count": len(group) - 1,
         }
 
-        asserted_reasons: list[str] = []
-        definition_id = str(
-            _schema2_field(
-                row, metadata, "semantic_relationship_id"
-            )
-            or ""
-        )
-        definition = relationship_definitions.get(definition_id)
-        contract_hash = str(
-            _schema2_field(row, metadata, "semantic_contract_hash") or ""
-        )
-        validation_authority = str(
-            _schema2_field(row, metadata, "validation_authority") or ""
-        )
-        primary_evidence_id = str(
-            _schema2_field(
-                row, metadata, "evidence_id", "verified_evidence_id"
-            )
-            or ""
-        )
+        asserted_reasons = winner["generated_reasons"]
+        definition = winner["definition"]
+        primary_evidence_id = winner["primary_evidence_id"]
         verified_ids = [
             item
             for item in merged_evidence
             if item in evidence_by_id
             and evidence_by_id[item].get("runner_verified") is True
         ]
-        if state == "asserted":
-            if not relationship_id:
-                asserted_reasons.append("RELATIONSHIP_ID_INVALID")
-            if contract_hash != active_hash:
-                asserted_reasons.append("STALE_CONTRACT_HASH")
-            if definition is None:
-                asserted_reasons.append("UNAPPROVED_RELATION")
-            elif str(row.get("relationship_type") or "") != definition.predicate:
-                asserted_reasons.append("UNAPPROVED_PREDICATE")
-            if validation_authority != "schema2":
-                asserted_reasons.append("INVALID_VALIDATION_AUTHORITY")
-            if not primary_evidence_id:
-                asserted_reasons.append("EVIDENCE_MISSING")
-            elif primary_evidence_id not in evidence_by_id:
-                asserted_reasons.append("EVIDENCE_DANGLING")
-            elif evidence_by_id[primary_evidence_id].get("runner_verified") is not True:
-                asserted_reasons.append("EVIDENCE_NOT_RUNNER_VERIFIED")
-            verified_hint = str(
-                _schema2_field(row, metadata, "verified_evidence_id") or ""
-            )
-            if verified_hint and verified_hint != primary_evidence_id:
-                asserted_reasons.append("EVIDENCE_FK_MISMATCH")
-            if endpoint_unresolved:
-                asserted_reasons.append("ENDPOINT_UNRESOLVED")
-            elif endpoint_unpublished:
-                asserted_reasons.append("ENDPOINT_UNPUBLISHED")
-
-            if definition is not None and not endpoint_unresolved:
-                source_type = str(
-                    _schema2_field(
-                        row, metadata, "resolved_source_type_id"
-                    )
-                    or entity_type_by_id.get(source_id)
-                    or _schema2_field(
-                        entity_winners[source_id],
-                        _schema2_json_metadata(
-                            entity_winners[source_id].get("properties_json")
-                        )
-                        or {},
-                        "semantic_type_id",
-                    )
-                    or ""
-                )
-                target_type = str(
-                    _schema2_field(
-                        row, metadata, "resolved_target_type_id"
-                    )
-                    or entity_type_by_id.get(target_id)
-                    or _schema2_field(
-                        entity_winners[target_id],
-                        _schema2_json_metadata(
-                            entity_winners[target_id].get("properties_json")
-                        )
-                        or {},
-                        "semantic_type_id",
-                    )
-                    or ""
-                )
-                source_actual = str(
-                    _schema2_field(
-                        entity_winners[source_id],
-                        _schema2_json_metadata(
-                            entity_winners[source_id].get("properties_json")
-                        )
-                        or {},
-                        "semantic_type_id",
-                    )
-                    or source_type
-                )
-                target_actual = str(
-                    _schema2_field(
-                        entity_winners[target_id],
-                        _schema2_json_metadata(
-                            entity_winners[target_id].get("properties_json")
-                        )
-                        or {},
-                        "semantic_type_id",
-                    )
-                    or target_type
-                )
-                allow_subtypes = (
-                    definition.endpoint_policy == "allow_subtypes"
-                    and contract.extraction_policy.allow_subtype_endpoints
-                )
-                source_path = _schema2_type_path(
-                    source_actual,
-                    definition.source_types,
-                    parent_by_id=parent_by_id,
-                    allow_subtypes=allow_subtypes,
-                )
-                target_path = _schema2_type_path(
-                    target_actual,
-                    definition.target_types,
-                    parent_by_id=parent_by_id,
-                    allow_subtypes=allow_subtypes,
-                )
-                recorded_source_path = _schema2_field(
-                    row, metadata, "source_inheritance_path"
-                )
-                recorded_target_path = _schema2_field(
-                    row, metadata, "target_inheritance_path"
-                )
-                if (
-                    source_path is None
-                    or target_path is None
-                    or source_type not in definition.source_types
-                    or target_type not in definition.target_types
-                    or (
-                        recorded_source_path
-                        and list(recorded_source_path) != source_path
-                    )
-                    or (
-                        recorded_target_path
-                        and list(recorded_target_path) != target_path
-                    )
-                ):
-                    asserted_reasons.append("INCOMPATIBLE_ENDPOINT")
-            direction = str(
-                _schema2_field(row, metadata, "direction") or ""
-            ).casefold()
-            if direction not in {"forward", "source_to_target"}:
-                asserted_reasons.append("INCOMPATIBLE_DIRECTION")
-
         if asserted_reasons:
-            merged_reasons = sorted(
-                set(merged_reasons) | set(asserted_reasons)
+            audit["reason_codes"] = sorted(
+                set(audit["reason_codes"]) | set(asserted_reasons)
             )
-            audit["reason_codes"] = merged_reasons
-            audit_id = relationship_id or winner["occurrence_key"]
-            for reason in sorted(set(asserted_reasons)):
-                if reason.startswith("EVIDENCE_"):
-                    gate = "SEM-102"
-                elif reason in {
-                    "ENDPOINT_UNRESOLVED",
-                    "ENDPOINT_UNPUBLISHED",
-                    "INCOMPATIBLE_ENDPOINT",
-                }:
-                    gate = "SEM-103"
-                else:
-                    gate = "SEM-101"
-                relationship_gate_violations[gate].append(
-                    f"{audit_id}:{reason}"
-                )
         audit_relationships.append(audit)
 
         valid_asserted = (
@@ -1717,6 +1906,31 @@ def _schema2_projection(
             "relationship_groups": len(winners),
             "deduplicated_occurrences": len(losers),
         },
+        "entity_reconciliation_counts": {
+            "input_occurrences": len(entity_occurrences),
+            "entity_groups": len(entity_groups),
+            "selected_occurrences": sum(
+                record["selected"] for record in entity_reconciliation
+            ),
+            "deduplicated_occurrences": sum(
+                not record["selected"] for record in entity_reconciliation
+            ),
+            "authority_conflicts": len(entity_conflict_violations),
+        },
+        "entity_reason_counts": dict(sorted(Counter(
+            reason
+            for record in entity_reconciliation
+            for reason in record["reason_codes"]
+        ).items())),
+        "entity_reconciliation_policy": [
+            "asserted",
+            "authoritative",
+            "approved_review",
+            "approved_type",
+            "active_contract_hash",
+            "verified_evidence_or_complete_business_approval",
+            "canonical_row_hash",
+        ],
         "endpoint_counts": {
             "unresolved": terminal_counts["endpoint_unresolved"],
             "unpublished": terminal_counts["endpoint_unpublished"],
@@ -1737,6 +1951,7 @@ def _schema2_projection(
         "reconciliation": reconciliation,
         "reconciliation_records": reconciliation,
         "occurrence_reconciliation": reconciliation,
+        "entity_reconciliation_records": entity_reconciliation,
         "canonical_row_hashes": {
             "entities": sorted(_schema2_row_hash(row) for row in entities),
             "relationships": [

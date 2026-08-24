@@ -239,6 +239,31 @@ def test_dedup_selects_asserted_winner_and_accounts_per_occurrence() -> None:
     assert result.receipt["dedup_counts"]["deduplicated_occurrences"] == 2
 
 
+def test_invalid_asserted_dedup_loser_fails_with_occurrence_reasons() -> None:
+    valid = _relationship("rel:duplicate")
+    invalid_loser = _relationship("rel:duplicate", evidence_id=None)
+
+    result = _project([invalid_loser, valid])
+
+    loser = next(
+        record
+        for record in result.receipt["reconciliation_records"]
+        if record["bucket"] == "deduplicated"
+    )
+    assert "EVIDENCE_MISSING" in loser["reason_codes"]
+    assert result.audit_relationships[0]["assertion_state"] == "asserted"
+    assert "EVIDENCE_MISSING" in result.audit_relationships[0]["reason_codes"]
+    assert result.receipt["status"] == "failed"
+    assert (
+        f"{loser['occurrence_key']}:EVIDENCE_MISSING"
+        in result.receipt["invariant_results"]["SEM-102"]["violations"]
+    )
+    assert result.semantic_entities == []
+    assert result.semantic_relationships == []
+    assert result.claims == []
+    assert result.claim_evidence == []
+
+
 def test_asserted_relationship_with_unpublished_endpoint_is_not_served() -> None:
     entities = _entities()
     entities[1] = _entity(
@@ -350,16 +375,69 @@ def test_projection_and_hashes_are_deterministic_across_input_shuffle() -> None:
     assert baseline.as_dict() == shuffled.as_dict()
 
 
+def test_conflicting_entity_authority_is_order_independent_and_fails() -> None:
+    entities = _entities()
+    conflicting = copy.deepcopy(entities[0])
+    conflicting["semantic_contract_hash"] = "stale-contract"
+    conflicting["properties_json"]["semantic_contract_hash"] = "stale-contract"
+    entities.append(conflicting)
+
+    baseline = build_semantic_projection(
+        entities,
+        [_relationship("rel:valid")],
+        [_evidence()],
+        schema2_contract=_contract(),
+    )
+    shuffled = build_semantic_projection(
+        list(reversed(copy.deepcopy(entities))),
+        [_relationship("rel:valid")],
+        [_evidence()],
+        schema2_contract=_contract(),
+    )
+    assert isinstance(baseline, SemanticProjectionResult)
+    assert isinstance(shuffled, SemanticProjectionResult)
+
+    assert baseline.receipt == shuffled.receipt
+    assert baseline.as_dict() == shuffled.as_dict()
+    assert baseline.receipt["status"] == "failed"
+    assert baseline.receipt["entity_reconciliation_counts"] == {
+        "input_occurrences": 3,
+        "entity_groups": 2,
+        "selected_occurrences": 2,
+        "deduplicated_occurrences": 1,
+        "authority_conflicts": 1,
+    }
+    records = baseline.receipt["entity_reconciliation_records"]
+    assert len(records) == 3
+    stale = next(
+        record
+        for record in records
+        if "STALE_CONTRACT_HASH" in record["reason_codes"]
+    )
+    assert stale["selected"] is False
+    assert baseline.receipt["invariant_results"]["SEM-100"]["passed"] is False
+    assert baseline.semantic_entities == []
+    assert baseline.semantic_relationships == []
+    assert baseline.claims == []
+    assert baseline.claim_evidence == []
+
+
 def test_projection_receipt_is_stable_across_python_hash_seeds() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     script = """
+import copy
 import json
 from tests.unit.test_semantic_projection_lifecycle import (
     _contract, _entities, _evidence, _relationship,
 )
 from fabric_kg_builder.serving.semantic_projection import build_semantic_projection
+entities = _entities()
+conflicting = copy.deepcopy(entities[0])
+conflicting["semantic_contract_hash"] = "stale-contract"
+conflicting["properties_json"]["semantic_contract_hash"] = "stale-contract"
+entities.append(conflicting)
 result = build_semantic_projection(
-    _entities(),
+    entities,
     [
         _relationship("rel:a"),
         _relationship("rel:b", state="unresolved", evidence_id=None),
@@ -386,7 +464,7 @@ print(json.dumps(result.receipt, sort_keys=True, separators=(",", ":")))
             ).strip()
         )
     assert outputs[0] == outputs[1]
-    assert json.loads(outputs[0])["status"] == "succeeded"
+    assert json.loads(outputs[0])["status"] == "failed"
 
 
 def test_schema1_call_keeps_original_dict_shape_and_behavior() -> None:

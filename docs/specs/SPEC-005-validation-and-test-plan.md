@@ -1247,6 +1247,10 @@ asserted-only serving state, evidence and endpoint referential integrity,
 contract-hash binding, schema-1 compatibility, and identical receipt/table
 hashes across input order and `PYTHONHASHSEED`.
 
+Blocking lifecycle regressions additionally cover conflicting schema markers,
+invalid asserted duplicate losers, conflicting duplicate entity authority, and
+injected Parquet-write failure before success-receipt publication.
+
 ### 15.1 Proposal and approval test matrix
 
 The schema foundation and proposal merge gates cover:

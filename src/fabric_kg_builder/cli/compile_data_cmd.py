@@ -17,7 +17,9 @@ Exit codes
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ import click
 
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.domain.service import (
+    DomainContractError,
     compute_contract_hash,
     load_domain_contract,
 )
@@ -137,11 +140,46 @@ def _load_schema2_projection_authority(
         raise click.ClickException(
             f"Invalid domain run manifest {manifest_path}: expected an object"
         )
+    top_version = manifest.get("schema_version")
     contract_meta = manifest.get("domain_contract")
+    nested_version = (
+        contract_meta.get("schema_version")
+        if isinstance(contract_meta, dict)
+        else None
+    )
+    v2_binding_marker = bool(
+        isinstance(contract_meta, dict)
+        and (
+            contract_meta.get("proposal_hash")
+            or contract_meta.get("source_profile_hash")
+        )
+    )
+    top_schema2 = str(top_version) == "2.0"
+    nested_schema2 = str(nested_version) == "2.0"
+    if (
+        top_version is not None
+        and nested_version is not None
+        and str(top_version) != str(nested_version)
+    ):
+        raise click.ClickException(
+            "Domain run manifest has conflicting schema-version markers."
+        )
+    if v2_binding_marker and (
+        top_version not in (None, "2.0") or nested_version != "2.0"
+    ):
+        raise click.ClickException(
+            "Domain run manifest has conflicting schema-2 approval markers."
+        )
+    if not top_schema2 and not nested_schema2 and not v2_binding_marker:
+        return None, manifest
     if not isinstance(contract_meta, dict):
-        return None, manifest
-    if str(contract_meta.get("schema_version") or manifest.get("schema_version")) != "2.0":
-        return None, manifest
+        raise click.ClickException(
+            "Schema-2 domain run manifest is missing domain_contract."
+        )
+    if str(contract_meta.get("schema_version")) != "2.0":
+        raise click.ClickException(
+            "Schema-2 domain run manifest domain_contract marker is invalid."
+        )
 
     raw_path = contract_meta.get("path")
     if not isinstance(raw_path, str) or not raw_path.strip():
@@ -171,7 +209,12 @@ def _load_schema2_projection_authority(
             f"trusted project root {trusted_root}: {raw_path!r}"
         )
     contract_path = next(iter(resolved_candidates))
-    contract = load_domain_contract(contract_path)
+    try:
+        contract = load_domain_contract(contract_path)
+    except DomainContractError as exc:
+        raise click.ClickException(
+            f"Manifest-bound schema-2 contract is invalid: {exc}"
+        ) from exc
     if not isinstance(contract, DomainContractV2):
         raise click.ClickException(
             f"Manifest-bound contract is not schema 2.0: {contract_path}"
@@ -191,6 +234,26 @@ def _load_schema2_projection_authority(
         raise click.ClickException(
             "Schema-2 approval is not bound to the active contract hash."
         )
+    required_manifest_bindings = {
+        "approval_status": contract.approval.status,
+        "approved_by": contract.approval.approved_by,
+        "approved_at_utc": contract.approval.approved_at_utc,
+        "schema_version": contract.schema_version,
+        "prompt_version": contract.approval.prompt_version,
+        "model_version": contract.approval.model_version,
+        "proposal_hash": contract.approval.proposal_hash,
+        "source_profile_hash": contract.approval.source_profile_hash,
+    }
+    inconsistent = [
+        key
+        for key, expected in required_manifest_bindings.items()
+        if not expected or contract_meta.get(key) != expected
+    ]
+    if inconsistent:
+        raise click.ClickException(
+            "Schema-2 domain run manifest approval bindings are missing or "
+            f"inconsistent: {', '.join(sorted(inconsistent))}."
+        )
     return contract, manifest
 
 
@@ -198,7 +261,8 @@ def _write_projection_receipt(output_dir: Path, receipt: dict[str, Any]) -> Path
     """Persist one deterministic projection receipt."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "semantic-projection-receipt.json"
-    path.write_text(
+    staging_path = output_dir / ".semantic-projection-receipt.json.tmp"
+    staging_path.write_text(
         json.dumps(
             receipt,
             indent=2,
@@ -209,6 +273,7 @@ def _write_projection_receipt(output_dir: Path, receipt: dict[str, Any]) -> Path
         + "\n",
         encoding="utf-8",
     )
+    os.replace(staging_path, path)
     return path
 
 
@@ -697,6 +762,9 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
             f"  Migrated {backfilled} legacy row(s) to the lineage v2 envelope."
         )
 
+    raw_entity_occurrences = [
+        dict(row) for row in table_rows["entities"]
+    ]
     raw_relationship_occurrences = [
         dict(row) for row in table_rows["relationships"]
     ]
@@ -754,7 +822,11 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
     # canonical tables so graph edges, claims, and citations have one-to-one
     # stable IDs with their serving source rows.
     projection = build_semantic_projection(
-        table_rows["entities"],
+        (
+            raw_entity_occurrences
+            if schema2_contract is not None
+            else table_rows["entities"]
+        ),
         (
             raw_relationship_occurrences
             if schema2_contract is not None
@@ -784,10 +856,7 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
             },
             "invariants": [],
         }
-    receipt_path = _write_projection_receipt(
-        output_dir,
-        projection_receipt,
-    )
+    receipt_path = output_dir / "semantic-projection-receipt.json"
     # Preserve any upstream claim workflow output; deterministic relationship
     # claims supplement it rather than replacing it.
     existing_claim_ids = {
@@ -825,22 +894,22 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
     if violations:
         if schema2_contract is not None:
             _clear_semantic_outputs(output_dir)
-            projection_receipt = {
-                **projection_receipt,
-                "status": "failed",
-                "compile_gate_violations": [
-                    {
-                        "gate": violation.gate,
-                        "table": violation.table,
-                        "message": violation.message,
-                    }
-                    for violation in violations
-                ],
-            }
-            receipt_path = _write_projection_receipt(
-                output_dir,
-                projection_receipt,
-            )
+        projection_receipt = {
+            **projection_receipt,
+            "status": "failed",
+            "compile_gate_violations": [
+                {
+                    "gate": violation.gate,
+                    "table": violation.table,
+                    "message": violation.message,
+                }
+                for violation in violations
+            ],
+        }
+        receipt_path = _write_projection_receipt(
+            output_dir,
+            projection_receipt,
+        )
         click.echo(
             f"  [FAIL] {len(violations)} data-integrity violation(s) found:",
             err=True,
@@ -864,15 +933,48 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
                 or rows
             )
         }
-        written = write_all_tables(core_rows, output_dir)
-        for name, schema in DRAWING_TABLE_SCHEMAS.items():
-            written[name] = write_table(
-                name,
-                table_rows[name],
-                output_dir,
-                schema=schema,
-            )
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".compile-data-",
+            dir=output_dir.parent,
+        ) as staging_name:
+            staging_dir = Path(staging_name)
+            staged = write_all_tables(core_rows, staging_dir)
+            for name, schema in DRAWING_TABLE_SCHEMAS.items():
+                staged[name] = write_table(
+                    name,
+                    table_rows[name],
+                    staging_dir,
+                    schema=schema,
+                )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            written: dict[str, Path] = {}
+            for table_name, staged_path in sorted(staged.items()):
+                final_path = output_dir / staged_path.name
+                os.replace(staged_path, final_path)
+                written[table_name] = final_path
+        receipt_path = _write_projection_receipt(
+            output_dir,
+            projection_receipt,
+        )
     except (ValueError, KeyError, OSError) as exc:
+        if schema2_contract is not None:
+            _clear_semantic_outputs(output_dir)
+        failed_receipt = {
+            **projection_receipt,
+            "status": "failed",
+            "output_failure": {
+                "code": "OUTPUT_WRITE_FAILED",
+                "error_type": type(exc).__name__,
+            },
+        }
+        try:
+            receipt_path = _write_projection_receipt(
+                output_dir,
+                failed_receipt,
+            )
+        except OSError:
+            pass
         raise click.ClickException(f"Failed to write Parquet: {exc}") from exc
 
     # --- Summary ------------------------------------------------------------
