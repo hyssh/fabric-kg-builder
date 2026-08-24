@@ -554,6 +554,25 @@ def canonicalize_llm_output(
                 if output.semantic_contract_hash or entity.semantic_lane
                 else None,
                 evidence_ids=entity.evidence_id_hints or None,
+                assertion_state=entity.assertion_state,
+                semantic_lane=entity.semantic_lane,
+                semantic_type_id=entity.semantic_type_id,
+                review_status=entity.review_status,
+                semantic_contract_hash=output.semantic_contract_hash,
+                audit_reason_codes=entity.audit_reasons or None,
+                proposal_approval_json=(
+                    json.dumps(
+                        {
+                            "proposal_hash": output.proposal_hash,
+                            "source_profile_hash": output.source_profile_hash,
+                            "prompt_version": output.prompt_version,
+                            "model_version": output.model_version,
+                        },
+                        sort_keys=True,
+                    )
+                    if output.semantic_contract_hash
+                    else None
+                ),
                 resolution_context_key=entity.resolution_context_key,
                 cannot_link_keys=entity.cannot_link_keys or None,
                 confidence=entity.confidence,
@@ -817,6 +836,33 @@ def canonicalize_llm_output(
             source_span_ids=rel.source_span_ids or None,
             semantic_relationship_id=rel.semantic_relationship_id,
             assertion_state=rel.assertion_status,
+            processing_status=rel.processing_status,
+            semantic_lane=rel.semantic_lane,
+            semantic_contract_hash=output.semantic_contract_hash,
+            reason_codes=rel.rejection_reasons or None,
+            candidate_evidence_json=json.dumps(
+                {
+                    "evidence": (
+                        rel.evidence.model_dump(mode="json")
+                        if rel.evidence is not None
+                        else None
+                    ),
+                    "evidence_id_hint": rel.evidence_id_hint,
+                    "evidence_id_hints": rel.evidence_id_hints,
+                    "source_span_ids": rel.source_span_ids,
+                },
+                sort_keys=True,
+            ),
+            resolved_source_type_id=rel.resolved_source_type_id,
+            resolved_target_type_id=rel.resolved_target_type_id,
+            source_inheritance_path=rel.source_inheritance_path or None,
+            target_inheritance_path=rel.target_inheritance_path or None,
+            validation_authority=rel.validation_authority,
+            retry_eligible=False,
+            prompt_version=output.prompt_version,
+            model_version=output.model_version,
+            source_profile_hash=output.source_profile_hash,
+            proposal_hash=output.proposal_hash,
             direction=rel.direction,
             relationship_category=rel.semantic_category,
             review_status=rel.review_status,
@@ -963,6 +1009,7 @@ def canonicalize_llm_output(
                 span_start=ev.span_start,
                 span_end=ev.span_end,
                 source_content_hash=ev.source_content_hash,
+                runner_verified=ev.runner_verified,
                 source_locator_json=ev.source_locator_json,
                 content_hash=ev_text_hash,
                 created_at=now,

@@ -166,6 +166,20 @@ def test_entities_updated_at_type():
     assert fm["updated_at"].type == _TS_TYPE
 
 
+def test_schema2_entity_audit_columns_are_additive_nullable():
+    fm = field_map(TABLE_SCHEMAS["entities"])
+    for col in (
+        "assertion_state",
+        "semantic_lane",
+        "semantic_type_id",
+        "review_status",
+        "semantic_contract_hash",
+        "audit_reason_codes",
+        "proposal_approval_json",
+    ):
+        assert fm[col].nullable is True
+
+
 # ---------------------------------------------------------------------------
 # relationships (§3.6)
 # ---------------------------------------------------------------------------
@@ -183,6 +197,31 @@ def test_relationships_required_columns():
 def test_relationships_evidence_id_nullable():
     fm = field_map(TABLE_SCHEMAS["relationships"])
     assert fm["evidence_id"].nullable is True
+
+
+def test_schema2_relationship_audit_columns_are_additive_nullable():
+    fm = field_map(TABLE_SCHEMAS["relationships"])
+    for col in (
+        "processing_status",
+        "semantic_lane",
+        "semantic_contract_hash",
+        "reason_codes",
+        "candidate_evidence_json",
+        "resolved_source_type_id",
+        "resolved_target_type_id",
+        "source_inheritance_path",
+        "target_inheritance_path",
+        "validation_authority",
+        "retry_eligible",
+        "prompt_version",
+        "model_version",
+        "source_profile_hash",
+        "proposal_hash",
+        "terminal_bucket",
+        "canonical_row_hash",
+        "deduplicated_occurrence_count",
+    ):
+        assert fm[col].nullable is True
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +242,10 @@ def test_evidence_all_fk_cols_nullable():
         "callout_id", "visual_region_id", "figure_id",
     ):
         assert fm[col].nullable is True, f"{col} should be NULLABLE"
+
+
+def test_evidence_runner_verified_is_additive_nullable():
+    assert field_map(TABLE_SCHEMAS["evidence"])["runner_verified"].nullable is True
 
 
 # ---------------------------------------------------------------------------

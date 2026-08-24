@@ -186,6 +186,10 @@ def test_exact_span_is_asserted_and_mints_runner_evidence() -> None:
 
     assert relationship.assertion_status == "asserted"
     assert relationship.verified_evidence_id
+    assert all(
+        entity.assertion_state == "asserted"
+        for entity in validated.entities
+    )
     assert relationship.evidence_id_hint == relationship.verified_evidence_id
     evidence = next(
         item
@@ -323,6 +327,7 @@ def test_unknown_terms_use_discovery_lane() -> None:
         )
     )
     assert validated.entities[0].semantic_lane == "discovery"
+    assert validated.entities[0].assertion_state == "unresolved"
     relationship = validated.relationships[0]
     assert relationship.semantic_lane == "discovery"
     assert relationship.processing_status == "discovery"

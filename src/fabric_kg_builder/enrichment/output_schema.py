@@ -231,6 +231,10 @@ class Entity(BaseModel):
         default=None,
         description="Runner-assigned contract lane; never trusted from the model.",
     )
+    assertion_state: Optional[Literal["asserted", "unresolved"]] = Field(
+        default=None,
+        description="Runner-assigned schema-2 entity publication state.",
+    )
     review_status: Optional[Literal["approved", "needs_review"]] = Field(
         default=None,
         description="Runner-assigned review status for semantic publication.",
@@ -705,6 +709,10 @@ class LLMOutput(BaseModel):
         default=None,
         description="Runner-assigned hash of the approved semantic contract.",
     )
+    proposal_hash: Optional[str] = None
+    source_profile_hash: Optional[str] = None
+    prompt_version: Optional[str] = None
+    model_version: Optional[str] = None
     pass_: str = Field(
         alias="pass",
         description="Extraction pass identifier: p1 | p2 | p3 | p4 | p5 | p6 | p7 | p8",

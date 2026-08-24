@@ -100,6 +100,22 @@ def run_gates(table_rows: dict[str, list[dict]]) -> list[Violation]:
     return violations
 
 
+def run_semantic_projection_gates(receipt: dict) -> list[Violation]:
+    """Translate the shared projection's SEM-100..SEM-104 results to violations."""
+    violations: list[Violation] = []
+    for result in receipt.get("invariants", []):
+        if not isinstance(result, dict) or result.get("passed") is True:
+            continue
+        gate = str(result.get("gate") or "SEM-104")
+        details = result.get("details")
+        if isinstance(details, list):
+            message = "; ".join(str(item) for item in details)
+        else:
+            message = str(details or "semantic projection invariant failed")
+        violations.append(Violation(gate, "semantic_projection", message))
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Individual gate implementations
 # ---------------------------------------------------------------------------
@@ -158,6 +174,8 @@ def _val005_dangling_source_entity(table_rows: dict[str, list[dict]]) -> list[Vi
     }
     violations: list[Violation] = []
     for rel in table_rows.get("relationships", []):
+        if _schema2_audit_only_relationship(rel):
+            continue
         sid = rel.get("source_entity_id")
         if sid is not None and sid not in entity_ids:
             violations.append(
@@ -178,6 +196,8 @@ def _val006_dangling_target_entity(table_rows: dict[str, list[dict]]) -> list[Vi
     }
     violations: list[Violation] = []
     for rel in table_rows.get("relationships", []):
+        if _schema2_audit_only_relationship(rel):
+            continue
         tid = rel.get("target_entity_id")
         if tid is not None and tid not in entity_ids:
             violations.append(
@@ -198,6 +218,8 @@ def _val007_dangling_evidence_fk(table_rows: dict[str, list[dict]]) -> list[Viol
     }
     violations: list[Violation] = []
     for rel in table_rows.get("relationships", []):
+        if _schema2_audit_only_relationship(rel):
+            continue
         relationship_evidence = set(rel.get("evidence_ids") or [])
         if rel.get("evidence_id"):
             relationship_evidence.add(rel["evidence_id"])
@@ -212,6 +234,15 @@ def _val007_dangling_evidence_fk(table_rows: dict[str, list[dict]]) -> list[Viol
                 )
             )
     return violations
+
+
+def _schema2_audit_only_relationship(row: dict) -> bool:
+    """Return true for a non-serving schema-2 raw audit candidate."""
+    has_schema2_authority = (
+        row.get("validation_authority") == "schema2"
+        or bool(row.get("semantic_contract_hash"))
+    )
+    return has_schema2_authority and row.get("assertion_state") != "asserted"
 
 
 def _val013_dup_property_ids(

@@ -101,6 +101,13 @@ class EntityRow(CommonLineageRow):
     description: Optional[str] = None
     properties_json: Optional[str] = None
     evidence_ids: Optional[list[str]] = None
+    assertion_state: Optional[str] = None
+    semantic_lane: Optional[str] = None
+    semantic_type_id: Optional[str] = None
+    review_status: Optional[str] = None
+    semantic_contract_hash: Optional[str] = None
+    audit_reason_codes: Optional[list[str]] = None
+    proposal_approval_json: Optional[str] = None
     resolution_context_key: Optional[str] = None
     cannot_link_keys: Optional[list[str]] = None
     source_file_id: Optional[str] = None
@@ -123,6 +130,24 @@ class RelationshipRow(CommonLineageRow):
     source_span_ids: Optional[list[str]] = None
     semantic_relationship_id: Optional[str] = None
     assertion_state: Optional[str] = None
+    processing_status: Optional[str] = None
+    semantic_lane: Optional[str] = None
+    semantic_contract_hash: Optional[str] = None
+    reason_codes: Optional[list[str]] = None
+    candidate_evidence_json: Optional[str] = None
+    resolved_source_type_id: Optional[str] = None
+    resolved_target_type_id: Optional[str] = None
+    source_inheritance_path: Optional[list[str]] = None
+    target_inheritance_path: Optional[list[str]] = None
+    validation_authority: Optional[str] = None
+    retry_eligible: Optional[bool] = None
+    prompt_version: Optional[str] = None
+    model_version: Optional[str] = None
+    source_profile_hash: Optional[str] = None
+    proposal_hash: Optional[str] = None
+    terminal_bucket: Optional[str] = None
+    canonical_row_hash: Optional[str] = None
+    deduplicated_occurrence_count: Optional[int] = None
     direction: Optional[str] = None
     relationship_category: Optional[str] = None
     review_status: Optional[str] = None
@@ -196,6 +221,7 @@ class EvidenceRow(CommonLineageRow):
     span_start: Optional[int] = None
     span_end: Optional[int] = None
     source_content_hash: Optional[str] = None
+    runner_verified: Optional[bool] = None
     content_hash: str
     created_at: datetime
 

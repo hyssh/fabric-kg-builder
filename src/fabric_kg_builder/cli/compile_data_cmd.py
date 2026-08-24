@@ -24,11 +24,23 @@ from typing import Any
 
 import click
 
+from fabric_kg_builder.domain.models import DomainContractV2
+from fabric_kg_builder.domain.service import (
+    compute_contract_hash,
+    load_domain_contract,
+)
 from fabric_kg_builder.lineage.common import ensure_lineage_defaults
 from fabric_kg_builder.model.arrow_schemas import DRAWING_TABLE_SCHEMAS
 from fabric_kg_builder.parquet.writer import write_all_tables, write_table
-from fabric_kg_builder.serving.semantic_projection import build_semantic_projection
-from fabric_kg_builder.validate.data_gates import Violation, run_gates
+from fabric_kg_builder.serving.semantic_projection import (
+    SemanticProjectionResult,
+    build_semantic_projection,
+)
+from fabric_kg_builder.validate.data_gates import (
+    Violation,
+    run_gates,
+    run_semantic_projection_gates,
+)
 
 # ---------------------------------------------------------------------------
 # Datetime coercion — enriched JSON stores datetimes as ISO strings
@@ -93,6 +105,124 @@ _SKIP_NAMES = {
     "enrichment-metrics.json",
     ".enrichment-metrics.json",
 }
+
+
+def _project_root_for_input(input_dir: Path) -> Path:
+    """Return the trusted project boundary for an enriched artifact directory."""
+    resolved = input_dir.resolve()
+    if resolved.name == "enriched" and resolved.parent.name == "build":
+        return resolved.parent.parent
+    return resolved.parent
+
+
+def _load_schema2_projection_authority(
+    input_dir: Path,
+) -> tuple[DomainContractV2 | None, dict[str, Any] | None]:
+    """Load the approved contract bound by the enrichment run manifest.
+
+    Schema-1 and manifest-free compatibility inputs return ``(None, None)``.
+    Schema-2 manifests fail closed when their path, approval, or hash binding is
+    missing or stale.
+    """
+    manifest_path = input_dir / "domain.run-manifest.json"
+    if not manifest_path.exists():
+        return None, None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise click.ClickException(
+            f"Invalid domain run manifest {manifest_path}: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise click.ClickException(
+            f"Invalid domain run manifest {manifest_path}: expected an object"
+        )
+    contract_meta = manifest.get("domain_contract")
+    if not isinstance(contract_meta, dict):
+        return None, manifest
+    if str(contract_meta.get("schema_version") or manifest.get("schema_version")) != "2.0":
+        return None, manifest
+
+    raw_path = contract_meta.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise click.ClickException(
+            "Schema-2 domain run manifest does not identify its approved contract."
+        )
+    trusted_root = _project_root_for_input(input_dir)
+    supplied = Path(raw_path)
+    candidates = (
+        [supplied.resolve()]
+        if supplied.is_absolute()
+        else [
+            (trusted_root / supplied).resolve(),
+            (manifest_path.parent / supplied).resolve(),
+        ]
+    )
+    resolved_candidates = {
+        candidate
+        for candidate in candidates
+        if candidate.exists()
+        and candidate.is_file()
+        and candidate.is_relative_to(trusted_root)
+    }
+    if len(resolved_candidates) != 1:
+        raise click.ClickException(
+            "Schema-2 contract path is missing, ambiguous, or outside the "
+            f"trusted project root {trusted_root}: {raw_path!r}"
+        )
+    contract_path = next(iter(resolved_candidates))
+    contract = load_domain_contract(contract_path)
+    if not isinstance(contract, DomainContractV2):
+        raise click.ClickException(
+            f"Manifest-bound contract is not schema 2.0: {contract_path}"
+        )
+    actual_hash = compute_contract_hash(contract)
+    expected_hash = contract_meta.get("contract_hash")
+    if expected_hash != actual_hash:
+        raise click.ClickException(
+            "Schema-2 domain run manifest contract hash mismatch: "
+            f"expected {expected_hash!r}, found {actual_hash!r}."
+        )
+    if contract.approval.status != "approved":
+        raise click.ClickException(
+            f"Schema-2 contract is not approved: {contract_path}"
+        )
+    if contract.approval.contract_hash != actual_hash:
+        raise click.ClickException(
+            "Schema-2 approval is not bound to the active contract hash."
+        )
+    return contract, manifest
+
+
+def _write_projection_receipt(output_dir: Path, receipt: dict[str, Any]) -> Path:
+    """Persist one deterministic projection receipt."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "semantic-projection-receipt.json"
+    path.write_text(
+        json.dumps(
+            receipt,
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _clear_semantic_outputs(output_dir: Path) -> None:
+    """Remove only stale serving files after a schema-2 projection failure."""
+    for name in (
+        "semantic_entities.parquet",
+        "semantic_relationships.parquet",
+        "claims.parquet",
+        "claim_evidence.parquet",
+    ):
+        path = output_dir / name
+        if path.is_file():
+            path.unlink()
 
 
 def _load_enriched_json(input_dir: Path) -> dict[str, list[dict]]:
@@ -497,6 +627,37 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
     except Exception as exc:
         raise click.ClickException(f"Unexpected error loading input: {exc}") from exc
 
+    try:
+        schema2_contract, domain_run_manifest = (
+            _load_schema2_projection_authority(input_dir)
+        )
+    except click.ClickException as exc:
+        _clear_semantic_outputs(output_dir)
+        _write_projection_receipt(
+            output_dir,
+            {
+                "receipt_schema_version": "1.0",
+                "schema_mode": "schema2",
+                "status": "failed",
+                "active_contract_hash": None,
+                "input_candidate_count": len(table_rows["relationships"]),
+                "terminal_counts": {},
+                "reason_counts": {"AUTHORITY_INVALID": 1},
+                "serving_counts": {
+                    "semantic_entities": 0,
+                    "semantic_relationships": 0,
+                },
+                "invariants": [
+                    {
+                        "gate": "SEM-100",
+                        "passed": False,
+                        "details": [str(exc)],
+                    }
+                ],
+            },
+        )
+        raise
+
     if quality_report is not None:
         click.echo(
             "  Semantic quality: "
@@ -535,6 +696,10 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
         click.echo(
             f"  Migrated {backfilled} legacy row(s) to the lineage v2 envelope."
         )
+
+    raw_relationship_occurrences = [
+        dict(row) for row in table_rows["relationships"]
+    ]
 
     # --- Capture source identity sets for the additivity (superset) guard ----
     # Every real entity_id and relationship_id present in the enriched input MUST
@@ -590,8 +755,38 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
     # stable IDs with their serving source rows.
     projection = build_semantic_projection(
         table_rows["entities"],
-        table_rows["relationships"],
+        (
+            raw_relationship_occurrences
+            if schema2_contract is not None
+            else table_rows["relationships"]
+        ),
         table_rows["evidence"],
+        schema2_contract=schema2_contract,
+    )
+    projection_receipt: dict[str, Any]
+    if isinstance(projection, SemanticProjectionResult):
+        table_rows["relationships"] = projection.audit_relationships
+        projection_receipt = projection.receipt
+    else:
+        projection_receipt = {
+            "receipt_schema_version": "1.0",
+            "schema_mode": "schema1_compatibility",
+            "status": "succeeded",
+            "active_contract_hash": None,
+            "input_candidate_count": len(raw_relationship_occurrences),
+            "terminal_counts": {},
+            "reason_counts": {},
+            "serving_counts": {
+                "semantic_entities": len(projection["semantic_entities"]),
+                "semantic_relationships": len(
+                    projection["semantic_relationships"]
+                ),
+            },
+            "invariants": [],
+        }
+    receipt_path = _write_projection_receipt(
+        output_dir,
+        projection_receipt,
     )
     # Preserve any upstream claim workflow output; deterministic relationship
     # claims supplement it rather than replacing it.
@@ -622,15 +817,37 @@ def compile_data_cmd(input_path: str, output_path: str, run_validate: bool) -> N
 
     # --- Data-integrity gates (VAL-001..VAL-017) -----------------------------
     click.echo("[compile-data] Running data-integrity gates (VAL-001..VAL-017) ...")
-    violations: list[Violation] = run_gates(table_rows)
+    violations: list[Violation] = [
+        *run_gates(table_rows),
+        *run_semantic_projection_gates(projection_receipt),
+    ]
 
     if violations:
+        if schema2_contract is not None:
+            _clear_semantic_outputs(output_dir)
+            projection_receipt = {
+                **projection_receipt,
+                "status": "failed",
+                "compile_gate_violations": [
+                    {
+                        "gate": violation.gate,
+                        "table": violation.table,
+                        "message": violation.message,
+                    }
+                    for violation in violations
+                ],
+            }
+            receipt_path = _write_projection_receipt(
+                output_dir,
+                projection_receipt,
+            )
         click.echo(
             f"  [FAIL] {len(violations)} data-integrity violation(s) found:",
             err=True,
         )
         for v in violations:
             click.echo(f"    {v}", err=True)
+        click.echo(f"    receipt: {receipt_path}", err=True)
         sys.exit(5)
 
     click.echo("  All gates passed.")

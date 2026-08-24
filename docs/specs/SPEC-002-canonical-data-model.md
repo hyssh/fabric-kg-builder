@@ -640,6 +640,36 @@ input_candidate_count
 
 Silent drops are invalid.
 
+Schema-2 rows materialize the lifecycle authority as nullable additive canonical
+columns so schema-1 readers remain compatible. Entity rows carry
+`assertion_state`, `semantic_lane`, `semantic_type_id`, `review_status`,
+`semantic_contract_hash`, audit reason codes, and proposal approval metadata.
+Relationship rows carry `processing_status`, `semantic_lane`,
+`semantic_contract_hash`, reason codes, candidate evidence, resolved endpoint
+types and inheritance paths, validation authority, retry eligibility, and
+prompt/model/source-profile/proposal bindings. Existing `properties_json`
+representations remain accepted as migration aliases, but the dedicated columns
+are authoritative when present.
+
+Duplicate relationship occurrences are reconciled before publication. The
+deterministic winner order is asserted, unresolved, rejected, discovery; a
+runner-verified evidence occurrence wins within a state, followed by canonical
+row hash. Every non-winning occurrence counts once as `deduplicated`.
+
+Terminal precedence is discovery, endpoint unresolved, unresolved, rejected,
+endpoint unpublished, then asserted. The complete equation is:
+
+```text
+input_candidate_count
+  = asserted_count
+  + unresolved_count
+  + rejected_count
+  + discovery_count
+  + deduplicated_count
+  + endpoint_unresolved_count
+  + endpoint_unpublished_count
+```
+
 ### 12.2 Semantic serving requirements
 
 `semantic_entities` contains only asserted, approved, contract-matching entities
@@ -664,6 +694,24 @@ Compilation records deterministic row counts and canonical row hashes for every
 sealed semantic source table. Deployment must use the same projection and
 validation implementation and must compare the exact expected counts and hashes
 before mutation and after persisted read-back.
+
+`compile-data` writes `semantic-projection-receipt.json`. It contains terminal,
+reason, duplicate, endpoint exclusion, and serving counts; per-occurrence
+reconciliation; the active contract hash; canonical row and aggregate table
+hashes; and SEM-100 through SEM-104 results. Failed projections write a
+deterministic failed receipt but no success-shaped semantic serving rows.
+
+Canonical hashes use UTF-8 JSON with sorted object keys, compact separators,
+explicit nulls, finite numbers only, and UTC `Z` datetime normalization.
+Set-like arrays such as aliases, evidence IDs, and reason codes are deduplicated
+and canonically sorted; ordered arrays such as inheritance paths retain order.
+Rows are sorted by stable primary key before aggregate hashing.
+
+Schema-2 compilation resolves the contract path from
+`domain.run-manifest.json` inside the project boundary and verifies the manifest,
+approval, and computed contract hashes agree. Missing, escaping, ambiguous, or
+stale authority fails closed. Manifest-free and schema-1 inputs retain the
+existing compatibility projection.
 
 ### 6.3 Column-to-Field Mapping Conventions
 

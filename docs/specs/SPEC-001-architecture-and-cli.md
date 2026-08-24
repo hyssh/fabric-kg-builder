@@ -634,6 +634,9 @@ build/
 │   ├── chunks.parquet
 │   ├── entities.parquet
 │   ├── relationships.parquet
+│   ├── semantic_entities.parquet
+│   ├── semantic_relationships.parquet
+│   ├── semantic-projection-receipt.json
 │   ├── evidence.parquet
 │   ├── visual_assets.parquet
 │   └── visual_regions.parquet
@@ -674,7 +677,7 @@ dist/                            # Stage: package
 | domain-intake (set-domain) | User domain prompt (CLI or file) | `build/enriched/domain.json` |
 | inspect-source | Raw source files | Schema profile (stdout/file) |
 | enrich | Raw source files + config + domain.json (optional) | `build/enriched/*.json` |
-| compile-data | `build/enriched/` | `build/parquet/*.parquet` |
+| compile-data | `build/enriched/` + manifest-bound approved schema-2 contract | raw and semantic Parquet tables + `semantic-projection-receipt.json` |
 | compile-ontology | `ontology/model.yaml`, `ids.lock.json`, Parquet schemas | `build/ontology/` |
 | compile-search | `build/parquet/` — **text/visual tables only** (chunks, document_elements, visual_assets) | `build/search/` |
 | package | `build/*` | `dist/` |

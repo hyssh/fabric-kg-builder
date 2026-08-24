@@ -1235,6 +1235,18 @@ remain unchanged.
 | DEP-102 | deploy/read-back | Compile, prepared deploy, or persisted count/hash evidence differs |
 | QRY-101 | query planning | A generated path exceeds approved K or uses unbounded traversal |
 
+SEM-100 through SEM-104 consume the shared semantic projection receipt; gates
+must not independently reimplement filtering. A failed receipt leaves serving
+outputs empty and reports every failed invariant.
+
+Layer-4 fixtures reproduce the 0.2.3 mixed lifecycle: asserted with evidence,
+rejected with and without evidence, unresolved without evidence, discovery,
+subtype endpoints, duplicate overlap, unpublished endpoints, and legacy
+`unverified`. Tests prove per-occurrence reconciliation, zero silent loss,
+asserted-only serving state, evidence and endpoint referential integrity,
+contract-hash binding, schema-1 compatibility, and identical receipt/table
+hashes across input order and `PYTHONHASHSEED`.
+
 ### 15.1 Proposal and approval test matrix
 
 The schema foundation and proposal merge gates cover:

@@ -21,6 +21,10 @@ import pytest
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli.compile_data_cmd import compile_data_cmd
+from fabric_kg_builder.cli.compile_data_cmd import _load_schema2_projection_authority
+from fabric_kg_builder.domain.models import ApprovalMetadataV2
+from fabric_kg_builder.domain.proposal import DomainProposal
+from fabric_kg_builder.domain.service import compute_contract_hash, save_domain_contract
 from tests.conftest import combined_output, make_cli_runner  # noqa: F401
 from fabric_kg_builder.model.ids import (
     content_hash,
@@ -29,9 +33,16 @@ from fabric_kg_builder.model.ids import (
     make_evidence_id,
     make_relationship_id,
 )
+from fabric_kg_builder.validate.data_gates import run_gates
 
 _UTC = timezone.utc
 _NOW = "2026-06-24T12:00:00+00:00"
+_PROPOSAL_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "domain_proposals"
+    / "facility_maintenance_proposal.json"
+)
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -200,6 +211,304 @@ def _write_input(tmp_path: Path, fixture: dict, filename: str = "batch_p2.json")
     input_dir.mkdir(parents=True, exist_ok=True)
     (input_dir / filename).write_text(json.dumps(fixture, ensure_ascii=False), encoding="utf-8")
     return input_dir
+
+
+def _write_schema2_authority(tmp_path: Path) -> tuple[Path, Path]:
+    proposal = DomainProposal.model_validate(
+        json.loads(_PROPOSAL_FIXTURE.read_text(encoding="utf-8"))
+    )
+    contract_hash = compute_contract_hash(proposal.contract)
+    contract = proposal.contract.model_copy(
+        update={
+            "approval": ApprovalMetadataV2(
+                status="approved",
+                approved_by="test@example.com",
+                approved_at_utc="2026-08-24T00:00:00Z",
+                contract_hash=contract_hash,
+                proposal_hash=proposal.proposal_hash,
+                source_profile_hash=proposal.source_profile_hash,
+                prompt_hash=proposal.prompt_hash,
+                prompt_version=proposal.prompt_version,
+                model_version=proposal.model_version,
+                model_hash=proposal.model_hash,
+            )
+        }
+    )
+    contract_path = tmp_path / "domain.yaml"
+    save_domain_contract(contract, contract_path)
+    input_dir = tmp_path / "build" / "enriched"
+    input_dir.mkdir(parents=True)
+    (input_dir / "domain.run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "2.0",
+                "domain_contract": {
+                    "path": "domain.yaml",
+                    "contract_hash": contract_hash,
+                    "approval_status": "approved",
+                    "schema_version": "2.0",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return input_dir, contract_path
+
+
+def test_schema2_authority_resolves_project_relative_manifest_path(
+    tmp_path: Path,
+) -> None:
+    input_dir, contract_path = _write_schema2_authority(tmp_path)
+    contract, manifest = _load_schema2_projection_authority(input_dir)
+    assert contract is not None
+    assert manifest is not None
+    assert compute_contract_hash(contract) == manifest["domain_contract"]["contract_hash"]
+    assert contract_path.exists()
+
+
+def test_schema2_authority_rejects_path_outside_project(tmp_path: Path) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["domain_contract"]["path"] = str(_PROPOSAL_FIXTURE)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="outside the trusted project root"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def test_schema2_authority_rejects_stale_manifest_hash(tmp_path: Path) -> None:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    manifest_path = input_dir / "domain.run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["domain_contract"]["contract_hash"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Exception, match="contract hash mismatch"):
+        _load_schema2_projection_authority(input_dir)
+
+
+def _schema2_entity(
+    entity_type: str,
+    type_id: str,
+    name: str,
+    contract_hash: str,
+    evidence_id: str | None,
+    *,
+    asserted: bool = True,
+) -> dict:
+    row = _make_entity_row(entity_type, name)
+    row.update(
+        {
+            "evidence_ids": [evidence_id] if evidence_id else [],
+            "assertion_state": "asserted" if asserted else "unresolved",
+            "semantic_lane": "authoritative",
+            "semantic_type_id": type_id,
+            "review_status": "approved" if asserted else "needs_review",
+            "semantic_contract_hash": contract_hash,
+            "properties_json": json.dumps(
+                {
+                    "semantic_contract_hash": contract_hash,
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": type_id,
+                    "review_status": "approved" if asserted else "needs_review",
+                },
+                sort_keys=True,
+            ),
+        }
+    )
+    return row
+
+
+def _schema2_relationship(
+    relationship_id: str,
+    source_id: str,
+    target_id: str,
+    contract_hash: str,
+    evidence_id: str | None,
+    *,
+    state: str = "asserted",
+) -> dict:
+    row = _make_relationship_row(
+        source_id,
+        target_id,
+        rel_type="contains",
+        evidence_id=evidence_id,
+    )
+    row.update(
+        {
+            "relationship_id": relationship_id,
+            "evidence_ids": [evidence_id] if evidence_id else [],
+            "semantic_relationship_id": "relationship-type:contains",
+            "assertion_state": state,
+            "processing_status": (
+                "accepted" if state == "asserted" else state
+            ),
+            "semantic_lane": "authoritative",
+            "semantic_contract_hash": contract_hash,
+            "reason_codes": (
+                ["EVIDENCE_MISSING"] if state == "unresolved" else []
+            ),
+            "resolved_source_type_id": "entity-type:facility",
+            "resolved_target_type_id": "entity-type:equipment",
+            "source_inheritance_path": ["entity-type:facility"],
+            "target_inheritance_path": ["entity-type:equipment"],
+            "validation_authority": "schema2",
+            "direction": "forward",
+            "review_status": (
+                "approved" if state == "asserted" else "needs_review"
+            ),
+            "properties_json": json.dumps(
+                {
+                    "semantic_contract_hash": contract_hash,
+                    "semantic_lane": "authoritative",
+                    "semantic_relationship_id": "relationship-type:contains",
+                    "assertion_status": state,
+                    "validation_authority": "schema2",
+                    "direction": "forward",
+                },
+                sort_keys=True,
+            ),
+        }
+    )
+    return row
+
+
+def _write_schema2_compile_input(
+    tmp_path: Path,
+    *,
+    unpublished_endpoint: bool = False,
+) -> Path:
+    input_dir, _ = _write_schema2_authority(tmp_path)
+    contract, _ = _load_schema2_projection_authority(input_dir)
+    assert contract is not None
+    contract_hash = compute_contract_hash(contract)
+    evidence = _make_evidence_row()
+    evidence.update(
+        {
+            "runner_verified": True,
+            "text_unit_id": "unit:test",
+            "span_start": 0,
+            "span_end": len(str(evidence["text"])),
+            "source_content_hash": content_hash(str(evidence["text"])),
+        }
+    )
+    evidence_id = evidence["evidence_id"]
+    facility = _schema2_entity(
+        "Facility",
+        "entity-type:facility",
+        "Building A",
+        contract_hash,
+        evidence_id,
+    )
+    equipment = _schema2_entity(
+        "Equipment",
+        "entity-type:equipment",
+        "AHU-4",
+        contract_hash,
+        evidence_id,
+    )
+    entities = [facility, equipment]
+    target_id = equipment["entity_id"]
+    if unpublished_endpoint:
+        unpublished = _schema2_entity(
+            "Equipment",
+            "entity-type:equipment",
+            "Unpublished AHU",
+            contract_hash,
+            None,
+            asserted=False,
+        )
+        entities.append(unpublished)
+        target_id = unpublished["entity_id"]
+    relationships = [
+        _schema2_relationship(
+            "relationship:asserted",
+            facility["entity_id"],
+            target_id,
+            contract_hash,
+            evidence_id,
+        ),
+        _schema2_relationship(
+            "relationship:unresolved",
+            facility["entity_id"],
+            equipment["entity_id"],
+            contract_hash,
+            None,
+            state="unresolved",
+        ),
+    ]
+    (input_dir / "batch.json").write_text(
+        json.dumps(
+            {
+                "entities": entities,
+                "relationships": relationships,
+                "evidence": [evidence],
+                "chunks": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return input_dir
+
+
+def test_compile_data_schema2_writes_reconciled_audit_and_receipt(
+    tmp_path: Path,
+) -> None:
+    input_dir = _write_schema2_compile_input(tmp_path)
+    out_dir = tmp_path / "build" / "parquet"
+    result = CliRunner().invoke(
+        compile_data_cmd,
+        ["--input", str(input_dir), "--out", str(out_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(
+        (out_dir / "semantic-projection-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "succeeded"
+    assert receipt["input_candidate_count"] == 2
+    assert sum(receipt["terminal_counts"].values()) == 2
+    assert pq.read_table(out_dir / "relationships.parquet").num_rows == 2
+    assert pq.read_table(out_dir / "semantic_relationships.parquet").num_rows == 1
+
+
+def test_compile_data_schema2_failure_keeps_receipt_without_serving_output(
+    tmp_path: Path,
+) -> None:
+    input_dir = _write_schema2_compile_input(
+        tmp_path,
+        unpublished_endpoint=True,
+    )
+    out_dir = tmp_path / "build" / "parquet"
+    result = CliRunner().invoke(
+        compile_data_cmd,
+        ["--input", str(input_dir), "--out", str(out_dir)],
+    )
+    assert result.exit_code == 5, result.output
+    receipt = json.loads(
+        (out_dir / "semantic-projection-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "failed"
+    assert receipt["terminal_counts"]["endpoint_unpublished"] == 1
+    assert not (out_dir / "semantic_entities.parquet").exists()
+    assert not (out_dir / "semantic_relationships.parquet").exists()
+
+
+def test_schema2_nonasserted_dangling_endpoint_remains_audit_only() -> None:
+    rows = {
+        "entities": [],
+        "relationships": [
+            {
+                "relationship_id": "relationship:audit",
+                "source_entity_id": "unresolved-endpoint:1",
+                "target_entity_id": "unresolved-endpoint:2",
+                "assertion_state": "unresolved",
+                "semantic_contract_hash": "contract:test",
+            }
+        ],
+        "evidence": [],
+    }
+    assert not {
+        violation.gate for violation in run_gates(rows)
+    }.intersection({"VAL-005", "VAL-006", "VAL-007"})
 
 
 # ---------------------------------------------------------------------------

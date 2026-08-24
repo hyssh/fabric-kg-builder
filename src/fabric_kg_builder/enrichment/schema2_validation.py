@@ -68,6 +68,10 @@ class Schema2EnrichmentContext:
     max_relations_per_work_unit: int
     allow_subtype_endpoints: bool
     prompt_payload: dict[str, Any]
+    proposal_hash: str = ""
+    source_profile_hash: str = ""
+    prompt_version: str = ""
+    model_version: str = ""
 
 
 def build_schema2_enrichment_context(
@@ -151,6 +155,10 @@ def build_schema2_enrichment_context(
             contract.extraction_policy.allow_subtype_endpoints
         ),
         prompt_payload=prompt_payload,
+        proposal_hash=contract.approval.proposal_hash or "",
+        source_profile_hash=contract.approval.source_profile_hash or "",
+        prompt_version=contract.approval.prompt_version or "",
+        model_version=contract.approval.model_version or "",
     )
 
 
@@ -346,6 +354,7 @@ def apply_schema2_contract(
                         "observed_type": entity.type,
                         "semantic_type_id": None,
                         "semantic_lane": "discovery",
+                        "assertion_state": "unresolved",
                         "review_status": "needs_review",
                         "audit_reasons": [UNKNOWN_ENTITY_TYPE],
                     }
@@ -359,6 +368,7 @@ def apply_schema2_contract(
                         "observed_type": entity.type,
                         "semantic_type_id": definition.id,
                         "semantic_lane": "authoritative",
+                        "assertion_state": "asserted",
                         "review_status": "approved",
                         "audit_reasons": [],
                     }
@@ -620,6 +630,10 @@ def apply_schema2_contract(
     validated = output.model_copy(
         update={
             "semantic_contract_hash": context.contract_hash,
+            "proposal_hash": context.proposal_hash,
+            "source_profile_hash": context.source_profile_hash,
+            "prompt_version": context.prompt_version,
+            "model_version": context.model_version,
             "entities": normalized_entities,
             "relationships": normalized_relationships,
             "evidence": [
