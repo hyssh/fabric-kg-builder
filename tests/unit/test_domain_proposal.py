@@ -27,6 +27,7 @@ from fabric_kg_builder.domain.proposal import (
 )
 from fabric_kg_builder.domain.selection import (
     ProposalSelectionError,
+    _selection_key,
     merge_relationship_candidates,
     select_relationship_vocabulary,
 )
@@ -320,6 +321,108 @@ def test_merge_relationship_candidates_merges_duplicates_and_inverse_endpoints()
         "relationship-type:contains-register",
         "relationship-type:installed-in",
     )
+
+
+def test_merge_relationship_candidates_preserves_conflicting_endpoint_policies() -> None:
+    question_id = "cq:facility-equipment"
+    allow_subtypes = _relationship(
+        "relationship-type:contains-flexible",
+        predicate="contains_flexible",
+        semantic_key="contains",
+        source_types=["entity-type:facility"],
+        target_types=["entity-type:equipment"],
+        competency_question_ids=[question_id],
+        source_evidence_ids=["proposal-evidence:flexible"],
+    )
+    exact = _relationship(
+        "relationship-type:contains-exact",
+        predicate="contains_exact",
+        semantic_key="contains",
+        source_types=["entity-type:facility"],
+        target_types=["entity-type:equipment"],
+        competency_question_ids=[question_id],
+        source_evidence_ids=["proposal-evidence:exact"],
+    ).model_copy(update={"endpoint_policy": "exact"})
+
+    merged, aliases, groups = merge_relationship_candidates(
+        [allow_subtypes, exact]
+    )
+
+    assert [item.id for item in merged] == [
+        "relationship-type:contains-exact",
+        "relationship-type:contains-flexible",
+    ]
+    assert aliases == {
+        "relationship-type:contains-exact": "relationship-type:contains-exact",
+        "relationship-type:contains-flexible": "relationship-type:contains-flexible",
+    }
+    assert all(len(group) == 1 for group in groups.values())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf"), -0.01, 100.01],
+)
+def test_proposal_scores_reject_nonfinite_or_unreasonable_values(
+    value: float,
+) -> None:
+    with pytest.raises(ValidationError):
+        ProposalScore(coverage_score=value)
+
+
+def test_selection_score_key_uses_stable_ids_and_fsum() -> None:
+    candidates = {
+        item.id: item
+        for item in [
+            _relationship(
+                "relationship-type:a",
+                predicate="a",
+                semantic_key="a",
+                source_types=["entity-type:facility"],
+                target_types=["entity-type:equipment"],
+                competency_question_ids=["cq:q"],
+                source_evidence_ids=["proposal-evidence:a"],
+                score=0.1,
+            ),
+            _relationship(
+                "relationship-type:b",
+                predicate="b",
+                semantic_key="b",
+                source_types=["entity-type:facility"],
+                target_types=["entity-type:equipment"],
+                competency_question_ids=["cq:q"],
+                source_evidence_ids=["proposal-evidence:b"],
+                score=0.2,
+            ),
+            _relationship(
+                "relationship-type:c",
+                predicate="c",
+                semantic_key="c",
+                source_types=["entity-type:facility"],
+                target_types=["entity-type:equipment"],
+                competency_question_ids=["cq:q"],
+                source_evidence_ids=["proposal-evidence:c"],
+                score=0.3,
+            ),
+        ]
+    }
+    first = frozenset(
+        [
+            "relationship-type:c",
+            "relationship-type:a",
+            "relationship-type:b",
+        ]
+    )
+    second = frozenset(
+        [
+            "relationship-type:b",
+            "relationship-type:c",
+            "relationship-type:a",
+        ]
+    )
+
+    assert _selection_key(first, candidates) == _selection_key(second, candidates)
+    assert _selection_key(first, candidates)[2] == tuple(sorted(first))
 
 
 

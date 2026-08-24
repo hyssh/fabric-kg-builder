@@ -1569,7 +1569,10 @@ most three per file, and at most 1,800 total characters. Supported kinds are
 heading, text, table, and already-available visual description. Each excerpt
 has a stable sample ID, source-file ID, relative citation, element locator, and
 content hash. Conservative secret patterns are redacted before persistence or
-model submission. Adapter failures remain visible as typed sampling warnings.
+model submission, including all free-text citation and locator metadata such as
+section paths. Adapter failures remain visible as typed sampling warnings.
+Adapter sampling is enabled only by schema-2.0 proposal generation; schema-1.0
+source profiles remain metadata-only.
 
 Copilot may propose up to 48 candidate entity and relationship types. Each
 relationship includes a semantic key, optional explicit inverse declaration,
@@ -1577,13 +1580,18 @@ directed endpoints, question support, evidence or governance justification,
 and selector scores. Local code:
 
 1. merges only identical endpoint signatures with the same semantic key, or an
-   explicitly declared inverse with the same key and exactly reversed endpoints;
+   explicitly declared inverse with the same key and exactly reversed endpoints,
+   and only when endpoint policies are equal;
 2. enumerates question-scoped typed paths of at most four hops;
 3. chooses the minimum union of one valid path per coverable question plus
    mandatory governance relationships, with deterministic score/ID tie-breaks;
 4. recomputes shortest paths in the selected graph and records hop direction;
 5. derives K from the maximum selected shortest path; and
 6. preserves unsupported questions, blocking approval when one is critical.
+
+All score components are strict finite values in `[0, 100]`. Aggregate and
+tie-break calculations sort stable relationship IDs and use precise summation
+so `PYTHONHASHSEED` cannot change selection.
 
 The proposal layer does not enforce extraction spans or activate schema-2.0
 enrichment. Those remain later-layer responsibilities.

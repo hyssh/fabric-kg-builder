@@ -562,6 +562,9 @@ def _render_proposal_summary(proposal, profile: SourceProfile, findings) -> str:
         "  Competency questions:",
     ]
     plans = {item.question_id: item for item in contract.question_plans}
+    relationships = {
+        item.id: item for item in contract.candidate_model.relationship_types
+    }
     for question in contract.competency_questions:
         plan = plans[question.id]
         status = (
@@ -570,6 +573,13 @@ def _render_proposal_summary(proposal, profile: SourceProfile, findings) -> str:
             else f"UNSUPPORTED: {plan.unsupported_reason}"
         )
         lines.append(f"    - {question.id}: {question.question} [{status}]")
+        for index, step in enumerate(plan.required_path, start=1):
+            relationship = relationships[step.relationship_type]
+            lines.append(
+                f"      path {index}: {relationship.id} "
+                f"({relationship.predicate}); {step.from_type} -> "
+                f"{step.to_type}; traversal={step.traversal}"
+            )
     lines.append("  Entity types:")
     for entity in contract.candidate_model.entity_types:
         lines.append(f"    - {entity.id}: {entity.name}")
@@ -671,6 +681,7 @@ def _run_v2_init_domain(
         profile = build_source_profile(
             source_path,
             domain_description=domain_description,
+            include_proposal_samples=True,
         )
     else:
         profile = SourceProfile(

@@ -218,8 +218,16 @@ def runner():
 
 @pytest.fixture(autouse=True)
 def _stub_source_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _build_source_profile(_source_path: Path, domain_description: str | None = None) -> SourceProfile:
+    def _build_source_profile(
+        _source_path: Path,
+        domain_description: str | None = None,
+        *,
+        include_proposal_samples: bool = False,
+    ) -> SourceProfile:
         profile = _source_profile().model_copy(deep=True)
+        if not include_proposal_samples:
+            profile.proposal_samples = []
+            profile.sampling_warnings = []
         if domain_description is not None:
             profile.domain_description = domain_description
         return profile
@@ -352,10 +360,23 @@ def test_interactive_one_summary_approve_marks_contract_and_profile_approved(
     assert output.count("Domain proposal summary") == 1
     assert "approval is still required" not in output
     assert len(fake_client.calls) == 1
+    assert (
+        "path 1: relationship-type:contains (contains); "
+        "entity-type:equipment -> entity-type:facility; traversal=reverse"
+        in output
+    )
+    assert (
+        "path 2: relationship-type:work-order-for (work_order_for); "
+        "entity-type:equipment -> entity-type:work-order; traversal=reverse"
+        in output
+    )
 
     contract = load_domain_contract(artifacts.contract_path)
     profile = load_source_profile(artifacts.profile_path)
     proposal = load_domain_proposal(artifacts.proposal_path)
+    assert output.count("      path ") == sum(
+        len(plan.required_path) for plan in proposal.contract.question_plans
+    )
 
     assert contract.approval.status == "approved"
     assert contract.approval.approved_by == "interactive-owner@example.com"
@@ -666,6 +687,7 @@ def test_legacy_schema_1_init_compatibility_path_still_writes_schema_1_contract(
     assert "--approve selects legacy schema-1.0 compatibility" in output
     contract = load_domain_contract(contract_path)
     assert contract.schema_version == "1.0"
+    assert load_source_profile(profile_path).proposal_samples == []
 
 
 @pytest.mark.parametrize(

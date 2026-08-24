@@ -78,6 +78,14 @@ _FREE_TEXT_SECRET_PATTERNS: list[re.Pattern[str]] = [
         r"\s*(?::|=|\bis\b)\s*[A-Za-z0-9+/=._~-]{20,}",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"(?:api[ _-]?key|admin[ _-]?key|token|secret|password)"
+        r"[-/\\]"
+        r"(?=[A-Za-z0-9+_=~]*[A-Za-z])"
+        r"(?=[A-Za-z0-9+_=~]*[0-9])"
+        r"[A-Za-z0-9+_=~]{20,}",
+        re.IGNORECASE,
+    ),
 ]
 
 _REDACTED_PLACEHOLDER = "[REDACTED]"

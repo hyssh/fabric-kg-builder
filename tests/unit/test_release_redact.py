@@ -13,6 +13,7 @@ from fabric_kg_builder.release.redact import (
     redact_dict,
     redact_evidence_manifest,
     redact_ledger,
+    redact_secret_text,
     redact_value,
 )
 
@@ -94,6 +95,40 @@ class TestRedactValue:
         uri = "https://storage.blob.core.windows.net/cont/file.json"
         result = redact_value("url", uri)
         assert result == uri
+
+
+class TestRedactSecretText:
+    @pytest.mark.parametrize(
+        "label",
+        ["api-key", "admin-key", "token", "secret", "password"],
+    )
+    @pytest.mark.parametrize("separator", ["-", "/"])
+    def test_labeled_filename_and_path_tokens_are_redacted(
+        self,
+        label: str,
+        separator: str,
+    ) -> None:
+        token = "Ab12" * 8
+        value = f"docs/{label}{separator}{token}.html"
+
+        result = redact_secret_text(value)
+
+        assert token not in result
+        assert _REDACTED_PLACEHOLDER in result
+        assert result.endswith(".html")
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "api-key-rotation-policy.html",
+            "admin-key-ownership-guidelines.html",
+            "password-reset-guidelines-for-operators.html",
+            "secret-management-practices.html",
+            "token-version-2026-production.html",
+        ],
+    )
+    def test_ordinary_hyphenated_names_are_preserved(self, value: str) -> None:
+        assert redact_secret_text(value) == value
 
 
 # ---------------------------------------------------------------------------

@@ -1254,10 +1254,13 @@ The schema foundation and proposal merge gates cover:
 - strict intake and proposal versioning, unknown-key rejection, generated
   proposal JSON Schema, and canonical hash stability;
 - deterministic duplicate/inverse merging and minimum path-union N selection;
+- endpoint-policy conflicts preventing duplicate/inverse merge, and finite
+  bounded score aggregation remaining stable across hash seeds;
 - bounded cited heading/text/table/available-visual sampling, stable locators
-  and hashes, secret redaction, and visible typed sampling failures;
+  and hashes, excerpt/citation/locator secret redaction, schema-2-only adapter
+  sampling, root `.fkg/` ignore protection, and visible typed sampling failures;
 - interactive one-summary approval, free-form correction/regeneration, and
-  abort;
+  abort, with every path hop rendered by relationship, endpoints, and traversal;
 - YAML/JSON noninteractive generation that remains draft until a separate
   explicit `domain approve`;
 - stale proposal, contract, source-profile, prompt, and model binding rejection;

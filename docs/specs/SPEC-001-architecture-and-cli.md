@@ -870,13 +870,19 @@ The cited proposal is a strict JSON artifact at
 source evidence references, candidate and selected relationship counts, merge
 groups, the draft contract, and canonical intake, source-profile, prompt, model,
 contract, and proposal hashes. Unknown keys and scalar coercion fail.
+Generated `.fkg/` proposal and source-profile artifacts are repository-root
+runtime state and must remain ignored; committed golden fixtures live outside
+that directory.
 
 ### 11.3 N and K authority
 
 - N counts approved relationship **types**, not relationship instances.
 - Copilot proposes candidates. Local code merges only candidates whose declared
   semantic key and endpoint signatures prove duplicate or explicitly declared
-  inverse semantics. It then chooses the exact minimum union of bounded
+  inverse semantics. Merge candidates must also have identical endpoint policy;
+  a stricter/exact policy is never silently replaced by `allow_subtypes`. Local
+  scoring accepts only finite values from 0 through 100 and uses stable-ID
+  ordering plus precise summation. It then chooses the exact minimum union of bounded
   question paths plus mandatory governance relationships, using stable score
   and identifier tie-breaks.
 - The advisory N range is 8-20. A valid minimal set may be below eight and must

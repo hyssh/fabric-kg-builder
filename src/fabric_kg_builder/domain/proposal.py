@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -116,12 +117,19 @@ class ProposalEvidence(ProposalStrictModel):
 class ProposalScore(ProposalStrictModel):
     """Deterministic selector inputs supplied for each relationship candidate."""
 
-    coverage_score: float = Field(default=0.0, ge=0.0)
-    source_support_score: float = Field(default=0.0, ge=0.0)
-    reuse_score: float = Field(default=0.0, ge=0.0)
-    clarity_score: float = Field(default=0.0, ge=0.0)
-    risk_penalty: float = Field(default=0.0, ge=0.0)
-    redundancy_penalty: float = Field(default=0.0, ge=0.0)
+    coverage_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    source_support_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    reuse_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    clarity_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    risk_penalty: float = Field(default=0.0, ge=0.0, le=100.0)
+    redundancy_penalty: float = Field(default=0.0, ge=0.0, le=100.0)
+
+    @model_validator(mode="after")
+    def _validate_finite_scores(self) -> "ProposalScore":
+        for field_name, value in self:
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite.")
+        return self
 
 
 class EntityCandidate(ProposalStrictModel):
@@ -404,6 +412,20 @@ def load_domain_proposal(path: Path | str) -> DomainProposal:
 
 
 def _evidence_from_profile(profile: Any) -> list[ProposalEvidence]:
+    from fabric_kg_builder.release.redact import redact_secret_text
+
+    def redact_locator(value: Any) -> Any:
+        if isinstance(value, str):
+            return redact_secret_text(value)
+        if isinstance(value, dict):
+            return {
+                key: redact_locator(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact_locator(item) for item in value]
+        return value
+
     evidence: list[ProposalEvidence] = []
     samples = getattr(
         profile,
@@ -436,29 +458,29 @@ def _evidence_from_profile(profile: Any) -> list[ProposalEvidence]:
         ):
             if raw.get(key) is not None:
                 locator[key] = raw[key]
+        locator = redact_locator(locator)
+        excerpt = redact_secret_text(
+            str(raw.get("excerpt") or raw.get("text") or "[unavailable]")
+        )
+        citation = redact_secret_text(
+            str(
+                raw.get("citation")
+                or raw.get("citation_path")
+                or raw.get("source_path")
+                or raw.get("relative_path")
+                or "source"
+            )
+        )
         evidence.append(
             ProposalEvidence(
                 id=f"proposal-evidence:{digest}",
                 source_sample_id=sample_id or f"source-sample:{digest}",
                 source_file_id=str(raw.get("source_file_id") or "unknown"),
                 sample_kind=sample_kind,
-                citation=str(
-                    raw.get("citation")
-                    or raw.get("citation_path")
-                    or raw.get("source_path")
-                    or raw.get("relative_path")
-                    or "source"
-                ),
+                citation=citation,
                 locator=locator,
-                excerpt=str(raw.get("excerpt") or raw.get("text") or "[unavailable]"),
-                content_hash=str(
-                    raw.get("content_hash")
-                    or hashlib.sha256(
-                        str(raw.get("excerpt") or raw.get("text") or "").encode(
-                            "utf-8"
-                        )
-                    ).hexdigest()
-                ),
+                excerpt=excerpt,
+                content_hash=hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
             )
         )
     return evidence

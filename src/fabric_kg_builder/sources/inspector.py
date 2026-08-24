@@ -356,9 +356,10 @@ class _SampleCandidate:
 
 def _safe_citation_path(file_path: Path, source_root: Path) -> str:
     try:
-        return file_path.resolve().relative_to(source_root.resolve()).as_posix()
+        citation = file_path.resolve().relative_to(source_root.resolve()).as_posix()
     except ValueError:
-        return file_path.name
+        citation = file_path.name
+    return redact_secret_text(citation)
 
 
 def _excerpt_text(text: str, limit: int) -> str:
@@ -389,7 +390,11 @@ def _candidate_from_element(
         source_file_id=element.source_file_id,
         citation_path=citation_path,
         page_number=element.page_number,
-        section_path=element.section_path,
+        section_path=(
+            redact_secret_text(element.section_path)
+            if element.section_path
+            else None
+        ),
         row_index=element.row_index,
         col_index=element.col_index,
         sort_order=element.sort_order,
@@ -582,6 +587,8 @@ def _select_proposal_samples(candidates: list[_SampleCandidate]) -> list[SourceP
 def build_source_profile(
     source_path: Path,
     domain_description: str | None = None,
+    *,
+    include_proposal_samples: bool = False,
 ) -> SourceProfile:
     """Inspect *source_path* and build a SourceProfile.
 
@@ -591,6 +598,10 @@ def build_source_profile(
         A file or directory containing source documents.
     domain_description:
         Optional existing domain description to incorporate.
+    include_proposal_samples:
+        Run source adapters and persist bounded excerpts for schema-2.0 domain
+        proposal generation. The default remains metadata-only for schema-1.0
+        compatibility.
 
     Returns
     -------
@@ -645,14 +656,15 @@ def build_source_profile(
         extraction_risks=_assess_extraction_risks(files),
     )
 
-    source_root = source_path if source_path.is_dir() else source_path.parent
     sample_candidates: list[_SampleCandidate] = []
     sampling_warnings: list[SourceSamplingWarning] = []
-    for file_path in files:
-        candidates, warning = _sample_source_file(file_path, source_root)
-        sample_candidates.extend(candidates)
-        if warning is not None:
-            sampling_warnings.append(warning)
+    if include_proposal_samples:
+        source_root = source_path if source_path.is_dir() else source_path.parent
+        for file_path in files:
+            candidates, warning = _sample_source_file(file_path, source_root)
+            sample_candidates.extend(candidates)
+            if warning is not None:
+                sampling_warnings.append(warning)
 
     return SourceProfile(
         schema_version=PROFILE_SCHEMA_VERSION,

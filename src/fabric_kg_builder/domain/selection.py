@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from math import fsum
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
@@ -55,13 +56,15 @@ class SelectionResult:
 
 def _score(candidate: "RelationshipCandidate") -> float:
     scores = candidate.scores
-    return (
-        scores.coverage_score
-        + scores.source_support_score
-        + scores.reuse_score
-        + scores.clarity_score
-        - scores.risk_penalty
-        - scores.redundancy_penalty
+    return fsum(
+        (
+            scores.coverage_score,
+            scores.source_support_score,
+            scores.reuse_score,
+            scores.clarity_score,
+            -scores.risk_penalty,
+            -scores.redundancy_penalty,
+        )
     )
 
 
@@ -90,6 +93,8 @@ def _can_merge(
     right: "RelationshipCandidate",
 ) -> bool:
     if left.semantic_key != right.semantic_key:
+        return False
+    if left.endpoint_policy != right.endpoint_policy:
         return False
     if _same_signature(left, right):
         return True
@@ -295,10 +300,11 @@ def _selection_key(
     relationship_ids: frozenset[str],
     by_id: dict[str, "RelationshipCandidate"],
 ) -> tuple[int, float, tuple[str, ...]]:
+    stable_ids = tuple(sorted(relationship_ids))
     return (
         len(relationship_ids),
-        -sum(_score(by_id[item_id]) for item_id in relationship_ids),
-        tuple(sorted(relationship_ids)),
+        -fsum(_score(by_id[item_id]) for item_id in stable_ids),
+        stable_ids,
     )
 
 

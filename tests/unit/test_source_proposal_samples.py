@@ -14,6 +14,7 @@ from fabric_kg_builder.model.ids import (
     make_source_file_id,
 )
 from fabric_kg_builder.model.schemas import DocumentElementRow, SourceFileRow
+from fabric_kg_builder.domain.proposal import _evidence_from_profile
 from fabric_kg_builder.sources.adapter import AdapterError, FailureType
 from fabric_kg_builder.sources.inspector import (
     MAX_PROPOSAL_SAMPLES,
@@ -99,8 +100,8 @@ def test_sampling_is_deterministic_bounded_and_ordered(tmp_path: Path) -> None:
     for idx in range(6):
         _write_html(tmp_path / f"report_{idx}.html")
 
-    first = build_source_profile(tmp_path)
-    second = build_source_profile(tmp_path)
+    first = build_source_profile(tmp_path, include_proposal_samples=True)
+    second = build_source_profile(tmp_path, include_proposal_samples=True)
 
     first_signature = [
         (sample.sample_id, sample.sample_kind, sample.citation_path, sample.excerpt, sample.content_hash)
@@ -123,7 +124,7 @@ def test_sampling_includes_heading_text_table_with_stable_citations_and_hashes(t
     _write_html(tmp_path / "docs" / "overview.html")
     _write_csv(tmp_path / "data" / "assets.csv")
 
-    profile = build_source_profile(tmp_path)
+    profile = build_source_profile(tmp_path, include_proposal_samples=True)
 
     kinds = {sample.sample_kind for sample in profile.proposal_samples}
     citations = {sample.citation_path for sample in profile.proposal_samples}
@@ -154,13 +155,87 @@ def test_sampling_includes_visual_descriptions_when_available(tmp_path: Path, mo
         )
 
     monkeypatch.setattr("fabric_kg_builder.sources.inspector.router.extract", _extract)
-    profile = build_source_profile(tmp_path)
+    profile = build_source_profile(tmp_path, include_proposal_samples=True)
 
     assert len(profile.proposal_samples) == 1
     sample = profile.proposal_samples[0]
     assert sample.sample_kind == "visual"
     assert sample.element_type == "vision_description"
     assert sample.citation_path == "diagram.png"
+
+
+@pytest.mark.unit
+def test_schema_1_metadata_profile_does_not_run_proposal_adapters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_html(tmp_path / "overview.html")
+
+    def _unexpected_extract(_: Path) -> SimpleNamespace:
+        raise AssertionError("schema-1 metadata inspection invoked a source adapter")
+
+    monkeypatch.setattr(
+        "fabric_kg_builder.sources.inspector.router.extract",
+        _unexpected_extract,
+    )
+    profile = build_source_profile(tmp_path)
+
+    assert profile.observed.total_file_count == 1
+    assert profile.proposal_samples == []
+    assert profile.sampling_warnings == []
+
+
+@pytest.mark.unit
+def test_sample_locator_free_text_is_redacted_before_persistence_and_model_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "b2" * 16
+    source = _write_html(tmp_path / f"api-key-{secret}.html")
+
+    def _extract(path: Path) -> SimpleNamespace:
+        return _fake_extract_result(
+            Path(path),
+            element_type="paragraph",
+            content="Pump P-100 requires inspection.",
+            section_path=f"token/{secret} for the restricted section.",
+            sort_order=1,
+        )
+
+    monkeypatch.setattr(
+        "fabric_kg_builder.sources.inspector.router.extract",
+        _extract,
+    )
+    profile = build_source_profile(source, include_proposal_samples=True)
+    sample = profile.proposal_samples[0]
+
+    assert secret not in sample.citation_path
+    assert secret not in (sample.section_path or "")
+    assert "[REDACTED]" in sample.citation_path
+    assert "[REDACTED]" in (sample.section_path or "")
+
+    # Defense in depth: model-input conversion redacts manually supplied legacy
+    # sample locator values too.
+    unredacted = sample.model_copy(
+        update={"section_path": f"token={secret} for model input"}
+    )
+    evidence = _evidence_from_profile(
+        profile.model_copy(update={"proposal_samples": [unredacted]})
+    )
+    assert secret not in json.dumps(evidence[0].locator)
+    assert "[REDACTED]" in evidence[0].locator["section_path"]
+
+
+@pytest.mark.unit
+def test_generated_fkg_artifacts_are_root_ignored_without_fixture_exclusion() -> None:
+    ignore_lines = (
+        Path(__file__).resolve().parents[2] / ".gitignore"
+    ).read_text(encoding="utf-8").splitlines()
+
+    assert "/.fkg/" in ignore_lines
+    assert ".fkg/" not in ignore_lines
+    fixture_path = Path("tests/fixtures/domain_proposals")
+    assert ".fkg" not in fixture_path.parts
 
 
 @pytest.mark.unit
@@ -180,7 +255,7 @@ def test_sampling_redacts_detected_secrets_without_dropping_context(
         )
 
     monkeypatch.setattr("fabric_kg_builder.sources.inspector.router.extract", _extract)
-    profile = build_source_profile(tmp_path)
+    profile = build_source_profile(tmp_path, include_proposal_samples=True)
     excerpts = [sample.excerpt for sample in profile.proposal_samples if sample.sample_kind == "text"]
 
     assert any("[REDACTED]" in excerpt for excerpt in excerpts)
@@ -207,7 +282,7 @@ def test_sampling_redacts_labeled_key_with_trailing_prose(
         "fabric_kg_builder.sources.inspector.router.extract",
         _extract,
     )
-    profile = build_source_profile(source)
+    profile = build_source_profile(source, include_proposal_samples=True)
     excerpt = profile.proposal_samples[0].excerpt
 
     assert secret not in excerpt
@@ -223,7 +298,7 @@ def test_sampling_failures_become_visible_typed_warnings(tmp_path: Path, monkeyp
         raise AdapterError(FailureType.CORRUPT, "html parse failed", source_locator=str(broken))
 
     monkeypatch.setattr("fabric_kg_builder.sources.inspector.router.extract", _raise)
-    profile = build_source_profile(tmp_path)
+    profile = build_source_profile(tmp_path, include_proposal_samples=True)
 
     assert profile.observed.total_file_count == 1
     assert profile.proposal_samples == []
@@ -237,7 +312,7 @@ def test_sampling_failures_become_visible_typed_warnings(tmp_path: Path, monkeyp
 @pytest.mark.unit
 def test_profile_hash_is_canonical_and_legacy_profiles_still_load(tmp_path: Path) -> None:
     _write_csv(tmp_path / "assets.csv")
-    profile = build_source_profile(tmp_path)
+    profile = build_source_profile(tmp_path, include_proposal_samples=True)
 
     base_hash = compute_source_profile_hash(profile)
     profile.approved = True

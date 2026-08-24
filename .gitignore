@@ -17,6 +17,7 @@ dist/
 
 # Pipeline working outputs (enriched JSON, parquet, search, deploy dist)
 data/
+/.fkg/
 __pycache__/
 *.py[cod]
 *.egg-info/
