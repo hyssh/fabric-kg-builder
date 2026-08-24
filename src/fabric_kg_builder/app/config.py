@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -58,6 +59,8 @@ class AppConfig:
     fabric_api_endpoint: str
     allowed_caller_object_ids: tuple[str, ...]
     required_app_role: str
+    query_schema_mode: str
+    query_schema_path: str
 
     @property
     def live_mode(self) -> bool:
@@ -124,6 +127,22 @@ def load_app_config() -> AppConfig:
     ).rstrip("/")
     allowed_callers = _csv_values("FABRIC_KG_ALLOWED_CALLER_OBJECT_IDS")
     required_app_role = os.environ.get("FABRIC_KG_REQUIRED_APP_ROLE", "").strip()
+    query_schema_mode = os.environ.get(
+        "FABRIC_KG_QUERY_SCHEMA_MODE",
+        "schema1_compatibility",
+    ).strip()
+    query_schema_path = os.environ.get(
+        "FABRIC_KG_QUERY_SCHEMA_PATH",
+        "",
+    ).strip()
+    if query_schema_mode not in {
+        "schema1_compatibility",
+        "schema2_bounded",
+    }:
+        raise AppConfigError(
+            "FABRIC_KG_QUERY_SCHEMA_MODE must be schema1_compatibility or "
+            "schema2_bounded."
+        )
 
     if not is_local:
         required_values = {
@@ -145,6 +164,11 @@ def load_app_config() -> AppConfig:
                 f"{', '.join(missing)}. "
                 f"Set FABRIC_KG_ENVIRONMENT=local and FABRIC_KG_LOCAL_DEV=true "
                 f"to use explicit offline local-dev mode."
+            )
+        if query_schema_mode == "schema2_bounded" and not query_schema_path:
+            raise AppConfigError(
+                "FABRIC_KG_QUERY_SCHEMA_PATH is required when "
+                "FABRIC_KG_QUERY_SCHEMA_MODE=schema2_bounded."
             )
         if not preview_ack:
             raise AppConfigError(
@@ -179,6 +203,8 @@ def load_app_config() -> AppConfig:
         fabric_api_endpoint=fabric_api_endpoint,
         allowed_caller_object_ids=allowed_callers,
         required_app_role=required_app_role,
+        query_schema_mode=query_schema_mode,
+        query_schema_path=query_schema_path,
     )
 
 
@@ -259,4 +285,20 @@ def build_runtime_dependencies(config: AppConfig):
         scope=config.fabric_scope,
         api_endpoint=config.fabric_api_endpoint,
     )
-    return kb_tool, visual_tool, FabricDataAgentAdapter(_client=graph_client)
+    query_schema = None
+    if config.query_schema_mode == "schema2_bounded":
+        from fabric_kg_builder.semantic.schemas import PersistedQuerySchema
+
+        try:
+            query_schema = PersistedQuerySchema.model_validate_json(
+                Path(config.query_schema_path).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            raise AppConfigError(
+                "Could not load sealed schema-2 persisted query schema."
+            ) from exc
+    return kb_tool, visual_tool, FabricDataAgentAdapter(
+        _client=graph_client,
+        schema_mode=config.query_schema_mode,
+        query_schema=query_schema,
+    )

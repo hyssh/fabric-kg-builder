@@ -248,6 +248,15 @@ No secrets are accepted on the command line.
               help="Approved domain.yaml context for the deployed prompt agent.")
 @click.option("--entity-types-file", default=None, type=click.Path(exists=True),
               help="multitype-plan.json used to ground valid entity types.")
+@click.option(
+    "--agent-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help=(
+        "Compiled build/agents directory containing sealed schema-2 query "
+        "authority."
+    ),
+)
 @click.pass_context
 def deploy_agent_cmd(
     ctx: click.Context,
@@ -257,6 +266,7 @@ def deploy_agent_cmd(
     registry_path: str | None,
     domain_contract: str | None,
     entity_types_file: str | None,
+    agent_dir: str | None,
 ) -> None:
     """Deploy the Foundry prompt-agent from agent-metadata.yaml."""
     md_path = Path(metadata_path) if metadata_path else _DEFAULT_METADATA_PATH
@@ -284,8 +294,12 @@ def deploy_agent_cmd(
             if isinstance(item, dict) and item.get("type_name")
         ]
     domain_context: str | None = None
+    query_authority: dict[str, object] | None = None
     if domain_contract:
-        from fabric_kg_builder.domain import require_ready_domain_contract
+        from fabric_kg_builder.domain import (
+            DomainContractV2,
+            require_ready_domain_contract,
+        )
 
         contract, _review, _status = require_ready_domain_contract(
             domain_contract
@@ -295,6 +309,87 @@ def deploy_agent_cmd(
             f"Business context: {contract.business.organization_context}. "
             f"Problem: {contract.problem.statement}"
         )
+        if isinstance(contract, DomainContractV2):
+            if not agent_dir:
+                raise click.ClickException(
+                    "Schema-2 Foundry deployment requires --agent-dir so the "
+                    "approved K and plans are bound to the agent definition."
+                )
+            context_path = Path(agent_dir) / "semantic-context.json"
+            try:
+                query_context = json.loads(
+                    context_path.read_text(encoding="utf-8")
+                )
+                from fabric_kg_builder.domain.service import (  # noqa: PLC0415
+                    compute_contract_hash,
+                )
+                from fabric_kg_builder.semantic.schemas import (  # noqa: PLC0415
+                    PersistedQuerySchema,
+                    compute_persisted_query_schema_hash,
+                )
+
+                query_schema = PersistedQuerySchema.model_validate_json(
+                    (Path(agent_dir) / "persisted-query-schema.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if not isinstance(query_context, dict):
+                    raise ValueError(
+                        "semantic-context.json must contain an object."
+                    )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise click.ClickException(
+                    f"Could not load schema-2 agent query authority: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise click.ClickException(
+                    f"Invalid schema-2 persisted query authority: {exc}"
+                ) from exc
+            if (
+                query_schema.schema_mode != "schema2_bounded"
+                or query_schema.authority is None
+                or query_schema.schema_hash
+                != compute_persisted_query_schema_hash(query_schema)
+            ):
+                raise click.ClickException(
+                    "Schema-2 Foundry deployment requires a sealed bounded "
+                    "persisted query schema."
+                )
+            authority = query_schema.authority
+            if authority.domain_contract_hash != compute_contract_hash(contract):
+                raise click.ClickException(
+                    "Foundry query authority does not match the approved domain "
+                    "contract."
+                )
+            expected_context = {
+                "domain_contract_hash": authority.domain_contract_hash,
+                "reasoning_policy_hash": authority.reasoning_policy_hash,
+                "question_plans_hash": authority.question_plans_hash,
+                "query_authority_hash": authority.authority_hash,
+                "persisted_query_schema_hash": query_schema.schema_hash,
+                "approved_max_hops": authority.approved_max_hops,
+            }
+            mismatched = sorted(
+                field_name
+                for field_name, expected in expected_context.items()
+                if query_context.get(field_name) != expected
+            )
+            if mismatched:
+                raise click.ClickException(
+                    "Foundry semantic-context query authority is stale or "
+                    f"mismatched: {mismatched}."
+                )
+            query_authority = {
+                "domain_contract_hash": authority.domain_contract_hash,
+                "query_authority_hash": authority.authority_hash,
+                "persisted_query_schema_hash": query_schema.schema_hash,
+                "approved_max_hops": authority.approved_max_hops,
+                "approved_plan_ids": [
+                    path.question_id
+                    for path in authority.question_paths
+                    if path.covered
+                ],
+            }
 
     try:
         # _client=None → deployer builds FoundryAgentClient from metadata + DefaultAzureCredential
@@ -305,6 +400,7 @@ def deploy_agent_cmd(
             metadata_path=md_path,
             entity_types=entity_types,
             domain_context=domain_context,
+            query_authority=query_authority,
             dry_run=dry_run,
             require_grounding_tools=True,
         )
@@ -1067,7 +1163,10 @@ def _run_offline_evaluation(cases: list[EvalCase]) -> list[dict]:
     from fabric_kg_builder.agent.tools.fabric_data import FabricDataAgentAdapter
 
     kb = KnowledgeBaseTool(index_name="offline-eval", _client=None)
-    graph = FabricDataAgentAdapter(_client=None)
+    graph = FabricDataAgentAdapter(
+        _client=None,
+        schema_mode="schema1_compatibility",
+    )
 
     responses: list[dict] = []
     for case in cases:

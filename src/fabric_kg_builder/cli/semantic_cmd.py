@@ -622,7 +622,7 @@ Rules for users, Copilot, and AI agents:
 
 PowerShell example:
 \b
-  fabric-kg compile-agent --semantic-dir build\\semantic --out build\\agents --domain-context "Building operations and maintenance" --competency-suite evaluation\\competency.yaml
+  fabric-kg compile-agent --semantic-dir build\\semantic --out build\\agents --domain-contract domain.yaml --domain-context "Building operations and maintenance" --competency-suite evaluation\\competency.yaml
 """
 
 
@@ -669,6 +669,23 @@ PowerShell example:
         "directions are validated against the approved contract."
     ),
 )
+@click.option(
+    "--domain-contract",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help=(
+        "Approved schema-2 domain.yaml that seals K and competency paths."
+    ),
+)
+@click.option(
+    "--schema1-compatibility",
+    is_flag=True,
+    default=False,
+    help=(
+        "Explicitly compile legacy schema-1 query artifacts without bounded "
+        "DomainContractV2 authority."
+    ),
+)
 def compile_agent_cmd(
     contract_path: str,
     mappings_path: str,
@@ -679,9 +696,32 @@ def compile_agent_cmd(
     questions: tuple[str, ...],
     domain_context: str,
     competency_suite: str | None,
+    domain_contract: str | None,
+    schema1_compatibility: bool,
 ) -> None:
     """Compile instructions, source semantics, and validated agent examples."""
     try:
+        if bool(domain_contract) == schema1_compatibility:
+            raise ValueError(
+                "Choose exactly one query authority mode: provide "
+                "--domain-contract for schema 2 or pass "
+                "--schema1-compatibility for legacy behavior."
+            )
+        approved_domain = None
+        if domain_contract:
+            from fabric_kg_builder.domain import (  # noqa: PLC0415
+                DomainContractV2,
+                require_ready_domain_contract,
+            )
+
+            approved_domain, _review, _status = require_ready_domain_contract(
+                domain_contract
+            )
+            if not isinstance(approved_domain, DomainContractV2):
+                raise ValueError(
+                    "--domain-contract must reference an approved schema-2 "
+                    "DomainContractV2; use --schema1-compatibility for schema 1."
+                )
         if semantic_dir:
             semantic_root = Path(semantic_dir)
             loaded = load_semantic_model_artifacts(semantic_root)
@@ -718,15 +758,56 @@ def compile_agent_cmd(
             semantic_crosswalk_hash = semantic_context[
                 "semantic_crosswalk_hash"
             ]
+        out = Path(output_path)
+        out.mkdir(parents=True, exist_ok=True)
+        instructions_path = out / "instructions.md"
+        context_path = out / "semantic-context.json"
+        query_schema = build_persisted_query_schema(
+            semantic_manifest,
+            semantic_crosswalk,
+            materialization_plan=(
+                loaded.materialization_plan if semantic_dir else (
+                    compiled.materialization_plan
+                )
+            ),
+            domain_contract=approved_domain,
+        )
+        if query_schema.authority is not None:
+            semantic_context = {
+                **semantic_context,
+                "schema_mode": "schema2_bounded",
+                "domain_contract_hash": (
+                    query_schema.authority.domain_contract_hash
+                ),
+                "reasoning_policy_hash": (
+                    query_schema.authority.reasoning_policy_hash
+                ),
+                "question_plans_hash": (
+                    query_schema.authority.question_plans_hash
+                ),
+                "query_authority_hash": (
+                    query_schema.authority.authority_hash
+                ),
+                "persisted_query_schema_hash": query_schema.schema_hash,
+                "approved_max_hops": (
+                    query_schema.authority.approved_max_hops
+                ),
+                "approved_query_paths": [
+                    path.model_dump(mode="json")
+                    for path in query_schema.authority.question_paths
+                ],
+            }
+        else:
+            semantic_context = {
+                **semantic_context,
+                "schema_mode": "schema1_compatibility",
+                "persisted_query_schema_hash": query_schema.schema_hash,
+            }
         instructions = build_contract_agent_instructions(
             semantic_context,
             competency_questions=questions,
             domain_context=domain_context,
         )
-        out = Path(output_path)
-        out.mkdir(parents=True, exist_ok=True)
-        instructions_path = out / "instructions.md"
-        context_path = out / "semantic-context.json"
         instructions_path.write_text(instructions, encoding="utf-8")
         context_path.write_text(
             json.dumps(
@@ -735,10 +816,6 @@ def compile_agent_cmd(
                 sort_keys=True,
             ),
             encoding="utf-8",
-        )
-        query_schema = build_persisted_query_schema(
-            semantic_manifest,
-            semantic_crosswalk,
         )
         query_schema_path = out / "persisted-query-schema.json"
         query_schema_path.write_text(
@@ -777,7 +854,33 @@ def compile_agent_cmd(
             json.dumps(
                 {
                     "schema_version": "1.0",
+                    "schema_mode": query_schema.schema_mode,
                     "contract_hash": contract_hash,
+                    "domain_contract_hash": (
+                        query_schema.authority.domain_contract_hash
+                        if query_schema.authority is not None
+                        else None
+                    ),
+                    "reasoning_policy_hash": (
+                        query_schema.authority.reasoning_policy_hash
+                        if query_schema.authority is not None
+                        else None
+                    ),
+                    "question_plans_hash": (
+                        query_schema.authority.question_plans_hash
+                        if query_schema.authority is not None
+                        else None
+                    ),
+                    "query_authority_hash": (
+                        query_schema.authority.authority_hash
+                        if query_schema.authority is not None
+                        else None
+                    ),
+                    "approved_max_hops": (
+                        query_schema.authority.approved_max_hops
+                        if query_schema.authority is not None
+                        else None
+                    ),
                     "semantic_model_manifest_hash": (
                         semantic_model_manifest_hash
                     ),

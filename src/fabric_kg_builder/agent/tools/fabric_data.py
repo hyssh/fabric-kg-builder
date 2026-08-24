@@ -30,6 +30,12 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from fabric_kg_builder.semantic.query_rendering import (
+    compile_approved_query_plan,
+    render_bounded_gql,
+)
+from fabric_kg_builder.semantic.schemas import PersistedQuerySchema
+
 
 class FabricDataError(Exception):
     """Raised when the Fabric Data Agent API returns an unrecoverable error."""
@@ -246,9 +252,25 @@ class FabricDataAgentAdapter:
         *,
         _client: GraphClientProtocol | None = None,
         max_rows: int = 20,
+        schema_mode: str,
+        query_schema: PersistedQuerySchema | None = None,
     ) -> None:
+        if schema_mode not in {"schema1_compatibility", "schema2_bounded"}:
+            raise ValueError(
+                "schema_mode must be schema1_compatibility or schema2_bounded."
+            )
+        if schema_mode == "schema2_bounded" and (
+            query_schema is None
+            or query_schema.schema_mode != "schema2_bounded"
+            or query_schema.authority is None
+        ):
+            raise ValueError(
+                "Schema-2 Fabric adapter requires sealed bounded query schema."
+            )
         self._client = _client
-        self.max_rows = max_rows
+        self.max_rows = max(1, min(max_rows, 100))
+        self.schema_mode = schema_mode
+        self.query_schema = query_schema
 
     @property
     def is_available(self) -> bool:
@@ -270,6 +292,8 @@ class FabricDataAgentAdapter:
         Returns FabricDataResult with status "ok", "no_data", "error",
         or "unsupported".
         """
+        if self.schema_mode == "schema2_bounded":
+            return self._bounded_only_result()
         if self._client is None:
             return FabricDataResult(
                 status="unsupported",
@@ -328,6 +352,8 @@ class FabricDataAgentAdapter:
                 child_type="SubSection",
             )
         """
+        if self.schema_mode == "schema2_bounded":
+            return self._bounded_only_result()
         if self._client is None:
             return FabricDataResult(
                 status="unsupported",
@@ -358,6 +384,8 @@ class FabricDataAgentAdapter:
 
     def query_keyword(self, keyword: str) -> FabricDataResult:
         """Search all node types without assuming a domain schema."""
+        if self.schema_mode == "schema2_bounded":
+            return self._bounded_only_result()
         if self._client is None:
             return FabricDataResult(
                 status="unsupported",
@@ -373,7 +401,9 @@ class FabricDataAgentAdapter:
         return self._execute(gql)
 
     def query_raw_gql(self, gql: str) -> FabricDataResult:
-        """Execute an arbitrary GQL query.  For advanced mixed-route scenarios."""
+        """Execute raw GQL only in explicit schema-1 compatibility mode."""
+        if self.schema_mode != "schema1_compatibility":
+            return self._bounded_only_result()
         if self._client is None:
             return FabricDataResult(
                 status="unsupported",
@@ -381,30 +411,110 @@ class FabricDataAgentAdapter:
             )
         return self._execute(gql)
 
+    def execute_approved_plan(
+        self,
+        question_id: str,
+        *,
+        intent: str,
+    ) -> FabricDataResult:
+        """Execute one sealed schema-2 plan after deterministic local rendering."""
+        if self.schema_mode != "schema2_bounded" or self.query_schema is None:
+            return FabricDataResult(
+                status="unsupported",
+                error_message=(
+                    "Approved plan execution requires schema2_bounded mode."
+                ),
+            )
+        if self._client is None:
+            return FabricDataResult(
+                status="unsupported",
+                error_message="Fabric graph client not configured (offline mode).",
+            )
+        try:
+            plan = compile_approved_query_plan(
+                schema=self.query_schema,
+                question_id=question_id,
+                intent=intent,
+                result_limit=self.max_rows,
+            )
+            gql = render_bounded_gql(plan, self.query_schema)
+        except ValueError as exc:
+            return FabricDataResult(
+                status="unsupported",
+                error_message=str(exc),
+            )
+        return self._execute(gql, expose_query=False)
+
     def is_unsupported_query_type(self, query_lower: str) -> bool:
         """Return True if this query type is definitively unsupported by any graph."""
         return any(t in query_lower for t in _UNSUPPORTED_TYPES)
 
-    def _execute(self, gql: str) -> FabricDataResult:
+    def _execute(
+        self,
+        gql: str,
+        *,
+        expose_query: bool = True,
+    ) -> FabricDataResult:
+        diagnostic_query = gql if expose_query else ""
         try:
             response = self._client.execute_gql(gql)
         except FabricDataError as exc:
-            return FabricDataResult(status="error", gql=gql, error_message=str(exc))
+            return FabricDataResult(
+                status="error",
+                gql=diagnostic_query,
+                error_message=str(exc),
+            )
         except Exception as exc:
-            return FabricDataResult(status="error", gql=gql, error_message=f"Unexpected error: {exc}")
+            return FabricDataResult(
+                status="error",
+                gql=diagnostic_query,
+                error_message=f"Unexpected error: {type(exc).__name__}",
+            )
 
         rows = response.get("rows") or response.get("data") or []
         if not isinstance(rows, list):
             rows = []
         rows = [self._normalize_row(row) for row in rows if isinstance(row, dict)]
         if not rows:
-            return FabricDataResult(status="no_data", gql=gql, rows=[])
-        return FabricDataResult(status="ok", gql=gql, rows=rows)
+            return FabricDataResult(
+                status="no_data",
+                gql=diagnostic_query,
+                rows=[],
+            )
+        return FabricDataResult(
+            status="ok",
+            gql=diagnostic_query,
+            rows=rows,
+        )
 
     def check_ready(self) -> bool:
         """Verify that the configured GraphModel can execute a bounded query."""
         if self._client is None:
             return False
+        if self.schema_mode == "schema2_bounded":
+            assert self.query_schema is not None
+            authority = self.query_schema.authority
+            assert authority is not None
+            first_plan = next(
+                (
+                    path.question_id
+                    for path in authority.question_paths
+                    if path.covered
+                ),
+                None,
+            )
+            if first_plan is None:
+                return False
+            result = self.execute_approved_plan(
+                first_plan,
+                intent="Graph readiness",
+            )
+            if result.status == "error":
+                raise FabricDataError(
+                    result.error_message
+                    or "Fabric GraphModel readiness check failed."
+                )
+            return result.status in {"ok", "no_data"}
         result = self.query_raw_gql(
             "MATCH (n) RETURN TO_JSON_STRING(n) AS entity_json LIMIT 1"
         )
@@ -413,6 +523,16 @@ class FabricDataAgentAdapter:
                 result.error_message or "Fabric GraphModel readiness check failed."
             )
         return result.status in {"ok", "no_data"}
+
+    @staticmethod
+    def _bounded_only_result() -> FabricDataResult:
+        return FabricDataResult(
+            status="unsupported",
+            error_message=(
+                "Schema-2 Graph access accepts approved bounded plan IDs only; "
+                "raw or model-authored GQL is disabled."
+            ),
+        )
 
     @staticmethod
     def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:

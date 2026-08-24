@@ -468,7 +468,7 @@ class GQLQueryBuilder:
     def node_count(cls, label: str) -> str:
         """MATCH (n:`{label}`) RETURN count(n) AS `count`"""
         l = cls._safe(label)
-        return f"MATCH (n:`{l}`) RETURN count(n) AS `count`"
+        return f"MATCH (n:`{l}`) RETURN count(n) AS `count` LIMIT 1"
 
     @classmethod
     def edge_count(cls, src_label: str, edge_alias: str, dst_label: str) -> str:
@@ -478,7 +478,7 @@ class GQLQueryBuilder:
         d = cls._safe(dst_label)
         return (
             f"MATCH (s:`{s}`)-[r:`{e}`]->(d:`{d}`) "
-            "RETURN count(r) AS `count`"
+            "RETURN count(r) AS `count` LIMIT 1"
         )
 
     @classmethod
@@ -488,24 +488,39 @@ class GQLQueryBuilder:
         edge_alias: str,
         dst_label: str,
         limit: int = 1,
+        src_id_property: str = "entity_id",
+        evidence_property: str = "evidence_id",
+        dst_id_property: str = "entity_id",
     ) -> str:
         """Return a bounded typed source-edge-target path query."""
         s = cls._safe(src_label)
         e = cls._safe(edge_alias)
         d = cls._safe(dst_label)
+        src_id = cls._safe_property(src_id_property)
+        evidence = cls._safe_property(evidence_property)
+        dst_id = cls._safe_property(dst_id_property)
+        bounded_limit = max(1, min(int(limit), 100))
         return (
             f"MATCH (s:`{s}`)-[r:`{e}`]->(d:`{d}`) "
-            f"RETURN s, r, d LIMIT {int(limit)}"
+            f"RETURN s.{src_id} AS source_id, "
+            f"r.{evidence} AS evidence_id, "
+            f"d.{dst_id} AS target_id LIMIT {bounded_limit}"
         )
 
     @classmethod
     def path_traversal(
         cls, start_label: str, edge_alias: str, limit: int = 5
     ) -> str:
-        """Sample traversal: MATCH (a:`{start}`)-[r:`{edge}`]->(b) RETURN a, r, b LIMIT {n}"""
+        """Return a legacy one-hop scalar traversal sample."""
         s = cls._safe(start_label)
         e = cls._safe(edge_alias)
-        return f"MATCH (a:`{s}`)-[r:`{e}`]->(b) RETURN a, r, b LIMIT {int(limit)}"
+        bounded_limit = max(1, min(int(limit), 100))
+        return (
+            f"MATCH (a:`{s}`)-[r:`{e}`]->(b) "
+            "RETURN a.entity_id AS source_id, "
+            "r.evidence_id AS evidence_id, "
+            f"b.entity_id AS target_id LIMIT {bounded_limit}"
+        )
 
     @classmethod
     def lineage_property_sample(

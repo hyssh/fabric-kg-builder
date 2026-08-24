@@ -615,10 +615,15 @@ def validate_graph_few_shot_examples(
         compute_physical_query_hash,
         validate_physical_query,
     )
+    from fabric_kg_builder.semantic.query_rendering import (  # noqa: PLC0415
+        render_bounded_gql,
+        validate_bounded_query_plan,
+    )
     from fabric_kg_builder.semantic.schemas import (  # noqa: PLC0415
         CompetencyExampleReceipt,
         PersistedQuerySchema,
         SemanticQueryPlan,
+        compute_query_plan_hash,
     )
 
     if not isinstance(contract, dict) or limit < 1:
@@ -768,6 +773,61 @@ def validate_graph_few_shot_examples(
                 "direct_result_category": "invalid_semantic_plan",
             }))
             continue
+        if (
+            resolved_schema is not None
+            and resolved_schema.schema_mode == "schema2_bounded"
+        ):
+            if plan is None:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="static-validation",
+                    reason="Schema-2 example has no structured semantic plan.",
+                    remediation=(
+                        "Recompile the competency contract from the approved "
+                        "DomainContractV2 question plan."
+                    ),
+                    required=base_receipt.required,
+                    result_category="invalid_semantic_plan",
+                )
+            bounded_findings = validate_bounded_query_plan(
+                plan,
+                resolved_schema,
+            )
+            if bounded_findings:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="static-validation",
+                    reason="; ".join(
+                        f"{finding.code}: {finding.message}"
+                        for finding in bounded_findings
+                    ),
+                    remediation=(
+                        "Recompile the competency contract from the current "
+                        "bounded query authority."
+                    ),
+                    required=base_receipt.required,
+                    result_category="invalid_semantic_plan",
+                )
+            expected_query = render_bounded_gql(plan, resolved_schema)
+            if normalized_query != expected_query:
+                raise DataAgentExampleValidationFailed(
+                    competency_id=case_id,
+                    stage="static-validation",
+                    reason=(
+                        "Schema-2 example query differs from deterministic "
+                        "structured-plan rendering."
+                    ),
+                    remediation=(
+                        "Remove authored GQL and rebuild the agent examples."
+                    ),
+                    required=base_receipt.required,
+                    result_category="invalid_physical_query",
+                )
+            base_receipt = base_receipt.model_copy(update={
+                "semantic_plan_hash": compute_query_plan_hash(plan),
+                "query_authority_hash": plan.query_authority_hash,
+                "actual_hop_count": len(plan.path_steps),
+            })
         findings = validate_physical_query(
             normalized_query,
             plan,
@@ -1520,6 +1580,10 @@ class DataAgentStageSnapshot:
             "fabricKgGraphModelId",
             "fabricKgPropertyChildCoverage",
             "fabricKgExpectedPropertyCount",
+            "fabricKgDomainContractHash",
+            "fabricKgQueryAuthorityHash",
+            "fabricKgPersistedQuerySchemaHash",
+            "fabricKgApprovedMaxHops",
         )
         references = [
             {

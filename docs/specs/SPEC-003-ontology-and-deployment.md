@@ -1691,6 +1691,47 @@ managed typed-table sets. Read-back enumerates only the deployment-owned `kg_*`
 namespace. Any stale `kg_*` table omitted by a shrunken plan blocks success;
 unrelated non-`kg_*` Lakehouse tables are neither considered nor modified.
 
+### 12.12 Schema-2 bounded query publication
+
+Schema-2 query publication derives one `BoundedQueryAuthority` from the approved
+`DomainContractV2`, sealed semantic manifest, canonical crosswalk, and
+materialization plan. The authority contains the exact domain contract hash,
+reasoning-policy hash, question-plan hash, derived `K`, and every approved
+directed question path resolved to semantic IDs, Graph labels, endpoint labels,
+endpoint ID/display properties, and relationship evidence properties.
+
+The persisted query schema hash seals that authority. Competency contracts,
+agent semantic context, agent manifests, Data Agent sidecars/publication
+receipts, Foundry agent metadata, deployment receipts, and runtime configuration
+must carry matching authority/schema hashes and K. Any missing or stale binding
+fails before Graph execution or agent publication.
+
+For schema 2, structured plans are the only query input. Every hop has depth one
+and explicitly records forward or reverse traversal. Runtime validates the plan
+against the sealed authority, renders GQL deterministically, validates the
+render, and only then invokes the Graph transport. Generated queries:
+
+- contain no variable-length traversal;
+- contain no hop outside the approved question path;
+- preserve canonical relationship direction, including explicit reverse
+  traversal;
+- return approved scalar endpoint IDs/display properties and evidence IDs only;
+- never return whole nodes or edges; and
+- use `LIMIT <= 100` and no more than the approved K (universally no more than
+  four hops).
+
+Raw/model-authored GQL is disabled on schema-2 runtime and agent-tool surfaces.
+The low-level Graph client is transport-only. Existing raw-query behavior remains
+available only when the caller explicitly selects `schema1_compatibility`.
+
+Data Agent and Foundry instructions/descriptors expose the approved K, plan IDs,
+authority hash, and abstention policy. An unsupported or over-K request must
+abstain or be decomposed into separately approved bounded subquestions; it cannot
+increase K. Schema-2 query telemetry stores actual hop count, route, status,
+timing, row count, and plan/authority/schema hashes with sanitized error
+categories. It does not store GQL, filters, source content, credentials, remote
+error bodies, or raw sensitive parameters.
+
 ## 13. Revision History
 
 | Date | Author | Summary |
@@ -1703,6 +1744,7 @@ unrelated non-`kg_*` Lakehouse tables are neither considered nor modified.
 | 2026-06-24T21:46:59.576-07:00 | McManus | §12 bridge — §12.10 added: Table document-element nodes (element_type="table", content_html, blob_url) participate in the evidenced_by / shown_in bridge, enabling graph↔table integration and AI Search indexing of tables as independent documents (coordinator-tables-via-docintel.md, verified 2026-06-24). |
 | 2026-08-23 | Copilot | Added §12.11: schema-2.0 Ontology/Graph publication is semantic-only and requires compile/deploy/persisted hash and count equivalence. |
 | 2026-08-24 | Copilot | Expanded §12.11 with the closed support-source taxonomy, published-identity joins, exact typed-table receipts, mutation ordering, partial-write evidence, and secret-free receipts. |
+| 2026-08-24 | Copilot | Added §12.12 schema-2 bounded query authority, deterministic structured-plan rendering, agent publication binding, sanitized actual-hop telemetry, and explicit schema-1 compatibility. |
 
 ---
 

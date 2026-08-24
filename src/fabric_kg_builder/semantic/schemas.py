@@ -65,6 +65,7 @@ MATERIALIZATION_RECEIPT_VERSION = "1.0"
 # ---------------------------------------------------------------------------
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DOMAIN_HASH_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
 _SEMANTIC_TYPE_ID_RE = re.compile(
     r"^(?:entity-type|relationship-type):[a-z0-9][a-z0-9._-]*$"
 )
@@ -75,6 +76,25 @@ def _check_hash(value: str) -> str:
     if value and not _HASH_RE.fullmatch(value):
         raise ValueError(
             "Hash must be 'sha256:<64 lower-hex chars>' or an empty string."
+        )
+    return value
+
+
+def _check_domain_hash(value: str) -> str:
+    """Accept the domain subsystem's legacy bare or prefixed SHA-256."""
+    if value and not _DOMAIN_HASH_RE.fullmatch(value):
+        raise ValueError(
+            "Domain hash must be 64 lower-hex chars, optionally prefixed "
+            "with 'sha256:'."
+        )
+    return value
+
+
+def _check_nonempty_domain_hash(value: str) -> str:
+    if not _DOMAIN_HASH_RE.fullmatch(value):
+        raise ValueError(
+            "Domain hash must be 64 lower-hex chars, optionally prefixed "
+            "with 'sha256:'."
         )
     return value
 
@@ -1659,6 +1679,9 @@ class CompetencyExampleReceipt(_StrictPersistedModel):
     published: bool = False
     original_query_hash: str = ""
     normalized_query_hash: str = ""
+    semantic_plan_hash: str = ""
+    query_authority_hash: str = ""
+    actual_hop_count: int = Field(default=0, ge=0, le=4)
     direct_graph_row_count: int = Field(default=0, ge=0)
     data_agent_row_count: int = Field(default=0, ge=0)
     evidence_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -1685,6 +1708,10 @@ class AgentPublicationReceipt(_StrictPersistedModel):
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
     semantic_model_manifest_hash: str
+    domain_contract_hash: str = ""
+    query_authority_hash: str = ""
+    persisted_query_schema_hash: str = ""
+    approved_max_hops: int | None = Field(default=None, ge=1, le=4)
     persisted_projection_receipt_hash: str
     ontology_persisted_projection_hash: str
     graph_persisted_projection_hash: str
@@ -1743,9 +1770,14 @@ class AgentPublicationReceipt(_StrictPersistedModel):
         mode="after",
     )(_check_nonempty_hash)
     # New optional hash fields use _check_hash (allows empty) for backward compat.
+    _check_domain_contract_hash = field_validator(
+        "domain_contract_hash", mode="after"
+    )(_check_domain_hash)
     _check_optional_hash_fields = field_validator(
         "compiled_property_selection_hash",
         "published_property_selection_hash",
+        "query_authority_hash",
+        "persisted_query_schema_hash",
         mode="after",
     )(_check_hash)
     _check_validated_at = field_validator(
@@ -1814,6 +1846,17 @@ class AgentPublicationReceipt(_StrictPersistedModel):
             raise ValueError(
                 "Published agent-visible property-child coverage must equal 1.0."
             )
+        query_fields = (
+            bool(self.domain_contract_hash),
+            bool(self.query_authority_hash),
+            bool(self.persisted_query_schema_hash),
+            self.approved_max_hops is not None,
+        )
+        if any(query_fields) and not all(query_fields):
+            raise ValueError(
+                "Schema-2 agent publication query authority fields must be "
+                "provided together."
+            )
         return self
 
 
@@ -1833,6 +1876,8 @@ QueryExecutionStatus = Literal[
     "partial_result",
     "success",
 ]
+
+QuerySchemaMode = Literal["schema1_compatibility", "schema2_bounded"]
 
 
 class ComplexityBudget(_StrictPersistedModel):
@@ -1862,6 +1907,12 @@ class SemanticPathStep(_StrictPersistedModel):
     direction: Literal["source_to_target", "target_to_source"] = "source_to_target"
     optional: bool = False
     max_depth: int = Field(default=1, ge=1)
+    relationship_graph_label: str = ""
+    from_graph_label: str = ""
+    to_graph_label: str = ""
+    from_endpoint_property: str = ""
+    to_endpoint_property: str = ""
+    evidence_property: str = ""
 
     @field_validator("from_type_id", "to_type_id")
     @classmethod
@@ -1874,6 +1925,106 @@ class SemanticPathStep(_StrictPersistedModel):
     def _valid_rel_id(cls, value: str) -> str:
         _check_semantic_type_id(value)
         return value
+
+
+class SemanticQueryOutput(_StrictPersistedModel):
+    """One approved scalar field returned by a bounded Graph query."""
+
+    alias: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
+    owner_kind: Literal["node", "relationship"]
+    owner_index: int = Field(ge=0)
+    semantic_id: str = Field(min_length=1)
+    property_name: str = Field(min_length=1)
+    purpose: Literal["id", "display", "evidence"]
+
+    @field_validator("semantic_id")
+    @classmethod
+    def _valid_semantic_id(cls, value: str) -> str:
+        _check_semantic_type_id(value)
+        return value
+
+
+class ApprovedQueryPath(_StrictPersistedModel):
+    """One sealed competency path resolved to persisted Graph identifiers."""
+
+    question_id: str = Field(min_length=1)
+    covered: bool
+    unsupported_reason: str | None = None
+    steps: list[SemanticPathStep] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_path(self) -> "ApprovedQueryPath":
+        if self.covered and not self.steps:
+            raise ValueError("Covered approved query paths require at least one step.")
+        if not self.covered and self.steps:
+            raise ValueError("Unsupported approved query paths cannot contain steps.")
+        if not self.covered and not self.unsupported_reason:
+            raise ValueError(
+                "Unsupported approved query paths require unsupported_reason."
+            )
+        for left, right in zip(self.steps, self.steps[1:]):
+            if left.to_type_id != right.from_type_id:
+                raise ValueError(
+                    "Approved query path steps must form one continuous path."
+                )
+        return self
+
+
+class BoundedQueryAuthority(_StrictPersistedModel):
+    """Sealed schema-2 K and approved question paths."""
+
+    schema_mode: Literal["schema2_bounded"] = "schema2_bounded"
+    domain_contract_hash: str
+    reasoning_policy_hash: str
+    question_plans_hash: str
+    semantic_manifest_hash: str
+    semantic_crosswalk_hash: str
+    approved_max_hops: int = Field(ge=1, le=4)
+    question_paths: list[ApprovedQueryPath] = Field(min_length=1)
+    authority_hash: str = ""
+
+    _check_domain_contract_hash = field_validator(
+        "domain_contract_hash", mode="after"
+    )(_check_nonempty_domain_hash)
+    _check_reasoning_policy_hash = field_validator(
+        "reasoning_policy_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_question_plans_hash = field_validator(
+        "question_plans_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_semantic_manifest_hash = field_validator(
+        "semantic_manifest_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_semantic_crosswalk_hash = field_validator(
+        "semantic_crosswalk_hash", mode="after"
+    )(_check_nonempty_hash)
+    _check_authority_hash = field_validator("authority_hash", mode="after")(
+        _check_hash
+    )
+
+    @model_validator(mode="after")
+    def _validate_authority(self) -> "BoundedQueryAuthority":
+        question_ids = [path.question_id for path in self.question_paths]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("Bounded query authority question IDs must be unique.")
+        covered_hops = [
+            len(path.steps) for path in self.question_paths if path.covered
+        ]
+        if not covered_hops:
+            raise ValueError(
+                "Bounded query authority requires at least one covered question."
+            )
+        if max(covered_hops) != self.approved_max_hops:
+            raise ValueError(
+                "approved_max_hops must equal the maximum approved covered path."
+            )
+        if self.authority_hash:
+            computed = compute_bounded_query_authority_hash(self)
+            if self.authority_hash != computed:
+                raise ValueError(
+                    "Bounded query authority hash does not match its contents."
+                )
+        return self
 
 
 class SemanticQueryPlan(_StrictPersistedModel):
@@ -1896,11 +2047,17 @@ class SemanticQueryPlan(_StrictPersistedModel):
     """
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
+    schema_mode: QuerySchemaMode = "schema1_compatibility"
     plan_hash: str = Field(
         default="",
         description="sha256 hash of this plan excluding this field.",
     )
     manifest_hash: str = Field(default="")
+    domain_contract_hash: str = ""
+    semantic_crosswalk_hash: str = ""
+    query_authority_hash: str = ""
+    query_schema_hash: str = ""
+    question_id: str = ""
     intent: str = Field(min_length=1)
     requested_concepts: list[str] = Field(default_factory=list)
     required_types: list[str] = Field(default_factory=list)
@@ -1909,12 +2066,24 @@ class SemanticQueryPlan(_StrictPersistedModel):
     requested_properties: list[str] = Field(default_factory=list)
     evidence_required: bool = True
     path_steps: list[SemanticPathStep] = Field(default_factory=list)
+    outputs: list[SemanticQueryOutput] = Field(default_factory=list)
+    result_limit: int = Field(default=100, ge=1)
     budget: ComplexityBudget = Field(default_factory=ComplexityBudget)
 
     _check_plan_hash = field_validator("plan_hash", mode="after")(_check_hash)
     _check_manifest_hash = field_validator("manifest_hash", mode="after")(
         _check_hash
     )
+    _check_domain_contract_hash = field_validator(
+        "domain_contract_hash",
+        mode="after",
+    )(_check_domain_hash)
+    _check_authority_hashes = field_validator(
+        "semantic_crosswalk_hash",
+        "query_authority_hash",
+        "query_schema_hash",
+        mode="after",
+    )(_check_hash)
 
     @model_validator(mode="before")
     @classmethod
@@ -2020,6 +2189,67 @@ class SemanticQueryPlan(_StrictPersistedModel):
                 "(SPEC-008A §9.4)."
             )
 
+        if self.schema_mode == "schema2_bounded":
+            required_identity = {
+                "manifest_hash": self.manifest_hash,
+                "domain_contract_hash": self.domain_contract_hash,
+                "semantic_crosswalk_hash": self.semantic_crosswalk_hash,
+                "query_authority_hash": self.query_authority_hash,
+                "query_schema_hash": self.query_schema_hash,
+                "question_id": self.question_id,
+            }
+            missing = sorted(
+                name for name, value in required_identity.items() if not value
+            )
+            if missing:
+                raise ValueError(
+                    "Schema-2 bounded plans require sealed query identity fields: "
+                    f"{missing}."
+                )
+            if self.budget.max_hops > 4:
+                raise ValueError("Schema-2 bounded plans cannot exceed four hops.")
+            if self.budget.max_rows_per_subquery > 100:
+                raise ValueError(
+                    "Schema-2 bounded plans cannot exceed 100 rows per subquery."
+                )
+            if self.result_limit > 100:
+                raise ValueError(
+                    "Schema-2 bounded plans cannot request more than 100 rows."
+                )
+            if required_hops > self.budget.max_hops:
+                raise ValueError(
+                    "Schema-2 bounded plan exceeds its approved K."
+                )
+            if not self.path_steps:
+                raise ValueError(
+                    "Schema-2 bounded plans require at least one explicit hop."
+                )
+            if not self.outputs:
+                raise ValueError(
+                    "Schema-2 bounded plans require explicit scalar outputs."
+                )
+            for step in self.path_steps:
+                if step.max_depth != 1:
+                    raise ValueError(
+                        "Schema-2 bounded plans require one explicit hop per step."
+                    )
+                if not all((
+                    step.relationship_graph_label,
+                    step.from_graph_label,
+                    step.to_graph_label,
+                    step.from_endpoint_property,
+                    step.to_endpoint_property,
+                )):
+                    raise ValueError(
+                        "Every schema-2 hop requires Graph labels and endpoint "
+                        "properties."
+                    )
+            for left, right in zip(self.path_steps, self.path_steps[1:]):
+                if left.to_type_id != right.from_type_id:
+                    raise ValueError(
+                        "Schema-2 bounded path steps must be continuous."
+                    )
+
         return self
 
 
@@ -2053,6 +2283,8 @@ class PersistedQueryNodeSchema(_StrictPersistedModel):
     semantic_id: str = Field(min_length=1)
     label: str = Field(default="")
     owner_properties: dict[str, str] = Field(default_factory=dict)
+    id_property: str = ""
+    display_property: str = ""
 
     @field_validator("semantic_id")
     @classmethod
@@ -2079,7 +2311,10 @@ class PersistedQueryNodeSchema(_StrictPersistedModel):
     @property
     def physical_property_keys(self) -> frozenset[str]:
         """The set of physical graph property keys owned by this node."""
-        return frozenset(self.owner_properties.values())
+        return frozenset({
+            *self.owner_properties.values(),
+            *(value for value in (self.id_property, self.display_property) if value),
+        })
 
 
 class PersistedQueryRelationshipSchema(_StrictPersistedModel):
@@ -2099,6 +2334,7 @@ class PersistedQueryRelationshipSchema(_StrictPersistedModel):
     source_label: str = Field(default="")
     target_label: str = Field(default="")
     direction: Literal["source_to_target"] = "source_to_target"
+    evidence_property: str = ""
 
     @field_validator("semantic_id")
     @classmethod
@@ -2124,7 +2360,10 @@ class PersistedQuerySchema(_StrictPersistedModel):
     """
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
+    schema_mode: QuerySchemaMode = "schema1_compatibility"
     manifest_hash: str = Field(default="")
+    semantic_crosswalk_hash: str = ""
+    authority: BoundedQueryAuthority | None = None
     nodes: list[PersistedQueryNodeSchema] = Field(default_factory=list)
     relationships: list[PersistedQueryRelationshipSchema] = Field(
         default_factory=list
@@ -2137,6 +2376,9 @@ class PersistedQuerySchema(_StrictPersistedModel):
     _check_manifest_hash = field_validator("manifest_hash", mode="after")(
         _check_hash
     )
+    _check_crosswalk_hash = field_validator(
+        "semantic_crosswalk_hash", mode="after"
+    )(_check_hash)
     _check_schema_hash = field_validator("schema_hash", mode="after")(
         _check_hash
     )
@@ -2166,6 +2408,47 @@ class PersistedQuerySchema(_StrictPersistedModel):
                     f"Relationship '{rel.semantic_id}' target_type_id "
                     f"'{rel.target_type_id}' is not in schema nodes."
                 )
+        if self.schema_mode == "schema2_bounded":
+            if self.authority is None:
+                raise ValueError(
+                    "Schema-2 persisted query schemas require bounded authority."
+                )
+            if not self.semantic_crosswalk_hash:
+                raise ValueError(
+                    "Schema-2 persisted query schemas require a crosswalk hash."
+                )
+            if self.authority.semantic_manifest_hash != self.manifest_hash:
+                raise ValueError(
+                    "Query authority semantic manifest hash differs from schema."
+                )
+            if (
+                self.authority.semantic_crosswalk_hash
+                != self.semantic_crosswalk_hash
+            ):
+                raise ValueError(
+                    "Query authority semantic crosswalk hash differs from schema."
+                )
+            for node in self.nodes:
+                if not node.label or not node.id_property or not node.display_property:
+                    raise ValueError(
+                        "Schema-2 query nodes require label, ID property, and "
+                        "display property."
+                    )
+            for rel in self.relationships:
+                if not all((
+                    rel.label,
+                    rel.source_label,
+                    rel.target_label,
+                    rel.evidence_property,
+                )):
+                    raise ValueError(
+                        "Schema-2 query relationships require labels, endpoint "
+                        "labels, and an evidence property."
+                    )
+        elif self.authority is not None:
+            raise ValueError(
+                "Schema-1 compatibility query schemas cannot carry schema-2 authority."
+            )
         return self
 
 
@@ -2199,6 +2482,7 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
+    schema_mode: QuerySchemaMode = "schema1_compatibility"
     # Required envelope fields (§10.4)
     export_freshness_watermark: str = Field(min_length=1)
     partial_snapshot: bool
@@ -2206,6 +2490,8 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
     workspace_id: str = Field(min_length=1)
     target_item_id: str = Field(min_length=1)
     semantic_contract_hash: str
+    domain_contract_hash: str = ""
+    query_authority_hash: str = ""
     manifest_hash: str
     ontology_projection_hash: str
     graph_projection_hash: str
@@ -2213,9 +2499,11 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
     instruction_hash: str
     source_selection_hash: str
     query_schema_hash: str
+    route: str = Field(default="composed", min_length=1)
     selected_source: str = Field(min_length=1)
-    semantic_plan: SemanticQueryPlan
+    semantic_plan: SemanticQueryPlan | None = None
     semantic_plan_hash: str
+    actual_hop_count: int = Field(default=0, ge=0, le=4)
     physical_query_hash: str
     static_validation_passed: bool
     query_row_count: int = Field(ge=0)
@@ -2241,6 +2529,12 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
     _check_semantic_contract_hash = field_validator(
         "semantic_contract_hash", mode="after"
     )(_check_nonempty_hash)
+    _check_domain_contract_hash = field_validator(
+        "domain_contract_hash", mode="after"
+    )(_check_domain_hash)
+    _check_query_authority_hash = field_validator(
+        "query_authority_hash", mode="after"
+    )(_check_hash)
     _check_ontology_hash = field_validator(
         "ontology_projection_hash", mode="after"
     )(_check_nonempty_hash)
@@ -2275,11 +2569,26 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
 
     @model_validator(mode="after")
     def _validate_status_consistency(self) -> "SemanticDiagnosticRecord":
-        computed_plan_hash = compute_query_plan_hash(self.semantic_plan)
-        if self.semantic_plan_hash != computed_plan_hash:
-            raise ValueError(
-                "semantic_plan_hash does not match the embedded semantic_plan."
-            )
+        if self.schema_mode == "schema2_bounded":
+            if self.semantic_plan is not None:
+                raise ValueError(
+                    "Schema-2 diagnostics must not serialize semantic plans or "
+                    "raw query parameters."
+                )
+            if not self.domain_contract_hash or not self.query_authority_hash:
+                raise ValueError(
+                    "Schema-2 diagnostics require domain and query authority hashes."
+                )
+        else:
+            if self.semantic_plan is None:
+                raise ValueError(
+                    "Schema-1 compatibility diagnostics require semantic_plan."
+                )
+            computed_plan_hash = compute_query_plan_hash(self.semantic_plan)
+            if self.semantic_plan_hash != computed_plan_hash:
+                raise ValueError(
+                    "semantic_plan_hash does not match the embedded semantic_plan."
+                )
         # §10.1: required-source failure cannot be reported as semantic success
         if (
             self.result_category in _SOURCE_FAILURE_STATUSES
@@ -2357,12 +2666,15 @@ class PartialDiagnosticExport(StrictModel):
     """
 
     schema_version: Literal[SEMANTIC_SCHEMAS_VERSION] = SEMANTIC_SCHEMAS_VERSION
+    schema_mode: QuerySchemaMode = "schema1_compatibility"
     export_freshness_watermark: str = Field(default="")
     partial_snapshot: bool = False
     overlapping_snapshot: bool = False
     workspace_id: str = Field(default="")
     target_item_id: str = Field(default="")
     semantic_contract_hash: str = Field(default="")
+    domain_contract_hash: str = Field(default="")
+    query_authority_hash: str = Field(default="")
     manifest_hash: str = Field(default="")
     ontology_projection_hash: str = Field(default="")
     graph_projection_hash: str = Field(default="")
@@ -2370,9 +2682,11 @@ class PartialDiagnosticExport(StrictModel):
     instruction_hash: str = Field(default="")
     source_selection_hash: str = Field(default="")
     query_schema_hash: str = Field(default="")
+    route: str | None = None
     selected_source: str | None = None
     semantic_plan: SemanticQueryPlan | None = None
     semantic_plan_hash: str = Field(default="")
+    actual_hop_count: int = Field(default=0, ge=0, le=4)
     physical_query_hash: str = Field(default="")
     static_validation_passed: bool | None = None
     query_row_count: int | None = None
@@ -2491,6 +2805,22 @@ def compute_query_plan_hash(plan: SemanticQueryPlan) -> str:
     """
     payload = plan.model_dump(mode="json")
     payload.pop("plan_hash", None)
+    digest = hashlib.sha256(
+        _canonical_json(payload).encode("utf-8")
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+def compute_bounded_query_authority_hash(
+    authority: BoundedQueryAuthority,
+) -> str:
+    """Compute sha256 over bounded query authority excluding its seal."""
+    payload = authority.model_dump(mode="json")
+    payload.pop("authority_hash", None)
+    payload["question_paths"] = sorted(
+        payload.get("question_paths", []),
+        key=lambda path: path["question_id"],
+    )
     digest = hashlib.sha256(
         _canonical_json(payload).encode("utf-8")
     ).hexdigest()

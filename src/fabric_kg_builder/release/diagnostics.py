@@ -99,6 +99,7 @@ def _is_fingerprint(value: Any) -> bool:
 
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DOMAIN_HASH_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
 
 
 def _is_hash(value: Any) -> bool:
@@ -143,6 +144,7 @@ def _aliases(*names: str) -> tuple[str, ...]:
 # time), covering common Fabric/Azure telemetry vocabulary variants. This
 # table intentionally does not assume one exact export shape.
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "schema_mode": _aliases("schema_mode", "schemaMode"),
     "export_freshness_watermark": _aliases(
         "export_freshness_watermark", "exportedAt", "exportTimestamp",
         "snapshotTimestamp", "generatedAt", "asOf", "watermark",
@@ -156,6 +158,12 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "target_item_id", "targetId", "itemId", "agentId", "dataAgentId"
     ),
     "semantic_contract_hash": _aliases("semantic_contract_hash", "contractHash"),
+    "domain_contract_hash": _aliases(
+        "domain_contract_hash", "domainContractHash"
+    ),
+    "query_authority_hash": _aliases(
+        "query_authority_hash", "queryAuthorityHash"
+    ),
     "manifest_hash": _aliases(
         "manifest_hash", "modelManifestHash", "semanticModelHash"
     ),
@@ -166,6 +174,10 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "source_selection_hash": _aliases("source_selection_hash", "sourceHash"),
     "query_schema_hash": _aliases(
         "query_schema_hash", "persistedQuerySchemaHash", "querySchemaHash"
+    ),
+    "route": _aliases("route", "queryRoute"),
+    "actual_hop_count": _aliases(
+        "actual_hop_count", "actualHopCount", "hopCount"
     ),
     "selected_source": _aliases("selected_source", "source", "dataSource"),
     "semantic_plan_hash": _aliases("semantic_plan_hash", "queryPlanHash", "planHash"),
@@ -207,7 +219,7 @@ _HASH_FIELDS: frozenset[str] = frozenset({
     "semantic_contract_hash", "manifest_hash", "ontology_projection_hash",
     "graph_projection_hash", "search_projection_hash", "instruction_hash",
     "source_selection_hash", "query_schema_hash", "semantic_plan_hash",
-    "physical_query_hash",
+    "physical_query_hash", "query_authority_hash",
 })
 _ID_FIELDS: frozenset[str] = frozenset({
     "workspace_id", "target_item_id", "request_id", "correlation_id",
@@ -511,6 +523,24 @@ def redact_record(canonical: dict[str, Any]) -> dict[str, Any]:
     for field_name in _HASH_FIELDS:
         value = canonical.get(field_name)
         redacted[field_name] = value if _is_hash(value) else None
+    domain_hash = canonical.get("domain_contract_hash")
+    redacted["domain_contract_hash"] = (
+        domain_hash
+        if isinstance(domain_hash, str)
+        and _DOMAIN_HASH_RE.fullmatch(domain_hash)
+        else None
+    )
+    redacted["schema_mode"] = _match_enum(
+        canonical.get("schema_mode"),
+        frozenset({"schema1_compatibility", "schema2_bounded"}),
+    )
+    route = canonical.get("route")
+    redacted["route"] = (
+        str(route)
+        if isinstance(route, str)
+        and route in {"direct_graph", "data_agent_mcp", "composed"}
+        else None
+    )
 
     for field_name in _ID_FIELDS:
         value = canonical.get(field_name)
@@ -532,6 +562,9 @@ def redact_record(canonical: dict[str, Any]) -> dict[str, Any]:
     redacted["query_row_count"] = _coerce_int(canonical.get("query_row_count"))
     redacted["latency_ms"] = _coerce_float(canonical.get("latency_ms"))
     redacted["retry_count"] = _coerce_int(canonical.get("retry_count"))
+    redacted["actual_hop_count"] = _coerce_int(
+        canonical.get("actual_hop_count")
+    )
 
     redacted["result_category"] = _match_enum(canonical.get("result_category"), _STATUS_VALUES)
     redacted["final_semantic_status"] = _match_enum(
@@ -563,7 +596,10 @@ def _field_present(field_name: str, redacted: dict[str, Any]) -> bool:
             or redacted.get("selected_source_fingerprint") is not None
         )
     if field_name == "semantic_plan":
-        return bool(redacted.get("semantic_plan_present"))
+        return (
+            redacted.get("schema_mode") == "schema2_bounded"
+            or bool(redacted.get("semantic_plan_present"))
+        )
     if field_name == "evidence_ids":
         return redacted.get("evidence_ids_present") is True
     value = redacted.get(field_name)
@@ -615,6 +651,9 @@ def _build_partial_export(redacted: dict[str, Any]) -> PartialDiagnosticExport |
     Returns None if construction unexpectedly fails (defensive only).
     """
     payload: dict[str, Any] = {
+        "schema_mode": (
+            redacted.get("schema_mode") or "schema1_compatibility"
+        ),
         "export_freshness_watermark": redacted.get("export_freshness_watermark") or "",
         "partial_snapshot": bool(redacted.get("partial_snapshot")),
         "overlapping_snapshot": bool(redacted.get("overlapping_snapshot")),
@@ -622,13 +661,17 @@ def _build_partial_export(redacted: dict[str, Any]) -> PartialDiagnosticExport |
         "target_item_id": redacted.get("target_item_id") or "",
         "manifest_hash": redacted.get("manifest_hash") or "",
         "semantic_contract_hash": redacted.get("semantic_contract_hash") or "",
+        "domain_contract_hash": redacted.get("domain_contract_hash") or "",
+        "query_authority_hash": redacted.get("query_authority_hash") or "",
         "ontology_projection_hash": redacted.get("ontology_projection_hash") or "",
         "graph_projection_hash": redacted.get("graph_projection_hash") or "",
         "search_projection_hash": redacted.get("search_projection_hash") or "",
         "instruction_hash": redacted.get("instruction_hash") or "",
         "source_selection_hash": redacted.get("source_selection_hash") or "",
         "query_schema_hash": redacted.get("query_schema_hash") or "",
+        "route": redacted.get("route"),
         "semantic_plan_hash": redacted.get("semantic_plan_hash") or "",
+        "actual_hop_count": redacted.get("actual_hop_count") or 0,
         "physical_query_hash": redacted.get("physical_query_hash") or "",
         "static_validation_passed": redacted.get("static_validation_passed"),
         "query_row_count": redacted.get("query_row_count"),

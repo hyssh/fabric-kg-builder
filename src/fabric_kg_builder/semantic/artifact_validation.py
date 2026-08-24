@@ -648,6 +648,41 @@ def validate_compiled_semantic_artifacts(
                         "Agent manifest query schema hash differs from the "
                         "persisted query schema.",
                     ))
+                if query_schema.schema_mode == "schema2_bounded":
+                    authority = query_schema.authority
+                    if authority is None:
+                        findings.append(ArtifactFinding(
+                            "QUERY_AUTHORITY_MISSING",
+                            "Schema-2 query schema has no bounded authority.",
+                        ))
+                    else:
+                        expected_authority = {
+                            "schema_mode": "schema2_bounded",
+                            "domain_contract_hash": (
+                                authority.domain_contract_hash
+                            ),
+                            "reasoning_policy_hash": (
+                                authority.reasoning_policy_hash
+                            ),
+                            "question_plans_hash": (
+                                authority.question_plans_hash
+                            ),
+                            "query_authority_hash": authority.authority_hash,
+                            "approved_max_hops": authority.approved_max_hops,
+                        }
+                        for field_name, expected in expected_authority.items():
+                            if agent_manifest.get(field_name) != expected:
+                                findings.append(ArtifactFinding(
+                                    "QUERY_AUTHORITY_MANIFEST_DRIFT",
+                                    f"Agent manifest {field_name} differs from "
+                                    "the sealed query authority.",
+                                ))
+                            if agent_context.get(field_name) != expected:
+                                findings.append(ArtifactFinding(
+                                    "QUERY_AUTHORITY_CONTEXT_DRIFT",
+                                    f"Agent semantic context {field_name} differs "
+                                    "from the sealed query authority.",
+                                ))
     contract_hash = semantic_manifest.get("contract_hash")
     competency_status = agent_manifest.get("competency_status")
     if competency_status == "compiled":
@@ -673,6 +708,24 @@ def validate_compiled_semantic_artifacts(
                     "query schema.",
                 )
             )
+        if (
+            query_schema is not None
+            and query_schema.schema_mode == "schema2_bounded"
+            and query_schema.authority is not None
+        ):
+            authority = query_schema.authority
+            for field_name, expected in {
+                "schema_mode": "schema2_bounded",
+                "domain_contract_hash": authority.domain_contract_hash,
+                "query_authority_hash": authority.authority_hash,
+                "approved_max_hops": authority.approved_max_hops,
+            }.items():
+                if competency.get(field_name) != expected:
+                    findings.append(ArtifactFinding(
+                        "COMPETENCY_QUERY_AUTHORITY_DRIFT",
+                        f"Competency contract {field_name} differs from sealed "
+                        "query authority.",
+                    ))
         if competency_path.exists():
             actual_competency_hash = _sha256(competency_path)
             if (

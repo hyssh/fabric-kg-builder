@@ -134,6 +134,14 @@ _INLINE_PROPERTY_KEY_PATTERN = re.compile(
     r"(?P<property>`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_.-]*)\s*:"
 )
 _LIMIT_VALUE_RE = re.compile(r"\bLIMIT\s+(?P<value>\d+)\b", re.IGNORECASE)
+_VARIABLE_LENGTH_RELATIONSHIP_RE = re.compile(
+    r"\[[^\]]*\*[^\]]*\]",
+    re.IGNORECASE,
+)
+_RETURN_BODY_RE = re.compile(
+    r"\bRETURN\b(?P<body>.*?)(?:\bLIMIT\b|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 _RESERVED_ALIAS_WORDS = frozenset({
     "and", "or", "not", "xor", "true", "false", "null", "count", "sum",
     "avg", "min", "max", "collect", "distinct", "as", "when", "case",
@@ -612,6 +620,15 @@ def validate_physical_query(
         identifier_masked = _mask_literals_and_comments(
             query, mask_backticks=False
         )
+        if (
+            schema.schema_mode == "schema2_bounded"
+            and _VARIABLE_LENGTH_RELATIONSHIP_RE.search(identifier_masked)
+        ):
+            findings.append(QueryFinding(
+                "QUERY_VARIABLE_LENGTH_TRAVERSAL",
+                "Schema-2 queries cannot use variable-length relationship "
+                "traversal; every hop must be explicit.",
+            ))
 
         node_label_tokens: set[str] = set()
         alias_to_label: dict[str, str] = {}
@@ -621,6 +638,36 @@ def validate_physical_query(
             alias = match.group("alias")
             if alias and alias.lower() not in _RESERVED_ALIAS_WORDS:
                 alias_to_label[alias] = label
+        relationship_aliases = {
+            match.group(1)
+            for match in re.finditer(
+                r"\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*:",
+                identifier_masked,
+            )
+        }
+        if schema.schema_mode == "schema2_bounded":
+            for return_match in _RETURN_BODY_RE.finditer(identifier_masked):
+                expressions = [
+                    expression.strip()
+                    for expression in return_match.group("body").split(",")
+                ]
+                whole_values = sorted({
+                    expression
+                    for expression in expressions
+                    if expression in alias_to_label
+                    or expression in relationship_aliases
+                    or re.fullmatch(
+                        r"TO_JSON_STRING\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)",
+                        expression,
+                        re.IGNORECASE,
+                    )
+                })
+                if whole_values:
+                    findings.append(QueryFinding(
+                        "QUERY_WHOLE_GRAPH_VALUE_RETURN",
+                        "Schema-2 queries may return approved scalar properties "
+                        f"only, not whole nodes/edges: {whole_values}.",
+                    ))
 
         relationship_label_tokens: set[str] = {
             match.group("label")
@@ -811,6 +858,12 @@ def validate_physical_query(
                         "semantic path step as a non-optional MATCH. Missing "
                         f"steps: {missing_required}.",
                     ))
+                if unused_required:
+                    findings.append(QueryFinding(
+                        "QUERY_UNPLANNED_PATH",
+                        "Physical query contains Graph hops absent from the "
+                        "validated structured plan.",
+                    ))
 
             # Bounded top-level LIMIT <= plan budget.
             limit_matches = [
@@ -831,7 +884,14 @@ def validate_physical_query(
                 ))
             else:
                 max_rows = plan.budget.max_rows_per_subquery
-                over_budget = [v for v in top_level_limits if v > max_rows]
+                enforced_max_rows = (
+                    min(max_rows, 100)
+                    if schema.schema_mode == "schema2_bounded"
+                    else max_rows
+                )
+                over_budget = [
+                    v for v in top_level_limits if v > enforced_max_rows
+                ]
                 if over_budget:
                     findings.append(QueryFinding(
                         "QUERY_LIMIT_OVER_BUDGET",
@@ -1026,7 +1086,7 @@ def resolve_query_plan(
         node = nodes_by_id.get(type_id)
         if node is not None:
             owner_scoped_properties.update(node.owner_properties.keys())
-            owner_scoped_properties.update(node.owner_properties.values())
+            owner_scoped_properties.update(node.physical_property_keys)
     for prop_name in plan.requested_properties:
         if prop_name not in owner_scoped_properties:
             findings.append(QueryFinding(
@@ -1057,6 +1117,64 @@ def resolve_query_plan(
                 "(source_to_target) in the persisted query schema.",
             ))
 
+    if plan.schema_mode == "schema2_bounded":
+        node_sequence = (
+            [plan.path_steps[0].from_type_id]
+            + [step.to_type_id for step in plan.path_steps]
+            if plan.path_steps
+            else []
+        )
+        for output in plan.outputs:
+            if output.owner_kind == "node":
+                if output.owner_index >= len(node_sequence):
+                    findings.append(QueryFinding(
+                        "PLAN_OUTPUT_OWNER_MISMATCH",
+                        f"Output '{output.alias}' references missing node index "
+                        f"{output.owner_index}.",
+                    ))
+                    continue
+                owner_id = node_sequence[output.owner_index]
+                node = nodes_by_id.get(owner_id)
+                if (
+                    node is None
+                    or output.semantic_id != owner_id
+                    or (
+                        output.purpose == "id"
+                        and output.property_name != node.id_property
+                    )
+                    or (
+                        output.purpose == "display"
+                        and output.property_name != node.display_property
+                    )
+                    or output.purpose not in {"id", "display"}
+                ):
+                    findings.append(QueryFinding(
+                        "PLAN_OUTPUT_PROPERTY_MISMATCH",
+                        f"Output '{output.alias}' is not an approved scalar "
+                        f"property for node '{owner_id}'.",
+                    ))
+            else:
+                if output.owner_index >= len(plan.path_steps):
+                    findings.append(QueryFinding(
+                        "PLAN_OUTPUT_OWNER_MISMATCH",
+                        f"Output '{output.alias}' references missing relationship "
+                        f"index {output.owner_index}.",
+                    ))
+                    continue
+                step = plan.path_steps[output.owner_index]
+                rel = rels_by_id.get(step.via_relationship_id)
+                if (
+                    rel is None
+                    or output.semantic_id != step.via_relationship_id
+                    or output.property_name != rel.evidence_property
+                    or output.purpose != "evidence"
+                ):
+                    findings.append(QueryFinding(
+                        "PLAN_OUTPUT_PROPERTY_MISMATCH",
+                        f"Output '{output.alias}' is not the approved evidence "
+                        f"property for relationship '{step.via_relationship_id}'.",
+                    ))
+
     if raise_on_findings and findings:
         raise SemanticQueryValidationError(findings)
     return findings
@@ -1075,6 +1193,7 @@ _SOURCE_FAILURE_CATEGORIES: frozenset[str] = frozenset({
 })
 
 _REQUIRED_DIAGNOSTIC_FIELDS: frozenset[str] = frozenset({
+    "schema_mode",
     "export_freshness_watermark",
     "partial_snapshot",
     "overlapping_snapshot",
@@ -1088,9 +1207,11 @@ _REQUIRED_DIAGNOSTIC_FIELDS: frozenset[str] = frozenset({
     "instruction_hash",
     "source_selection_hash",
     "query_schema_hash",
+    "route",
     "selected_source",
     "semantic_plan",
     "semantic_plan_hash",
+    "actual_hop_count",
     "physical_query_hash",
     "static_validation_passed",
     "query_row_count",
@@ -1157,6 +1278,14 @@ def validate_diagnostic_record(
                 f"Incomplete diagnostic envelope: required field '{field}' "
                 "is absent or empty (SPEC-008A §10.4).",
             ))
+    if raw.get("schema_mode") == "schema2_bounded":
+        for field in ("domain_contract_hash", "query_authority_hash"):
+            if not raw.get(field):
+                findings.append(QueryFinding(
+                    "DIAGNOSTIC_FIELD_MISSING",
+                    "Incomplete schema-2 diagnostic envelope: required field "
+                    f"'{field}' is absent or empty.",
+                ))
 
     result_cat = raw.get("result_category")
     final_status = raw.get("final_semantic_status")

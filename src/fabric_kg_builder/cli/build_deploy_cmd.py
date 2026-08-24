@@ -431,6 +431,11 @@ def _write_semantic_deployment_receipt(
         "environment": environment,
         "created_at_utc": _utc_now(),
         "semantic_contract_hash": semantic.get("contract_hash"),
+        "domain_contract_hash": agent.get("domain_contract_hash"),
+        "reasoning_policy_hash": agent.get("reasoning_policy_hash"),
+        "question_plans_hash": agent.get("question_plans_hash"),
+        "query_authority_hash": agent.get("query_authority_hash"),
+        "approved_max_hops": agent.get("approved_max_hops"),
         "semantic_artifact_set_hash": semantic.get("artifact_set_hash"),
         "ontology_artifact_set_hash": ontology.get("artifact_set_hash"),
         "graph_artifact_set_hash": graph.get("artifact_set_hash"),
@@ -877,6 +882,7 @@ def _deploy_knowledge(
     from fabric_kg_builder.knowledge.transport import RequestsTransport
     from fabric_kg_builder.semantic import (
         PersistedProjectionReceipt,
+        PersistedQuerySchema,
         build_contract_agent_instructions,
         build_graph_source_description,
         build_graph_source_instructions,
@@ -1008,6 +1014,12 @@ def _deploy_knowledge(
                 packaged_agent_instructions.encode("utf-8")
             ).hexdigest()
         )
+        query_schema = PersistedQuerySchema.model_validate_json(
+            (
+                semantic_context_path.parent
+                / "persisted-query-schema.json"
+            ).read_text(encoding="utf-8")
+        )
         grounding = build_persisted_agent_grounding(
             manifest=loaded_semantic.manifest,
             crosswalk=loaded_semantic.crosswalk,
@@ -1016,6 +1028,7 @@ def _deploy_knowledge(
             projection_receipt_hash=projection_receipt_hash,
             workspace_id=workspace_id,
             graph_model_id=graph_model_id,
+            query_schema=query_schema,
         )
         public_elements, public_metadata = (
             build_public_ontology_source_projection(grounding)
@@ -2932,6 +2945,10 @@ def build_deploy_cmd(
         "--domain-context",
         _domain_instruction(domain),
     ]
+    if str(getattr(domain, "schema_version", "")) == "2.0":
+        agent_args.extend(["--domain-contract", str(domain_path)])
+    else:
+        agent_args.append("--schema1-compatibility")
     for question in domain.competency_questions:
         agent_args.extend(["--question", str(question)])
     if competency_suite:
@@ -3333,20 +3350,28 @@ def build_deploy_cmd(
         )
 
     if deploy_agent:
+        deploy_agent_args = [
+            "app",
+            "deploy-agent",
+            "--env",
+            env,
+            "--metadata",
+            str(paths["metadata"]),
+            "--registry",
+            str(paths["registry"]),
+            "--domain-contract",
+            str(domain_path),
+        ]
+        if str(getattr(domain, "schema_version", "")) == "2.0":
+            deploy_agent_args.extend([
+                "--agent-dir",
+                str(paths["agents"]),
+            ])
         state.execute(
             "deploy_agent",
             lambda: (
                 _invoke_cli(
-                    [
-                        "app",
-                        "deploy-agent",
-                        "--env",
-                        env,
-                        "--metadata",
-                        str(paths["metadata"]),
-                        "--registry",
-                        str(paths["registry"]),
-                    ],
+                    deploy_agent_args,
                     config_path=config_path,
                     environment=env,
                     extra_env=runtime_env,

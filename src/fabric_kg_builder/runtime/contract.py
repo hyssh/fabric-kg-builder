@@ -14,6 +14,11 @@ from fabric_kg_builder.semantic.query_validation import (
     resolve_query_plan,
     validate_physical_query,
 )
+from fabric_kg_builder.semantic.query_rendering import (
+    compile_approved_query_plan,
+    render_bounded_gql,
+    validate_bounded_query_plan,
+)
 from fabric_kg_builder.semantic.schemas import (
     PersistedQuerySchema,
     SemanticQueryPlan,
@@ -191,7 +196,13 @@ class CompetencyContract(_StrictModel):
     """Compiled route-aware competency suite for one semantic contract."""
 
     schema_version: Literal["1.0"] = "1.0"
+    schema_mode: Literal["schema1_compatibility", "schema2_bounded"] = (
+        "schema1_compatibility"
+    )
     contract_hash: str = Field(min_length=1)
+    domain_contract_hash: str = ""
+    query_authority_hash: str = ""
+    approved_max_hops: int | None = Field(default=None, ge=1, le=4)
     query_schema: PersistedQuerySchema | None = None
     cases: list[CompetencyCase] = Field(min_length=1)
 
@@ -200,6 +211,21 @@ class CompetencyContract(_StrictModel):
         ids = [case.id for case in self.cases]
         if len(ids) != len(set(ids)):
             raise ValueError("Competency case IDs must be unique.")
+        if self.schema_mode == "schema2_bounded":
+            if self.query_schema is None or self.query_schema.authority is None:
+                raise ValueError(
+                    "Schema-2 competency contracts require bounded query authority."
+                )
+            authority = self.query_schema.authority
+            if (
+                self.domain_contract_hash != authority.domain_contract_hash
+                or self.query_authority_hash != authority.authority_hash
+                or self.approved_max_hops != authority.approved_max_hops
+            ):
+                raise ValueError(
+                    "Schema-2 competency authority fields differ from the "
+                    "persisted query schema."
+                )
         return self
 
 
@@ -255,6 +281,17 @@ def _prepare_query_contract_payload(
     if active_schema is None:
         return prepared
 
+    if active_schema.schema_mode == "schema2_bounded":
+        authority = active_schema.authority
+        if authority is None:
+            raise CompetencyContractError(
+                "Schema-2 query schema is missing bounded authority."
+            )
+        prepared["schema_mode"] = "schema2_bounded"
+        prepared["domain_contract_hash"] = authority.domain_contract_hash
+        prepared["query_authority_hash"] = authority.authority_hash
+        prepared["approved_max_hops"] = authority.approved_max_hops
+
     for case_payload in prepared.get("cases", []):
         if not isinstance(case_payload, dict):
             continue
@@ -277,6 +314,141 @@ def _prepare_query_contract_payload(
                     "plans differ."
                 )
         raw_plan = case_plan or graph_plan
+        if active_schema.schema_mode == "schema2_bounded":
+            case_id = str(case_payload.get("id") or "")
+            try:
+                plan = compile_approved_query_plan(
+                    schema=active_schema,
+                    question_id=case_id,
+                    intent=str(
+                        (
+                            raw_plan.get("intent")
+                            if isinstance(raw_plan, dict)
+                            else None
+                        )
+                        or case_payload.get("question")
+                        or case_id
+                    ),
+                    result_limit=int(
+                        (
+                            raw_plan.get("result_limit")
+                            if isinstance(raw_plan, dict)
+                            else None
+                        )
+                        or 100
+                    ),
+                )
+            except ValueError as exc:
+                raise CompetencyContractError(
+                    f"{case_id}: {exc}"
+                ) from exc
+            if isinstance(raw_plan, dict) and raw_plan.get("path_steps"):
+                authored_steps = [
+                    (
+                        str(step.get("from_type_id") or ""),
+                        str(step.get("via_relationship_id") or ""),
+                        str(step.get("to_type_id") or ""),
+                        str(step.get("direction") or "source_to_target"),
+                    )
+                    for step in raw_plan["path_steps"]
+                    if isinstance(step, dict)
+                ]
+                approved_steps = [
+                    (
+                        step.from_type_id,
+                        step.via_relationship_id,
+                        step.to_type_id,
+                        step.direction,
+                    )
+                    for step in plan.path_steps
+                ]
+                if authored_steps != approved_steps:
+                    raise CompetencyContractError(
+                        f"{case_id}: authored semantic path differs from the "
+                        "approved DomainContractV2 question plan."
+                    )
+            serialized_plan = plan.model_dump(mode="json")
+            case_payload["semantic_plan"] = serialized_plan
+            if not isinstance(graph_probe, dict):
+                raise CompetencyContractError(
+                    f"{case_id}: schema-2 Graph route requires direct_graph probe "
+                    "bindings."
+                )
+            rendered_query = render_bounded_gql(plan, active_schema)
+            authored_query = str(graph_probe.get("query") or "").strip()
+            if authored_query:
+                authored_findings = validate_physical_query(
+                    authored_query,
+                    plan,
+                    schema=active_schema,
+                )
+                if authored_findings:
+                    raise CompetencyContractError(
+                        f"{case_id}: authored Graph query is not equivalent to "
+                        "the approved structured plan: "
+                        + "; ".join(
+                            f"{finding.code}: {finding.message}"
+                            for finding in authored_findings
+                        )
+                    )
+            graph_probe["query"] = rendered_query
+            graph_probe["semantic_plan"] = serialized_plan
+            node_id_columns = [
+                output.alias
+                for output in plan.outputs
+                if output.owner_kind == "node"
+                and output.purpose == "id"
+            ]
+            graph_probe["entity_bindings"] = [
+                {
+                    "column": output.alias,
+                    "semantic_id": output.semantic_id,
+                }
+                for output in plan.outputs
+                if output.owner_kind == "node"
+                and output.purpose == "id"
+            ]
+            relationships_by_id = {
+                relationship.semantic_id: relationship
+                for relationship in active_schema.relationships
+            }
+            graph_probe["relationship_bindings"] = [
+                {
+                    "semantic_id": step.via_relationship_id,
+                    "source_column": (
+                        f"n{index}_id"
+                        if step.direction == "source_to_target"
+                        else f"n{index + 1}_id"
+                    ),
+                    "target_column": (
+                        f"n{index + 1}_id"
+                        if step.direction == "source_to_target"
+                        else f"n{index}_id"
+                    ),
+                    "direction": relationships_by_id[
+                        step.via_relationship_id
+                    ].direction,
+                    "evidence_column": f"r{index}_evidence_id",
+                }
+                for index, step in enumerate(plan.path_steps)
+            ]
+            graph_probe["canonical_id_columns"] = node_id_columns
+            graph_probe["lineage_columns"] = [
+                f"r{index}_evidence_id"
+                for index, _step in enumerate(plan.path_steps)
+            ]
+            graph_probe["relationship_labels"] = {
+                step.via_relationship_id: step.relationship_graph_label
+                for step in plan.path_steps
+            }
+            graph_probe["type_labels"] = {
+                step.from_type_id: step.from_graph_label
+                for step in plan.path_steps
+            } | {
+                step.to_type_id: step.to_graph_label
+                for step in plan.path_steps
+            }
+            continue
         if raw_plan is None:
             raise CompetencyContractError(
                 f"{case_payload.get('id')}: a semantic_plan is required "
@@ -351,6 +523,17 @@ def _validate_compiled_query_contract(
             plan,
             schema=schema,
         )
+        if schema.schema_mode == "schema2_bounded":
+            bounded_findings = validate_bounded_query_plan(plan, schema)
+            errors.extend(
+                f"{case.id}: {finding.code}: {finding.message}"
+                for finding in bounded_findings
+            )
+            expected_query = render_bounded_gql(plan, schema)
+            if graph_probe.query != expected_query:
+                errors.append(
+                    f"{case.id}: Graph query differs from deterministic rendering."
+                )
         errors.extend(
             f"{case.id}: {finding.code}: {finding.message}"
             for finding in physical_findings

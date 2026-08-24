@@ -198,7 +198,10 @@ def create_app(
         blob_account_url="",
         blob_container="",
     )
-    _graph = graph_adapter or FabricDataAgentAdapter(_client=None)
+    _graph = graph_adapter or FabricDataAgentAdapter(
+        _client=None,
+        schema_mode="schema1_compatibility",
+    )
     _limiter = rate_limiter or RateLimiter()
     _live_mode = require_downstreams
     if _live_mode and (not _kb.is_available or not _visual.is_available):
@@ -566,6 +569,15 @@ def _answer_question(
         "relationship",
     )
     if any(signal in q_lower for signal in graph_signals):
+        if graph.schema_mode == "schema2_bounded":
+            return (
+                "No approved bounded Graph plan is mapped to this free-form "
+                "request. Use an approved plan ID or decompose the question "
+                "into approved bounded subquestions.",
+                ROUTE_UNSUPPORTED,
+                [],
+                True,
+            )
         route_type = "ontology"
         graph_result = graph.query_keyword(_graph_keyword(question))
         if graph_result.status == "error":

@@ -87,7 +87,13 @@ def _make_full_build(build: Path) -> None:
     # Compile agent artifacts (reads from semantic_dir).
     r = runner.invoke(
         compile_agent_cmd,
-        ["--semantic-dir", str(semantic_dir), "--out", str(build / "agents")],
+        [
+            "--semantic-dir",
+            str(semantic_dir),
+            "--out",
+            str(build / "agents"),
+            "--schema1-compatibility",
+        ],
     )
     assert r.exit_code == 0, f"compile-agent failed:\n{r.output}"
 

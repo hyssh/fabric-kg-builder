@@ -15,8 +15,10 @@ from fabric_kg_builder.semantic.schemas import (
     CompetencyExampleReceipt,
     MaterializationPlan,
     PersistedProjectionReceipt,
+    PersistedQuerySchema,
     SemanticCrosswalk,
     SemanticModelManifest,
+    compute_persisted_query_schema_hash,
 )
 
 from .data_agent import (
@@ -94,6 +96,18 @@ def build_public_graph_source_projection(
         "fabricKgExpectedPropertyCount": str(
             grounding.expected_property_child_count
         ),
+        "fabricKgDomainContractHash": str(
+            grounding.sidecar.get("domain_contract_hash") or ""
+        ),
+        "fabricKgQueryAuthorityHash": str(
+            grounding.sidecar.get("query_authority_hash") or ""
+        ),
+        "fabricKgPersistedQuerySchemaHash": str(
+            grounding.sidecar.get("persisted_query_schema_hash") or ""
+        ),
+        "fabricKgApprovedMaxHops": str(
+            grounding.sidecar.get("approved_max_hops") or ""
+        ),
     }
     return elements, metadata
 
@@ -137,6 +151,18 @@ def build_public_ontology_source_projection(
         ),
         "fabricKgExpectedPropertyCount": str(
             grounding.expected_property_child_count
+        ),
+        "fabricKgDomainContractHash": str(
+            grounding.sidecar.get("domain_contract_hash") or ""
+        ),
+        "fabricKgQueryAuthorityHash": str(
+            grounding.sidecar.get("query_authority_hash") or ""
+        ),
+        "fabricKgPersistedQuerySchemaHash": str(
+            grounding.sidecar.get("persisted_query_schema_hash") or ""
+        ),
+        "fabricKgApprovedMaxHops": str(
+            grounding.sidecar.get("approved_max_hops") or ""
         ),
     }
     return elements, metadata
@@ -263,6 +289,7 @@ def build_persisted_agent_grounding(
     projection_receipt_hash: str,
     workspace_id: str,
     graph_model_id: str,
+    query_schema: PersistedQuerySchema | None = None,
 ) -> PersistedAgentGrounding:
     """Compile complete source elements only after H3 persisted read-back."""
     if projection_receipt.semantic_model_manifest_hash != manifest.manifest_hash:
@@ -280,6 +307,53 @@ def build_persisted_agent_grounding(
             "AGENT_STALE_SCHEMA",
             "Agent semantic context was not compiled from the persisted manifest.",
         )
+    if semantic_context.get("schema_mode") == "schema2_bounded":
+        if (
+            query_schema is None
+            or query_schema.schema_mode != "schema2_bounded"
+            or query_schema.authority is None
+            or query_schema.schema_hash
+            != compute_persisted_query_schema_hash(query_schema)
+        ):
+            raise AgentPublicationError(
+                "AGENT_QUERY_AUTHORITY_INVALID",
+                "Schema-2 Data Agent publication requires a sealed bounded "
+                "persisted query schema.",
+            )
+        authority = query_schema.authority
+        if query_schema.manifest_hash != manifest.manifest_hash:
+            raise AgentPublicationError(
+                "AGENT_QUERY_AUTHORITY_DRIFT",
+                "Persisted query schema manifest differs from the semantic "
+                "manifest selected for Data Agent publication.",
+            )
+        if query_schema.semantic_crosswalk_hash != _canonical_hash(
+            crosswalk.model_dump(mode="json")
+        ):
+            raise AgentPublicationError(
+                "AGENT_QUERY_AUTHORITY_DRIFT",
+                "Persisted query schema crosswalk differs from the semantic "
+                "crosswalk selected for Data Agent publication.",
+            )
+        expected_query_context = {
+            "domain_contract_hash": authority.domain_contract_hash,
+            "reasoning_policy_hash": authority.reasoning_policy_hash,
+            "question_plans_hash": authority.question_plans_hash,
+            "query_authority_hash": authority.authority_hash,
+            "persisted_query_schema_hash": query_schema.schema_hash,
+            "approved_max_hops": authority.approved_max_hops,
+        }
+        mismatched = sorted(
+            field_name
+            for field_name, expected in expected_query_context.items()
+            if semantic_context.get(field_name) != expected
+        )
+        if mismatched:
+            raise AgentPublicationError(
+                "AGENT_QUERY_AUTHORITY_DRIFT",
+                "Agent semantic context differs from the sealed persisted "
+                f"query schema: {mismatched}.",
+            )
     if not workspace_id:
         raise AgentPublicationError(
             "AGENT_TARGET_MISMATCH",
@@ -438,6 +512,10 @@ def build_persisted_agent_grounding(
 
     sidecar = {
         "schema_version": "1.1",
+        "schema_mode": str(
+            semantic_context.get("schema_mode")
+            or "schema1_compatibility"
+        ),
         "semantic_model_manifest_hash": manifest.manifest_hash,
         "semantic_crosswalk_hash": str(
             semantic_context.get("semantic_crosswalk_hash") or ""
@@ -451,6 +529,16 @@ def build_persisted_agent_grounding(
             projection_receipt.graph_persisted_projection_hash
         ),
         "graph_model_id": graph_model_id,
+        "domain_contract_hash": str(
+            semantic_context.get("domain_contract_hash") or ""
+        ),
+        "query_authority_hash": str(
+            semantic_context.get("query_authority_hash") or ""
+        ),
+        "persisted_query_schema_hash": str(
+            semantic_context.get("persisted_query_schema_hash") or ""
+        ),
+        "approved_max_hops": semantic_context.get("approved_max_hops"),
         "property_child_coverage": property_child_coverage,
         "entity_types": sidecar_entities,
         "relationship_types": sidecar_relationships,
@@ -638,6 +726,48 @@ def build_agent_publication_receipt(
             "AGENT_STALE_PROJECTION",
             "Published source references a stale persisted projection receipt.",
         )
+    expected_query_reference = {
+        "domain_contract_hash": str(
+            grounding.sidecar.get("domain_contract_hash") or ""
+        ),
+        "query_authority_hash": str(
+            grounding.sidecar.get("query_authority_hash") or ""
+        ),
+        "persisted_query_schema_hash": str(
+            grounding.sidecar.get("persisted_query_schema_hash") or ""
+        ),
+        "approved_max_hops": str(
+            grounding.sidecar.get("approved_max_hops") or ""
+        ),
+    }
+    published_query_reference = {
+        "domain_contract_hash": str(
+            sidecar.get("domain_contract_hash") or ""
+            if sidecar is not None
+            else reference.get("fabricKgDomainContractHash") or ""
+        ),
+        "query_authority_hash": str(
+            sidecar.get("query_authority_hash") or ""
+            if sidecar is not None
+            else reference.get("fabricKgQueryAuthorityHash") or ""
+        ),
+        "persisted_query_schema_hash": str(
+            sidecar.get("persisted_query_schema_hash") or ""
+            if sidecar is not None
+            else reference.get("fabricKgPersistedQuerySchemaHash") or ""
+        ),
+        "approved_max_hops": str(
+            sidecar.get("approved_max_hops") or ""
+            if sidecar is not None
+            else reference.get("fabricKgApprovedMaxHops") or ""
+        ),
+    }
+    if published_query_reference != expected_query_reference:
+        raise AgentPublicationError(
+            "AGENT_QUERY_AUTHORITY_DRIFT",
+            "Published Data Agent query authority differs from the compiled "
+            "bounded authority.",
+        )
     source_receipts = published.source_receipts()
     if any(
         source["workspace_id"] != workspace_id
@@ -675,6 +805,20 @@ def build_agent_publication_receipt(
     return AgentPublicationReceipt(
         semantic_model_manifest_hash=(
             projection_receipt.semantic_model_manifest_hash
+        ),
+        domain_contract_hash=published_query_reference[
+            "domain_contract_hash"
+        ],
+        query_authority_hash=published_query_reference[
+            "query_authority_hash"
+        ],
+        persisted_query_schema_hash=published_query_reference[
+            "persisted_query_schema_hash"
+        ],
+        approved_max_hops=(
+            int(published_query_reference["approved_max_hops"])
+            if published_query_reference["approved_max_hops"]
+            else None
         ),
         persisted_projection_receipt_hash=projection_receipt_hash,
         ontology_persisted_projection_hash=(

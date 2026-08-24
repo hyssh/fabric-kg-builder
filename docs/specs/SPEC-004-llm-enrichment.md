@@ -1605,8 +1605,19 @@ raise or replace K.
 
 These requirements apply only to schema-2.0 enrichment. Schema-1.0 evidence-hint
 and checkpoint behavior remains compatible. Separate audit/serving Parquet
-surfaces, Ontology/Graph deployment selection, and runtime Graph K enforcement
-remain owned by later layers.
+surfaces and Ontology/Graph deployment selection remain downstream concerns.
+Runtime Graph planning must consume this same sealed K and the approved
+question-plan hashes. Neither competency compilation, a model, a Data Agent, a
+Foundry agent, nor a runtime caller may submit a replacement K.
+
+Schema-2 agents do not author raw GQL. They select an approved bounded plan or
+abstain. Local deterministic code validates each explicit semantic
+relationship/endpoint/traversal hop against the sealed crosswalk, renders the
+physical GQL, and enforces scalar ID/display/evidence outputs and `LIMIT <= 100`.
+An over-K question may be decomposed only into separately approved bounded
+subquestions; decomposition preserves the original K and authority hashes.
+Schema-1.0 raw-query behavior is retained only under explicit
+`schema1_compatibility`.
 
 ### 12.13 Domain proposal prompt and local authority
 

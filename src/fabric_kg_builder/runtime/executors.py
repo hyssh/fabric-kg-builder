@@ -35,6 +35,10 @@ from fabric_kg_builder.semantic.query_validation import (
     resolve_query_plan,
     validate_physical_query as _validate_physical_query,
 )
+from fabric_kg_builder.semantic.query_rendering import (
+    render_bounded_gql,
+    validate_bounded_query_plan,
+)
 from fabric_kg_builder.semantic.schemas import (
     PersistedQuerySchema,
     compute_query_plan_hash,
@@ -112,6 +116,9 @@ def _failure(
             )
         else:
             result_category = QueryExecutionStatus.PLATFORM_FAILURE
+    bounded_schema2 = bool(
+        diagnostics and diagnostics.get("query_authority_hash")
+    )
     return {
         "status": "failed",
         "result_category": result_category.value,
@@ -123,7 +130,11 @@ def _failure(
         "error_type": type(error).__name__
         if isinstance(error, Exception)
         else "RuntimeError",
-        "error_message": str(error),
+        "error_message": (
+            result_category.value
+            if bounded_schema2
+            else str(error)
+        ),
         "remediation": remediation,
         **(diagnostics or {}),
     }
@@ -398,11 +409,15 @@ class FabricGraphExecutor:
             return {"status": "not_expected", "timestamp_utc": _utc_now()}
         started = time.monotonic()
         semantic_plan = case.semantic_plan or probe.semantic_plan
+        schema2_bounded = (
+            self._query_schema is not None
+            and self._query_schema.schema_mode == "schema2_bounded"
+        )
         query_diagnostics: dict[str, Any] = {
             "physical_query_hash": compute_physical_query_hash(probe.query),
             "semantic_plan": (
                 semantic_plan.model_dump(mode="json")
-                if semantic_plan is not None
+                if semantic_plan is not None and not schema2_bounded
                 else None
             ),
             "semantic_plan_hash": (
@@ -416,7 +431,25 @@ class FabricGraphExecutor:
                 else None
             ),
             "static_validation_passed": False,
+            "actual_hop_count": 0,
+            "route": "direct_graph",
         }
+        if (
+            schema2_bounded
+            and self._query_schema is not None
+            and self._query_schema.authority is not None
+        ):
+            query_diagnostics.update({
+                "domain_contract_hash": (
+                    self._query_schema.authority.domain_contract_hash
+                ),
+                "query_authority_hash": (
+                    self._query_schema.authority.authority_hash
+                ),
+                "approved_max_hops": (
+                    self._query_schema.authority.approved_max_hops
+                ),
+            })
 
         if self._query_schema is not None:
             if semantic_plan is None:
@@ -461,11 +494,60 @@ class FabricGraphExecutor:
                     ),
                     diagnostics=query_diagnostics,
                 )
+            if schema2_bounded:
+                bounded_findings = validate_bounded_query_plan(
+                    semantic_plan,
+                    self._query_schema,
+                )
+                if bounded_findings:
+                    elapsed = (time.monotonic() - started) * 1000
+                    return _failure(
+                        error=(
+                            "Bounded query authority validation failed: "
+                            + "; ".join(
+                                finding.code
+                                for finding in bounded_findings
+                            )
+                        ),
+                        remediation=(
+                            "Recompile the competency contract from the "
+                            "approved DomainContractV2 and current query schema."
+                        ),
+                        elapsed_ms=elapsed,
+                        result_category=(
+                            QueryExecutionStatus.INVALID_SEMANTIC_PLAN
+                        ),
+                        diagnostics=query_diagnostics,
+                    )
 
+        query = probe.query
+        if schema2_bounded:
+            if semantic_plan is None or self._query_schema is None:
+                raise RuntimeError(
+                    "Schema-2 bounded execution requires plan and query schema."
+                )
+            query = render_bounded_gql(semantic_plan, self._query_schema)
+            if query != probe.query:
+                elapsed = (time.monotonic() - started) * 1000
+                return _failure(
+                    error="Compiled Graph probe differs from deterministic render.",
+                    remediation=(
+                        "Recompile the competency and agent artifacts from the "
+                        "current bounded query authority."
+                    ),
+                    elapsed_ms=elapsed,
+                    result_category=(
+                        QueryExecutionStatus.INVALID_PHYSICAL_QUERY
+                    ),
+                    diagnostics=query_diagnostics,
+                )
+            query_diagnostics["physical_query_hash"] = (
+                compute_physical_query_hash(query)
+            )
         # §9.2: Validate physical query before submission — fenced/projection-less
         # queries must be blocked before they reach the GQL execution layer.
         _qfindings = _validate_physical_query(
-            probe.query,
+            query,
             semantic_plan,
             relationship_labels=probe.relationship_labels,
             type_labels=probe.type_labels,
@@ -510,10 +592,15 @@ class FabricGraphExecutor:
         query_diagnostics["static_validation_passed"] = True
 
         try:
+            query_diagnostics["actual_hop_count"] = (
+                len(semantic_plan.path_steps)
+                if semantic_plan is not None
+                else 0
+            )
             response = self._client.execute_query_all_pages(
                 self._workspace_id,
                 self._graph_model_id,
-                probe.query,
+                query,
             )
             code = str(response.get("status", {}).get("code") or "")
             if not code or code[:2] not in {"00", "01", "02", "03"}:

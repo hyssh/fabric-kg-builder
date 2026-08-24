@@ -280,6 +280,26 @@ class SDKAgentTransport:
                 metadata={
                     "instructions_version": str(definition.get("system_prompt_version", "")),
                     "instructions_hash": str(definition.get("instructions_hash", "")),
+                    "query_authority_hash": str(
+                        definition.get("query_authority", {}).get(
+                            "query_authority_hash", ""
+                        )
+                    ),
+                    "domain_contract_hash": str(
+                        definition.get("query_authority", {}).get(
+                            "domain_contract_hash", ""
+                        )
+                    ),
+                    "approved_max_hops": str(
+                        definition.get("query_authority", {}).get(
+                            "approved_max_hops", ""
+                        )
+                    ),
+                    "persisted_query_schema_hash": str(
+                        definition.get("query_authority", {}).get(
+                            "persisted_query_schema_hash", ""
+                        )
+                    ),
                 },
                 description=definition.get("description", ""),
             )

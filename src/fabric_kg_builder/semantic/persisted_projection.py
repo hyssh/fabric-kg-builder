@@ -823,6 +823,12 @@ def prepare_semantic_tables(
     availability = {
         item.semantic_id: item for item in plan.data_availability
     }
+    entity_table_by_id = {
+        table.semantic_id: table for table in plan.entity_tables
+    }
+    relationship_table_by_id = {
+        table.semantic_id: table for table in plan.relationship_tables
+    }
     strict_schema2 = (
         plan.source_taxonomy_version is not None
         if strict_schema2 is None
@@ -1802,6 +1808,18 @@ def validate_graph_query_readiness(
             relationship.graph_projection.source_label,
             relationship.graph_projection.label,
             relationship.graph_projection.target_label,
+            src_id_property=entity_table_by_id[
+                relationship.source_type_id
+            ].entity_id_column,
+            evidence_property=(
+                relationship_table_by_id[
+                    relationship.semantic_id
+                ].evidence_column
+                or "evidence_id"
+            ),
+            dst_id_property=entity_table_by_id[
+                relationship.target_type_id
+            ].entity_id_column,
         )
         try:
             typed_response = gql_client.execute_query(

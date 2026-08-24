@@ -2864,6 +2864,7 @@ def deploy_data_agent_cmd(
     from fabric_kg_builder.knowledge.transport import RequestsTransport  # noqa: PLC0415
     from fabric_kg_builder.semantic import (  # noqa: PLC0415
         PersistedProjectionReceipt,
+        PersistedQuerySchema,
         build_contract_agent_instructions,
         build_graph_source_description,
         build_graph_source_instructions,
@@ -2918,6 +2919,11 @@ def deploy_data_agent_cmd(
                 packaged_instructions.encode("utf-8")
             ).hexdigest()
         )
+        query_schema = PersistedQuerySchema.model_validate_json(
+            (agent_dir / "persisted-query-schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
         grounding = build_persisted_agent_grounding(
             manifest=loaded.manifest,
             crosswalk=loaded.crosswalk,
@@ -2926,6 +2932,7 @@ def deploy_data_agent_cmd(
             projection_receipt_hash=persisted_hash,
             workspace_id=workspace_id,
             graph_model_id=graph_model_id,
+            query_schema=query_schema,
         )
         public_elements, public_metadata = (
             build_public_ontology_source_projection(grounding)

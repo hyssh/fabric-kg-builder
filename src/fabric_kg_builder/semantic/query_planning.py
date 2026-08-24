@@ -28,13 +28,21 @@ alongside the schema-aware extension of ``validate_physical_query``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field, replace
 
 from pydantic import ValidationError as _PydanticValidationError
 
+from fabric_kg_builder.domain.models import DomainContractV2
+from fabric_kg_builder.domain.service import compute_contract_hash
+
 from .query_validation import QueryFinding
 from .schemas import (
+    ApprovedQueryPath,
+    BoundedQueryAuthority,
     ComplexityBudget,
+    MaterializationPlan,
     PersistedQueryNodeSchema,
     PersistedQueryRelationshipSchema,
     PersistedQuerySchema,
@@ -42,6 +50,7 @@ from .schemas import (
     SemanticModelManifest,
     SemanticPathStep,
     SemanticQueryPlan,
+    compute_bounded_query_authority_hash,
     compute_persisted_query_schema_hash,
     compute_query_plan_hash,
 )
@@ -54,6 +63,9 @@ from .schemas import (
 def build_persisted_query_schema(
     manifest: SemanticModelManifest,
     crosswalk: SemanticCrosswalk | None = None,
+    *,
+    materialization_plan: MaterializationPlan | None = None,
+    domain_contract: DomainContractV2 | None = None,
 ) -> PersistedQuerySchema:
     """Deterministically derive and seal a PersistedQuerySchema.
 
@@ -104,6 +116,23 @@ def build_persisted_query_schema(
             f"'{manifest.manifest_hash}'. A persisted query schema must be "
             "derived from a manifest/crosswalk pair with matching identity."
         )
+    if (
+        materialization_plan is not None
+        and materialization_plan.manifest_hash
+        and manifest.manifest_hash
+        and materialization_plan.manifest_hash != manifest.manifest_hash
+    ):
+        raise ValueError(
+            "MaterializationPlan.manifest_hash does not match the semantic "
+            "manifest used for persisted query schema derivation."
+        )
+    if domain_contract is not None and (
+        crosswalk is None or materialization_plan is None
+    ):
+        raise ValueError(
+            "Schema-2 bounded query authority requires both semantic crosswalk "
+            "and materialization plan."
+        )
 
     crosswalk_entity_labels: dict[str, str] = {}
     crosswalk_relationship_labels: dict[str, str] = {}
@@ -132,6 +161,14 @@ def build_persisted_query_schema(
         if physical_key and prop.owner_type_id in owner_properties:
             owner_properties[prop.owner_type_id][prop.property_id] = physical_key
 
+    table_by_type = {
+        table.semantic_id: table
+        for table in (
+            materialization_plan.entity_tables
+            if materialization_plan is not None
+            else []
+        )
+    }
     nodes = [
         PersistedQueryNodeSchema(
             semantic_id=entity.semantic_id,
@@ -141,11 +178,29 @@ def build_persisted_query_schema(
                 or ""
             ),
             owner_properties=owner_properties.get(entity.semantic_id, {}),
+            id_property=(
+                table_by_type[entity.semantic_id].entity_id_column
+                if entity.semantic_id in table_by_type
+                else ""
+            ),
+            display_property=(
+                table_by_type[entity.semantic_id].display_name_column
+                if entity.semantic_id in table_by_type
+                else ""
+            ),
         )
         for entity in manifest.entity_types
     ]
 
     node_labels_by_id = {node.semantic_id: node.label for node in nodes}
+    relationship_table_by_id = {
+        table.semantic_id: table
+        for table in (
+            materialization_plan.relationship_tables
+            if materialization_plan is not None
+            else []
+        )
+    }
     relationships = [
         PersistedQueryRelationshipSchema(
             semantic_id=relationship.semantic_id,
@@ -159,18 +214,175 @@ def build_persisted_query_schema(
             source_label=node_labels_by_id.get(relationship.source_type_id, ""),
             target_label=node_labels_by_id.get(relationship.target_type_id, ""),
             direction=relationship.direction,
+            evidence_property=(
+                relationship_table_by_id[relationship.semantic_id].evidence_column
+                or ""
+                if relationship.semantic_id in relationship_table_by_id
+                else ""
+            ),
         )
         for relationship in manifest.relationship_types
     ]
 
+    crosswalk_hash = (
+        _canonical_payload_hash(crosswalk.model_dump(mode="json"))
+        if crosswalk is not None
+        else ""
+    )
+    authority = (
+        build_bounded_query_authority(
+            domain_contract,
+            manifest=manifest,
+            crosswalk=crosswalk,
+            nodes=nodes,
+            relationships=relationships,
+        )
+        if domain_contract is not None
+        else None
+    )
     schema = PersistedQuerySchema(
+        schema_mode=(
+            "schema2_bounded"
+            if authority is not None
+            else "schema1_compatibility"
+        ),
         manifest_hash=manifest.manifest_hash,
+        semantic_crosswalk_hash=crosswalk_hash,
+        authority=authority,
         nodes=nodes,
         relationships=relationships,
     )
     return schema.model_copy(
         update={"schema_hash": compute_persisted_query_schema_hash(schema)}
     )
+
+
+def _canonical_payload_hash(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def build_bounded_query_authority(
+    contract: DomainContractV2,
+    *,
+    manifest: SemanticModelManifest,
+    crosswalk: SemanticCrosswalk,
+    nodes: list[PersistedQueryNodeSchema],
+    relationships: list[PersistedQueryRelationshipSchema],
+) -> BoundedQueryAuthority:
+    """Resolve approved schema-2 K/question paths to persisted Graph identity."""
+    if contract.approval.status != "approved":
+        raise ValueError(
+            "Schema-2 query authority requires an approved DomainContractV2."
+        )
+    computed_contract_hash = compute_contract_hash(contract)
+    if contract.approval.contract_hash != computed_contract_hash:
+        raise ValueError(
+            "Approved schema-2 domain contract hash does not match its contents."
+        )
+    if crosswalk.manifest_hash != manifest.manifest_hash:
+        raise ValueError(
+            "Schema-2 query authority requires a crosswalk bound to the "
+            "current semantic manifest."
+        )
+
+    node_by_id = {node.semantic_id: node for node in nodes}
+    relationship_by_id = {
+        relationship.semantic_id: relationship
+        for relationship in relationships
+    }
+    resolved_paths: list[ApprovedQueryPath] = []
+    for question_plan in contract.question_plans:
+        if not question_plan.covered:
+            resolved_paths.append(ApprovedQueryPath(
+                question_id=question_plan.question_id,
+                covered=False,
+                unsupported_reason=question_plan.unsupported_reason,
+            ))
+            continue
+        steps: list[SemanticPathStep] = []
+        for index, approved_step in enumerate(question_plan.required_path):
+            relationship = relationship_by_id.get(
+                approved_step.relationship_type
+            )
+            if relationship is None:
+                raise ValueError(
+                    "Approved question path references relationship absent from "
+                    f"the semantic manifest: {approved_step.relationship_type}."
+                )
+            from_node = node_by_id.get(approved_step.from_type)
+            to_node = node_by_id.get(approved_step.to_type)
+            if from_node is None or to_node is None:
+                raise ValueError(
+                    "Approved question path references an entity type absent "
+                    "from the semantic manifest."
+                )
+            direction = (
+                "source_to_target"
+                if approved_step.traversal == "forward"
+                else "target_to_source"
+            )
+            expected_from, expected_to = (
+                (
+                    relationship.source_type_id,
+                    relationship.target_type_id,
+                )
+                if direction == "source_to_target"
+                else (
+                    relationship.target_type_id,
+                    relationship.source_type_id,
+                )
+            )
+            if (
+                approved_step.from_type != expected_from
+                or approved_step.to_type != expected_to
+            ):
+                raise ValueError(
+                    "Approved question path endpoint/direction differs from the "
+                    f"semantic crosswalk for {approved_step.relationship_type}."
+                )
+            steps.append(SemanticPathStep(
+                step_id=f"{question_plan.question_id}:hop:{index + 1}",
+                from_type_id=approved_step.from_type,
+                via_relationship_id=approved_step.relationship_type,
+                to_type_id=approved_step.to_type,
+                direction=direction,
+                relationship_graph_label=relationship.label,
+                from_graph_label=from_node.label,
+                to_graph_label=to_node.label,
+                from_endpoint_property=from_node.id_property,
+                to_endpoint_property=to_node.id_property,
+                evidence_property=relationship.evidence_property,
+            ))
+        resolved_paths.append(ApprovedQueryPath(
+            question_id=question_plan.question_id,
+            covered=True,
+            steps=steps,
+        ))
+
+    authority = BoundedQueryAuthority(
+        domain_contract_hash=computed_contract_hash,
+        reasoning_policy_hash=_canonical_payload_hash(
+            contract.reasoning_policy.model_dump(mode="json")
+        ),
+        question_plans_hash=_canonical_payload_hash([
+            plan.model_dump(mode="json")
+            for plan in contract.question_plans
+        ]),
+        semantic_manifest_hash=manifest.manifest_hash,
+        semantic_crosswalk_hash=_canonical_payload_hash(
+            crosswalk.model_dump(mode="json")
+        ),
+        approved_max_hops=contract.reasoning_policy.max_hops,
+        question_paths=resolved_paths,
+    )
+    return authority.model_copy(update={
+        "authority_hash": compute_bounded_query_authority_hash(authority)
+    })
 
 
 # ---------------------------------------------------------------------------

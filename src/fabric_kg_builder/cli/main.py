@@ -101,7 +101,7 @@ PowerShell example (large document set):
   fabric-kg compile-semantic --data-dir build\\parquet
   fabric-kg compile-ontology --semantic-dir build\\semantic --env dev
   fabric-kg compile-graph --semantic-dir build\\semantic
-  fabric-kg compile-agent --semantic-dir build\\semantic
+  fabric-kg compile-agent --semantic-dir build\\semantic --domain-contract domain.yaml
   fabric-kg compile-search --input build\\parquet
   fabric-kg validate-artifacts --build-dir build --require-search
   fabric-kg deploy-lakehouse --env dev --parquet-dir build\\parquet --no-mock

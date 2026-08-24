@@ -1567,6 +1567,7 @@ def test_offline_semantic_graph_and_agent_compile_commands(
             str(semantic_out),
             "--out",
             str(agent_out),
+            "--schema1-compatibility",
             "--question",
             "Which subjects have events?",
             "--competency-suite",
@@ -1764,7 +1765,11 @@ def test_offline_semantic_graph_and_agent_compile_commands(
         evaluation=evaluation,
     )
 
-    assert deployment_validation["status"] == "passed"
+    assert deployment_validation["status"] == "passed", json.dumps(
+        deployment_validation,
+        indent=2,
+        sort_keys=True,
+    )
     assert evaluation["violations"] == [], evaluation["metrics"]
     assert evaluation["status"] == "passed", evaluation
     assert report["status"] == "passed"
@@ -1882,6 +1887,7 @@ def test_artifact_validation_rejects_graph_definition_drift(
             str(semantic_dir),
             "--out",
             str(build / "agents"),
+            "--schema1-compatibility",
         ],
     )
     assert agent_result.exit_code == 0, agent_result.output
@@ -1943,15 +1949,18 @@ def test_artifact_validation_rejects_query_schema_model_manifest_drift(
         ("compile-graph", "graph"),
         ("compile-agent", "agents"),
     ):
+        command_args = [
+            command,
+            "--semantic-dir",
+            str(semantic_dir),
+            "--out",
+            str(build / out_name),
+        ]
+        if command == "compile-agent":
+            command_args.append("--schema1-compatibility")
         result = CliRunner().invoke(
             cli,
-            [
-                command,
-                "--semantic-dir",
-                str(semantic_dir),
-                "--out",
-                str(build / out_name),
-            ],
+            command_args,
         )
         assert result.exit_code == 0, result.output
 

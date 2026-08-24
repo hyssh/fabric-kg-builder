@@ -117,8 +117,12 @@ def build_semantic_data_agent_spec(
     graph_model_name: str,
     ontology_plan: MultitypePlan,
     graph_parts: list[dict[str, Any]],
+    approved_max_hops: int = 4,
+    schema_mode: str = "schema1_compatibility",
 ) -> DataAgentSpec:
     """Build current graph/ontology sources with grounded schema guidance."""
+    if not 1 <= approved_max_hops <= 4:
+        raise ValueError("approved_max_hops must be between one and four.")
     graph_type = _graph_type(graph_parts)
     node_elements = _node_elements(graph_type)
     edge_elements = _edge_elements(graph_type)
@@ -141,6 +145,8 @@ def build_semantic_data_agent_spec(
         "Project has an event_date.",
         "Use one hop first. If it returns no rows, retry once with a "
         "simpler entity-discovery query before reporting no graph result.",
+        f"Never exceed the approved K={approved_max_hops}; unsupported paths "
+        "must abstain rather than increasing K.",
         "Return citation_json with factual findings so the user can trace "
         "the supporting source. Do not invent dates, relationships, or "
         "maintenance activity.",
@@ -239,11 +245,15 @@ def build_semantic_data_agent_spec(
         "Use only selected node and edge labels. Backtick-quote all identifiers.",
         "Preserve every directed edge exactly; do not reverse traversal direction.",
         "Prefer one-hop MATCH patterns; use OPTIONAL MATCH only for optional later hops.",
-        "Keep each query within 4 hops and LIMIT 100.",
+        f"Keep each query within the approved K={approved_max_hops} and LIMIT 100.",
         "Return endpoint entity IDs and citation_json for relationship findings.",
         "A valid empty result means no verified relationship was found.",
         f"Selected graph edge labels: {', '.join(graph_labels)}.",
     ]
+    if schema_mode == "schema2_bounded":
+        graph_source_lines.append(
+            "Use approved structured plans only; never author raw GQL."
+        )
     graph_source_instruction = "\n".join(graph_source_lines)
 
     ontology_elements = [

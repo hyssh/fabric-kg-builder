@@ -131,6 +131,7 @@ def deploy_agent(
     metadata_path: str | Path | None = None,
     entity_types: list[str] | None = None,
     domain_context: str | None = None,
+    query_authority: dict[str, object] | None = None,
     dry_run: bool = False,
     smoke_timeout_s: int = 60,
     require_grounding_tools: bool = False,
@@ -197,7 +198,7 @@ def deploy_agent(
             "query_type": "vector_semantic_hybrid",
             "top_k": 5,
         })
-    if fabric_connection_id:
+    if fabric_connection_id and not query_authority:
         tool_specs.append({
             "type": "fabric_data_agent",
             "project_connection_id": fabric_connection_id,
@@ -222,7 +223,7 @@ def deploy_agent(
                 "environments.<env>.connections.search and "
                 "knowledge.searchIndexName"
             )
-        if not fabric_connection_id:
+        if not fabric_connection_id and not query_authority:
             missing.append(
                 "environments.<env>.connections.fabricDataAgent "
                 "(create the Microsoft Fabric project connection in Foundry)"
@@ -237,6 +238,7 @@ def deploy_agent(
         version=INSTRUCTIONS_VERSION,
         entity_types=entity_types,
         domain_context=domain_context,
+        query_authority=query_authority,
     )
     instructions_hash = _hash_instructions(instructions)
     image_tag = _timestamp_tag()
@@ -309,6 +311,7 @@ def deploy_agent(
         "instructions_hash": instructions_hash,
         "image_tag": image_tag,
         "tools": tool_specs,
+        "query_authority": query_authority or {},
     }
 
     # -- Step 5: create/update (create_version) --------------------------------

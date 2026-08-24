@@ -580,6 +580,11 @@ class DeploymentRuntimeConfig(_StrictModel):
     receipt_path: Path | None = None
     receipt_sha256: str | None = None
     semantic_contract_hash: str | None = None
+    domain_contract_hash: str | None = None
+    reasoning_policy_hash: str | None = None
+    question_plans_hash: str | None = None
+    query_authority_hash: str | None = None
+    approved_max_hops: int | None = Field(default=None, ge=1, le=4)
     semantic_artifact_set_hash: str | None = None
     graph_artifact_set_hash: str | None = None
     search_artifact_set_hash: str | None = None
@@ -660,6 +665,11 @@ def _merge_deployment_receipt(
             "semantic_contract_hash": receipt.get(
                 "semantic_contract_hash"
             ),
+            "domain_contract_hash": receipt.get("domain_contract_hash"),
+            "reasoning_policy_hash": receipt.get("reasoning_policy_hash"),
+            "question_plans_hash": receipt.get("question_plans_hash"),
+            "query_authority_hash": receipt.get("query_authority_hash"),
+            "approved_max_hops": receipt.get("approved_max_hops"),
             "semantic_artifact_set_hash": receipt.get(
                 "semantic_artifact_set_hash"
             ),
@@ -864,6 +874,32 @@ class RuntimeEvidenceCollector:
                 "Competency query schema manifest does not match the "
                 "deployment semantic model manifest."
             )
+        if (
+            contract.query_schema is not None
+            and contract.query_schema.schema_mode == "schema2_bounded"
+        ):
+            authority = contract.query_schema.authority
+            if authority is None:
+                raise RuntimeCollectionError(
+                    "Schema-2 runtime query authority is missing."
+                )
+            expected = {
+                "domain_contract_hash": authority.domain_contract_hash,
+                "reasoning_policy_hash": authority.reasoning_policy_hash,
+                "question_plans_hash": authority.question_plans_hash,
+                "query_authority_hash": authority.authority_hash,
+                "approved_max_hops": authority.approved_max_hops,
+            }
+            mismatched = sorted(
+                field_name
+                for field_name, value in expected.items()
+                if getattr(config.deployment, field_name) != value
+            )
+            if mismatched:
+                raise RuntimeCollectionError(
+                    "Deployment receipt bounded query authority differs from "
+                    f"the competency contract: {mismatched}."
+                )
         self._graph = graph_executor
         self._search = search_executor
         self._mcp = mcp_executor
@@ -1426,6 +1462,7 @@ class RuntimeEvidenceCollector:
         )
         try:
             record = SemanticDiagnosticRecord(
+                schema_mode=query_schema.schema_mode,
                 export_freshness_watermark=_timestamp_utc(),
                 partial_snapshot=False,
                 overlapping_snapshot=False,
@@ -1433,6 +1470,16 @@ class RuntimeEvidenceCollector:
                 target_item_id=target_item_id,
                 semantic_contract_hash=str(
                     required_hashes["semantic_contract_hash"]
+                ),
+                domain_contract_hash=(
+                    query_schema.authority.domain_contract_hash
+                    if query_schema.authority is not None
+                    else ""
+                ),
+                query_authority_hash=(
+                    query_schema.authority.authority_hash
+                    if query_schema.authority is not None
+                    else ""
                 ),
                 manifest_hash=str(
                     required_hashes["semantic_model_manifest_hash"]
@@ -1453,9 +1500,21 @@ class RuntimeEvidenceCollector:
                 query_schema_hash=str(
                     required_hashes["persisted_query_schema_hash"]
                 ),
+                route=(
+                    "direct_graph"
+                    if graph.get("status") != "not_expected"
+                    else "composed"
+                ),
                 selected_source=",".join(selected_sources),
-                semantic_plan=semantic_plan,
+                semantic_plan=(
+                    None
+                    if query_schema.schema_mode == "schema2_bounded"
+                    else semantic_plan
+                ),
                 semantic_plan_hash=compute_query_plan_hash(semantic_plan),
+                actual_hop_count=int(
+                    graph.get("actual_hop_count") or 0
+                ),
                 physical_query_hash=str(physical_query_hash),
                 static_validation_passed=bool(
                     graph.get("static_validation_passed", True)

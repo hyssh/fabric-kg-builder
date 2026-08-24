@@ -84,6 +84,7 @@ def build_routing_instructions(
     version: str = INSTRUCTIONS_VERSION,
     entity_types: list[str] | None = None,
     domain_context: str | None = None,
+    query_authority: dict[str, object] | None = None,
 ) -> str:
     """Return the versioned system prompt for the grounded agent.
 
@@ -104,4 +105,32 @@ def build_routing_instructions(
             "\nAPPROVED DOMAIN CONTEXT:\n"
             f"{domain_context.strip()}\n"
         )
+    if query_authority:
+        max_hops = int(query_authority.get("approved_max_hops") or 0)
+        authority_hash = str(
+            query_authority.get("query_authority_hash") or ""
+        )
+        plan_ids = query_authority.get("approved_plan_ids")
+        if not 1 <= max_hops <= 4 or not authority_hash:
+            raise ValueError(
+                "Foundry schema-2 grounding requires approved K and query "
+                "authority hash."
+            )
+        rendered_ids = [
+            str(item) for item in plan_ids
+        ] if isinstance(plan_ids, list) else []
+        base += (
+            "\nBOUNDED GRAPH QUERY AUTHORITY\n"
+            f"  • Approved maximum hops K={max_hops}; never increase it.\n"
+            "  • Use only approved bounded plans and scalar ID/display/evidence "
+            "outputs with LIMIT 100.\n"
+            "  • Never author or submit raw GQL. Abstain when no approved plan "
+            "applies; decompose only into approved bounded subquestions.\n"
+            "  • This Foundry agent has no unrestricted Graph/Data Agent tool. "
+            "Use only a separately validated bounded plan execution surface; "
+            "if it is unavailable, abstain.\n"
+            f"  • Query authority hash: {authority_hash}.\n"
+        )
+        if rendered_ids:
+            base += "  • Approved plan IDs: " + ", ".join(rendered_ids) + ".\n"
     return base

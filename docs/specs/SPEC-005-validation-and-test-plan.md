@@ -1234,7 +1234,12 @@ remain unchanged.
 | SEM-104 | compile-data | Candidate lifecycle counts do not reconcile exactly |
 | DEP-101 | compile/deploy | Ontology or Graph selects a raw relationship source instead of the sealed semantic projection |
 | DEP-102 | deploy/read-back | Compile, prepared deploy, or persisted count/hash evidence differs |
-| QRY-101 | query planning | A generated path exceeds approved K or uses unbounded traversal |
+| QRY-101 | query planning | A structured or generated path exceeds approved K, K exceeds four, or traversal is variable-length/unbounded |
+| QRY-102 | query authority | Domain/reasoning/question-plan/semantic-manifest/crosswalk/query-schema/plan hashes or K are missing, stale, or inconsistent |
+| QRY-103 | query plan | A hop uses an unapproved relationship/label/property, loses direction, reverses without an explicit compatible reverse step, or has mismatched endpoints |
+| QRY-104 | physical query | GQL differs from deterministic structured-plan rendering, contains an extra hop, returns a whole node/edge, lacks a limit, or uses `LIMIT > 100` |
+| QRY-105 | agent boundary | A schema-2 Data Agent, Foundry agent, or Fabric tool exposes raw GQL or a plan outside the approved bounded set; unsupported/over-K requests do not abstain |
+| QRY-106 | telemetry | A query receipt omits actual hop count/route/status/timing/authority hashes or contains GQL, source content, secrets, raw parameters, or unsanitized remote errors |
 
 SEM-100 through SEM-104 consume the shared semantic projection receipt; gates
 must not independently reimplement filtering. A failed receipt leaves serving
@@ -1309,8 +1314,26 @@ serialization. CLI tests inject a deterministic Foundry client and assert that
 user/source/correction content is sent only in the user message.
 
 Layers 3-5 add exact-span, subtype, lifecycle, and materialization evidence.
-Later layers add runtime query, isolated installation, and live-smoke evidence
-without weakening these gates.
+Layer 6 adds runtime query authority; later layers add isolated installation and
+live-smoke evidence without weakening these gates.
+
+### 15.3 Layer-6 bounded query regression matrix
+
+- approved one-hop and directed three-hop paths;
+- justified four-hop path and universal five-hop rejection;
+- explicit reverse traversal with endpoint-compatible direction;
+- rejection of unbounded `*`/range traversal;
+- rejection of unapproved relationship labels and endpoint mismatch;
+- rejection of whole-node/whole-edge returns and `LIMIT > 100`;
+- stale domain, reasoning-policy, question-plan, manifest, crosswalk,
+  query-schema, plan, and K bindings;
+- deterministic structured-plan rendering before direct Graph execution;
+- raw-GQL bypass rejection before transport or agent tool invocation;
+- actual-hop, route, status, timing, and hash telemetry with sanitized errors;
+- Data Agent/Foundry instructions, examples, descriptors, sidecars, and
+  publication receipts exposing only approved K/plans;
+- unsupported and over-K abstention without silent K increase; and
+- unchanged behavior under explicit `schema1_compatibility`.
 
 ### 15.2 Layer-5 deployment regression matrix
 

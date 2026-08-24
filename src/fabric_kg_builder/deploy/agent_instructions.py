@@ -52,7 +52,9 @@ def _gql_template(src: str, name: str, tgt: str) -> str:
     return (
         f"MATCH (a:`{src}`)-[:`{name}`]->(b:`{tgt}`)\n"
         "WHERE LOWER(a.`display_name`) CONTAINS LOWER(\"<keyword>\")\n"
-        "RETURN a.`display_name`, b.`display_name`"
+        "RETURN a.`entity_id`, a.`display_name`, "
+        "b.`entity_id`, b.`display_name`\n"
+        "LIMIT 100"
     )
 
 

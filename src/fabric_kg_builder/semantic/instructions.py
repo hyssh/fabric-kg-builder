@@ -18,6 +18,27 @@ def _contract_identity(semantic_context: dict[str, Any]) -> tuple[str, str, str]
     return contract_name, contract_hash, contract_description
 
 
+def _bounded_query_policy(semantic_context: dict[str, Any]) -> tuple[int, list[str]]:
+    if semantic_context.get("schema_mode") != "schema2_bounded":
+        return 4, []
+    max_hops = int(semantic_context.get("approved_max_hops") or 0)
+    authority_hash = str(
+        semantic_context.get("query_authority_hash") or ""
+    ).strip()
+    if not 1 <= max_hops <= 4 or not authority_hash:
+        raise ValueError(
+            "Schema-2 agent context requires approved_max_hops in 1..4 and "
+            "query_authority_hash."
+        )
+    paths = semantic_context.get("approved_query_paths")
+    approved_ids = [
+        str(path.get("question_id"))
+        for path in paths
+        if isinstance(path, dict) and path.get("covered") is True
+    ] if isinstance(paths, list) else []
+    return max_hops, approved_ids
+
+
 def build_contract_agent_instructions(
     semantic_context: dict[str, Any],
     *,
@@ -28,6 +49,8 @@ def build_contract_agent_instructions(
     contract_name, contract_hash, contract_description = _contract_identity(
         semantic_context
     )
+    max_hops, approved_plan_ids = _bounded_query_policy(semantic_context)
+    schema2_bounded = semantic_context.get("schema_mode") == "schema2_bounded"
     questions = [
         question.strip()
         for question in competency_questions
@@ -68,10 +91,27 @@ def build_contract_agent_instructions(
             "If no verified row exists, say the relationship is unsupported.",
             "- Report authentication, timeout, platform, and query errors as source "
             "failures; never convert them into no-data.",
-            "- Keep queries bounded to 4 hops and 100 rows. Do not invent labels, "
+            (
+                f"- Keep queries bounded to the approved K={max_hops} and 100 rows. "
+                if schema2_bounded
+                else "- Keep queries bounded to 4 hops and 100 rows. "
+            )
+            + "Do not invent labels, "
             "properties, dates, identities, or replacement links.",
         ]
     )
+    if schema2_bounded:
+        lines.append(
+            "- Use only approved bounded query plans. Abstain when no approved "
+            "plan applies; decompose only into approved bounded subquestions and "
+            "never increase K."
+        )
+    if approved_plan_ids:
+        lines.append(
+            "- Approved bounded plan IDs: "
+            + ", ".join(f"`{item}`" for item in approved_plan_ids[:10])
+            + "."
+        )
     if questions:
         lines.extend(["", "## Representative questions"])
         lines.extend(f"- {question}" for question in questions)
@@ -138,17 +178,35 @@ def build_graph_source_instructions(
         are currently unobserved so the agent does not over-claim.
     """
     contract_name, contract_hash, _ = _contract_identity(semantic_context)
+    max_hops, approved_plan_ids = _bounded_query_policy(semantic_context)
+    schema2_bounded = semantic_context.get("schema_mode") == "schema2_bounded"
     lines = [
         f"Query this Graph using `{contract_name}` (`{contract_hash}`).",
         "Use only selected node, edge, and property identifiers. Backtick-quote "
         "identifiers and preserve every directed edge exactly.",
         "Prefer one-hop MATCH patterns; use OPTIONAL MATCH only for later optional "
-        "hops. Keep each query within 4 hops and LIMIT 100.",
+        + (
+            f"hops. Keep each query within the approved K={max_hops} and LIMIT 100."
+            if schema2_bounded
+            else "hops. Keep each query within 4 hops and LIMIT 100."
+        ),
         "Return endpoint entity IDs and `evidence_id` for relationship findings. "
         "Do not infer edges from names, shared documents, or physical proximity.",
         "A valid empty result means no verified relationship was found. Surface "
         "execution failures separately instead of answering from memory.",
     ]
+    if schema2_bounded:
+        lines.insert(
+            -1,
+            "Use only approved bounded plan IDs. If none applies, abstain; never "
+            "author raw GQL or silently raise K.",
+        )
+    if approved_plan_ids:
+        lines.append(
+            "Approved bounded plans: "
+            + ", ".join(f"`{item}`" for item in approved_plan_ids[:10])
+            + "."
+        )
     avail_dict = _normalize_availability(availability)
     if avail_dict:
         unobserved = sorted(
