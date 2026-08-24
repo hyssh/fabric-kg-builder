@@ -137,6 +137,15 @@ TemporalPrecision = Literal[
 # ---------------------------------------------------------------------------
 
 
+class EntityOccurrenceAnchor(BaseModel):
+    """Model-proposed local entity mention verified against source text."""
+
+    text_unit_id: str = ""
+    span_start: Any = None
+    span_end: Any = None
+    quote: str = ""
+
+
 class Entity(BaseModel):
     """Candidate entity extracted by the LLM (SPEC-004 §4.2).
 
@@ -182,6 +191,13 @@ class Entity(BaseModel):
     evidence_id_hints: list[str] = Field(
         default_factory=list,
         description="Evidence id_hints supporting entity identity.",
+    )
+    occurrence_anchors: list[EntityOccurrenceAnchor] = Field(
+        default_factory=list,
+        description=(
+            "Exact local mentions used to ground relationship endpoints. "
+            "The runner verifies offsets and quote equality."
+        ),
     )
     parent_id_hint: Optional[str] = Field(
         default=None,
@@ -461,6 +477,12 @@ class Relationship(BaseModel):
     source_inheritance_path: list[str] = Field(default_factory=list)
     target_inheritance_path: list[str] = Field(default_factory=list)
     validation_authority: Literal["schema2"] | None = None
+    resolved_source_entity_id: str | None = None
+    resolved_target_entity_id: str | None = None
+    source_grounding_span_start: int | None = None
+    source_grounding_span_end: int | None = None
+    target_grounding_span_start: int | None = None
+    target_grounding_span_end: int | None = None
 
     @model_validator(mode="after")
     def _merge_evidence_hints(self) -> "Relationship":
@@ -790,6 +812,12 @@ _RUNNER_OWNED_FIELDS: dict[str, frozenset[str]] = {
             "source_inheritance_path",
             "target_inheritance_path",
             "validation_authority",
+            "resolved_source_entity_id",
+            "resolved_target_entity_id",
+            "source_grounding_span_start",
+            "source_grounding_span_end",
+            "target_grounding_span_start",
+            "target_grounding_span_end",
         }
     ),
     "evidence": frozenset({"runner_verified"}),

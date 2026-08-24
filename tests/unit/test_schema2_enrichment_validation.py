@@ -9,10 +9,18 @@ from fabric_kg_builder.domain.models import (
     DomainEntityTypeV2,
     DomainRelationshipTypeV2,
 )
-from fabric_kg_builder.enrichment.output_schema import LLMOutput
-from fabric_kg_builder.enrichment.orchestrator import canonicalize_llm_output
+from fabric_kg_builder.enrichment.output_schema import (
+    EntityOccurrenceAnchor,
+    ExactRelationshipEvidence,
+    LLMOutput,
+)
+from fabric_kg_builder.enrichment.orchestrator import (
+    build_user_message,
+    canonicalize_llm_output,
+)
 from fabric_kg_builder.enrichment.schema2_validation import (
     DIRECTION_MISMATCH,
+    ENDPOINT_EVIDENCE_UNGROUNDED,
     ENDPOINT_UNRESOLVED,
     EVIDENCE_MISSING,
     EVIDENCE_QUOTE_MISMATCH,
@@ -154,14 +162,17 @@ def _apply(
     output: LLMOutput,
     *,
     context: Schema2EnrichmentContext | None = None,
+    source_text: str = _SOURCE_TEXT,
+    source_type: str = "document_span",
 ) -> LLMOutput:
     return apply_schema2_contract(
         output,
         context or _context(),
         source_file_id=_SOURCE_FILE_ID,
         text_unit_id=_TEXT_UNIT_ID,
-        source_text=_SOURCE_TEXT,
+        source_text=source_text,
         source_locator_json=_LOCATOR,
+        source_type=source_type,
     )
 
 
@@ -226,6 +237,83 @@ def test_quote_mismatch_is_rejected() -> None:
     assert EVIDENCE_QUOTE_MISMATCH in relationship.rejection_reasons
 
 
+def test_exact_unrelated_quote_cannot_assert_relationship() -> None:
+    source_text = (
+        "Replacement event uses a Torx driver. "
+        "The maintenance window starts tomorrow."
+    )
+    quote = "The maintenance window starts tomorrow."
+    evidence = {
+        "text_unit_id": _TEXT_UNIT_ID,
+        "span_start": source_text.index(quote),
+        "span_end": source_text.index(quote) + len(quote),
+        "quote": quote,
+        "source_file_id": _SOURCE_FILE_ID,
+        "source_content_hash": content_hash(source_text),
+        "source_locator_json": _LOCATOR,
+    }
+    relationship = _apply(
+        _payload(evidence=evidence),
+        source_text=source_text,
+    ).relationships[0]
+    assert relationship.assertion_status == "rejected"
+    assert ENDPOINT_EVIDENCE_UNGROUNDED in relationship.rejection_reasons
+    assert relationship.verified_evidence_id is None
+
+
+def test_explicit_entity_anchor_resolves_ambiguous_repeated_name() -> None:
+    source_text = (
+        "Replacement event follows Replacement event and uses a Torx driver."
+    )
+    output = _payload()
+    first_start = source_text.index("Replacement event")
+    target_start = source_text.index("Torx driver")
+    output.entities[0] = output.entities[0].model_copy(
+        update={
+            "occurrence_anchors": [
+                EntityOccurrenceAnchor(
+                    text_unit_id=_TEXT_UNIT_ID,
+                    span_start=first_start,
+                    span_end=first_start + len("Replacement event"),
+                    quote="Replacement event",
+                )
+            ]
+        }
+    )
+    output.entities[1] = output.entities[1].model_copy(
+        update={
+            "occurrence_anchors": [
+                EntityOccurrenceAnchor(
+                    text_unit_id=_TEXT_UNIT_ID,
+                    span_start=target_start,
+                    span_end=target_start + len("Torx driver"),
+                    quote="Torx driver",
+                )
+            ]
+        }
+    )
+    output.relationships[0] = output.relationships[0].model_copy(
+        update={
+            "evidence": ExactRelationshipEvidence(
+                text_unit_id=_TEXT_UNIT_ID,
+                span_start=0,
+                span_end=len(source_text),
+                quote=source_text,
+                source_file_id=_SOURCE_FILE_ID,
+                source_content_hash=content_hash(source_text),
+                source_locator_json=_LOCATOR,
+            )
+        }
+    )
+    relationship = _apply(
+        output,
+        source_text=source_text,
+    ).relationships[0]
+    assert relationship.assertion_status == "asserted"
+    assert relationship.source_grounding_span_start == first_start
+    assert relationship.target_grounding_span_start == target_start
+
+
 def test_unknown_terms_use_discovery_lane() -> None:
     validated = _apply(
         _payload(
@@ -274,6 +362,27 @@ def test_transitive_subtype_records_deterministic_path() -> None:
     assert relationship.resolved_source_type_id == "entity-type:support-event"
 
 
+def test_casefolded_endpoint_hint_keeps_asserted_canonical_ids() -> None:
+    output = _payload()
+    output.relationships[0] = output.relationships[0].model_copy(
+        update={
+            "source_id_hint": "Event-1",
+            "target_id_hint": "TOOL-1",
+        }
+    )
+    validated = _apply(output)
+    relationship = validated.relationships[0]
+    records = canonicalize_llm_output(validated, _SOURCE_FILE_ID)
+
+    assert relationship.assertion_status == "asserted"
+    assert records.relationships[0].source_entity_id == (
+        relationship.resolved_source_entity_id
+    )
+    assert records.relationships[0].target_entity_id == (
+        relationship.resolved_target_entity_id
+    )
+
+
 def test_exact_only_rejects_child_endpoint() -> None:
     relationship = _apply(
         _payload(),
@@ -289,6 +398,46 @@ def test_source_identity_mismatch_is_rejected() -> None:
     relationship = _apply(_payload(evidence=evidence)).relationships[0]
     assert relationship.assertion_status == "rejected"
     assert EVIDENCE_SOURCE_MISMATCH in relationship.rejection_reasons
+
+
+def test_authoritative_source_type_changes_evidence_identity() -> None:
+    document = _apply(_payload(), source_type="document_span")
+    csv = _apply(_payload(), source_type="csv_row")
+    document_relationship = document.relationships[0]
+    csv_relationship = csv.relationships[0]
+
+    assert document_relationship.verified_evidence_id
+    assert csv_relationship.verified_evidence_id
+    assert (
+        document_relationship.verified_evidence_id
+        != csv_relationship.verified_evidence_id
+    )
+    document_evidence = next(
+        item
+        for item in document.evidence
+        if item.id_hint == document_relationship.verified_evidence_id
+    )
+    csv_evidence = next(
+        item
+        for item in csv.evidence
+        if item.id_hint == csv_relationship.verified_evidence_id
+    )
+    assert document_evidence.source_type == "document_span"
+    assert csv_evidence.source_type == "csv_row"
+
+
+def test_schema2_prompt_carries_authoritative_source_type() -> None:
+    prompt = build_user_message(
+        None,
+        _SOURCE_FILE_ID,
+        _SOURCE_TEXT,
+        "p3",
+        schema2_context=_context(),
+        text_unit_id=_TEXT_UNIT_ID,
+        source_locator_json=_LOCATOR,
+        source_type="csv_row",
+    )
+    assert '"source_type":"csv_row"' in prompt
 
 
 def test_out_of_bounds_span_is_rejected_without_dropping_candidate() -> None:

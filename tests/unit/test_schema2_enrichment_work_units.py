@@ -104,6 +104,43 @@ class _SingleClient(_BudgetClient):
         }
 
 
+class _MixedMalformedRelationshipClient(_BudgetClient):
+    def complete_json(self, **_kwargs) -> dict:
+        self.calls += 1
+        return {
+            "source_file_id": _SOURCE_FILE_ID,
+            "pass": "p2",
+            "entities": [
+                {
+                    "id_hint": "event-1",
+                    "type": "ReplacementEvent",
+                    "label": "Replacement event",
+                    "confidence": 0.9,
+                },
+                {
+                    "id_hint": "tool-1",
+                    "type": "Tool",
+                    "label": "Tool",
+                    "confidence": 0.9,
+                },
+            ],
+            "relationships": [
+                {
+                    "source_id_hint": "event-1",
+                    "relation": "requires_tool",
+                    "target_id_hint": "tool-1",
+                    "confidence": 0.9,
+                },
+                {
+                    "id_hint": "malformed-candidate",
+                    "source_id_hint": "event-1",
+                    "relation": "requires_tool",
+                    "confidence": 0.9,
+                },
+            ],
+        }
+
+
 def _root_item() -> EnrichmentWorkItem:
     context = _context()
     return EnrichmentWorkItem(
@@ -313,3 +350,46 @@ def test_asserted_without_evidence_writes_no_success_receipt(
     assert state["status"] == "failed"
     assert state["error_type"] == "Schema2WorkUnitInvariantError"
     assert not list(tmp_path.glob("r_*.json"))
+
+
+def test_malformed_schema2_relationship_fails_without_silent_loss(
+    tmp_path: Path,
+) -> None:
+    records = enrich_batch(
+        "single",
+        _SOURCE_FILE_ID,
+        _MixedMalformedRelationshipClient(),
+        None,
+        tmp_path,
+        schema2_context=_context(),
+    )
+    checkpoint = json.loads(
+        (tmp_path / ".checkpoint.json").read_text(encoding="utf-8")
+    )
+    state = checkpoint["work_units"][f"{_SOURCE_FILE_ID}:pass:p2"]
+
+    assert records.relationships == []
+    assert records.failed_work_units == [f"{_SOURCE_FILE_ID}:pass:p2"]
+    assert state["status"] == "failed"
+    assert state["error_type"] == "Schema2MalformedRelationshipError"
+    assert not list(tmp_path.glob("r_*.json"))
+
+
+def test_schema1_tolerant_relationship_behavior_remains_compatible(
+    tmp_path: Path,
+) -> None:
+    records = enrich_batch(
+        "single",
+        _SOURCE_FILE_ID,
+        _MixedMalformedRelationshipClient(),
+        None,
+        tmp_path,
+    )
+    checkpoint = json.loads(
+        (tmp_path / ".checkpoint.json").read_text(encoding="utf-8")
+    )
+    state = checkpoint["work_units"][f"{_SOURCE_FILE_ID}:pass:p2"]
+
+    assert len(records.relationships) == 1
+    assert records.failed_work_units == []
+    assert state["status"] == "succeeded"

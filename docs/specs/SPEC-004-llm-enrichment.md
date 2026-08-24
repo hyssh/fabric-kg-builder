@@ -1546,7 +1546,8 @@ For each relationship candidate the model returns one nested `evidence` object:
 ```
 
 The model may omit the evidence object so the candidate can abstain. It must not
-mint an evidence ID. Local code verifies:
+mint an evidence ID. Entity candidates may provide exact `occurrence_anchors`
+(`text_unit_id`, offsets, and quote). Local code verifies:
 
 1. source and target occurrences exist;
 2. predicate and direction are approved;
@@ -1554,18 +1555,33 @@ mint an evidence ID. Local code verifies:
    unless the endpoint policy is exact;
 4. offsets are in range and the quote is nonempty;
 5. `source_text[span_start:span_end] == quote`;
-6. source locator and content hash match one source unit; and
-7. a deterministic evidence ID is minted only after all checks pass.
+6. both endpoint occurrences are grounded inside the cited relationship span by
+   verified anchors, or by an exact, boundary-aware display-name/alias match that
+   is unique within that span;
+7. source locator and content hash match one source unit;
+8. the runner-provided `csv_row` or `document_span` source type is used; and
+9. a deterministic evidence ID is minted only after all checks pass, with source
+   type participating in the identity.
 
 An asserted candidate without verified evidence is invalid before checkpoint
 success. Missing evidence alone yields `unresolved` / `EVIDENCE_MISSING`.
 Vocabulary, endpoint, direction, source-identity, or span failures yield
 `rejected` with stable `UNKNOWN_*`, `ENDPOINT_UNRESOLVED`, `*_TYPE_MISMATCH`,
-`DIRECTION_MISMATCH`, `EVIDENCE_SOURCE_MISMATCH`,
+`DIRECTION_MISMATCH`, `ENDPOINT_EVIDENCE_UNGROUNDED`, `EVIDENCE_SOURCE_MISMATCH`,
 `EVIDENCE_SPAN_INVALID`, or `EVIDENCE_QUOTE_MISMATCH` reasons. Unsupported
 entity or relationship terms use the discovery lane and never receive an
 authoritative semantic ID. Structural failures take precedence over missing
 evidence, and reason ordering is deterministic.
+
+Validator-resolved canonical source and target entity IDs are carried into
+canonicalization. Canonicalization never re-resolves a schema-2 asserted edge from
+raw model hint casing.
+
+Schema-2 tolerant parsing is fail-closed for relationships. If any raw
+relationship candidate cannot be represented by the typed intermediate contract,
+the work unit fails and remains retryable; it cannot write a success receipt or
+checkpoint with a silently reduced candidate count. Schema-1 tolerant parsing
+retains its compatibility behavior.
 
 `max_relations_per_work_unit` defaults to 25. A model response above the bound is
 not truncated, canonicalized, receipted, or checkpointed as successful. The

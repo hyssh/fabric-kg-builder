@@ -67,6 +67,7 @@ from .foundry_client import FoundryClient
 from .output_schema import LLM_OUTPUT_JSON_SCHEMA, LLMOutput, validate, validate_tolerant
 from .schema2_validation import (
     Schema2EnrichmentContext,
+    Schema2MalformedRelationshipError,
     apply_schema2_contract,
     assert_schema2_work_unit_invariants,
     render_schema2_prompt_block,
@@ -349,6 +350,7 @@ def build_user_message(
     schema2_context: Schema2EnrichmentContext | None = None,
     text_unit_id: str | None = None,
     source_locator_json: str | None = None,
+    source_type: str = "document_span",
 ) -> str:
     """Build the user message for an enrichment pass.
 
@@ -389,6 +391,7 @@ def build_user_message(
                 source_file_id=source_file_id,
                 source_text=source_content,
                 source_locator_json=source_locator_json,
+                source_type=source_type,
             )
             + "\n"
         )
@@ -755,8 +758,12 @@ def canonicalize_llm_output(
         ]
 
     for rel in output.relationships:
-        source_id = _resolve_ref(rel.source_id_hint)
-        target_id = _resolve_ref(rel.target_id_hint)
+        if rel.validation_authority == "schema2":
+            source_id = rel.resolved_source_entity_id
+            target_id = rel.resolved_target_entity_id
+        else:
+            source_id = _resolve_ref(rel.source_id_hint)
+            target_id = _resolve_ref(rel.target_id_hint)
 
         if source_id is None or target_id is None:
             if rel.validation_authority == "schema2":
@@ -835,6 +842,16 @@ def canonicalize_llm_output(
                     "source_inheritance_path": rel.source_inheritance_path,
                     "target_inheritance_path": rel.target_inheritance_path,
                     "validation_authority": rel.validation_authority,
+                    "resolved_source_entity_id": rel.resolved_source_entity_id,
+                    "resolved_target_entity_id": rel.resolved_target_entity_id,
+                    "source_grounding_span_start": (
+                        rel.source_grounding_span_start
+                    ),
+                    "source_grounding_span_end": rel.source_grounding_span_end,
+                    "target_grounding_span_start": (
+                        rel.target_grounding_span_start
+                    ),
+                    "target_grounding_span_end": rel.target_grounding_span_end,
                     "rejection_reasons": rel.rejection_reasons,
                     "description_evidence_id_hints": (
                         rel.description_evidence_id_hints
@@ -1552,6 +1569,7 @@ def _execute_work_item(
                 and item.lineage.get("source_locator_json") is not None
                 else None
             ),
+            source_type=item.default_source_type,
         )
         raw_result = client.complete_json(
             system=_ENRICH_SYSTEM_PROMPT,
@@ -1568,6 +1586,14 @@ def _execute_work_item(
                 "enrichment work %s dropped malformed items: %s",
                 item.work_unit_key,
                 ", ".join(f"{count} {name}" for name, count in dropped.items()),
+            )
+        if (
+            item.schema2_context is not None
+            and dropped.get("relationships", 0)
+        ):
+            raise Schema2MalformedRelationshipError(
+                "Schema-2 tolerant parsing could not retain every relationship "
+                "candidate; the work unit must be retried."
             )
         if (
             item.schema2_context is not None
@@ -1597,6 +1623,7 @@ def _execute_work_item(
                     and item.lineage.get("source_locator_json") is not None
                     else None
                 ),
+                source_type=item.default_source_type,
             )
             assert_schema2_work_unit_invariants(output)
         elif item.semantic_context is not None:

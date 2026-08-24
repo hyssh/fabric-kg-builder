@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,7 +13,11 @@ from fabric_kg_builder.domain.models import (
     DomainRelationshipTypeV2,
 )
 from fabric_kg_builder.domain.service import compute_contract_hash
-from fabric_kg_builder.model.ids import content_hash, make_evidence_id
+from fabric_kg_builder.model.ids import (
+    content_hash,
+    make_entity_id,
+    make_evidence_id,
+)
 
 from .output_schema import Entity, Evidence, LLMOutput, Relationship
 
@@ -27,22 +32,28 @@ SOURCE_TYPE_MISMATCH = "SOURCE_TYPE_MISMATCH"
 TARGET_TYPE_MISMATCH = "TARGET_TYPE_MISMATCH"
 DIRECTION_MISMATCH = "DIRECTION_MISMATCH"
 ENDPOINT_UNRESOLVED = "ENDPOINT_UNRESOLVED"
+ENDPOINT_EVIDENCE_UNGROUNDED = "ENDPOINT_EVIDENCE_UNGROUNDED"
 
 _REASON_ORDER = {
     UNKNOWN_RELATIONSHIP_TYPE: 0,
     ENDPOINT_UNRESOLVED: 1,
-    SOURCE_TYPE_MISMATCH: 2,
-    TARGET_TYPE_MISMATCH: 3,
-    DIRECTION_MISMATCH: 4,
-    EVIDENCE_SOURCE_MISMATCH: 5,
-    EVIDENCE_SPAN_INVALID: 6,
-    EVIDENCE_QUOTE_MISMATCH: 7,
-    EVIDENCE_MISSING: 8,
+    ENDPOINT_EVIDENCE_UNGROUNDED: 2,
+    SOURCE_TYPE_MISMATCH: 3,
+    TARGET_TYPE_MISMATCH: 4,
+    DIRECTION_MISMATCH: 5,
+    EVIDENCE_SOURCE_MISMATCH: 6,
+    EVIDENCE_SPAN_INVALID: 7,
+    EVIDENCE_QUOTE_MISMATCH: 8,
+    EVIDENCE_MISSING: 9,
 }
 
 
 class Schema2WorkUnitInvariantError(ValueError):
     """Raised when a schema-2 work unit cannot be checkpointed as successful."""
+
+
+class Schema2MalformedRelationshipError(ValueError):
+    """Raised when tolerant parsing cannot retain every schema-2 relationship."""
 
 
 @dataclass(frozen=True)
@@ -114,6 +125,7 @@ def build_schema2_enrichment_context(
             "Every relationship endpoint must reference an entity id_hint in this response.",
             "Unknown terms are discovery candidates, never authoritative data.",
             "Every asserted relationship requires one exact nested evidence object.",
+            "Provide exact entity occurrence_anchors when an endpoint display name or alias is repeated or ambiguous in the relationship evidence span.",
             "Copy the runner-provided text_unit_id, source_file_id, content hash, and locator exactly.",
             "Offsets are zero-based character offsets into the provided source text.",
             "The quote must exactly equal source_text[span_start:span_end].",
@@ -149,6 +161,7 @@ def render_schema2_prompt_block(
     source_file_id: str,
     source_text: str,
     source_locator_json: str | None,
+    source_type: str,
 ) -> str:
     """Render sealed schema-2 guidance plus authoritative source identity."""
     payload = {
@@ -158,6 +171,7 @@ def render_schema2_prompt_block(
             "source_file_id": source_file_id,
             "source_content_hash": content_hash(source_text),
             "source_locator_json": source_locator_json,
+            "source_type": source_type,
         },
     }
     return (
@@ -206,7 +220,7 @@ def _resolve_entities(entities: list[Entity]) -> dict[str, Entity]:
     for entity in entities:
         if entity.id_hint:
             references.setdefault(
-                entity.id_hint.strip().casefold(),
+                _normalize_local_reference(entity.id_hint),
                 [],
             ).append(entity)
     resolved: dict[str, Entity] = {}
@@ -225,6 +239,92 @@ def _resolve_entities(entities: list[Entity]) -> dict[str, Entity]:
     return resolved
 
 
+def _normalize_local_reference(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _term_spans(
+    source_text: str,
+    term: str,
+    *,
+    span_start: int,
+    span_end: int,
+) -> list[tuple[int, int]]:
+    if not term:
+        return []
+    pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)")
+    return [
+        (span_start + match.start(), span_start + match.end())
+        for match in pattern.finditer(source_text[span_start:span_end])
+    ]
+
+
+def _ground_entity_occurrence(
+    entity: Entity,
+    *,
+    text_unit_id: str,
+    source_text: str,
+    relationship_start: int,
+    relationship_end: int,
+) -> tuple[int, int] | None:
+    terms = [entity.label, *entity.aliases]
+    valid_terms = {term for term in terms if term}
+    explicit: set[tuple[int, int]] = set()
+    for anchor in entity.occurrence_anchors:
+        start = anchor.span_start
+        end = anchor.span_end
+        if (
+            anchor.text_unit_id != text_unit_id
+            or not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or start < relationship_start
+            or end > relationship_end
+            or end <= start
+            or end > len(source_text)
+            or not anchor.quote
+            or anchor.quote not in valid_terms
+            or source_text[start:end] != anchor.quote
+            or (start, end)
+            not in _term_spans(
+                source_text,
+                anchor.quote,
+                span_start=relationship_start,
+                span_end=relationship_end,
+            )
+        ):
+            continue
+        explicit.add((start, end))
+    if len(explicit) == 1:
+        return next(iter(explicit))
+    if len(explicit) > 1:
+        return None
+
+    label_spans = _term_spans(
+        source_text,
+        entity.label,
+        span_start=relationship_start,
+        span_end=relationship_end,
+    )
+    if len(label_spans) == 1:
+        return label_spans[0]
+    if len(label_spans) > 1:
+        return None
+
+    alias_spans = {
+        span
+        for alias in entity.aliases
+        for span in _term_spans(
+            source_text,
+            alias,
+            span_start=relationship_start,
+            span_end=relationship_end,
+        )
+    }
+    return next(iter(alias_spans)) if len(alias_spans) == 1 else None
+
+
 def apply_schema2_contract(
     output: LLMOutput,
     context: Schema2EnrichmentContext,
@@ -233,6 +333,7 @@ def apply_schema2_contract(
     text_unit_id: str,
     source_text: str,
     source_locator_json: str | None,
+    source_type: str,
 ) -> LLMOutput:
     """Classify every schema-2 candidate and mint evidence after exact validation."""
     normalized_entities: list[Entity] = []
@@ -274,10 +375,10 @@ def apply_schema2_contract(
             relationship.relation.strip().casefold()
         )
         source = entities_by_reference.get(
-            relationship.source_id_hint.strip().casefold()
+            _normalize_local_reference(relationship.source_id_hint)
         )
         target = entities_by_reference.get(
-            relationship.target_id_hint.strip().casefold()
+            _normalize_local_reference(relationship.target_id_hint)
         )
         reasons: list[str] = []
         source_path: list[str] = []
@@ -293,11 +394,11 @@ def apply_schema2_contract(
                 context.allow_subtype_endpoints
                 and definition.endpoint_policy == "allow_subtypes"
             )
-            source_type = source.semantic_type_id or ""
-            target_type = target.semantic_type_id or ""
+            actual_source_type = source.semantic_type_id or ""
+            actual_target_type = target.semantic_type_id or ""
             source_path = (
                 _inheritance_path(
-                    source_type,
+                    actual_source_type,
                     definition.source_types,
                     parent_by_id=context.parent_by_id,
                     allow_subtypes=use_subtypes,
@@ -306,7 +407,7 @@ def apply_schema2_contract(
             )
             target_path = (
                 _inheritance_path(
-                    target_type,
+                    actual_target_type,
                     definition.target_types,
                     parent_by_id=context.parent_by_id,
                     allow_subtypes=use_subtypes,
@@ -322,6 +423,8 @@ def apply_schema2_contract(
 
         evidence = relationship.evidence
         evidence_id: str | None = None
+        source_grounding: tuple[int, int] | None = None
+        target_grounding: tuple[int, int] | None = None
         structural_failure = any(
             reason
             in {
@@ -359,6 +462,31 @@ def apply_schema2_contract(
                 reasons.append(EVIDENCE_SPAN_INVALID)
             elif source_text[start:end] != evidence.quote:
                 reasons.append(EVIDENCE_QUOTE_MISMATCH)
+            else:
+                if source is not None and target is not None:
+                    source_grounding = _ground_entity_occurrence(
+                        source,
+                        text_unit_id=text_unit_id,
+                        source_text=source_text,
+                        relationship_start=start,
+                        relationship_end=end,
+                    )
+                    target_grounding = _ground_entity_occurrence(
+                        target,
+                        text_unit_id=text_unit_id,
+                        source_text=source_text,
+                        relationship_start=start,
+                        relationship_end=end,
+                    )
+                    if (
+                        source_grounding is None
+                        or target_grounding is None
+                        or (
+                            source is not target
+                            and source_grounding == target_grounding
+                        )
+                    ):
+                        reasons.append(ENDPOINT_EVIDENCE_UNGROUNDED)
 
         reasons = _ordered_reasons(reasons)
         if definition is None:
@@ -384,19 +512,20 @@ def apply_schema2_contract(
                     "span_end": evidence.span_end,
                     "source_content_hash": source_hash,
                     "source_locator_json": source_locator_json,
+                    "source_type": source_type,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
             )
             evidence_id = make_evidence_id(
                 source_file_id,
-                "document_span",
+                source_type,
                 context_key,
                 content_hash(evidence.quote),
             )
             verified_evidence[evidence_id] = Evidence(
                 id_hint=evidence_id,
-                source_type="document_span",
+                source_type=source_type,
                 text=evidence.quote,
                 text_unit_id=text_unit_id,
                 span_start=evidence.span_start,
@@ -445,6 +574,36 @@ def apply_schema2_contract(
                     "source_inheritance_path": source_path,
                     "target_inheritance_path": target_path,
                     "validation_authority": "schema2",
+                    "resolved_source_entity_id": (
+                        make_entity_id(
+                            source.type,
+                            source.label,
+                            source.resolution_context_key,
+                        )
+                        if source is not None
+                        else None
+                    ),
+                    "resolved_target_entity_id": (
+                        make_entity_id(
+                            target.type,
+                            target.label,
+                            target.resolution_context_key,
+                        )
+                        if target is not None
+                        else None
+                    ),
+                    "source_grounding_span_start": (
+                        source_grounding[0] if source_grounding else None
+                    ),
+                    "source_grounding_span_end": (
+                        source_grounding[1] if source_grounding else None
+                    ),
+                    "target_grounding_span_start": (
+                        target_grounding[0] if target_grounding else None
+                    ),
+                    "target_grounding_span_end": (
+                        target_grounding[1] if target_grounding else None
+                    ),
                     "verified_evidence_id": evidence_id,
                     "evidence_id_hint": evidence_id,
                     "evidence_id_hints": [evidence_id] if evidence_id else [],
@@ -487,7 +646,14 @@ def assert_schema2_work_unit_invariants(output: LLMOutput) -> None:
             != relationship.verified_evidence_id
             or relationship.verified_evidence_id
             not in relationship.evidence_id_hints
+            or not relationship.resolved_source_entity_id
+            or not relationship.resolved_target_entity_id
+            or relationship.source_grounding_span_start is None
+            or relationship.source_grounding_span_end is None
+            or relationship.target_grounding_span_start is None
+            or relationship.target_grounding_span_end is None
         ):
             raise Schema2WorkUnitInvariantError(
-                "Schema-2 asserted relationship lacks runner-verified evidence."
+                "Schema-2 asserted relationship lacks runner-verified evidence "
+                "or endpoint grounding."
             )
