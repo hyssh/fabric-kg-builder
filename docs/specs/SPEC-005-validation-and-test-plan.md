@@ -13,6 +13,7 @@
 | 2 | 2026-06-24T11:46:10.517-07:00 | Hockney | Command rename `deploy-data` → `deploy-lakehouse` throughout; domain-intake tests with security assertion; graph→AI Search clue-chaining contract; Document Intelligence mocked tests; Foundry + .env config validation; VAL-023–VAL-028 added; mocking strategy updated to Microsoft Foundry SDK |
 | 3 | 2026-06-24T12:42:17.255-07:00 | Hockney | Canonical-naming reconciliation (coordinator-canonical-naming.md): §12 graph→search fixture rewritten to `search.in()` + `vectorFilterMode: preFilter` + provenance select fields; BRG-001–BRG-010 (SPEC-003 §12 bridge gates) and D-31/D-32 (SPEC-002 §11 alias validations) registered in gate catalog and traceability; config keys updated to `AZURE_AI_FOUNDRY_ENDPOINT`/`AZURE_AI_FOUNDRY_API_KEY` (removing `AZURE_OPENAI_*`/`FOUNDRY_DEPLOYMENT_NAME`); commands aligned to `compile-search`, `deploy-lakehouse`, `enrich --domain-prompt`; VAL-023 reworded to chunk (text) and visual AI Search indexes only — no entity/relationship AI Search index exists |
 | 4 | 2026-08-23 | Copilot | Added schema-2.0 DOM, EXT, SEM, DEP, and QRY gates and compatibility test requirements. |
+| 5 | 2026-08-24 | Copilot | Added the C0.Core contract gate and corrected shared-contract ownership references to SPEC-006; no higher-layer feature gate is activated. |
 
 ---
 
@@ -1254,5 +1255,17 @@ The schema foundation merge gate covers:
 - explicit non-activation of schema-2.0 enrichment until proposal approval is
   implemented.
 
-Later layers add exact-span, subtype, lifecycle, materialization, query, isolated
-installation, and live-smoke evidence without weakening these gates.
+### 15.2 C0.Core contract gate
+
+SPEC-006 C0.Core adds offline contract tests for strict frozen models, registered
+kind/version negotiation, unknown-major rejection, NFC canonical JSON and golden
+hashes, immutable secret-free locators, Unicode exact-span verification, every
+allowed/forbidden lifecycle transition, mutually exclusive disposition and
+current-state accounting, asserted-only serving membership, manifest totals,
+receipt skip preconditions, resource-metric binding, and equality adapters to
+the existing domain/lineage/model/checkpoint/semantic authorities.
+
+These tests validate contract shapes and invariants only. Later layers add
+subtype-validation integration, materialization, query execution, isolated
+installation, approved numeric performance policies, and live-smoke evidence
+without weakening the C0 gate.

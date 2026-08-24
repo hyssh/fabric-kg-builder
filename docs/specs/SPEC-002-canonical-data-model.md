@@ -15,6 +15,7 @@
 | 1.3 | 2026-06-24T12:42:17.255-07:00 | Fenster | §3.4 `entity_search_keys` and §3.5 `search_aliases` notes corrected: `entity_search_keys` feeds AI Search `entity_aliases` SEARCHABLE field (keyword/alias matching only); filtering is done on `entity_ids` / `canonical_key` (stable IDs). Stale "filter on entity_search_keys" and "filterable/searchable" wording removed to match §11.4 filter-on-IDs/search-on-aliases rule. |
 | 1.4 | 2026-06-24T21:46:59.576-07:00 | McManus | §3.3 document_elements + §3.4 chunks: Document Intelligence Layout is the authoritative source for table structure and `content_html`. Added provenance notes: `element_type="table"` and `chunk_type="table_html"` are produced by DI Layout (`docintel_tables.py`), not the LLM. LLM role = semantics only (summary, entity linking over HTML). `table_row` / `table_cell` element and chunk types are schema-level only — no longer produced by the enrichment pipeline. |
 | 2.0-foundation | 2026-08-23 | Copilot | Defined schema-2.0 audit and serving lifecycle requirements without changing the existing schema-1.0 table workflow. |
+| 2.0-foundation-c0 | 2026-08-24 | Copilot | Corrected the schema-2.0 subsection placement under ingestion and assigned cross-layer references/accounting/projection headers to SPEC-006 without replacing canonical tables. |
 
 ---
 
@@ -608,12 +609,12 @@ The `fabric-kg inspect-source` command produces a `schema-profile.json` file in 
 }
 ```
 
-## 12. Schema-2.0 Candidate and Serving Lifecycle
+### 6.3 Schema-2.0 Candidate and Serving Lifecycle
 
 Schema-2.0 projects retain raw relationship candidates for audit and publish a
 separate semantic projection.
 
-### 12.1 Raw relationship requirements
+#### 6.3.1 Raw relationship requirements
 
 The canonical `relationships` surface may contain asserted, unresolved,
 rejected, and discovery candidates. The 0.2.4 lifecycle extension must record:
@@ -626,21 +627,28 @@ rejected, and discovery candidates. The 0.2.4 lifecycle extension must record:
 - source lineage, semantic contract hash, prompt version, and model version; and
 - retry eligibility.
 
-Every input candidate reaches exactly one terminal accounting bucket:
+Every input candidate has exactly one mutually exclusive C0 disposition:
 
 ```text
 input_candidate_count
-  = asserted_count
+  = retained_candidate_count
+  + deduplicated_input_count
+
+retained_candidate_count
+  = proposed_count
+  + discovery_count
   + unresolved_count
   + rejected_count
-  + discovery_count
-  + deduplicated_count
-  + endpoint_unresolved_count
+  + unsupported_count
+  + asserted_count
 ```
 
-Silent drops are invalid.
+Reason codes such as `endpoint_unresolved` and `evidence_missing` are
+non-additive diagnostics and never accounting buckets. Silent drops are invalid.
+The immutable lifecycle and disposition contracts are owned by SPEC-006; the
+existing canonical row models remain the table authority.
 
-### 12.2 Semantic serving requirements
+#### 6.3.2 Semantic serving requirements
 
 `semantic_entities` contains only asserted, approved, contract-matching entities
 with valid identity and evidence, except for explicitly approved
@@ -658,14 +666,18 @@ Unresolved, rejected, discovery, and legacy `unverified` rows are never serving
 rows. A schema-2.0 ingestion path maps `unverified` to `unresolved` with an audit
 reason.
 
-### 12.3 Compile/deploy receipt
+Raw canonical tables are not a serving fallback. SPEC-006 owns the audit and
+serving projection headers that prove the serving ID sets are exactly the
+asserted subset.
+
+#### 6.3.3 Compile/deploy receipt
 
 Compilation records deterministic row counts and canonical row hashes for every
 sealed semantic source table. Deployment must use the same projection and
 validation implementation and must compare the exact expected counts and hashes
 before mutation and after persisted read-back.
 
-### 6.3 Column-to-Field Mapping Conventions
+### 6.4 Column-to-Field Mapping Conventions
 
 | Column name pattern | Maps to entity/field | Notes |
 |---|---|---|
@@ -682,7 +694,7 @@ before mutation and after persisted read-back.
 
 LLM inference can override any mapping. The schema-profile records the final mapping used.
 
-### 6.4 XLSX Sheet Handling
+### 6.5 XLSX Sheet Handling
 
 Each sheet in an XLSX file is treated as a separate logical table:
 

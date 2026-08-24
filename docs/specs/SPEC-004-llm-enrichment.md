@@ -17,12 +17,19 @@
 | 2026-06-24T15:41:07.842-07:00 | Verbal | v5 — Enrichment default corrected to gpt-5.4-mini (deployment `gpt-5-4-mini`, 200K TPM GlobalStandard); removed gpt-5.5-mini references (model does not exist); added 200K TPM minimum requirement in §9.2; updated model defaults summary table; updated Appendix B Q6; AI Search scope corrected to IN MVP; reference REQUIREMENTS-001. |
 | 2026-06-24T21:46:59.576-07:00 | McManus | Document Intelligence table approach (coordinator-tables-via-docintel.md, verified 2026-06-24): §7.3 Table Chunking rewritten — tables extracted by DI Layout (outputContentFormat=markdown), not LLM; table_row no longer produced by enrichment pipeline; §6.2 system prompt extended to ban table_row/table_cell emission; §8.6 added — DI Layout table extraction pipeline, HTML artifact flow (table_n.html), MS Learn citations (prebuilt/layout + RAG semantic chunking), validation proof (Surface PDF → 2 table_html chunks), reference implementations. |
 | 2026-08-23 | Copilot | Added schema-2.0 closed-vocabulary, exact-evidence, subtype, lifecycle, and shared-K contracts. |
+| 2026-08-24 | Copilot | Clarified that C0.Core contract references are owned by SPEC-006 and do not activate L2 extraction or L3 evidence validation. |
 
 ---
 
 ## 1. Scope and Purpose
 
 This spec defines the behavior of the LLM extraction and enrichment stage in the fabric-kg-builder pipeline. It covers the 12 required LLM tasks, the intermediate JSON contract the LLM must produce, how that contract is canonicalized, prompt architecture, chunking behavior, image/figure understanding, model configuration, reliability requirements, and the `enrich` CLI command contract.
+
+For schema 2.0, the shared identity, SourceUnit, EvidenceSpan, lifecycle,
+accounting, assertion-reference, manifest, and receipt shapes are imported from
+SPEC-006. LLM output may propose candidates and evidence hints, but may not mint
+verified evidence IDs, transition terminal lifecycle records, or author
+cross-layer hashes. C0.Core itself adds no extraction activation.
 
 ### 1.1 Core Principle (PRD §6)
 
