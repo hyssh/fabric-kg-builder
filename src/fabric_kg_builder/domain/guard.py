@@ -8,7 +8,7 @@ from typing import Iterable
 
 from pydantic import ValidationError
 
-from .models import DomainContract, DomainReview
+from .models import AnyDomainContract, DomainContract, DomainContractV2, DomainReview
 from .review import run_deterministic_validation
 from .service import (
     DomainContractError,
@@ -29,7 +29,7 @@ class DomainGuardStatus:
     contract_path: Path | None = None
     review_path: Path | None = None
     legacy_path: Path | None = None
-    contract: DomainContract | None = None
+    contract: AnyDomainContract | None = None
     review: DomainReview | None = None
     contract_hash: str | None = None
     deterministic_error_count: int = 0
@@ -114,6 +114,14 @@ def evaluate_domain_guard_status(
         status.messages.append(
             f"Deterministic validation found {status.deterministic_error_count} error(s). Run 'fabric-kg domain validate'."
         )
+
+    if isinstance(contract, DomainContractV2):
+        status.messages.append(
+            "Schema-2.0 contract validation is available, but proposal review, "
+            "one-summary approval, and enrichment activation are not enabled in "
+            "the schema foundation layer."
+        )
+        return status
 
     if review_path.exists():
         try:

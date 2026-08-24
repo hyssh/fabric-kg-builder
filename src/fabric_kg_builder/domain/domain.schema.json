@@ -120,6 +120,127 @@
       "title": "ApprovalMetadata",
       "type": "object"
     },
+    "ApprovalMetadataV2": {
+      "additionalProperties": false,
+      "description": "One-summary approval metadata for a schema-2.0 domain contract.",
+      "properties": {
+        "status": {
+          "default": "draft",
+          "enum": [
+            "draft",
+            "needs_review",
+            "approved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "approved_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved By"
+        },
+        "approved_at_utc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved At Utc"
+        },
+        "contract_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract Hash"
+        },
+        "proposal_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Proposal Hash"
+        },
+        "source_profile_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Profile Hash"
+        },
+        "prompt_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Hash"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Version"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Version"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "title": "ApprovalMetadataV2",
+      "type": "object"
+    },
     "BusinessSection": {
       "additionalProperties": false,
       "description": "Business and organizational context.",
@@ -172,6 +293,34 @@
       "title": "CandidateModelSection",
       "type": "object"
     },
+    "CandidateModelSectionV2": {
+      "additionalProperties": false,
+      "description": "Typed candidate model sealed by schema-2.0 approval.",
+      "properties": {
+        "entity_types": {
+          "items": {
+            "$ref": "#/$defs/DomainEntityTypeV2"
+          },
+          "minItems": 1,
+          "title": "Entity Types",
+          "type": "array"
+        },
+        "relationship_types": {
+          "items": {
+            "$ref": "#/$defs/DomainRelationshipTypeV2"
+          },
+          "minItems": 1,
+          "title": "Relationship Types",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_types",
+        "relationship_types"
+      ],
+      "title": "CandidateModelSectionV2",
+      "type": "object"
+    },
     "CanonicalTerm": {
       "additionalProperties": false,
       "description": "Preferred business terminology.",
@@ -199,6 +348,33 @@
         "definition"
       ],
       "title": "CanonicalTerm",
+      "type": "object"
+    },
+    "CompetencyQuestionV2": {
+      "additionalProperties": false,
+      "description": "One stable competency question used for coverage and path design.",
+      "properties": {
+        "id": {
+          "pattern": "^cq:[a-z0-9][a-z0-9._-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 15,
+          "title": "Question",
+          "type": "string"
+        },
+        "business_critical": {
+          "default": true,
+          "title": "Business Critical",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "question"
+      ],
+      "title": "CompetencyQuestionV2",
       "type": "object"
     },
     "ConstraintsSection": {
@@ -235,6 +411,287 @@
         }
       },
       "title": "ConstraintsSection",
+      "type": "object"
+    },
+    "DomainContract": {
+      "additionalProperties": false,
+      "description": "Approved YAML source-of-truth for domain intent.",
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "domain": {
+          "$ref": "#/$defs/DomainSection"
+        },
+        "business": {
+          "$ref": "#/$defs/BusinessSection"
+        },
+        "problem": {
+          "$ref": "#/$defs/ProblemSection"
+        },
+        "competency_questions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Competency Questions",
+          "type": "array"
+        },
+        "terminology": {
+          "$ref": "#/$defs/TerminologySection"
+        },
+        "candidate_model": {
+          "$ref": "#/$defs/CandidateModelSection"
+        },
+        "constraints": {
+          "$ref": "#/$defs/ConstraintsSection"
+        },
+        "examples": {
+          "$ref": "#/$defs/ExamplesSection"
+        },
+        "approval": {
+          "$ref": "#/$defs/ApprovalMetadata"
+        }
+      },
+      "required": [
+        "domain",
+        "business",
+        "problem",
+        "terminology",
+        "candidate_model",
+        "constraints",
+        "examples"
+      ],
+      "title": "DomainContract",
+      "type": "object"
+    },
+    "DomainContractV2": {
+      "additionalProperties": false,
+      "description": "New-project-only bounded domain design contract.",
+      "properties": {
+        "schema_version": {
+          "const": "2.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "domain": {
+          "$ref": "#/$defs/DomainSection"
+        },
+        "business": {
+          "$ref": "#/$defs/BusinessSection"
+        },
+        "problem": {
+          "$ref": "#/$defs/ProblemSection"
+        },
+        "competency_questions": {
+          "items": {
+            "$ref": "#/$defs/CompetencyQuestionV2"
+          },
+          "maxItems": 10,
+          "minItems": 5,
+          "title": "Competency Questions",
+          "type": "array"
+        },
+        "terminology": {
+          "$ref": "#/$defs/TerminologySection"
+        },
+        "candidate_model": {
+          "$ref": "#/$defs/CandidateModelSectionV2"
+        },
+        "constraints": {
+          "$ref": "#/$defs/ConstraintsSection"
+        },
+        "examples": {
+          "$ref": "#/$defs/ExamplesSection"
+        },
+        "reasoning_policy": {
+          "$ref": "#/$defs/ReasoningPolicyV2"
+        },
+        "extraction_policy": {
+          "$ref": "#/$defs/ExtractionPolicyV2"
+        },
+        "publication_policy": {
+          "$ref": "#/$defs/PublicationPolicyV2"
+        },
+        "question_plans": {
+          "items": {
+            "$ref": "#/$defs/QuestionPlanV2"
+          },
+          "title": "Question Plans",
+          "type": "array"
+        },
+        "approval": {
+          "$ref": "#/$defs/ApprovalMetadataV2"
+        }
+      },
+      "required": [
+        "schema_version",
+        "domain",
+        "business",
+        "problem",
+        "competency_questions",
+        "terminology",
+        "candidate_model",
+        "constraints",
+        "examples",
+        "reasoning_policy",
+        "question_plans"
+      ],
+      "title": "DomainContractV2",
+      "type": "object"
+    },
+    "DomainEntityTypeV2": {
+      "additionalProperties": false,
+      "description": "One approved entity type in a schema-2.0 domain design.",
+      "properties": {
+        "id": {
+          "pattern": "^entity-type:[a-z0-9][a-z0-9._-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "pattern": "^entity-type:[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "source_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Evidence Ids",
+          "type": "array"
+        },
+        "business_defined": {
+          "default": false,
+          "title": "Business Defined",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description"
+      ],
+      "title": "DomainEntityTypeV2",
+      "type": "object"
+    },
+    "DomainRelationshipTypeV2": {
+      "additionalProperties": false,
+      "description": "One bounded, directed relationship type in a schema-2.0 design.",
+      "properties": {
+        "id": {
+          "pattern": "^relationship-type:[a-z0-9][a-z0-9._-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "predicate": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "source_types": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Source Types",
+          "type": "array"
+        },
+        "target_types": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Target Types",
+          "type": "array"
+        },
+        "direction": {
+          "const": "source_to_target",
+          "default": "source_to_target",
+          "title": "Direction",
+          "type": "string"
+        },
+        "endpoint_policy": {
+          "default": "allow_subtypes",
+          "enum": [
+            "allow_subtypes",
+            "exact"
+          ],
+          "title": "Endpoint Policy",
+          "type": "string"
+        },
+        "evidence_policy": {
+          "const": "exact_span_required",
+          "default": "exact_span_required",
+          "title": "Evidence Policy",
+          "type": "string"
+        },
+        "publication_policy": {
+          "const": "asserted_only",
+          "default": "asserted_only",
+          "title": "Publication Policy",
+          "type": "string"
+        },
+        "competency_question_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "governance_rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Governance Rule"
+        },
+        "source_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "predicate",
+        "description",
+        "source_types",
+        "target_types"
+      ],
+      "title": "DomainRelationshipTypeV2",
       "type": "object"
     },
     "DomainSection": {
@@ -286,6 +743,37 @@
         }
       },
       "title": "ExamplesSection",
+      "type": "object"
+    },
+    "ExtractionPolicyV2": {
+      "additionalProperties": false,
+      "description": "Closed-vocabulary and evidence requirements for schema 2.0.",
+      "properties": {
+        "vocabulary_mode": {
+          "const": "closed",
+          "default": "closed",
+          "title": "Vocabulary Mode",
+          "type": "string"
+        },
+        "exact_evidence_span_required": {
+          "const": true,
+          "default": true,
+          "title": "Exact Evidence Span Required",
+          "type": "boolean"
+        },
+        "abstain_without_evidence": {
+          "const": true,
+          "default": true,
+          "title": "Abstain Without Evidence",
+          "type": "boolean"
+        },
+        "allow_subtype_endpoints": {
+          "default": true,
+          "title": "Allow Subtype Endpoints",
+          "type": "boolean"
+        }
+      },
+      "title": "ExtractionPolicyV2",
       "type": "object"
     },
     "NegativeExample": {
@@ -370,6 +858,204 @@
       "title": "ProblemSection",
       "type": "object"
     },
+    "PublicationPolicyV2": {
+      "additionalProperties": false,
+      "description": "Serving lifecycle policy for schema 2.0.",
+      "properties": {
+        "included_states": {
+          "items": {
+            "const": "asserted",
+            "type": "string"
+          },
+          "title": "Included States",
+          "type": "array"
+        },
+        "excluded_states": {
+          "items": {
+            "enum": [
+              "unresolved",
+              "rejected"
+            ],
+            "type": "string"
+          },
+          "title": "Excluded States",
+          "type": "array"
+        },
+        "source_table": {
+          "const": "semantic_relationships",
+          "default": "semantic_relationships",
+          "title": "Source Table",
+          "type": "string"
+        }
+      },
+      "title": "PublicationPolicyV2",
+      "type": "object"
+    },
+    "QuestionPathStepV2": {
+      "additionalProperties": false,
+      "description": "One explicitly directed hop in an approved competency path.",
+      "properties": {
+        "from_type": {
+          "pattern": "^entity-type:[a-z0-9][a-z0-9._-]*$",
+          "title": "From Type",
+          "type": "string"
+        },
+        "relationship_type": {
+          "pattern": "^relationship-type:[a-z0-9][a-z0-9._-]*$",
+          "title": "Relationship Type",
+          "type": "string"
+        },
+        "to_type": {
+          "pattern": "^entity-type:[a-z0-9][a-z0-9._-]*$",
+          "title": "To Type",
+          "type": "string"
+        },
+        "traversal": {
+          "enum": [
+            "forward",
+            "reverse"
+          ],
+          "title": "Traversal",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_type",
+        "relationship_type",
+        "to_type",
+        "traversal"
+      ],
+      "title": "QuestionPathStepV2",
+      "type": "object"
+    },
+    "QuestionPlanV2": {
+      "additionalProperties": false,
+      "description": "Shortest typed path or explicit unsupported result for one question.",
+      "properties": {
+        "question_id": {
+          "pattern": "^cq:[a-z0-9][a-z0-9._-]*$",
+          "title": "Question Id",
+          "type": "string"
+        },
+        "required_path": {
+          "items": {
+            "$ref": "#/$defs/QuestionPathStepV2"
+          },
+          "title": "Required Path",
+          "type": "array"
+        },
+        "hop_count": {
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Hop Count",
+          "type": "integer"
+        },
+        "covered": {
+          "title": "Covered",
+          "type": "boolean"
+        },
+        "shortest_path": {
+          "const": true,
+          "default": true,
+          "title": "Shortest Path",
+          "type": "boolean"
+        },
+        "unsupported_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unsupported Reason"
+        }
+      },
+      "required": [
+        "question_id",
+        "hop_count",
+        "covered"
+      ],
+      "title": "QuestionPlanV2",
+      "type": "object"
+    },
+    "ReasoningPolicyV2": {
+      "additionalProperties": false,
+      "description": "Approved N and K bounds shared by design, extraction, and querying.",
+      "properties": {
+        "relationship_type_count": {
+          "maximum": 24,
+          "minimum": 1,
+          "title": "Relationship Type Count",
+          "type": "integer"
+        },
+        "recommended_relationship_type_range": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Recommended Relationship Type Range",
+          "type": "array"
+        },
+        "max_relationship_types": {
+          "const": 24,
+          "default": 24,
+          "title": "Max Relationship Types",
+          "type": "integer"
+        },
+        "relationship_type_count_rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relationship Type Count Rationale"
+        },
+        "max_hops": {
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Max Hops",
+          "type": "integer"
+        },
+        "absolute_max_hops": {
+          "const": 4,
+          "default": 4,
+          "title": "Absolute Max Hops",
+          "type": "integer"
+        },
+        "max_hops_rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Hops Rationale"
+        },
+        "max_relations_per_work_unit": {
+          "default": 25,
+          "minimum": 1,
+          "title": "Max Relations Per Work Unit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relationship_type_count",
+        "max_hops"
+      ],
+      "title": "ReasoningPolicyV2",
+      "type": "object"
+    },
     "TerminologySection": {
       "additionalProperties": false,
       "description": "Domain terminology catalogue.",
@@ -393,58 +1079,22 @@
       "type": "object"
     }
   },
-  "additionalProperties": false,
-  "description": "Approved YAML source-of-truth for domain intent.",
-  "properties": {
-    "schema_version": {
-      "const": "1.0",
-      "default": "1.0",
-      "title": "Schema Version",
-      "type": "string"
+  "discriminator": {
+    "mapping": {
+      "1.0": "#/$defs/DomainContract",
+      "2.0": "#/$defs/DomainContractV2"
     },
-    "domain": {
-      "$ref": "#/$defs/DomainSection"
-    },
-    "business": {
-      "$ref": "#/$defs/BusinessSection"
-    },
-    "problem": {
-      "$ref": "#/$defs/ProblemSection"
-    },
-    "competency_questions": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Competency Questions",
-      "type": "array"
-    },
-    "terminology": {
-      "$ref": "#/$defs/TerminologySection"
-    },
-    "candidate_model": {
-      "$ref": "#/$defs/CandidateModelSection"
-    },
-    "constraints": {
-      "$ref": "#/$defs/ConstraintsSection"
-    },
-    "examples": {
-      "$ref": "#/$defs/ExamplesSection"
-    },
-    "approval": {
-      "$ref": "#/$defs/ApprovalMetadata"
-    }
+    "propertyName": "schema_version"
   },
-  "required": [
-    "domain",
-    "business",
-    "problem",
-    "terminology",
-    "candidate_model",
-    "constraints",
-    "examples"
+  "oneOf": [
+    {
+      "$ref": "#/$defs/DomainContract"
+    },
+    {
+      "$ref": "#/$defs/DomainContractV2"
+    }
   ],
-  "title": "DomainContract",
-  "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "domain.schema.json"
+  "$id": "domain.schema.json",
+  "title": "VersionedDomainContract"
 }

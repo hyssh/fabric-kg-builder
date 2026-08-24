@@ -8,19 +8,22 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from fabric_kg_builder.enrichment.domain import DomainBrief, load_domain_brief
 
 from .models import (
     DOMAIN_SCHEMA_VERSION,
+    DOMAIN_SCHEMA_V2_VERSION,
     AmbiguousTerm,
+    AnyDomainContract,
     ApprovalMetadata,
     BusinessSection,
     CandidateModelSection,
     CanonicalTerm,
     ConstraintsSection,
     DomainContract,
+    DomainContractV2,
     DomainSection,
     ExamplesSection,
     NegativeExample,
@@ -131,7 +134,7 @@ def _derive_name_from_text(text: str) -> str:
     return candidate[:80]
 
 
-def render_domain_contract_yaml(contract: DomainContract) -> str:
+def render_domain_contract_yaml(contract: AnyDomainContract) -> str:
     """Serialize a contract to stable UTF-8 YAML."""
     return yaml.safe_dump(
         contract.model_dump(mode="json"),
@@ -141,14 +144,14 @@ def render_domain_contract_yaml(contract: DomainContract) -> str:
     )
 
 
-def _hash_payload(contract: DomainContract) -> dict:
+def _hash_payload(contract: AnyDomainContract) -> dict:
     """Return the canonical hash payload excluding approval metadata."""
     payload = contract.model_dump(mode="json")
     payload.pop("approval", None)
     return payload
 
 
-def render_hashable_contract_yaml(contract: DomainContract) -> str:
+def render_hashable_contract_yaml(contract: AnyDomainContract) -> str:
     """Serialize the hash payload to canonical YAML."""
     return yaml.safe_dump(
         _hash_payload(contract),
@@ -158,13 +161,21 @@ def render_hashable_contract_yaml(contract: DomainContract) -> str:
     )
 
 
-def compute_contract_hash(contract: DomainContract) -> str:
-    """Return the SHA-256 hash of canonical YAML bytes."""
+def compute_contract_hash(contract: AnyDomainContract) -> str:
+    """Return a deterministic SHA-256 hash without approval metadata."""
+    if isinstance(contract, DomainContractV2):
+        payload = json.dumps(
+            _hash_payload(contract),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
     canonical_yaml = render_hashable_contract_yaml(contract).encode("utf-8")
     return hashlib.sha256(canonical_yaml).hexdigest()
 
 
-def load_domain_contract(path: Path | str) -> DomainContract:
+def load_domain_contract(path: Path | str) -> AnyDomainContract:
     """Parse a YAML contract from disk with stable syntax and schema errors."""
     contract_path = Path(path)
     try:
@@ -196,19 +207,41 @@ def load_domain_contract(path: Path | str) -> DomainContract:
             f"Domain contract '{contract_path}' must be a YAML mapping."
         )
 
+    schema_version = loaded.get("schema_version", DOMAIN_SCHEMA_VERSION)
+    contract_type = {
+        DOMAIN_SCHEMA_VERSION: DomainContract,
+        DOMAIN_SCHEMA_V2_VERSION: DomainContractV2,
+    }.get(schema_version)
+    if contract_type is None:
+        raise DomainContractValidationError(
+            f"Domain contract '{contract_path}' uses unsupported schema_version "
+            f"'{schema_version}'. Supported versions: {DOMAIN_SCHEMA_VERSION}, "
+            f"{DOMAIN_SCHEMA_V2_VERSION}."
+        )
     try:
-        return DomainContract.model_validate(loaded)
+        return contract_type.model_validate(loaded)
     except ValidationError as exc:
         raise DomainContractValidationError(
             f"Domain contract '{contract_path}' failed schema validation: {exc}"
         ) from exc
 
 
-def save_domain_contract(contract: DomainContract, path: Path | str) -> None:
+def save_domain_contract(contract: AnyDomainContract, path: Path | str) -> None:
     """Write a contract to disk as stable YAML."""
     contract_path = Path(path)
     contract_path.parent.mkdir(parents=True, exist_ok=True)
     contract_path.write_text(render_domain_contract_yaml(contract), encoding="utf-8")
+
+
+def domain_contract_json_schema() -> dict:
+    """Return the strict, version-discriminated domain contract JSON Schema."""
+    schema = TypeAdapter(AnyDomainContract).json_schema(
+        ref_template="#/$defs/{model}",
+    )
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "domain.schema.json"
+    schema["title"] = "VersionedDomainContract"
+    return schema
 
 
 def save_json_document(data: dict, path: Path | str) -> None:

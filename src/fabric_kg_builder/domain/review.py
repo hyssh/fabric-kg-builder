@@ -9,9 +9,11 @@ from typing import Iterable
 from pydantic import ValidationError
 
 from .models import (
+    AnyDomainContract,
     DOMAIN_SCHEMA_VERSION,
     CompetencyQuestionCoverage,
     DomainContract,
+    DomainContractV2,
     DomainReview,
     DomainReviewFinding,
     DomainReviewPayload,
@@ -80,9 +82,12 @@ def _append_finding(
 
 
 def run_deterministic_validation(
-    contract: DomainContract,
+    contract: AnyDomainContract,
 ) -> tuple[list[DomainReviewFinding], list[CompetencyQuestionCoverage]]:
     """Run deterministic semantic checks before or alongside LLM review."""
+    if isinstance(contract, DomainContractV2):
+        return _run_v2_deterministic_validation(contract)
+
     findings: list[DomainReviewFinding] = []
     coverage: list[CompetencyQuestionCoverage] = []
 
@@ -305,6 +310,78 @@ def run_deterministic_validation(
     return findings, coverage
 
 
+def _run_v2_deterministic_validation(
+    contract: DomainContractV2,
+) -> tuple[list[DomainReviewFinding], list[CompetencyQuestionCoverage]]:
+    """Return stable DOM-101..DOM-106 findings for a valid 2.0 contract."""
+    findings: list[DomainReviewFinding] = []
+    coverage: list[CompetencyQuestionCoverage] = []
+    questions = {item.id: item for item in contract.competency_questions}
+    plans = {item.question_id: item for item in contract.question_plans}
+    relationship_count = contract.reasoning_policy.relationship_type_count
+
+    if relationship_count < 8:
+        _append_finding(
+            findings,
+            severity="warning",
+            path="reasoning_policy.relationship_type_count",
+            code="DOM-103",
+            message=(
+                f"N={relationship_count} is below the advisory range 8-20. "
+                "Do not pad the vocabulary; confirm the minimal set covers the "
+                "required questions."
+            ),
+        )
+    elif relationship_count > 20:
+        _append_finding(
+            findings,
+            severity="warning",
+            path="reasoning_policy.relationship_type_count",
+            code="DOM-103",
+            message=(
+                f"N={relationship_count} exceeds the advisory range 8-20 and "
+                "uses the recorded rationale."
+            ),
+        )
+
+    if contract.reasoning_policy.max_hops == 4:
+        _append_finding(
+            findings,
+            severity="warning",
+            path="reasoning_policy.max_hops",
+            code="DOM-105",
+            message="K=4 uses the recorded cited rationale.",
+        )
+
+    for question_id, question in questions.items():
+        plan = plans[question_id]
+        notes = None
+        if not plan.covered:
+            notes = plan.unsupported_reason
+            _append_finding(
+                findings,
+                severity="error" if question.business_critical else "warning",
+                path=f"question_plans[{question_id}]",
+                code="DOM-104",
+                message=(
+                    "Business-critical question is unsupported."
+                    if question.business_critical
+                    else "Non-critical question is explicitly unsupported."
+                ),
+            )
+        coverage.append(
+            CompetencyQuestionCoverage(
+                question=question.question,
+                supported=plan.covered,
+                required_concepts=[
+                    step.relationship_type for step in plan.required_path
+                ],
+                notes=notes,
+            )
+        )
+    return findings, coverage
+
+
 def build_review_user_message(contract: DomainContract) -> str:
     """Build the untrusted user-content message sent to the review model."""
     yaml_body = render_hashable_contract_yaml(contract)
@@ -370,6 +447,11 @@ def run_structured_review(
     model_version: str,
 ) -> DomainReview:
     """Run deterministic checks plus the structured model review."""
+    if isinstance(contract, DomainContractV2):
+        raise DomainReviewError(
+            "Schema-2.0 proposal review and one-summary approval are not enabled "
+            "in the schema foundation layer."
+        )
     deterministic_findings, deterministic_coverage = run_deterministic_validation(
         contract
     )
