@@ -1,0 +1,103 @@
+schema_version: '2.0'
+domain:
+  name: facility-maintenance
+  description: Models facilities, installed equipment, and maintenance work orders.
+  subdomains: [asset operations]
+business:
+  organization_context: A facilities team operates buildings and maintains installed equipment.
+  users: [facility manager, maintenance planner]
+  decisions: [Prioritize maintenance work by facility and equipment.]
+problem:
+  statement: Connect facilities, equipment, and work orders with evidence-backed relationships.
+  desired_outcomes: [Trace maintenance work to installed equipment and its facility.]
+  in_scope: [facilities, equipment, work orders]
+  out_of_scope: [autonomous equipment control]
+competency_questions:
+  - {id: 'cq:equipment-location', question: 'Which facility contains a specified equipment asset?', business_critical: true}
+  - {id: 'cq:facility-equipment', question: 'Which equipment assets are installed in a facility?', business_critical: true}
+  - {id: 'cq:work-order-equipment', question: 'Which equipment asset is addressed by a work order?', business_critical: true}
+  - {id: 'cq:facility-work-orders', question: 'Which work orders affect equipment in a facility?', business_critical: true}
+  - {id: 'cq:equipment-work-orders', question: 'Which work orders have been recorded for an equipment asset?', business_critical: true}
+terminology:
+  canonical_terms:
+    - term: work order
+      definition: A maintenance task authorized for a specific equipment asset.
+      synonyms: [maintenance order]
+  ambiguous_terms: []
+candidate_model:
+  entity_types:
+    - {id: 'entity-type:facility', name: Facility, parent: null, description: A managed physical building or site., source_evidence_ids: ['proposal-evidence:facility']}
+    - {id: 'entity-type:equipment', name: Equipment, parent: null, description: An installed maintainable asset., source_evidence_ids: ['proposal-evidence:equipment']}
+    - {id: 'entity-type:work-order', name: WorkOrder, parent: null, description: An authorized maintenance task., source_evidence_ids: ['proposal-evidence:work-order']}
+  relationship_types:
+    - id: relationship-type:contains
+      predicate: contains
+      description: A facility contains installed equipment.
+      source_types: [entity-type:facility]
+      target_types: [entity-type:equipment]
+      competency_question_ids: [cq:equipment-location, cq:facility-equipment, cq:facility-work-orders]
+      source_evidence_ids: [proposal-evidence:contains]
+    - id: relationship-type:work-order-for
+      predicate: work_order_for
+      description: A work order applies to an equipment asset.
+      source_types: [entity-type:work-order]
+      target_types: [entity-type:equipment]
+      competency_question_ids: [cq:work-order-equipment, cq:facility-work-orders, cq:equipment-work-orders]
+      source_evidence_ids: [proposal-evidence:work-order-for]
+constraints:
+  temporal: [Preserve work-order effective dates.]
+  regulatory: []
+  privacy: []
+  safety: [Do not initiate maintenance actions automatically.]
+examples:
+  positive:
+    - text: Work order WO-17 applies to air handler AHU-4 in Building A.
+      expected: [WorkOrder work_order_for Equipment]
+  negative:
+    - text: Automatically shut down AHU-4.
+      reason: Autonomous equipment control is outside the approved scope.
+reasoning_policy:
+  relationship_type_count: 2
+  recommended_relationship_type_range: [8, 20]
+  max_relationship_types: 24
+  max_hops: 2
+  absolute_max_hops: 4
+  max_relations_per_work_unit: 25
+extraction_policy:
+  vocabulary_mode: closed
+  exact_evidence_span_required: true
+  abstain_without_evidence: true
+  allow_subtype_endpoints: true
+publication_policy:
+  included_states: [asserted]
+  excluded_states: [unresolved, rejected]
+  source_table: semantic_relationships
+question_plans:
+  - question_id: cq:equipment-location
+    required_path:
+      - {from_type: 'entity-type:equipment', relationship_type: 'relationship-type:contains', to_type: 'entity-type:facility', traversal: reverse}
+    hop_count: 1
+    covered: true
+  - question_id: cq:facility-equipment
+    required_path:
+      - {from_type: 'entity-type:facility', relationship_type: 'relationship-type:contains', to_type: 'entity-type:equipment', traversal: forward}
+    hop_count: 1
+    covered: true
+  - question_id: cq:work-order-equipment
+    required_path:
+      - {from_type: 'entity-type:work-order', relationship_type: 'relationship-type:work-order-for', to_type: 'entity-type:equipment', traversal: forward}
+    hop_count: 1
+    covered: true
+  - question_id: cq:facility-work-orders
+    required_path:
+      - {from_type: 'entity-type:facility', relationship_type: 'relationship-type:contains', to_type: 'entity-type:equipment', traversal: forward}
+      - {from_type: 'entity-type:equipment', relationship_type: 'relationship-type:work-order-for', to_type: 'entity-type:work-order', traversal: reverse}
+    hop_count: 2
+    covered: true
+  - question_id: cq:equipment-work-orders
+    required_path:
+      - {from_type: 'entity-type:equipment', relationship_type: 'relationship-type:work-order-for', to_type: 'entity-type:work-order', traversal: reverse}
+    hop_count: 1
+    covered: true
+approval:
+  status: draft

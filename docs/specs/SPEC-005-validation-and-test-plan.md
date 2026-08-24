@@ -12,6 +12,7 @@
 | 1 | 2026-06-24 | Hockney | Initial draft — VAL-001 through VAL-022, full test pyramid, Sprint 1 & 2 deliverables |
 | 2 | 2026-06-24T11:46:10.517-07:00 | Hockney | Command rename `deploy-data` → `deploy-lakehouse` throughout; domain-intake tests with security assertion; graph→AI Search clue-chaining contract; Document Intelligence mocked tests; Foundry + .env config validation; VAL-023–VAL-028 added; mocking strategy updated to Microsoft Foundry SDK |
 | 3 | 2026-06-24T12:42:17.255-07:00 | Hockney | Canonical-naming reconciliation (coordinator-canonical-naming.md): §12 graph→search fixture rewritten to `search.in()` + `vectorFilterMode: preFilter` + provenance select fields; BRG-001–BRG-010 (SPEC-003 §12 bridge gates) and D-31/D-32 (SPEC-002 §11 alias validations) registered in gate catalog and traceability; config keys updated to `AZURE_AI_FOUNDRY_ENDPOINT`/`AZURE_AI_FOUNDRY_API_KEY` (removing `AZURE_OPENAI_*`/`FOUNDRY_DEPLOYMENT_NAME`); commands aligned to `compile-search`, `deploy-lakehouse`, `enrich --domain-prompt`; VAL-023 reworded to chunk (text) and visual AI Search indexes only — no entity/relationship AI Search index exists |
+| 4 | 2026-08-23 | Copilot | Added schema-2.0 DOM, EXT, SEM, DEP, and QRY gates and compatibility test requirements. |
 
 ---
 
@@ -1207,3 +1208,51 @@ This change applies to: `test_csv_pipeline.py`, `test_document_pipeline.py`, `te
 | AC-F1 | CLI fails fast on missing secrets | TC-AC-F1 | `fabric-kg enrich` with `AZURE_AI_FOUNDRY_API_KEY` unset exits non-zero with `[VAL-025]` in stderr before any file is written |
 | AC-F2 | No secret in any committed config file | TC-AC-F2 | `test_no_secrets_in_config_files` passes on every PR; zero violations reported |
 | AC-F3 | Foundry deployment resolves before enrichment starts | TC-AC-F3 | With valid `AZURE_AI_FOUNDRY_ENDPOINT`, `AZURE_AI_FOUNDRY_API_KEY`, and mocked Foundry client, `fabric-kg enrich` begins without `[VAL-027]` error |
+
+## 15. Schema-2.0 Validation Gates
+
+These gates apply only to schema-2.0 projects. Schema-1.0 tests and behavior
+remain unchanged.
+
+| Gate | Stage | Failure condition |
+|---|---|---|
+| DOM-101 | domain validation | Fewer than five or more than ten competency questions |
+| DOM-102 | domain validation | An extracted entity lacks proposal evidence without `business_defined=true`, or a relationship lacks both proposal evidence and an explicit governance rule/business justification |
+| DOM-103 | domain validation | N is outside 1-24, or N 21-24 lacks rationale; N below 8 is advisory and must not be padded |
+| DOM-104 | domain validation | A required question has neither a valid path nor an explicit unsupported result; unsupported critical questions block approval |
+| DOM-105 | domain validation | K differs from the maximum shortest covered path on the question-scoped relationship graph, exceeds 4, or K=4 lacks cited rationale |
+| DOM-106 | domain validation | Type IDs, predicates, endpoint signatures, per-hop endpoints, or traversal direction are ambiguous or invalid |
+| EXT-101 | enrichment | A canonical type or predicate is outside the approved closed vocabulary |
+| EXT-102 | enrichment | An asserted relationship lacks a locally verified exact evidence span |
+| EXT-103 | enrichment | Endpoint validation is not transitive, deterministic, or compliant with exact-only policy |
+| EXT-104 | enrichment | Work-unit overflow truncates candidates instead of deterministic splitting |
+| SEM-100 | compile-data | `semantic_entities` contains a non-asserted, unapproved, stale-hash, or unevidenced extracted row |
+| SEM-101 | compile-data | `semantic_relationships` contains a state other than asserted |
+| SEM-102 | compile-data | A semantic relationship lacks a valid evidence FK |
+| SEM-103 | compile-data | A semantic relationship endpoint is absent from `semantic_entities` |
+| SEM-104 | compile-data | Candidate lifecycle counts do not reconcile exactly |
+| DEP-101 | compile/deploy | Ontology or Graph selects a raw relationship source instead of the sealed semantic projection |
+| DEP-102 | deploy/read-back | Compile, prepared deploy, or persisted count/hash evidence differs |
+| QRY-101 | query planning | A generated path exceeds approved K or uses unbounded traversal |
+
+### 15.1 Foundation test matrix
+
+The schema foundation merge gate covers:
+
+- strict version discrimination and unknown-key rejection;
+- strict schema-2.0 nested sections, nonblank required text, and rejection of
+  schema-1.0 scalar/null list coercion;
+- unchanged schema-1.0 defaults, loading, hashing, review, approval, and
+  enrichment guards;
+- schema-2.0 YAML/JSON round-trip and generated JSON Schema;
+- N advisory/no-padding behavior, rationale threshold, and hard maximum;
+- derived K, justified K=4, rejection above four, and per-hop direction;
+- question-scoped relationship authorization and shortest-path computation;
+- proposal-evidence requirements for entities and relationships; and
+- canonical publication excluded-state ordering and hash equivalence;
+- deterministic contract hashing excluding approval metadata; and
+- explicit non-activation of schema-2.0 enrichment until proposal approval is
+  implemented.
+
+Later layers add exact-span, subtype, lifecycle, materialization, query, isolated
+installation, and live-smoke evidence without weakening these gates.

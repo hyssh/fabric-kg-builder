@@ -16,6 +16,7 @@
 | 2026-06-24T13:24:31.077-07:00 | Verbal | Canonical-naming reconciliation (coordinator-canonical-naming.md): (1) env vars → `AZURE_AI_FOUNDRY_ENDPOINT` / `AZURE_AI_FOUNDRY_API_KEY`; yaml `foundry.endpoint: ${AZURE_AI_FOUNDRY_ENDPOINT}` + `foundry.project`; model keys moved to `enrichment:` section (`enrichment.chat_deployment`, `enrichment.embedding_deployment`, `enrichment.embedding_dimensions`, `enrichment.vision_deployment`); removed `text_deployment` alias and `foundry.project_endpoint` literal. (2) Pipeline block `compile-search-index` → `compile-search`; §2.5 + §11.1 updated to canonical `enrich --domain-prompt / --domain-file` and `set-domain --prompt`. (3) Vision default = chat deployment (gpt-4.1 interim / GPT-5.5-mini target; `gpt-4o` / example-vision documented as alternative); Appendix B Q7 closed. Endpoints are `${ENV_VAR}` in yaml; literal values in `.env` only. |
 | 2026-06-24T15:41:07.842-07:00 | Verbal | v5 — Enrichment default corrected to gpt-5.4-mini (deployment `gpt-5-4-mini`, 200K TPM GlobalStandard); removed gpt-5.5-mini references (model does not exist); added 200K TPM minimum requirement in §9.2; updated model defaults summary table; updated Appendix B Q6; AI Search scope corrected to IN MVP; reference REQUIREMENTS-001. |
 | 2026-06-24T21:46:59.576-07:00 | McManus | Document Intelligence table approach (coordinator-tables-via-docintel.md, verified 2026-06-24): §7.3 Table Chunking rewritten — tables extracted by DI Layout (outputContentFormat=markdown), not LLM; table_row no longer produced by enrichment pipeline; §6.2 system prompt extended to ban table_row/table_cell emission; §8.6 added — DI Layout table extraction pipeline, HTML artifact flow (table_n.html), MS Learn citations (prebuilt/layout + RAG semantic chunking), validation proof (Surface PDF → 2 table_html chunks), reference implementations. |
+| 2026-08-23 | Copilot | Added schema-2.0 closed-vocabulary, exact-evidence, subtype, lifecycle, and shared-K contracts. |
 
 ---
 
@@ -1515,6 +1516,44 @@ Total default context budget: **8000 tokens** (configurable via `fabric-kg.yaml`
 | SPEC-001 / INFRA-001 (Keyser) | AI Search index schema, vector field dimensions (`embedding_dimensions: 1536`), scoring profiles, semantic configs, CLI command surface |
 
 This spec defines Phase 1 output contract, Phase 2 request body, grounded-answer prompt contract, and confidence guardrails only. Do not redefine SPEC-002 schema, SPEC-003 ontology structure, or SPEC-001 CLI commands here.
+
+### 12.12 Schema-2.0 Extraction Contract
+
+Schema-2.0 enrichment receives only the approved entity IDs, relationship IDs,
+endpoint types, direction, subtype hierarchy, evidence policy, and sealed K.
+Unknown predicates remain discovery candidates and cannot enter the canonical
+authoritative lane without a new domain approval.
+
+The proposal authority feeding enrichment requires source evidence for extracted
+entity types and relationship types. An entity may omit source evidence only
+when explicitly approved as `business_defined`. A relationship may omit source
+evidence only when its nonempty `governance_rule` records the reviewed business
+or governance justification. A competency-question reference alone is not
+evidence.
+
+For each relationship candidate the model proposes a runner-known text-unit ID,
+`span_start`, `span_end`, and `quote`. Local code verifies:
+
+1. source and target occurrences exist;
+2. predicate and direction are approved;
+3. endpoint types are compatible through cycle-safe transitive subtype closure,
+   unless the endpoint policy is exact;
+4. offsets are in range and the quote is nonempty;
+5. `source_text[span_start:span_end] == quote`;
+6. source locator and content hash match one source unit; and
+7. a deterministic evidence ID is minted only after all checks pass.
+
+An asserted candidate without verified evidence is invalid before checkpoint
+success. Missing evidence yields `unresolved`; vocabulary, endpoint, direction,
+or span failures yield `rejected`; unsupported predicates yield `discovery`.
+All non-serving candidates retain stable audit reasons.
+
+`max_relations_per_work_unit` defaults to 25. Overflow splits the source unit
+deterministically with overlap and stable child IDs; truncation is forbidden.
+
+The approved K is the same value used by domain question paths, extraction path
+validation, and Graph query planning. Extraction may use fewer hops but cannot
+raise or replace K.
 
 ---
 

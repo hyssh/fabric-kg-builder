@@ -14,6 +14,7 @@
 | 1.2 | 2026-06-24T12:42:17.255-07:00 | Fenster | §11 enriched with RESEARCH-001 production findings: added §11.3 canonical→AI Search field mapping table; §11.4 filter-on-IDs/search-on-aliases split and `search.in()` requirement; §11.5 `preFilter` entity_ids coverage requirement; §11.6 KG↔index sync push pipeline (Parquet not readable by OneLake indexer); §11.7 embedding coupling (1536-dim `text-embedding-3-large`); renumbered prior §11.3–§11.6 to §11.8–§11.11; §11.9 worked example enriched with `search.in()` query pattern; updated §11.10 required conditions and §11.11 design constraints |
 | 1.3 | 2026-06-24T12:42:17.255-07:00 | Fenster | §3.4 `entity_search_keys` and §3.5 `search_aliases` notes corrected: `entity_search_keys` feeds AI Search `entity_aliases` SEARCHABLE field (keyword/alias matching only); filtering is done on `entity_ids` / `canonical_key` (stable IDs). Stale "filter on entity_search_keys" and "filterable/searchable" wording removed to match §11.4 filter-on-IDs/search-on-aliases rule. |
 | 1.4 | 2026-06-24T21:46:59.576-07:00 | McManus | §3.3 document_elements + §3.4 chunks: Document Intelligence Layout is the authoritative source for table structure and `content_html`. Added provenance notes: `element_type="table"` and `chunk_type="table_html"` are produced by DI Layout (`docintel_tables.py`), not the LLM. LLM role = semantics only (summary, entity linking over HTML). `table_row` / `table_cell` element and chunk types are schema-level only — no longer produced by the enrichment pipeline. |
+| 2.0-foundation | 2026-08-23 | Copilot | Defined schema-2.0 audit and serving lifecycle requirements without changing the existing schema-1.0 table workflow. |
 
 ---
 
@@ -606,6 +607,63 @@ The `fabric-kg inspect-source` command produces a `schema-profile.json` file in 
   "warnings": []
 }
 ```
+
+## 12. Schema-2.0 Candidate and Serving Lifecycle
+
+Schema-2.0 projects retain raw relationship candidates for audit and publish a
+separate semantic projection.
+
+### 12.1 Raw relationship requirements
+
+The canonical `relationships` surface may contain asserted, unresolved,
+rejected, and discovery candidates. The 0.2.4 lifecycle extension must record:
+
+- `assertion_state` and `processing_status`;
+- stable rejection or audit reason codes;
+- candidate evidence hints and proposed span metadata;
+- resolved endpoint types and inheritance path when subtype compatibility is
+  used;
+- source lineage, semantic contract hash, prompt version, and model version; and
+- retry eligibility.
+
+Every input candidate reaches exactly one terminal accounting bucket:
+
+```text
+input_candidate_count
+  = asserted_count
+  + unresolved_count
+  + rejected_count
+  + discovery_count
+  + deduplicated_count
+  + endpoint_unresolved_count
+```
+
+Silent drops are invalid.
+
+### 12.2 Semantic serving requirements
+
+`semantic_entities` contains only asserted, approved, contract-matching entities
+with valid identity and evidence, except for explicitly approved
+`business_defined` entities whose approval metadata supplies provenance.
+
+`semantic_relationships` contains only rows where:
+
+- `assertion_state == asserted`;
+- a locally verified `evidence_id` foreign key is present;
+- the relationship type, endpoint types, and direction are approved;
+- both endpoints exist in `semantic_entities`; and
+- `semantic_contract_hash` matches the active authority.
+
+Unresolved, rejected, discovery, and legacy `unverified` rows are never serving
+rows. A schema-2.0 ingestion path maps `unverified` to `unresolved` with an audit
+reason.
+
+### 12.3 Compile/deploy receipt
+
+Compilation records deterministic row counts and canonical row hashes for every
+sealed semantic source table. Deployment must use the same projection and
+validation implementation and must compare the exact expected counts and hashes
+before mutation and after persisted read-back.
 
 ### 6.3 Column-to-Field Mapping Conventions
 

@@ -14,6 +14,7 @@
 | 2026-06-24T12:42:17.255-07:00 | Keyser | v3 — Model defaults locked: chat=GPT-5.5-mini (interim dev gpt-4.1), embedding=text-embedding-3-large@1536; embedding_dimensions config key added; 1536-dim coupling to AI Search documented; sample_data fixtures forward ref. |
 | 2026-06-24T12:42:17.255-07:00 | Keyser | v4 — Canonical naming reconciliation: `compile-search-index` → `compile-search`; stage 2 `ingest` → `inspect-source`; config keys `vision_model_deployment` → `vision_deployment`, `foundry.project_name` → `foundry.project`; `.env` keys `AZURE_DOC_INTELLIGENCE_*` → `AZURE_DOCINTEL_*`; vision default = chat deployment (multimodal; gpt-4.1 interim / GPT-5.5-mini target), `example-vision`/`gpt-4o` as alternative; PRD coverage table updated; build-deploy pipeline sequence corrected. |
 | 2026-06-24T15:41:07.842-07:00 | Verbal | v5 — Enrichment default corrected to gpt-5.4-mini (deployment `gpt-5-4-mini`, 200K TPM GlobalStandard); 200K TPM minimum documented in §5.1 and §10 decisions; AI Search corrected to IN MVP scope (decision 8); reference REQUIREMENTS-001 for setup. |
+| 2026-08-23 | Copilot | v6 — Added the additive schema-2.0 domain foundation for new projects: strict version discrimination, bounded relationship vocabulary N, derived reasoning depth K, typed directed question paths, and explicit 1.0 compatibility. Interactive proposal and approval automation are specified but activate in a later implementation layer. |
 
 ---
 
@@ -799,6 +800,76 @@ dev = ["pytest>=7.0", "pytest-cov", "ruff"]
 [project.scripts]
 fabric-kg = "fabric_kg_builder.cli.main:cli"
 ```
+
+---
+
+## 11. Domain Contract 2.0 Foundation
+
+### 11.1 Version boundary
+
+`domain.yaml` is a version-discriminated contract. The runtime schema artifact
+at `src/fabric_kg_builder/domain/domain.schema.json` accepts exactly:
+
+- schema `1.0`, preserving the existing author, review, approval, and enrichment
+  workflow; or
+- schema `2.0`, for new projects created by the 0.2.4 domain-design workflow.
+
+Unknown versions and unknown keys fail validation. A 1.0 document is never
+automatically converted, upgraded, or granted 2.0 publication semantics.
+Schema 2.0 uses strict section models rather than the scalar/null-to-list
+coercion retained for 1.0 compatibility. Required text is trimmed and must remain
+nonempty; list fields require JSON/YAML arrays with nonblank members.
+
+The schema-foundation layer may load, hash, and deterministically validate 2.0
+contracts, but it must not activate 2.0 enrichment until the Copilot proposal
+and one-summary approval implementation is present.
+
+### 11.2 New-project CLI contract
+
+The completed 0.2.4 workflow will make `init-domain` interactive by default and
+will also accept deterministic YAML or JSON intake for automation. It will:
+
+1. collect the business goal, users, decisions, scope, five to ten competency
+   questions, and a bounded source profile;
+2. produce a strict typed proposal;
+3. select the minimal useful relationship vocabulary without padding;
+4. derive K from the maximum shortest covered question path;
+5. display one approval summary containing types, paths, N, K, unsupported
+   questions, warnings, and sealed hashes; and
+6. require one explicit approval action.
+
+Every extracted entity type requires proposal source evidence unless it is
+explicitly `business_defined`. Every relationship type requires proposal source
+evidence or a nonempty `governance_rule` that records the reviewed business or
+governance justification.
+
+Automation may supply inputs and corrections, but it may not silently approve a
+Copilot-authored proposal.
+
+### 11.3 N and K authority
+
+- N counts approved relationship **types**, not relationship instances.
+- The advisory N range is 8-20. A valid minimal set may be below eight and must
+  not be padded. Values 21-24 require a recorded rationale. Values above 24 fail.
+- K is the maximum shortest covered competency-question path. Values 1-3 are
+  normal. K=4 requires a cited rationale. K greater than four fails.
+- Each path step declares `from_type`, `relationship_type`, `to_type`, and
+  `traversal: forward|reverse`; endpoints and direction are validated locally.
+- A question path may use only relationships whose
+  `competency_question_ids` include that question. Shortest paths are computed
+  on this question-scoped graph, so relationships approved for other questions
+  cannot lower or inflate K.
+- The sealed K is shared by domain design, extraction validation, and Graph query
+  planning. No downstream component may substitute an independent default.
+
+### 11.4 Deterministic identity
+
+Schema-2.0 contract hashes use canonical JSON with sorted object keys and exclude
+approval metadata. Array order remains meaningful for ordered question paths.
+Set-like publication state input is normalized to the exact order
+`[unresolved, rejected]` before hashing, with duplicates removed.
+Approval will additionally seal proposal, source-profile, prompt, and model
+identity. Schema-1.0 hashing remains unchanged.
 
 ---
 

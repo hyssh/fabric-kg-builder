@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
     DomainContract,
+    DomainContractV2,
     DomainReview,
     DomainReviewError,
     compute_contract_hash,
@@ -226,6 +227,12 @@ def domain_review_cmd(
     """Run deterministic and LLM review, then persist domain.review.json."""
     ctx.ensure_object(dict)
     contract = load_domain_contract(contract_path)
+    if isinstance(contract, DomainContractV2):
+        raise click.ClickException(
+            "Schema-2.0 proposal review is not enabled in the schema foundation "
+            "layer. Use 'fabric-kg domain validate' until the one-summary approval "
+            "workflow is installed."
+        )
     client = ctx.obj.get("_foundry_client") if ctx.obj else None
     if client is None:
         try:
@@ -292,6 +299,11 @@ def domain_approve_cmd(
 ) -> None:
     """Record explicit approval metadata after a current passing review."""
     contract = load_domain_contract(contract_path)
+    if isinstance(contract, DomainContractV2):
+        raise click.ClickException(
+            "Schema-2.0 approval is not enabled in the schema foundation layer. "
+            "The schema-1.0 approval command cannot approve a 2.0 contract."
+        )
     review_path = review_path_for_contract(contract_path)
     if not review_path.exists():
         raise click.ClickException(
