@@ -1,0 +1,36 @@
+{
+  "source_file_id": "src:test",
+  "pass": "p3",
+  "entities": [
+    {
+      "id_hint": "event-1",
+      "type": "ReplacementEvent",
+      "label": "Replacement event",
+      "confidence": 0.9
+    },
+    {
+      "id_hint": "tool-1",
+      "type": "Tool",
+      "label": "Torx driver",
+      "confidence": 0.9
+    }
+  ],
+  "relationships": [
+    {
+      "source_id_hint": "event-1",
+      "relation": "requires_tool",
+      "target_id_hint": "tool-1",
+      "direction": "forward",
+      "confidence": 0.9,
+      "evidence": {
+        "text_unit_id": "unit:test",
+        "span_start": 0,
+        "span_end": 37,
+        "quote": "Replacement event uses a Torx driver.",
+        "source_file_id": "src:test",
+        "source_content_hash": "d4f7a8e2f2688fb7de3e3378406da25c52650b603473675134c76a91d342cdd8",
+        "source_locator_json": "{\"page\":1}"
+      }
+    }
+  ]
+}

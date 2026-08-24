@@ -365,8 +365,10 @@ def load_legacy_domain_brief(path: Path | str) -> DomainBrief:
         ) from exc
 
 
-def domain_contract_to_legacy_brief(contract: DomainContract) -> DomainBrief:
-    """Adapt the v1 contract into the legacy brief used by enrichment prompts."""
+def domain_contract_to_legacy_brief(
+    contract: DomainContract | DomainContractV2,
+) -> DomainBrief:
+    """Adapt an approved contract to the legacy prompt summary envelope."""
     constraint_items = (
         contract.constraints.temporal
         + contract.constraints.regulatory
@@ -382,15 +384,30 @@ def domain_contract_to_legacy_brief(contract: DomainContract) -> DomainBrief:
         summary_parts.append(
             "Desired outcomes: " + "; ".join(contract.problem.desired_outcomes)
         )
+    if isinstance(contract, DomainContractV2):
+        entity_types = [
+            item.name for item in contract.candidate_model.entity_types
+        ]
+        relationship_types = [
+            item.predicate
+            for item in contract.candidate_model.relationship_types
+        ]
+        competency_questions = [
+            item.question for item in contract.competency_questions
+        ]
+    else:
+        entity_types = contract.candidate_model.entity_categories
+        relationship_types = contract.candidate_model.relationship_categories
+        competency_questions = contract.competency_questions
     return DomainBrief(
         domain_brief=" ".join(summary_parts),
         industry=contract.domain.name,
         business_domain=contract.domain.subdomains[0]
         if contract.domain.subdomains
         else contract.domain.name,
-        key_entity_types=contract.candidate_model.entity_categories,
-        key_relationship_types=contract.candidate_model.relationship_categories,
+        key_entity_types=entity_types,
+        key_relationship_types=relationship_types,
         extraction_constraints=constraint_items,
-        competency_questions=contract.competency_questions,
+        competency_questions=competency_questions,
         source_domain_text=contract.domain.description,
     )

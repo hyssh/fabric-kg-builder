@@ -1531,8 +1531,22 @@ evidence only when its nonempty `governance_rule` records the reviewed business
 or governance justification. A competency-question reference alone is not
 evidence.
 
-For each relationship candidate the model proposes a runner-known text-unit ID,
-`span_start`, `span_end`, and `quote`. Local code verifies:
+For each relationship candidate the model returns one nested `evidence` object:
+
+```json
+{
+  "text_unit_id": "text-unit:<runner-known-id>",
+  "span_start": 410,
+  "span_end": 487,
+  "quote": "Use a 3IP Torx Plus driver to remove the six enclosure screws.",
+  "source_file_id": "src:<runner-known-id>",
+  "source_content_hash": "<sha256>",
+  "source_locator_json": "{\"page\":7}"
+}
+```
+
+The model may omit the evidence object so the candidate can abstain. It must not
+mint an evidence ID. Local code verifies:
 
 1. source and target occurrences exist;
 2. predicate and direction are approved;
@@ -1544,16 +1558,39 @@ For each relationship candidate the model proposes a runner-known text-unit ID,
 7. a deterministic evidence ID is minted only after all checks pass.
 
 An asserted candidate without verified evidence is invalid before checkpoint
-success. Missing evidence yields `unresolved`; vocabulary, endpoint, direction,
-or span failures yield `rejected`; unsupported predicates yield `discovery`.
-All non-serving candidates retain stable audit reasons.
+success. Missing evidence alone yields `unresolved` / `EVIDENCE_MISSING`.
+Vocabulary, endpoint, direction, source-identity, or span failures yield
+`rejected` with stable `UNKNOWN_*`, `ENDPOINT_UNRESOLVED`, `*_TYPE_MISMATCH`,
+`DIRECTION_MISMATCH`, `EVIDENCE_SOURCE_MISMATCH`,
+`EVIDENCE_SPAN_INVALID`, or `EVIDENCE_QUOTE_MISMATCH` reasons. Unsupported
+entity or relationship terms use the discovery lane and never receive an
+authoritative semantic ID. Structural failures take precedence over missing
+evidence, and reason ordering is deterministic.
 
-`max_relations_per_work_unit` defaults to 25. Overflow splits the source unit
-deterministically with overlap and stable child IDs; truncation is forbidden.
+`max_relations_per_work_unit` defaults to 25. A model response above the bound is
+not truncated, canonicalized, receipted, or checkpointed as successful. The
+coordinator replaces that parent with two stable child work units split at the
+nearest deterministic paragraph, sentence, or token boundary. The boundary
+logical unit appears in both children to preserve context. Child identities bind
+the parent, ordered source bounds, source hash, pass, contract hash, budget, and
+split-policy version.
+
+Children are recursively split until every successful leaf is within budget. An
+indivisible over-budget leaf fails explicitly, and recursion is capped at 16
+levels to prevent pathological model overproduction from causing unbounded
+fan-out. Checkpoints persist the ordered parent-to-child plan; resume reuses valid
+leaf receipts and reissues only missing or failed leaves. Leaf outputs retain
+parent lineage, aggregate in source order, and deduplicate overlap candidates
+after extraction.
 
 The approved K is the same value used by domain question paths, extraction path
 validation, and Graph query planning. Extraction may use fewer hops but cannot
 raise or replace K.
+
+These requirements apply only to schema-2.0 enrichment. Schema-1.0 evidence-hint
+and checkpoint behavior remains compatible. Separate audit/serving Parquet
+surfaces, Ontology/Graph deployment selection, and runtime Graph K enforcement
+remain owned by later layers.
 
 ### 12.13 Domain proposal prompt and local authority
 

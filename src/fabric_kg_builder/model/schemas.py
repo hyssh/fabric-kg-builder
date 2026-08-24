@@ -192,6 +192,10 @@ class EvidenceRow(CommonLineageRow):
     visual_region_id: Optional[str] = None
     blob_url: Optional[str] = None
     text: Optional[str] = None
+    text_unit_id: Optional[str] = None
+    span_start: Optional[int] = None
+    span_end: Optional[int] = None
+    source_content_hash: Optional[str] = None
     content_hash: str
     created_at: datetime
 

@@ -144,10 +144,7 @@ def evaluate_domain_guard_status(
                 "proposal approval."
             )
             return status
-        status.messages.append(
-            "Schema-2.0 proposal is approved, but schema-2.0 enrichment remains "
-            "disabled until the extraction-enforcement layer is installed."
-        )
+        status.ready_for_enrichment = status.deterministic_error_count == 0
         return status
 
     if review_path.exists():
@@ -201,10 +198,15 @@ def require_ready_domain_contract(
     explicit_path: str | None = None,
     *,
     output_dir: Path | None = None,
-) -> tuple[DomainContract, DomainReview, DomainGuardStatus]:
+) -> tuple[AnyDomainContract, DomainReview | None, DomainGuardStatus]:
     """Return the approved contract or raise a clear compatibility/migration error."""
     status = evaluate_domain_guard_status(explicit_path, output_dir=output_dir)
-    if not status.ready_for_enrichment or status.contract is None or status.review is None:
+    missing_review = (
+        status.contract is not None
+        and not isinstance(status.contract, DomainContractV2)
+        and status.review is None
+    )
+    if not status.ready_for_enrichment or status.contract is None or missing_review:
         raise EnrichmentContractError(" ".join(status.messages))
     return status.contract, status.review, status
 
@@ -213,8 +215,8 @@ def write_domain_run_manifest(
     output_dir: Path | str,
     *,
     contract_path: Path,
-    contract: DomainContract,
-    review: DomainReview,
+    contract: AnyDomainContract,
+    review: DomainReview | None,
 ) -> Path:
     """Write approval metadata used by the enrichment run."""
     manifest_path = Path(output_dir) / "domain.run-manifest.json"
@@ -229,12 +231,30 @@ def write_domain_run_manifest(
                 "approval_status": approval.status,
                 "approved_by": approval.approved_by,
                 "approved_at_utc": approval.approved_at_utc,
-                "schema_version": approval.schema_version,
+                "schema_version": getattr(
+                    approval,
+                    "schema_version",
+                    contract.schema_version,
+                ),
                 "prompt_version": approval.prompt_version,
                 "model_version": approval.model_version,
-                "review_quality_score": review.quality_score,
-                "reviewed_at_utc": review.reviewed_at_utc,
-                "review_file": str(review_path_for_contract(contract_path)),
+                "review_quality_score": (
+                    review.quality_score if review is not None else None
+                ),
+                "reviewed_at_utc": (
+                    review.reviewed_at_utc if review is not None else None
+                ),
+                "review_file": (
+                    str(review_path_for_contract(contract_path))
+                    if review is not None
+                    else None
+                ),
+                "proposal_hash": getattr(approval, "proposal_hash", None),
+                "source_profile_hash": getattr(
+                    approval,
+                    "source_profile_hash",
+                    None,
+                ),
             },
         },
         manifest_path,

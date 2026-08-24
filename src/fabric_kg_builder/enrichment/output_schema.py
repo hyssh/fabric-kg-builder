@@ -231,11 +231,16 @@ class Entity(BaseModel):
         default_factory=list,
         description="Runner-assigned evidence supporting the compiled description.",
     )
+    audit_reasons: list[str] = Field(
+        default_factory=list,
+        description="Runner-owned stable discovery or validation reasons.",
+    )
 
     @field_validator(
         "evidence_id_hints",
         "cannot_link_keys",
         "description_evidence_id_hints",
+        "audit_reasons",
     )
     @classmethod
     def _dedupe_string_lists(cls, values: list[str]) -> list[str]:
@@ -325,6 +330,18 @@ class PropertyObservation(BaseModel):
         return self
 
 
+class ExactRelationshipEvidence(BaseModel):
+    """Model-proposed exact source span; every field is verified by the runner."""
+
+    text_unit_id: str = ""
+    span_start: Any = None
+    span_end: Any = None
+    quote: str = ""
+    source_file_id: str | None = None
+    source_content_hash: str | None = None
+    source_locator_json: str | None = None
+
+
 class Relationship(BaseModel):
     """Directed relationship between entity id_hints (SPEC-004 §4.3).
 
@@ -364,6 +381,13 @@ class Relationship(BaseModel):
         description="All evidence id_hints supporting this relationship.",
     )
     source_span_ids: list[str] = Field(default_factory=list)
+    evidence: ExactRelationshipEvidence | None = Field(
+        default=None,
+        description=(
+            "Schema-2.0 exact evidence candidate. The runner verifies every field "
+            "and ignores model-authored evidence IDs."
+        ),
+    )
     direction: Literal["forward", "reverse", "unknown"] = "forward"
     observed_assertion_state: ObservationAssertionState = Field(
         default="asserted",
@@ -428,6 +452,15 @@ class Relationship(BaseModel):
     ] = None
     rejection_reasons: list[str] = Field(default_factory=list)
     description_evidence_id_hints: list[str] = Field(default_factory=list)
+    verified_evidence_id: str | None = Field(
+        default=None,
+        description="Runner-minted evidence ID after exact local validation.",
+    )
+    resolved_source_type_id: str | None = None
+    resolved_target_type_id: str | None = None
+    source_inheritance_path: list[str] = Field(default_factory=list)
+    target_inheritance_path: list[str] = Field(default_factory=list)
+    validation_authority: Literal["schema2"] | None = None
 
     @model_validator(mode="after")
     def _merge_evidence_hints(self) -> "Relationship":
@@ -583,6 +616,15 @@ class Evidence(BaseModel):
     text: Optional[str] = Field(
         default=None, description="Supporting text or value"
     )
+    text_unit_id: Optional[str] = None
+    span_start: Optional[int] = None
+    span_end: Optional[int] = None
+    source_content_hash: Optional[str] = None
+    source_locator_json: Optional[str] = None
+    runner_verified: bool = Field(
+        default=False,
+        description="Runner-owned marker for locally verified exact evidence.",
+    )
 
 
 class ColumnMapping(BaseModel):
@@ -713,6 +755,7 @@ _RUNNER_OWNED_FIELDS: dict[str, frozenset[str]] = {
             "observed_type",
             "resolution_context_key",
             "description_evidence_id_hints",
+            "audit_reasons",
         }
     ),
     "property_observations": frozenset(
@@ -741,8 +784,15 @@ _RUNNER_OWNED_FIELDS: dict[str, frozenset[str]] = {
             "processing_status",
             "rejection_reasons",
             "description_evidence_id_hints",
+            "verified_evidence_id",
+            "resolved_source_type_id",
+            "resolved_target_type_id",
+            "source_inheritance_path",
+            "target_inheritance_path",
+            "validation_authority",
         }
     ),
+    "evidence": frozenset({"runner_verified"}),
 }
 
 

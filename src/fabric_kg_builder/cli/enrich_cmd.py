@@ -333,7 +333,7 @@ def _resolve_domain_brief(
     domain_file: str | None,
     output_dir: Path,
 ):
-    """Resolve the approved v1 domain contract and adapt it for enrichment."""
+    """Resolve the approved domain contract and adapt it for enrichment."""
     if domain_prompt is not None:
         raise EnrichmentContractError(
             "Legacy --domain-prompt is no longer accepted for enrichment. "
@@ -354,11 +354,19 @@ def _resolve_domain_brief(
         contract=contract,
         review=review,
     )
+    schema2_context = None
+    if contract.schema_version == "2.0":
+        from ..enrichment.schema2_validation import (
+            build_schema2_enrichment_context,
+        )
+
+        schema2_context = build_schema2_enrichment_context(contract)
     return (
         domain_contract_to_legacy_brief(contract),
         manifest_path,
         status.contract_hash,
         contract.schema_version,
+        schema2_context,
     )
 
 
@@ -844,6 +852,7 @@ def _enrich_document_file(
     lineage: dict[str, str] | None = None,
     max_concurrent: int = 4,
     semantic_context=None,
+    schema2_context=None,
     cancel_event: threading.Event | None = None,
 ) -> bool:
     """Route a PDF/DOCX/HTML/MD/PPTX file through the full document enrichment pipeline.
@@ -1095,6 +1104,7 @@ def _enrich_document_file(
         lineage=lineage,
         max_concurrent=max_concurrent,
         semantic_context=semantic_context,
+        schema2_context=schema2_context,
         cancel_event=cancel_event,
     )
 
@@ -1351,6 +1361,7 @@ def _enrich_registered_source(
     asset_version_id: str,
     max_concurrent: int,
     semantic_context,
+    schema2_context,
     cancel_event: threading.Event | None = None,
 ) -> None:
     """Process one already-registered source without shared registry writes."""
@@ -1371,6 +1382,7 @@ def _enrich_registered_source(
             lineage=lineage,
             max_concurrent=max_concurrent,
             semantic_context=semantic_context,
+            schema2_context=schema2_context,
             cancel_event=cancel_event,
         )
         if not completed:
@@ -1423,6 +1435,7 @@ def _enrich_registered_source(
         default_source_type="csv_row",
         lineage=lineage,
         semantic_context=semantic_context,
+        schema2_context=schema2_context,
         max_concurrent=max_concurrent,
         cancel_event=cancel_event,
     )
@@ -1747,6 +1760,7 @@ def enrich_cmd(
             manifest_path,
             domain_hash,
             domain_schema_version,
+            schema2_context,
         ) = _resolve_domain_brief(
             domain_prompt=domain_prompt,
             domain_file=domain_file,
@@ -1755,20 +1769,23 @@ def enrich_cmd(
     except EnrichmentContractError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    try:
-        semantic_context = _resolve_semantic_enrichment_context(
-            contract_path=semantic_contract,
-            mappings_path=semantic_mappings,
-            vocabulary_path=semantic_vocabulary,
-            ids_lock_path=semantic_ids_lock,
-            require_contract=require_semantic_contract,
-        )
-    except Exception as exc:
-        if isinstance(exc, click.ClickException):
-            raise
-        raise click.ClickException(
-            f"Invalid semantic contract configuration: {exc}"
-        ) from exc
+    if schema2_context is not None:
+        semantic_context = None
+    else:
+        try:
+            semantic_context = _resolve_semantic_enrichment_context(
+                contract_path=semantic_contract,
+                mappings_path=semantic_mappings,
+                vocabulary_path=semantic_vocabulary,
+                ids_lock_path=semantic_ids_lock,
+                require_contract=require_semantic_contract,
+            )
+        except Exception as exc:
+            if isinstance(exc, click.ClickException):
+                raise
+            raise click.ClickException(
+                f"Invalid semantic contract configuration: {exc}"
+            ) from exc
 
     # Get or build Blob uploader (optional — None when blob not configured).
     if ctx.obj is not None and "_blob_uploader" in ctx.obj:
@@ -1939,6 +1956,7 @@ def enrich_cmd(
             asset_version_id=asset_version.asset_version_id,
             max_concurrent=per_file_concurrency,
             semantic_context=semantic_context,
+            schema2_context=schema2_context,
             cancel_event=cancel_event,
         )
 

@@ -13,6 +13,7 @@ import yaml
 import fabric_kg_builder.domain.proposal as proposal_module
 import fabric_kg_builder.cli.init_domain_cmd as init_domain_module
 from fabric_kg_builder.cli import cli
+from fabric_kg_builder.cli.enrich_cmd import _resolve_domain_brief
 from fabric_kg_builder.domain import (
     compute_contract_hash,
     evaluate_domain_guard_status,
@@ -498,11 +499,23 @@ def test_domain_approve_seals_hashes_when_given_explicit_inputs(
     assert profile.approved_by == "approver@example.com"
     assert compute_source_profile_hash(profile) == proposal.source_profile_hash
     status = evaluate_domain_guard_status(str(artifacts.contract_path))
-    assert status.ready_for_enrichment is False
-    assert any(
-        "enrichment remains disabled" in message
-        for message in status.messages
+    assert status.ready_for_enrichment is True
+    (
+        brief,
+        manifest_path,
+        domain_hash,
+        schema_version,
+        schema2_context,
+    ) = _resolve_domain_brief(
+        domain_prompt=None,
+        domain_file=str(artifacts.contract_path),
+        output_dir=tmp_path / "enriched",
     )
+    assert brief.key_relationship_types
+    assert manifest_path.is_file()
+    assert domain_hash == contract.approval.contract_hash
+    assert schema_version == "2.0"
+    assert schema2_context.contract_hash == domain_hash
 
 
 def test_domain_approve_requires_explicit_approved_by_for_schema_2(
