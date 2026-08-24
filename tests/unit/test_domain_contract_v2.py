@@ -42,6 +42,17 @@ def _contract() -> DomainContractV2:
     return DomainContractV2.model_validate(_payload())
 
 
+def _set_path(
+    payload: dict,
+    path: tuple[str | int, ...],
+    value: object,
+) -> None:
+    target: object = payload
+    for key in path[:-1]:
+        target = target[key]  # type: ignore[index]
+    target[path[-1]] = value  # type: ignore[index]
+
+
 def test_schema_versions_are_explicit() -> None:
     assert DOMAIN_SCHEMA_VERSION == "1.0"
     assert DOMAIN_SCHEMA_V2_VERSION == "2.0"
@@ -91,10 +102,49 @@ def test_schema_2_rejects_scalar_type_coercion(
     value: object,
 ) -> None:
     payload = _payload()
-    target: object = payload
-    for key in path[:-1]:
-        target = target[key]  # type: ignore[index]
-    target[path[-1]] = value  # type: ignore[index]
+    _set_path(payload, path, value)
+    with pytest.raises(ValidationError):
+        DomainContractV2.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("domain", "name"),
+        ("business", "organization_context"),
+        ("business", "users", 0),
+        ("problem", "statement"),
+        ("terminology", "canonical_terms", 0, "definition"),
+        ("constraints", "temporal", 0),
+        ("examples", "positive", 0, "text"),
+        ("candidate_model", "entity_types", 0, "description"),
+        ("candidate_model", "relationship_types", 0, "description"),
+        ("competency_questions", 0, "question"),
+    ],
+)
+def test_schema_2_rejects_whitespace_only_required_text(
+    path: tuple[str | int, ...],
+) -> None:
+    payload = _payload()
+    _set_path(payload, path, "   ")
+    with pytest.raises(ValidationError):
+        DomainContractV2.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("constraints", "temporal"), "Preserve effective dates."),
+        (("constraints", "safety"), None),
+        (("business", "users"), "facility manager"),
+    ],
+)
+def test_schema_2_does_not_inherit_schema_1_list_coercion(
+    path: tuple[str | int, ...],
+    value: object,
+) -> None:
+    payload = _payload()
+    _set_path(payload, path, value)
     with pytest.raises(ValidationError):
         DomainContractV2.model_validate(payload)
 
@@ -189,6 +239,32 @@ def test_k_must_equal_maximum_shortest_covered_path() -> None:
     payload = _payload()
     payload["reasoning_policy"]["max_hops"] = 3
     with pytest.raises(ValidationError, match="maximum shortest covered question path"):
+        DomainContractV2.model_validate(payload)
+
+
+def test_shortest_path_uses_question_scoped_relationship_graph() -> None:
+    payload = _payload()
+    payload["candidate_model"]["relationship_types"].append(
+        {
+            "id": "relationship-type:facility-work-order-shortcut",
+            "predicate": "facility_work_order_shortcut",
+            "description": "A relationship approved for a different question.",
+            "source_types": ["entity-type:facility"],
+            "target_types": ["entity-type:work-order"],
+            "competency_question_ids": ["cq:equipment-location"],
+            "source_evidence_ids": ["proposal-evidence:shortcut"],
+        }
+    )
+    payload["reasoning_policy"]["relationship_type_count"] = 3
+    contract = DomainContractV2.model_validate(payload)
+    assert contract.reasoning_policy.max_hops == 2
+
+
+def test_question_plan_relationship_must_support_that_question() -> None:
+    payload = _payload()
+    contains = payload["candidate_model"]["relationship_types"][0]
+    contains["competency_question_ids"].remove("cq:facility-work-orders")
+    with pytest.raises(ValidationError, match="not approved for the competency question"):
         DomainContractV2.model_validate(payload)
 
 
@@ -291,6 +367,44 @@ def test_non_shortest_question_plan_is_rejected() -> None:
     payload["reasoning_policy"]["max_hops_rationale"] = "A cited but invalid detour."
     with pytest.raises(ValidationError, match="shortest path of 2"):
         DomainContractV2.model_validate(payload)
+
+
+def test_extracted_entity_type_requires_proposal_evidence() -> None:
+    payload = _payload()
+    entity = payload["candidate_model"]["entity_types"][0]
+    entity["source_evidence_ids"] = []
+    with pytest.raises(ValidationError, match="entity types require proposal source"):
+        DomainContractV2.model_validate(payload)
+    entity["business_defined"] = True
+    DomainContractV2.model_validate(payload)
+
+
+def test_relationship_requires_evidence_or_governance_justification() -> None:
+    payload = _payload()
+    relationship = payload["candidate_model"]["relationship_types"][0]
+    relationship["source_evidence_ids"] = []
+    with pytest.raises(ValidationError, match="require proposal source evidence"):
+        DomainContractV2.model_validate(payload)
+    relationship["governance_rule"] = (
+        "The approved asset-governance policy requires this relationship."
+    )
+    DomainContractV2.model_validate(payload)
+
+
+def test_publication_excluded_states_have_one_canonical_hash() -> None:
+    baseline = _contract()
+    payload = _payload()
+    payload["publication_policy"]["excluded_states"] = [
+        "rejected",
+        "unresolved",
+        "rejected",
+    ]
+    canonicalized = DomainContractV2.model_validate(payload)
+    assert canonicalized.publication_policy.excluded_states == [
+        "unresolved",
+        "rejected",
+    ]
+    assert compute_contract_hash(canonicalized) == compute_contract_hash(baseline)
 
 
 def test_business_critical_unsupported_question_is_deterministic_error() -> None:

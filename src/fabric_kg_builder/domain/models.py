@@ -211,18 +211,115 @@ class V2StrictModel(BaseModel):
     )
 
 
+V2RequiredText: TypeAlias = Annotated[
+    str,
+    Field(min_length=1, pattern=r"\S"),
+]
+ProposalEvidenceId: TypeAlias = Annotated[
+    str,
+    Field(pattern=r"^proposal-evidence:[a-zA-Z0-9][a-zA-Z0-9._:-]*$"),
+]
+
+
+class DomainSectionV2(V2StrictModel):
+    """Strict domain description for schema 2.0."""
+
+    name: V2RequiredText
+    description: V2RequiredText
+    subdomains: list[V2RequiredText] = Field(default_factory=list)
+
+
+class BusinessSectionV2(V2StrictModel):
+    """Strict users, decisions, and operating context for schema 2.0."""
+
+    organization_context: V2RequiredText
+    users: list[V2RequiredText] = Field(min_length=1)
+    decisions: list[V2RequiredText] = Field(min_length=1)
+
+
+class ProblemSectionV2(V2StrictModel):
+    """Strict problem and scope definition for schema 2.0."""
+
+    statement: V2RequiredText
+    desired_outcomes: list[V2RequiredText] = Field(min_length=1)
+    in_scope: list[V2RequiredText] = Field(min_length=1)
+    out_of_scope: list[V2RequiredText] = Field(default_factory=list)
+
+
+class CanonicalTermV2(V2StrictModel):
+    """Strict preferred terminology for schema 2.0."""
+
+    term: V2RequiredText
+    definition: V2RequiredText
+    synonyms: list[V2RequiredText] = Field(default_factory=list)
+
+
+class AmbiguousTermV2(V2StrictModel):
+    """Strict ambiguous terminology for schema 2.0."""
+
+    term: V2RequiredText
+    meanings: list[V2RequiredText] = Field(min_length=1)
+
+
+class TerminologySectionV2(V2StrictModel):
+    """Strict schema-2.0 terminology catalogue."""
+
+    canonical_terms: list[CanonicalTermV2] = Field(default_factory=list)
+    ambiguous_terms: list[AmbiguousTermV2] = Field(default_factory=list)
+
+
+class ConstraintsSectionV2(V2StrictModel):
+    """Strict schema-2.0 temporal, regulatory, privacy, and safety rules."""
+
+    temporal: list[V2RequiredText] = Field(default_factory=list)
+    regulatory: list[V2RequiredText] = Field(default_factory=list)
+    privacy: list[V2RequiredText] = Field(default_factory=list)
+    safety: list[V2RequiredText] = Field(default_factory=list)
+
+
+class PositiveExampleV2(V2StrictModel):
+    """Strict positive example for schema 2.0."""
+
+    text: V2RequiredText
+    expected: list[V2RequiredText] = Field(default_factory=list)
+
+
+class NegativeExampleV2(V2StrictModel):
+    """Strict negative example for schema 2.0."""
+
+    text: V2RequiredText
+    reason: V2RequiredText
+
+
+class ExamplesSectionV2(V2StrictModel):
+    """Strict representative examples for schema 2.0."""
+
+    positive: list[PositiveExampleV2] = Field(default_factory=list)
+    negative: list[NegativeExampleV2] = Field(default_factory=list)
+
+
 class DomainEntityTypeV2(V2StrictModel):
     """One approved entity type in a schema-2.0 domain design."""
 
     id: str = Field(pattern=r"^entity-type:[a-z0-9][a-z0-9._-]*$")
-    name: str = Field(min_length=1)
+    name: V2RequiredText
     parent: str | None = Field(
         default=None,
         pattern=r"^entity-type:[a-z0-9][a-z0-9._-]*$",
     )
-    description: str = Field(min_length=1)
-    source_evidence_ids: list[str] = Field(default_factory=list)
+    description: V2RequiredText
+    source_evidence_ids: list[ProposalEvidenceId] = Field(default_factory=list)
     business_defined: bool = False
+
+    @model_validator(mode="after")
+    def _validate_source_support(self) -> "DomainEntityTypeV2":
+        self.source_evidence_ids = list(dict.fromkeys(self.source_evidence_ids))
+        if not self.business_defined and not self.source_evidence_ids:
+            raise ValueError(
+                "[DOM-102] Extracted entity types require proposal source "
+                "evidence unless business_defined=true."
+            )
+        return self
 
 
 class DomainRelationshipTypeV2(V2StrictModel):
@@ -230,7 +327,7 @@ class DomainRelationshipTypeV2(V2StrictModel):
 
     id: str = Field(pattern=r"^relationship-type:[a-z0-9][a-z0-9._-]*$")
     predicate: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
-    description: str = Field(min_length=1)
+    description: V2RequiredText
     source_types: list[str] = Field(min_length=1)
     target_types: list[str] = Field(min_length=1)
     direction: Literal["source_to_target"] = "source_to_target"
@@ -238,8 +335,8 @@ class DomainRelationshipTypeV2(V2StrictModel):
     evidence_policy: Literal["exact_span_required"] = "exact_span_required"
     publication_policy: Literal["asserted_only"] = "asserted_only"
     competency_question_ids: list[str] = Field(default_factory=list)
-    governance_rule: str | None = None
-    source_evidence_ids: list[str] = Field(default_factory=list)
+    governance_rule: V2RequiredText | None = None
+    source_evidence_ids: list[ProposalEvidenceId] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_support(self) -> "DomainRelationshipTypeV2":
@@ -253,6 +350,11 @@ class DomainRelationshipTypeV2(V2StrictModel):
             raise ValueError(
                 "[DOM-102] A relationship type must support a competency question or "
                 "declare a governance_rule."
+            )
+        if not self.source_evidence_ids and not self.governance_rule:
+            raise ValueError(
+                "[DOM-102] Relationship types require proposal source evidence "
+                "or an explicit governance_rule business justification."
             )
         return self
 
@@ -268,7 +370,7 @@ class CompetencyQuestionV2(V2StrictModel):
     """One stable competency question used for coverage and path design."""
 
     id: str = Field(pattern=r"^cq:[a-z0-9][a-z0-9._-]*$")
-    question: str = Field(min_length=15)
+    question: str = Field(min_length=15, pattern=r"\S")
     business_critical: bool = True
 
 
@@ -291,7 +393,7 @@ class QuestionPlanV2(V2StrictModel):
     hop_count: int = Field(ge=0, le=4)
     covered: bool
     shortest_path: Literal[True] = True
-    unsupported_reason: str | None = None
+    unsupported_reason: V2RequiredText | None = None
 
     @model_validator(mode="after")
     def _validate_path_shape(self) -> "QuestionPlanV2":
@@ -321,10 +423,10 @@ class ReasoningPolicyV2(V2StrictModel):
         max_length=2,
     )
     max_relationship_types: Literal[24] = 24
-    relationship_type_count_rationale: str | None = None
+    relationship_type_count_rationale: V2RequiredText | None = None
     max_hops: int = Field(ge=1, le=4)
     absolute_max_hops: Literal[4] = 4
-    max_hops_rationale: str | None = None
+    max_hops_rationale: V2RequiredText | None = None
     max_relations_per_work_unit: int = Field(default=25, ge=1)
 
     @model_validator(mode="before")
@@ -393,6 +495,7 @@ class PublicationPolicyV2(V2StrictModel):
             raise ValueError(
                 "Schema 2.0 must exclude unresolved and rejected relationships."
             )
+        self.excluded_states = ["unresolved", "rejected"]
         return self
 
 
@@ -437,17 +540,17 @@ class DomainContractV2(V2StrictModel):
     """New-project-only bounded domain design contract."""
 
     schema_version: Literal[DOMAIN_SCHEMA_V2_VERSION]
-    domain: DomainSection
-    business: BusinessSection
-    problem: ProblemSection
+    domain: DomainSectionV2
+    business: BusinessSectionV2
+    problem: ProblemSectionV2
     competency_questions: list[CompetencyQuestionV2] = Field(
         min_length=5,
         max_length=10,
     )
-    terminology: TerminologySection
+    terminology: TerminologySectionV2
     candidate_model: CandidateModelSectionV2
-    constraints: ConstraintsSection
-    examples: ExamplesSection
+    constraints: ConstraintsSectionV2
+    examples: ExamplesSectionV2
     reasoning_policy: ReasoningPolicyV2
     extraction_policy: ExtractionPolicyV2 = Field(default_factory=ExtractionPolicyV2)
     publication_policy: PublicationPolicyV2 = Field(
@@ -512,8 +615,11 @@ class DomainContractV2(V2StrictModel):
 
         known_questions = set(question_ids)
         relationship_by_id = {item.id: item for item in relationships}
-        adjacency: dict[str, set[str]] = {
-            entity_id: set() for entity_id in known_entities
+        adjacency_by_question: dict[str, dict[str, set[str]]] = {
+            question_id: {
+                entity_id: set() for entity_id in known_entities
+            }
+            for question_id in known_questions
         }
         for relationship in relationships:
             unknown_sources = set(relationship.source_types) - known_entities
@@ -531,12 +637,18 @@ class DomainContractV2(V2StrictModel):
                     f"[DOM-102] Relationship '{relationship.id}' references unknown competency "
                     f"questions: {sorted(unknown_questions)}."
                 )
-            for source_type in relationship.source_types:
-                for target_type in relationship.target_types:
-                    adjacency[source_type].add(target_type)
-                    adjacency[target_type].add(source_type)
+            for question_id in relationship.competency_question_ids:
+                adjacency = adjacency_by_question[question_id]
+                for source_type in relationship.source_types:
+                    for target_type in relationship.target_types:
+                        adjacency[source_type].add(target_type)
+                        adjacency[target_type].add(source_type)
 
-        def shortest_distance(start: str, end: str) -> int | None:
+        def shortest_distance(
+            adjacency: dict[str, set[str]],
+            start: str,
+            end: str,
+        ) -> int | None:
             if start == end:
                 return 0
             visited = {start}
@@ -572,6 +684,12 @@ class DomainContractV2(V2StrictModel):
                         f"[DOM-106] Question plan '{plan.question_id}' references unknown "
                         f"relationship '{step.relationship_type}'."
                     )
+                if plan.question_id not in relationship.competency_question_ids:
+                    raise ValueError(
+                        f"[DOM-104] Question plan '{plan.question_id}' uses "
+                        f"relationship '{step.relationship_type}', but that "
+                        "relationship is not approved for the competency question."
+                    )
                 expected_sources = (
                     relationship.source_types
                     if step.traversal == "forward"
@@ -598,6 +716,7 @@ class DomainContractV2(V2StrictModel):
             if not plan.covered:
                 continue
             shortest = shortest_distance(
+                adjacency_by_question[plan.question_id],
                 plan.required_path[0].from_type,
                 plan.required_path[-1].to_type,
             )

@@ -1524,6 +1524,13 @@ endpoint types, direction, subtype hierarchy, evidence policy, and sealed K.
 Unknown predicates remain discovery candidates and cannot enter the canonical
 authoritative lane without a new domain approval.
 
+The proposal authority feeding enrichment requires source evidence for extracted
+entity types and relationship types. An entity may omit source evidence only
+when explicitly approved as `business_defined`. A relationship may omit source
+evidence only when its nonempty `governance_rule` records the reviewed business
+or governance justification. A competency-question reference alone is not
+evidence.
+
 For each relationship candidate the model proposes a runner-known text-unit ID,
 `span_start`, `span_end`, and `quote`. Local code verifies:
 

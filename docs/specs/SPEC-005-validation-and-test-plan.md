@@ -1217,10 +1217,10 @@ remain unchanged.
 | Gate | Stage | Failure condition |
 |---|---|---|
 | DOM-101 | domain validation | Fewer than five or more than ten competency questions |
-| DOM-102 | domain validation | An approved relationship supports neither a competency question nor a governance rule |
+| DOM-102 | domain validation | An extracted entity lacks proposal evidence without `business_defined=true`, or a relationship lacks both proposal evidence and an explicit governance rule/business justification |
 | DOM-103 | domain validation | N is outside 1-24, or N 21-24 lacks rationale; N below 8 is advisory and must not be padded |
 | DOM-104 | domain validation | A required question has neither a valid path nor an explicit unsupported result; unsupported critical questions block approval |
-| DOM-105 | domain validation | K differs from the maximum shortest covered path, exceeds 4, or K=4 lacks cited rationale |
+| DOM-105 | domain validation | K differs from the maximum shortest covered path on the question-scoped relationship graph, exceeds 4, or K=4 lacks cited rationale |
 | DOM-106 | domain validation | Type IDs, predicates, endpoint signatures, per-hop endpoints, or traversal direction are ambiguous or invalid |
 | EXT-101 | enrichment | A canonical type or predicate is outside the approved closed vocabulary |
 | EXT-102 | enrichment | An asserted relationship lacks a locally verified exact evidence span |
@@ -1240,11 +1240,16 @@ remain unchanged.
 The schema foundation merge gate covers:
 
 - strict version discrimination and unknown-key rejection;
+- strict schema-2.0 nested sections, nonblank required text, and rejection of
+  schema-1.0 scalar/null list coercion;
 - unchanged schema-1.0 defaults, loading, hashing, review, approval, and
   enrichment guards;
 - schema-2.0 YAML/JSON round-trip and generated JSON Schema;
 - N advisory/no-padding behavior, rationale threshold, and hard maximum;
 - derived K, justified K=4, rejection above four, and per-hop direction;
+- question-scoped relationship authorization and shortest-path computation;
+- proposal-evidence requirements for entities and relationships; and
+- canonical publication excluded-state ordering and hash equivalence;
 - deterministic contract hashing excluding approval metadata; and
 - explicit non-activation of schema-2.0 enrichment until proposal approval is
   implemented.

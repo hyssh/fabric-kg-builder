@@ -23,6 +23,34 @@
       "title": "AmbiguousTerm",
       "type": "object"
     },
+    "AmbiguousTermV2": {
+      "additionalProperties": false,
+      "description": "Strict ambiguous terminology for schema 2.0.",
+      "properties": {
+        "term": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Term",
+          "type": "string"
+        },
+        "meanings": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Meanings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "term",
+        "meanings"
+      ],
+      "title": "AmbiguousTermV2",
+      "type": "object"
+    },
     "ApprovalMetadata": {
       "additionalProperties": false,
       "description": "Approval state stored with the domain contract.",
@@ -271,6 +299,45 @@
       "title": "BusinessSection",
       "type": "object"
     },
+    "BusinessSectionV2": {
+      "additionalProperties": false,
+      "description": "Strict users, decisions, and operating context for schema 2.0.",
+      "properties": {
+        "organization_context": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Organization Context",
+          "type": "string"
+        },
+        "users": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Users",
+          "type": "array"
+        },
+        "decisions": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Decisions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "organization_context",
+        "users",
+        "decisions"
+      ],
+      "title": "BusinessSectionV2",
+      "type": "object"
+    },
     "CandidateModelSection": {
       "additionalProperties": false,
       "description": "Candidate entity and relationship categories.",
@@ -350,6 +417,39 @@
       "title": "CanonicalTerm",
       "type": "object"
     },
+    "CanonicalTermV2": {
+      "additionalProperties": false,
+      "description": "Strict preferred terminology for schema 2.0.",
+      "properties": {
+        "term": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Term",
+          "type": "string"
+        },
+        "definition": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Definition",
+          "type": "string"
+        },
+        "synonyms": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Synonyms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "term",
+        "definition"
+      ],
+      "title": "CanonicalTermV2",
+      "type": "object"
+    },
     "CompetencyQuestionV2": {
       "additionalProperties": false,
       "description": "One stable competency question used for coverage and path design.",
@@ -361,6 +461,7 @@
         },
         "question": {
           "minLength": 15,
+          "pattern": "\\S",
           "title": "Question",
           "type": "string"
         },
@@ -411,6 +512,50 @@
         }
       },
       "title": "ConstraintsSection",
+      "type": "object"
+    },
+    "ConstraintsSectionV2": {
+      "additionalProperties": false,
+      "description": "Strict schema-2.0 temporal, regulatory, privacy, and safety rules.",
+      "properties": {
+        "temporal": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Temporal",
+          "type": "array"
+        },
+        "regulatory": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Regulatory",
+          "type": "array"
+        },
+        "privacy": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Privacy",
+          "type": "array"
+        },
+        "safety": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Safety",
+          "type": "array"
+        }
+      },
+      "title": "ConstraintsSectionV2",
       "type": "object"
     },
     "DomainContract": {
@@ -477,13 +622,13 @@
           "type": "string"
         },
         "domain": {
-          "$ref": "#/$defs/DomainSection"
+          "$ref": "#/$defs/DomainSectionV2"
         },
         "business": {
-          "$ref": "#/$defs/BusinessSection"
+          "$ref": "#/$defs/BusinessSectionV2"
         },
         "problem": {
-          "$ref": "#/$defs/ProblemSection"
+          "$ref": "#/$defs/ProblemSectionV2"
         },
         "competency_questions": {
           "items": {
@@ -495,16 +640,16 @@
           "type": "array"
         },
         "terminology": {
-          "$ref": "#/$defs/TerminologySection"
+          "$ref": "#/$defs/TerminologySectionV2"
         },
         "candidate_model": {
           "$ref": "#/$defs/CandidateModelSectionV2"
         },
         "constraints": {
-          "$ref": "#/$defs/ConstraintsSection"
+          "$ref": "#/$defs/ConstraintsSectionV2"
         },
         "examples": {
-          "$ref": "#/$defs/ExamplesSection"
+          "$ref": "#/$defs/ExamplesSectionV2"
         },
         "reasoning_policy": {
           "$ref": "#/$defs/ReasoningPolicyV2"
@@ -553,6 +698,7 @@
         },
         "name": {
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Name",
           "type": "string"
         },
@@ -571,11 +717,13 @@
         },
         "description": {
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Description",
           "type": "string"
         },
         "source_evidence_ids": {
           "items": {
+            "pattern": "^proposal-evidence:[a-zA-Z0-9][a-zA-Z0-9._:-]*$",
             "type": "string"
           },
           "title": "Source Evidence Ids",
@@ -611,6 +759,7 @@
         },
         "description": {
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Description",
           "type": "string"
         },
@@ -667,6 +816,8 @@
         "governance_rule": {
           "anyOf": [
             {
+              "minLength": 1,
+              "pattern": "\\S",
               "type": "string"
             },
             {
@@ -678,6 +829,7 @@
         },
         "source_evidence_ids": {
           "items": {
+            "pattern": "^proposal-evidence:[a-zA-Z0-9][a-zA-Z0-9._:-]*$",
             "type": "string"
           },
           "title": "Source Evidence Ids",
@@ -723,6 +875,39 @@
       "title": "DomainSection",
       "type": "object"
     },
+    "DomainSectionV2": {
+      "additionalProperties": false,
+      "description": "Strict domain description for schema 2.0.",
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Description",
+          "type": "string"
+        },
+        "subdomains": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Subdomains",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "DomainSectionV2",
+      "type": "object"
+    },
     "ExamplesSection": {
       "additionalProperties": false,
       "description": "Positive and negative examples.",
@@ -743,6 +928,28 @@
         }
       },
       "title": "ExamplesSection",
+      "type": "object"
+    },
+    "ExamplesSectionV2": {
+      "additionalProperties": false,
+      "description": "Strict representative examples for schema 2.0.",
+      "properties": {
+        "positive": {
+          "items": {
+            "$ref": "#/$defs/PositiveExampleV2"
+          },
+          "title": "Positive",
+          "type": "array"
+        },
+        "negative": {
+          "items": {
+            "$ref": "#/$defs/NegativeExampleV2"
+          },
+          "title": "Negative",
+          "type": "array"
+        }
+      },
+      "title": "ExamplesSectionV2",
       "type": "object"
     },
     "ExtractionPolicyV2": {
@@ -798,6 +1005,30 @@
       "title": "NegativeExample",
       "type": "object"
     },
+    "NegativeExampleV2": {
+      "additionalProperties": false,
+      "description": "Strict negative example for schema 2.0.",
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Text",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "reason"
+      ],
+      "title": "NegativeExampleV2",
+      "type": "object"
+    },
     "PositiveExample": {
       "additionalProperties": false,
       "description": "Representative positive example.",
@@ -819,6 +1050,32 @@
         "text"
       ],
       "title": "PositiveExample",
+      "type": "object"
+    },
+    "PositiveExampleV2": {
+      "additionalProperties": false,
+      "description": "Strict positive example for schema 2.0.",
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Text",
+          "type": "string"
+        },
+        "expected": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Expected",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "PositiveExampleV2",
       "type": "object"
     },
     "ProblemSection": {
@@ -856,6 +1113,54 @@
         "statement"
       ],
       "title": "ProblemSection",
+      "type": "object"
+    },
+    "ProblemSectionV2": {
+      "additionalProperties": false,
+      "description": "Strict problem and scope definition for schema 2.0.",
+      "properties": {
+        "statement": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Statement",
+          "type": "string"
+        },
+        "desired_outcomes": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Desired Outcomes",
+          "type": "array"
+        },
+        "in_scope": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "In Scope",
+          "type": "array"
+        },
+        "out_of_scope": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Out Of Scope",
+          "type": "array"
+        }
+      },
+      "required": [
+        "statement",
+        "desired_outcomes",
+        "in_scope"
+      ],
+      "title": "ProblemSectionV2",
       "type": "object"
     },
     "PublicationPolicyV2": {
@@ -963,6 +1268,8 @@
         "unsupported_reason": {
           "anyOf": [
             {
+              "minLength": 1,
+              "pattern": "\\S",
               "type": "string"
             },
             {
@@ -1009,6 +1316,8 @@
         "relationship_type_count_rationale": {
           "anyOf": [
             {
+              "minLength": 1,
+              "pattern": "\\S",
               "type": "string"
             },
             {
@@ -1033,6 +1342,8 @@
         "max_hops_rationale": {
           "anyOf": [
             {
+              "minLength": 1,
+              "pattern": "\\S",
               "type": "string"
             },
             {
@@ -1076,6 +1387,28 @@
         }
       },
       "title": "TerminologySection",
+      "type": "object"
+    },
+    "TerminologySectionV2": {
+      "additionalProperties": false,
+      "description": "Strict schema-2.0 terminology catalogue.",
+      "properties": {
+        "canonical_terms": {
+          "items": {
+            "$ref": "#/$defs/CanonicalTermV2"
+          },
+          "title": "Canonical Terms",
+          "type": "array"
+        },
+        "ambiguous_terms": {
+          "items": {
+            "$ref": "#/$defs/AmbiguousTermV2"
+          },
+          "title": "Ambiguous Terms",
+          "type": "array"
+        }
+      },
+      "title": "TerminologySectionV2",
       "type": "object"
     }
   },

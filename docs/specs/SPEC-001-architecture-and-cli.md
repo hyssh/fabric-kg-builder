@@ -816,6 +816,9 @@ at `src/fabric_kg_builder/domain/domain.schema.json` accepts exactly:
 
 Unknown versions and unknown keys fail validation. A 1.0 document is never
 automatically converted, upgraded, or granted 2.0 publication semantics.
+Schema 2.0 uses strict section models rather than the scalar/null-to-list
+coercion retained for 1.0 compatibility. Required text is trimmed and must remain
+nonempty; list fields require JSON/YAML arrays with nonblank members.
 
 The schema-foundation layer may load, hash, and deterministically validate 2.0
 contracts, but it must not activate 2.0 enrichment until the Copilot proposal
@@ -835,6 +838,11 @@ will also accept deterministic YAML or JSON intake for automation. It will:
    questions, warnings, and sealed hashes; and
 6. require one explicit approval action.
 
+Every extracted entity type requires proposal source evidence unless it is
+explicitly `business_defined`. Every relationship type requires proposal source
+evidence or a nonempty `governance_rule` that records the reviewed business or
+governance justification.
+
 Automation may supply inputs and corrections, but it may not silently approve a
 Copilot-authored proposal.
 
@@ -847,6 +855,10 @@ Copilot-authored proposal.
   normal. K=4 requires a cited rationale. K greater than four fails.
 - Each path step declares `from_type`, `relationship_type`, `to_type`, and
   `traversal: forward|reverse`; endpoints and direction are validated locally.
+- A question path may use only relationships whose
+  `competency_question_ids` include that question. Shortest paths are computed
+  on this question-scoped graph, so relationships approved for other questions
+  cannot lower or inflate K.
 - The sealed K is shared by domain design, extraction validation, and Graph query
   planning. No downstream component may substitute an independent default.
 
@@ -854,6 +866,8 @@ Copilot-authored proposal.
 
 Schema-2.0 contract hashes use canonical JSON with sorted object keys and exclude
 approval metadata. Array order remains meaningful for ordered question paths.
+Set-like publication state input is normalized to the exact order
+`[unresolved, rejected]` before hashing, with duplicates removed.
 Approval will additionally seal proposal, source-profile, prompt, and model
 identity. Schema-1.0 hashing remains unchanged.
 
