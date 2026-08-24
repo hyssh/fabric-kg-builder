@@ -738,8 +738,10 @@ projection receipt, exact Parquet/support sources, semantic manifest,
 materialization plan, compiled Ontology/Graph artifacts, and upstream deployment
 receipts as appropriate. Projection or materialization drift invalidates
 `compile-semantic`, `compile-ontology`, `compile-graph`,
-`deploy-lakehouse`, `deploy-ontology`, `deploy-serving`, and
-`validate-projection` without changing unrelated legacy recovery behavior.
+`compile-agent`, `compile-search`, `package`, artifact validation,
+`deploy-lakehouse`, `deploy-ontology`, `deploy-serving`,
+`validate-projection`, and the final deployment receipt without changing
+unrelated legacy recovery behavior.
 
 ### 9.5 Schema-2 deployment authority
 

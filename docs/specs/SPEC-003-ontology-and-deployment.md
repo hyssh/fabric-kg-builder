@@ -1676,12 +1676,20 @@ Mutation order is strict:
 2. prepare, write, and read back every typed table;
 3. persist a successful materialization receipt;
 4. update Ontology and require `getDefinition` read-back;
-5. update Graph, validate its LRO, and require `getDefinition` read-back;
-6. seal final compile/materialization/Ontology/Graph equivalence.
+5. immediately before Graph mutation, require submitted Ontology hash equality
+   with its persisted receipt and perform a fresh matching Ontology
+   `getDefinition` validation;
+6. update Graph, validate its LRO, and require `getDefinition` read-back;
+7. seal final compile/materialization/Ontology/Graph equivalence.
 
 Protected-label, permission, LRO, missing-table, and read-back errors are
 preserved as failures. Receipts are atomically written through the release
 redaction boundary and contain no source content or credentials.
+
+The successful materialization receipt also binds the expected and actual
+managed typed-table sets. Read-back enumerates only the deployment-owned `kg_*`
+namespace. Any stale `kg_*` table omitted by a shrunken plan blocks success;
+unrelated non-`kg_*` Lakehouse tables are neither considered nor modified.
 
 ## 13. Revision History
 

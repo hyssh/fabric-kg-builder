@@ -1370,6 +1370,8 @@ class MaterializationReceipt(_StrictPersistedModel):
     materialization_plan_hash: str
     source_tables: list[SourceTableAuthority]
     tables: list[MaterializedTableReceipt]
+    expected_managed_tables: list[str]
+    actual_managed_tables: list[str]
     emitted_at_utc: str = Field(min_length=1)
     mock: bool = False
 
@@ -1392,6 +1394,21 @@ class MaterializationReceipt(_StrictPersistedModel):
         _check_utc_timestamp
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonicalize_managed_tables(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field_name in (
+                "expected_managed_tables",
+                "actual_managed_tables",
+            ):
+                if field_name in data:
+                    data[field_name] = _canonicalize_string_list(
+                        data[field_name],
+                        field_name=field_name,
+                    )
+        return data
+
     @model_validator(mode="after")
     def _validate_receipt(self) -> "MaterializationReceipt":
         if not self.source_tables:
@@ -1408,12 +1425,15 @@ class MaterializationReceipt(_StrictPersistedModel):
                 "Materialization receipt contains duplicate typed tables."
             )
         failures = [table for table in self.tables if table.status != "ok"]
-        if self.status == "succeeded" and failures:
+        namespace_drift = (
+            self.actual_managed_tables != self.expected_managed_tables
+        )
+        if self.status == "succeeded" and (failures or namespace_drift):
             raise ValueError(
                 "Successful materialization receipt cannot contain incomplete "
-                "or failed tables."
+                "or failed tables or managed-table namespace drift."
             )
-        if self.status == "failed" and not failures:
+        if self.status == "failed" and not failures and not namespace_drift:
             raise ValueError(
                 "Failed materialization receipt must contain failure evidence."
             )

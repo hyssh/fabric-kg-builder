@@ -64,6 +64,37 @@ def _sha256_file(path: Path | None) -> str | None:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _require_matching_ontology_projection(
+    receipt: dict[str, Any],
+) -> str:
+    """Return the persisted hash only when submitted Ontology is identical."""
+    submitted = str(
+        receipt.get("ontology_submitted_projection_hash") or ""
+    )
+    persisted = str(
+        receipt.get("ontology_persisted_projection_hash") or ""
+    )
+    if not submitted or submitted != persisted:
+        raise click.ClickException(
+            "Ontology submitted and persisted projection hashes differ; "
+            "Graph mutation is blocked."
+        )
+    return persisted
+
+
+def _require_fresh_ontology_projection(
+    receipt: dict[str, Any],
+    fresh_projection_hash: str,
+) -> None:
+    """Require fresh Ontology read-back to match the persisted receipt."""
+    persisted = _require_matching_ontology_projection(receipt)
+    if not fresh_projection_hash or fresh_projection_hash != persisted:
+        raise click.ClickException(
+            "Fresh Ontology read-back differs from the deployment receipt; "
+            "Graph mutation is blocked."
+        )
+
+
 def _load_json_object(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -1501,6 +1532,11 @@ def deploy_ontology_cmd(
             schema=schema_name,
             table_reader=OneLakeDeltaClient(),
             materialization_receipt=semantic_materialization_receipt,
+            managed_table_prefix=(
+                "kg_"
+                if semantic_materialization_receipt is not None
+                else None
+            ),
         )
 
     if use_mock:
@@ -1609,6 +1645,16 @@ def deploy_ontology_cmd(
                         else []
                     )
                 ],
+                "expected_managed_tables": (
+                    semantic_materialization_receipt.expected_managed_tables
+                    if semantic_materialization_receipt is not None
+                    else []
+                ),
+                "actual_managed_tables": (
+                    semantic_materialization_receipt.actual_managed_tables
+                    if semantic_materialization_receipt is not None
+                    else []
+                ),
                 "materialized_tables": (
                     {
                         table.table_name: {
@@ -1854,6 +1900,11 @@ def deploy_ontology_cmd(
                 schema=schema_name,
                 table_reader=OneLakeDeltaClient(),
                 materialization_receipt=semantic_materialization_receipt,
+                managed_table_prefix=(
+                    "kg_"
+                    if semantic_materialization_receipt is not None
+                    else None
+                ),
             )
         except (
             PersistedProjectionError,
@@ -1926,6 +1977,16 @@ def deploy_ontology_cmd(
                     else []
                 )
             ],
+            "expected_managed_tables": (
+                semantic_materialization_receipt.expected_managed_tables
+                if semantic_materialization_receipt is not None
+                else []
+            ),
+            "actual_managed_tables": (
+                semantic_materialization_receipt.actual_managed_tables
+                if semantic_materialization_receipt is not None
+                else []
+            ),
             "ontology_persisted_projection_hash": (
                 ontology_persisted_evidence.projection_hash
                 if ontology_persisted_evidence is not None
@@ -3413,6 +3474,7 @@ def deploy_serving_cmd(
     semantic_materialization_receipt = None
     semantic_ontology_receipt: dict[str, Any] | None = None
     graph_submitted_projection_hash: str | None = None
+    fresh_ontology_projection_hash: str | None = None
     strict_schema2 = False
     if semantic_dir:
         if not graph_definition_file:
@@ -3481,13 +3543,9 @@ def deploy_serving_cmd(
                         f"Ontology receipt field '{field}' does not match the "
                         "schema-2 Graph authority."
                     )
-            if not semantic_ontology_receipt.get(
-                "ontology_persisted_projection_hash"
-            ):
-                raise click.ClickException(
-                    "Ontology receipt does not prove persisted getDefinition "
-                    "read-back."
-                )
+            _require_matching_ontology_projection(
+                semantic_ontology_receipt
+            )
 
     if not workspace_id or not lakehouse_item_id:
         click.echo("[deploy-serving] ERROR: missing fabric.workspace_id / lakehouse_item_id", err=True)
@@ -3504,6 +3562,52 @@ def deploy_serving_cmd(
             err=True,
         )
         raise SystemExit(2)
+
+    if strict_schema2 and not dry_run:
+        from fabric_kg_builder.deploy.fabric_ontology import (  # noqa: PLC0415
+            get_ontology_definition,
+        )
+        from fabric_kg_builder.semantic import (  # noqa: PLC0415
+            PersistedProjectionError,
+            validate_persisted_ontology,
+        )
+
+        try:
+            fresh_ontology_definition = get_ontology_definition(
+                workspace_id,
+                ontology_item_id,
+            )
+            fresh_ontology_evidence = validate_persisted_ontology(
+                definition=fresh_ontology_definition,
+                manifest=semantic_loaded.manifest,
+                plan=semantic_loaded.materialization_plan,
+                workspace_id=workspace_id,
+                lakehouse_item_id=lakehouse_item_id,
+                schema=schema_name,
+                expected_projection_hash=str(
+                    semantic_ontology_receipt.get(
+                        "ontology_submitted_projection_hash"
+                    )
+                    or ""
+                ),
+            )
+        except (
+            PersistedProjectionError,
+            PermissionError,
+            RuntimeError,
+            ValueError,
+        ) as exc:
+            raise click.ClickException(
+                "Fresh Ontology read-back failed before Graph mutation: "
+                f"{exc}"
+            ) from exc
+        fresh_ontology_projection_hash = (
+            fresh_ontology_evidence.projection_hash
+        )
+        _require_fresh_ontology_projection(
+            semantic_ontology_receipt,
+            fresh_ontology_projection_hash,
+        )
 
     # Resolve schema dict
     if schema_file:
@@ -3768,6 +3872,11 @@ def deploy_serving_cmd(
                     materialization_receipt=(
                         semantic_materialization_receipt
                     ),
+                    managed_table_prefix=(
+                        "kg_"
+                        if semantic_materialization_receipt is not None
+                        else None
+                    ),
                 )
             except PersistedProjectionError as exc:
                 raise click.ClickException(
@@ -4012,6 +4121,16 @@ def deploy_serving_cmd(
                     else []
                 )
             ],
+            "expected_managed_tables": (
+                semantic_materialization_receipt.expected_managed_tables
+                if semantic_materialization_receipt is not None
+                else []
+            ),
+            "actual_managed_tables": (
+                semantic_materialization_receipt.actual_managed_tables
+                if semantic_materialization_receipt is not None
+                else []
+            ),
             "materialized_tables": {
                 table.table_name: {
                     "row_count": table.persisted_row_count,
@@ -4030,6 +4149,9 @@ def deploy_serving_cmd(
                 )
                 if semantic_ontology_receipt is not None
                 else None
+            ),
+            "ontology_fresh_projection_hash": (
+                fresh_ontology_projection_hash
             ),
             "graph_definition_hash": _sha256_file(graph_definition_path),
             "graph_submitted_projection_hash": (
@@ -4235,6 +4357,14 @@ def validate_projection_cmd(
                         for source in materialization.source_tables
                     ],
                 ),
+                (
+                    "expected_managed_tables",
+                    materialization.expected_managed_tables,
+                ),
+                (
+                    "actual_managed_tables",
+                    materialization.actual_managed_tables,
+                ),
             ):
                 if receipt.get(field) != expected:
                     raise click.ClickException(
@@ -4260,6 +4390,13 @@ def validate_projection_cmd(
     ):
         raise click.ClickException(
             "Serving receipt is not bound to the persisted Ontology definition."
+        )
+    if strict_schema2 and serving.get(
+        "ontology_fresh_projection_hash"
+    ) != ontology.get("ontology_persisted_projection_hash"):
+        raise click.ClickException(
+            "Serving receipt does not prove a fresh matching Ontology read-back "
+            "before Graph mutation."
         )
     if strict_schema2:
         for label, receipt, submitted_field, persisted_field in (

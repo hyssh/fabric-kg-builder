@@ -2901,6 +2901,28 @@ def build_deploy_cmd(
             },
         ),
     )
+    semantic_authority_files = {
+        "normalized_contract": (
+            paths["semantic"] / "normalized-contract.json"
+        ),
+        "integration_manifest": paths["semantic"] / "semantic-manifest.json",
+        "model_manifest": (
+            paths["semantic"] / "semantic-model-manifest.json"
+        ),
+        "crosswalk": paths["semantic"] / "semantic-crosswalk.json",
+        "materialization_plan": (
+            paths["semantic"] / "materialization-plan.json"
+        ),
+        "model_quality_report": (
+            paths["semantic"] / "model-quality-report.json"
+        ),
+        "dependency_graph": (
+            paths["semantic"] / "dependency-graph.json"
+        ),
+        "projection_receipt": (
+            paths["parquet"] / "semantic-projection-receipt.json"
+        ),
+    }
     agent_args = [
         "compile-agent",
         "--semantic-dir",
@@ -2925,6 +2947,25 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                **semantic_authority_files,
+                "domain_contract": domain_path,
+                "competency_suite": (
+                    competency_suite.resolve()
+                    if competency_suite is not None
+                    else None
+                ),
+            },
+            values={
+                "domain_instruction": _domain_instruction(domain),
+                "questions": [
+                    str(question)
+                    for question in domain.competency_questions
+                ],
+            },
+            directories={"semantic": paths["semantic"]},
+        ),
     )
 
     if not skip_search:
@@ -2955,6 +2996,19 @@ def build_deploy_cmd(
                 extra_env=runtime_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files=semantic_authority_files,
+                directories={
+                    "semantic": paths["semantic"],
+                    "parquet": paths["parquet"],
+                },
+                values={
+                    "embed": embed,
+                    "embedding_deployment": str(
+                        outputs.get("embeddingDeploymentName") or "embedding"
+                    ),
+                },
+            ),
         )
 
     package_args = [
@@ -2975,6 +3029,11 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files=semantic_authority_files,
+            directories={"build": paths["build"]},
+            values={"include_search": not skip_search},
+        ),
     )
     state.execute(
         "validate",
@@ -2993,6 +3052,14 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files=semantic_authority_files,
+            directories={
+                "build": paths["build"],
+                "dist": paths["dist"],
+            },
+            values={"environment": env},
+        ),
     )
 
     search_index_name = f"fkg-{run_token}-chunks"
@@ -3363,6 +3430,29 @@ def build_deploy_cmd(
             state=state,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                **semantic_authority_files,
+                "package_manifest": (
+                    paths["dist"]
+                    / "fabric-kg-package"
+                    / "manifest.json"
+                ),
+                "validation_report": (
+                    paths["release"] / "validation.json"
+                ),
+                "materialization_receipt": (
+                    paths["release"] / "materialization-deployment.json"
+                ),
+                "ontology_receipt": (
+                    paths["release"] / "ontology-deployment.json"
+                ),
+                "serving_receipt": (
+                    paths["release"] / "serving-deployment.json"
+                ),
+            },
+            values={"environment": env},
+        ),
     )
     ledger = _build_resource_ledger(
         run_id=effective_run_id,

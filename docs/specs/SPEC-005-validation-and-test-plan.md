@@ -1324,8 +1324,14 @@ without weakening these gates.
 - missing, malformed, failed, and stale projection/materialization receipts;
 - support source count/hash/schema drift and unapproved support sources;
 - partial typed-table write and stale/extra persisted typed tables;
+- plan shrink with an extra stale owned `kg_*` table, while unrelated tables are
+  ignored and never deleted;
 - Ontology update, protected-label, and `getDefinition` failures;
+- Graph preflight rejects unequal Ontology submitted/persisted hashes and stale
+  fresh Ontology read-back before any Graph mutation;
 - Graph missing table, update LRO, mapping, and `getDefinition` failures;
 - schema-1 compile/deploy/multitype compatibility;
 - resume invalidation on projection or materialization fingerprint changes;
+- resume invalidation propagates through compile-agent, compile-search, package,
+  artifact validation, and final deployment receipt;
 - bearer token, SAS, connection-string, and source-text receipt redaction.

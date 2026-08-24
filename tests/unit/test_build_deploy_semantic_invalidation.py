@@ -97,3 +97,91 @@ def test_legacy_stage_without_fingerprint_keeps_resume_behavior(
         resume=True,
     )
     assert calls == ["first"]
+
+
+def test_semantic_change_invalidates_all_downstream_artifact_stages(
+    tmp_path: Path,
+) -> None:
+    authority = tmp_path / "semantic-manifest.json"
+    authority.write_text('{"contract_hash":"one"}', encoding="utf-8")
+    first_fingerprint = _input_fingerprint(
+        files={"semantic_manifest": authority}
+    )
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    stages = (
+        "compile_agent",
+        "compile_search",
+        "package",
+        "validate",
+        "deployment_receipt",
+    )
+    calls: list[str] = []
+    for stage in stages:
+        state.execute(
+            stage,
+            lambda stage=stage: calls.append(f"first:{stage}") or {},
+            resume=False,
+            input_fingerprint=first_fingerprint,
+        )
+    for stage in stages:
+        state.execute(
+            stage,
+            lambda stage=stage: calls.append(f"stale:{stage}") or {},
+            resume=True,
+            input_fingerprint=first_fingerprint,
+        )
+
+    authority.write_text('{"contract_hash":"two"}', encoding="utf-8")
+    second_fingerprint = _input_fingerprint(
+        files={"semantic_manifest": authority}
+    )
+    for stage in stages:
+        state.execute(
+            stage,
+            lambda stage=stage: calls.append(f"rerun:{stage}") or {},
+            resume=True,
+            input_fingerprint=second_fingerprint,
+        )
+
+    assert [call for call in calls if call.startswith("stale:")] == []
+    assert [call for call in calls if call.startswith("rerun:")] == [
+        f"rerun:{stage}" for stage in stages
+    ]
+
+
+def test_each_sealed_authority_file_changes_downstream_fingerprint(
+    tmp_path: Path,
+) -> None:
+    names = (
+        "normalized-contract.json",
+        "semantic-manifest.json",
+        "semantic-model-manifest.json",
+        "semantic-crosswalk.json",
+        "materialization-plan.json",
+        "model-quality-report.json",
+        "dependency-graph.json",
+        "semantic-projection-receipt.json",
+    )
+    files = {}
+    for name in names:
+        path = tmp_path / name
+        path.write_text('{"version":1}', encoding="utf-8")
+        files[name] = path
+    baseline = _input_fingerprint(
+        files=files,
+        directories={"semantic": tmp_path},
+    )
+
+    for name in names:
+        files[name].write_text('{"version":2}', encoding="utf-8")
+        changed = _input_fingerprint(
+            files=files,
+            directories={"semantic": tmp_path},
+        )
+        assert changed != baseline, name
+        files[name].write_text('{"version":1}', encoding="utf-8")

@@ -84,9 +84,13 @@ class OneLakeDeltaClient:
         *,
         token_provider: Optional[Callable[[], str]] = None,
         delta_table_factory: Optional[Callable[..., Any]] = None,
+        path_lister: Optional[
+            Callable[[str, str, str], list[str]]
+        ] = None,
     ) -> None:
         self._token_provider = token_provider or _default_onelake_token_provider
         self._delta_table_factory = delta_table_factory
+        self._path_lister = path_lister
 
     @staticmethod
     def _table_uri(
@@ -152,6 +156,81 @@ class OneLakeDeltaClient:
             table,
         )
         return delta_table.to_pyarrow_table(columns=columns)
+
+    def list_tables(
+        self,
+        workspace_id: str,
+        lakehouse_item_id: str,
+        schema: str,
+    ) -> list[str]:
+        """List immediate table directories through the OneLake DFS API."""
+        if self._path_lister is not None:
+            return sorted(set(
+                self._path_lister(
+                    workspace_id,
+                    lakehouse_item_id,
+                    schema,
+                )
+            ))
+        import requests  # type: ignore[import]
+
+        url = (
+            "https://onelake.dfs.fabric.microsoft.com/"
+            f"{workspace_id}"
+        )
+        directory = f"{lakehouse_item_id}/Tables/{schema}"
+        headers = {
+            "Authorization": f"Bearer {self._token_provider()}",
+            "x-ms-version": "2023-11-03",
+        }
+        headers["Authorization"] = "Bearer " + self._token_provider()
+        continuation = ""
+        table_names: set[str] = set()
+        while True:
+            params = {
+                "resource": "filesystem",
+                "directory": directory,
+                "recursive": "false",
+                "maxResults": "5000",
+            }
+            if continuation:
+                params["continuation"] = continuation
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=30,
+            )
+            if not response.ok:
+                raise RuntimeError(
+                    "OneLake table enumeration failed: "
+                    f"HTTP {response.status_code}: {response.text[:500]}"
+                )
+            payload = response.json()
+            paths = payload.get("paths", [])
+            if not isinstance(paths, list):
+                raise RuntimeError(
+                    "OneLake table enumeration returned malformed paths."
+                )
+            prefix = directory.rstrip("/") + "/"
+            for item in paths:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "")
+                if (
+                    str(item.get("isDirectory")).casefold() != "true"
+                    or not name.startswith(prefix)
+                ):
+                    continue
+                relative = name[len(prefix):]
+                if relative and "/" not in relative:
+                    table_names.add(relative)
+            continuation = str(
+                response.headers.get("x-ms-continuation") or ""
+            )
+            if not continuation:
+                break
+        return sorted(table_names)
 
     def path_query(
         self,

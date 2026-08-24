@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,6 +20,7 @@ from fabric_kg_builder.semantic.persisted_projection import (
     load_schema2_projection_authority,
     load_materialization_receipt,
     prepare_semantic_tables,
+    validate_bound_tables,
     write_safe_receipt,
 )
 from fabric_kg_builder.semantic.schemas import (
@@ -34,6 +36,7 @@ from fabric_kg_builder.semantic.source_tables import (
     resolve_schema2_source_parquet,
 )
 from fabric_kg_builder.serving.graph_model import build_graph_model_parts
+from fabric_kg_builder.serving.competency import OneLakeDeltaClient
 
 _HASH_A = "sha256:" + "a" * 64
 _HASH_B = "sha256:" + "b" * 64
@@ -333,8 +336,14 @@ def _seal_plan(root: Path) -> MaterializationPlan:
 
 
 class _Reader:
-    def __init__(self, tables: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        tables: dict[str, Any],
+        *,
+        extra_tables: set[str] | None = None,
+    ) -> None:
         self.tables = tables
+        self.extra_tables = extra_tables or set()
 
     def read_table(
         self,
@@ -346,6 +355,14 @@ class _Reader:
     ) -> Any:
         value = self.tables[table]
         return value.select(columns) if columns else value
+
+    def list_tables(
+        self,
+        _workspace_id: str,
+        _lakehouse_item_id: str,
+        _schema: str,
+    ) -> list[str]:
+        return sorted(set(self.tables) | self.extra_tables)
 
 
 def test_mixed_lifecycle_creates_34_tables_and_support_identity_is_exact(
@@ -544,6 +561,52 @@ def test_stale_typed_table_cannot_receive_success_receipt(tmp_path: Path) -> Non
     ).failure_code == "TABLE_READBACK_FAILED"
 
 
+def test_plan_shrink_fails_on_extra_owned_table_but_ignores_unrelated(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "parquet"
+    _write_sources(root)
+    plan = _seal_plan(root)
+    written: dict[str, Any] = {}
+
+    def writer(name: str, table: Any) -> None:
+        written[name] = table
+
+    reader = _Reader(
+        written,
+        extra_tables={"kg_entity_removed_type", "sales_fact"},
+    )
+    receipt = deploy_schema2_materialization(
+        environment="test",
+        parquet_dir=root,
+        plan=plan,
+        semantic_model_manifest_hash=_HASH_B,
+        semantic_crosswalk_hash=_HASH_C,
+        workspace_id="workspace",
+        lakehouse_item_id="lakehouse",
+        schema="dbo",
+        table_writer=writer,
+        table_reader=reader,
+    )
+
+    assert receipt.status == "failed"
+    assert "kg_entity_removed_type" in receipt.actual_managed_tables
+    assert "sales_fact" not in receipt.actual_managed_tables
+    assert receipt.expected_managed_tables == sorted(written)
+    with pytest.raises(
+        PersistedProjectionError,
+        match="namespace differs",
+    ):
+        validate_bound_tables(
+            plan=plan,
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            schema="dbo",
+            table_reader=reader,
+            managed_table_prefix="kg_",
+        )
+
+
 def test_missing_or_failed_materialization_receipt_cannot_authorize_ontology(
     tmp_path: Path,
 ) -> None:
@@ -679,3 +742,44 @@ def test_validation_support_cannot_become_an_entity_source(
         match="source categories are invalid",
     ):
         MaterializationPlan.model_validate(payload)
+
+
+def test_onelake_table_listing_is_injectable_and_deterministic() -> None:
+    client = OneLakeDeltaClient(
+        token_provider=lambda: "unused",
+        path_lister=lambda _workspace, _lakehouse, _schema: [
+            "sales_fact",
+            "kg_entity_b",
+            "kg_entity_a",
+            "kg_entity_a",
+        ],
+    )
+    assert client.list_tables("workspace", "lakehouse", "dbo") == [
+        "kg_entity_a",
+        "kg_entity_b",
+        "sales_fact",
+    ]
+
+
+def test_onelake_table_listing_uses_storage_bearer_token() -> None:
+    response = MagicMock()
+    response.ok = True
+    response.json.return_value = {
+        "paths": [
+            {
+                "name": "lakehouse/Tables/dbo/kg_entity_a",
+                "isDirectory": True,
+            }
+        ]
+    }
+    response.headers = {}
+    client = OneLakeDeltaClient(token_provider=lambda: "token-value")
+    with patch("requests.get", return_value=response) as request:
+        assert client.list_tables(
+            "workspace",
+            "lakehouse",
+            "dbo",
+        ) == ["kg_entity_a"]
+    assert request.call_args.kwargs["headers"]["Authorization"] == (
+        "Bearer token-value"
+    )

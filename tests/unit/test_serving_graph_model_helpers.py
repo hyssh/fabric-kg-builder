@@ -4,10 +4,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli import cli
+from fabric_kg_builder.cli.deploy_cmd import (
+    _require_fresh_ontology_projection,
+    _require_matching_ontology_projection,
+)
 from fabric_kg_builder.serving.graph_model import (
     _graph_alias,
     _stable_id,
@@ -19,6 +24,41 @@ from fabric_kg_builder.serving.graph_model import (
     validate_graph_data_source_paths,
     write_graph_mapping_artifact,
 )
+
+
+def test_graph_preflight_requires_matching_ontology_projection_hashes():
+    digest = "sha256:" + "a" * 64
+    assert _require_matching_ontology_projection({
+        "ontology_submitted_projection_hash": digest,
+        "ontology_persisted_projection_hash": digest,
+    }) == digest
+
+
+def test_graph_preflight_rejects_stale_ontology_projection():
+    with pytest.raises(
+        click.ClickException,
+        match="Graph mutation is blocked",
+    ):
+        _require_matching_ontology_projection({
+            "ontology_submitted_projection_hash": "sha256:" + "a" * 64,
+            "ontology_persisted_projection_hash": "sha256:" + "b" * 64,
+        })
+
+
+def test_graph_preflight_rejects_stale_fresh_ontology_readback():
+    digest = "sha256:" + "a" * 64
+    receipt = {
+        "ontology_submitted_projection_hash": digest,
+        "ontology_persisted_projection_hash": digest,
+    }
+    with pytest.raises(
+        click.ClickException,
+        match="Fresh Ontology read-back differs",
+    ):
+        _require_fresh_ontology_projection(
+            receipt,
+            "sha256:" + "b" * 64,
+        )
 
 
 # ---------------------------------------------------------------------------

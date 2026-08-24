@@ -72,6 +72,14 @@ class BoundTableReader(Protocol):
     ) -> Any:
         ...
 
+    def list_tables(
+        self,
+        workspace_id: str,
+        lakehouse_item_id: str,
+        schema: str,
+    ) -> list[str]:
+        ...
+
 
 class GQLReadinessClient(Protocol):
     """Execute validated GQL against one persisted Graph Model."""
@@ -1122,6 +1130,14 @@ def deploy_schema2_materialization(
                 "Prepared typed-table set differs from the sealed plan.",
             )
         ])
+    if any(not name.startswith("kg_") for name in expected_table_names):
+        raise PersistedProjectionError([
+            ArtifactFinding(
+                "MATERIALIZATION_MANAGED_NAMESPACE_INVALID",
+                "Schema-2 contract-owned typed tables must use the managed "
+                "'kg_' namespace.",
+            )
+        ])
     source_by_name = {
         source.table_name: source for source in plan.source_tables
     }
@@ -1190,6 +1206,8 @@ def deploy_schema2_materialization(
 
     table_receipts: dict[str, MaterializedTableReceipt] = {}
     ordered_tables = sorted(prepared)
+    expected_managed_tables = sorted(expected_table_names)
+    actual_managed_tables: list[str] = []
     if mock:
         for table_name in ordered_tables:
             table_receipts[table_name] = receipt_row(
@@ -1278,8 +1296,25 @@ def deploy_schema2_materialization(
                         failure=exc,
                     )
 
-    succeeded = bool(table_receipts) and all(
-        receipt.status == "ok" for receipt in table_receipts.values()
+    if not mock and table_reader is not None:
+        try:
+            actual_managed_tables = sorted({
+                table_name
+                for table_name in table_reader.list_tables(
+                    workspace_id,
+                    lakehouse_item_id,
+                    schema,
+                )
+                if table_name.startswith("kg_")
+            })
+        except Exception:
+            actual_managed_tables = []
+    succeeded = (
+        bool(table_receipts)
+        and all(
+            receipt.status == "ok" for receipt in table_receipts.values()
+        )
+        and actual_managed_tables == expected_managed_tables
     )
     return MaterializationReceipt(
         status="succeeded" if succeeded else "failed",
@@ -1299,6 +1334,8 @@ def deploy_schema2_materialization(
             table_receipts[table_name]
             for table_name in sorted(table_receipts)
         ],
+        expected_managed_tables=expected_managed_tables,
+        actual_managed_tables=actual_managed_tables,
         emitted_at_utc=_utc_now(),
         mock=mock,
     )
@@ -1312,6 +1349,7 @@ def validate_bound_tables(
     schema: str,
     table_reader: BoundTableReader,
     materialization_receipt: MaterializationReceipt | None = None,
+    managed_table_prefix: str | None = None,
 ) -> dict[str, int]:
     """Read persisted bound tables and validate exact schema, keys, and counts."""
     availability = {
@@ -1327,6 +1365,46 @@ def validate_bound_tables(
             else []
         )
     }
+    if managed_table_prefix is not None:
+        expected_managed = {
+            spec.table_name
+            for spec in [*plan.entity_tables, *plan.relationship_tables]
+            if spec.table_name.startswith(managed_table_prefix)
+        }
+        try:
+            actual_managed = {
+                table_name
+                for table_name in table_reader.list_tables(
+                    workspace_id,
+                    lakehouse_item_id,
+                    schema,
+                )
+                if table_name.startswith(managed_table_prefix)
+            }
+        except Exception as exc:
+            findings.append(ArtifactFinding(
+                "BOUND_TABLE_NAMESPACE_READ_FAILED",
+                f"Could not enumerate managed typed tables: {exc}.",
+            ))
+        else:
+            if actual_managed != expected_managed:
+                findings.append(ArtifactFinding(
+                    "BOUND_TABLE_NAMESPACE_DRIFT",
+                    "Managed typed-table namespace differs from the sealed "
+                    f"plan. Missing={sorted(expected_managed - actual_managed)}; "
+                    f"extra={sorted(actual_managed - expected_managed)}.",
+                ))
+            if materialization_receipt is not None and (
+                sorted(expected_managed)
+                != materialization_receipt.expected_managed_tables
+                or sorted(actual_managed)
+                != materialization_receipt.actual_managed_tables
+            ):
+                findings.append(ArtifactFinding(
+                    "BOUND_TABLE_NAMESPACE_RECEIPT_DRIFT",
+                    "Managed typed-table namespace differs from the "
+                    "materialization receipt.",
+                ))
     for spec in [*plan.entity_tables, *plan.relationship_tables]:
         try:
             table = table_reader.read_table(
