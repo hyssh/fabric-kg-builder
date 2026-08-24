@@ -27,6 +27,15 @@ from .base import (
     canonical_sha256,
 )
 from .evidence import EvidenceSpan, SourceUnit
+from .extraction import (
+    ExtractionAuthorityReferences,
+    ExtractionCandidateBatch,
+    ExtractionCandidateReference,
+    RequiredMemberManifest,
+    RequiredMemberReference,
+    RequiredMemberSetProposal,
+    authoritative_collection_hash,
+)
 from .identity import CanonicalIdentityEnvelope, ImmutableSourceLocator
 from .lifecycle import (
     AssertionState,
@@ -67,8 +76,14 @@ __all__ = [
     "ContractError",
     "ContractModel",
     "EvidenceSpan",
+    "ExtractionAuthorityReferences",
+    "ExtractionCandidateBatch",
+    "ExtractionCandidateReference",
     "ImmutableSourceLocator",
     "REGISTERED_CONTRACTS",
+    "RequiredMemberManifest",
+    "RequiredMemberReference",
+    "RequiredMemberSetProposal",
     "SemanticServingProjection",
     "SourceUnit",
     "StageReceipt",
@@ -77,6 +92,7 @@ __all__ = [
     "UnknownContractMajorError",
     "canonical_json",
     "canonical_sha256",
+    "authoritative_collection_hash",
     "assert_domain_hash_authority",
     "checkpoint_fingerprint_from_authority",
     "identity_from_common_lineage",

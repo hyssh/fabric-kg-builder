@@ -24,6 +24,11 @@ from .base import (
     contract_major,
 )
 from .evidence import EvidenceSpan, SourceUnit
+from .extraction import (
+    ExtractionCandidateBatch,
+    RequiredMemberManifest,
+    RequiredMemberSetProposal,
+)
 from .identity import StandaloneCanonicalIdentityEnvelope
 from .lifecycle import CandidateAccountingDisposition, CandidateLifecycleRecord
 from .projection import AuditProjection, SemanticServingProjection
@@ -34,6 +39,9 @@ REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
     "c0.identity": StandaloneCanonicalIdentityEnvelope,
     "c0.source_unit": SourceUnit,
     "c0.evidence_span": EvidenceSpan,
+    "c0.extraction_candidate_batch": ExtractionCandidateBatch,
+    "c0.required_member_set_proposal": RequiredMemberSetProposal,
+    "c0.required_member_manifest": RequiredMemberManifest,
     "c0.candidate_lifecycle_record": CandidateLifecycleRecord,
     "c0.candidate_accounting_disposition": CandidateAccountingDisposition,
     "c0.canonical_entity_assertion": CanonicalEntityAssertion,
