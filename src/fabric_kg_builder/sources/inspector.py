@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import BadZipFile
 
+from pdfplumber.utils.exceptions import PdfminerException
 from pydantic import BaseModel, Field, model_validator
 
 from fabric_kg_builder.model.ids import content_hash as compute_content_hash
@@ -415,6 +416,8 @@ def _warning_type(exc: Exception) -> str:
         return exc.failure_type.value
     if isinstance(exc, BadZipFile):
         return "bad_zip_file"
+    if isinstance(exc, PdfminerException):
+        return "pdf_parse_error"
     if isinstance(exc, UnicodeDecodeError):
         return "unicode_decode_error"
     if isinstance(exc, csv.Error):
@@ -445,7 +448,17 @@ def _sample_source_file(
     citation_path = _safe_citation_path(file_path, source_root)
     try:
         result = router.extract(file_path)
-    except (AdapterError, BadZipFile, FileNotFoundError, OSError, UnicodeDecodeError, csv.Error, ImportError, ValueError) as exc:
+    except (
+        AdapterError,
+        BadZipFile,
+        PdfminerException,
+        FileNotFoundError,
+        OSError,
+        UnicodeDecodeError,
+        csv.Error,
+        ImportError,
+        ValueError,
+    ) as exc:
         return [], _sampling_warning(citation_path, exc)
 
     elements = sorted(
