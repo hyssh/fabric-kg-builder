@@ -1235,9 +1235,9 @@ remain unchanged.
 | DEP-102 | deploy/read-back | Compile, prepared deploy, or persisted count/hash evidence differs |
 | QRY-101 | query planning | A generated path exceeds approved K or uses unbounded traversal |
 
-### 15.1 Foundation test matrix
+### 15.1 Proposal and approval test matrix
 
-The schema foundation merge gate covers:
+The schema foundation and proposal merge gates cover:
 
 - strict version discrimination and unknown-key rejection;
 - strict schema-2.0 nested sections, nonblank required text, and rejection of
@@ -1251,8 +1251,23 @@ The schema foundation merge gate covers:
 - proposal-evidence requirements for entities and relationships; and
 - canonical publication excluded-state ordering and hash equivalence;
 - deterministic contract hashing excluding approval metadata; and
-- explicit non-activation of schema-2.0 enrichment until proposal approval is
-  implemented.
+- strict intake and proposal versioning, unknown-key rejection, generated
+  proposal JSON Schema, and canonical hash stability;
+- deterministic duplicate/inverse merging and minimum path-union N selection;
+- bounded cited heading/text/table/available-visual sampling, stable locators
+  and hashes, secret redaction, and visible typed sampling failures;
+- interactive one-summary approval, free-form correction/regeneration, and
+  abort;
+- YAML/JSON noninteractive generation that remains draft until a separate
+  explicit `domain approve`;
+- stale proposal, contract, source-profile, prompt, and model binding rejection;
+- unsupported critical questions blocking approval while remaining visible; and
+- explicit non-activation of schema-2.0 enrichment after proposal approval until
+  extraction enforcement is implemented.
+
+Golden candidate/proposal/contract fixtures must prove stable selection and
+serialization. CLI tests inject a deterministic Foundry client and assert that
+user/source/correction content is sent only in the user message.
 
 Later layers add exact-span, subtype, lifecycle, materialization, query, isolated
 installation, and live-smoke evidence without weakening these gates.

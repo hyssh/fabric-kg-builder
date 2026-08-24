@@ -15,10 +15,12 @@ from fabric_kg_builder.domain import (
     DomainReview,
     DomainReviewError,
     compute_contract_hash,
+    approve_domain_proposal,
     convert_legacy_brief_to_contract,
     default_domain_contract,
     evaluate_domain_guard_status,
     load_domain_contract,
+    load_domain_proposal,
     load_domain_review_file,
     load_legacy_domain_brief,
     proposal_path_for_contract,
@@ -229,9 +231,9 @@ def domain_review_cmd(
     contract = load_domain_contract(contract_path)
     if isinstance(contract, DomainContractV2):
         raise click.ClickException(
-            "Schema-2.0 proposal review is not enabled in the schema foundation "
-            "layer. Use 'fabric-kg domain validate' until the one-summary approval "
-            "workflow is installed."
+            "Schema-2.0 proposals are reviewed and validated by 'init-domain'. "
+            "The standalone 'domain review' command remains schema-1.0-only; use "
+            "'domain validate' or regenerate/correct the cited proposal."
         )
     client = ctx.obj.get("_foundry_client") if ctx.obj else None
     if client is None:
@@ -286,6 +288,21 @@ def domain_review_cmd(
     help="Identity to record in approval metadata (default: env-driven local identity).",
 )
 @click.option(
+    "--proposal",
+    "proposal_path",
+    default=None,
+    type=click.Path(exists=True),
+    help="Cited schema-2.0 proposal JSON bound to the contract.",
+)
+@click.option(
+    "--source-profile",
+    "source_profile_path",
+    default=str(Path(".fkg") / "source-profile.json"),
+    show_default=True,
+    type=click.Path(),
+    help="Source profile whose canonical hash is bound by a schema-2.0 proposal.",
+)
+@click.option(
     "--min-quality-score",
     default=0.70,
     show_default=True,
@@ -295,15 +312,57 @@ def domain_review_cmd(
 def domain_approve_cmd(
     contract_path: str,
     approved_by: str | None,
+    proposal_path: str | None,
+    source_profile_path: str,
     min_quality_score: float,
 ) -> None:
     """Record explicit approval metadata after a current passing review."""
     contract = load_domain_contract(contract_path)
     if isinstance(contract, DomainContractV2):
-        raise click.ClickException(
-            "Schema-2.0 approval is not enabled in the schema foundation layer. "
-            "The schema-1.0 approval command cannot approve a 2.0 contract."
+        from fabric_kg_builder.domain import ProposalArtifactError
+        from fabric_kg_builder.sources.inspector import load_source_profile
+
+        if not proposal_path:
+            raise click.ClickException(
+                "Schema-2.0 approval requires --proposal."
+            )
+        if not approved_by or not approved_by.strip():
+            raise click.ClickException(
+                "Schema-2.0 approval requires an explicit --approved-by identity."
+            )
+        profile_path = Path(source_profile_path)
+        if not profile_path.exists():
+            raise click.ClickException(
+                f"Source profile not found: {profile_path}."
+            )
+        try:
+            proposal = load_domain_proposal(proposal_path)
+            source_profile = load_source_profile(profile_path)
+            approved_contract = approve_domain_proposal(
+                contract,
+                proposal,
+                source_profile,
+                approved_by=approved_by,
+                approved_at_utc=utc_now_text(),
+            )
+        except (ProposalArtifactError, ValidationError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        source_profile.approved = True
+        source_profile.approved_at_utc = utc_now_text()
+        source_profile.approved_by = approved_by
+        from fabric_kg_builder.sources.inspector import save_source_profile
+
+        save_source_profile(source_profile, profile_path)
+        save_domain_contract(approved_contract, contract_path)
+        click.echo(f"[domain approve] approved schema-2.0 contract → {contract_path}")
+        click.echo(f"[domain approve] approved_by   : {approved_by}")
+        click.echo(
+            f"[domain approve] contract_hash : {approved_contract.approval.contract_hash}"
         )
+        click.echo(
+            f"[domain approve] proposal_hash : {approved_contract.approval.proposal_hash}"
+        )
+        return
     review_path = review_path_for_contract(contract_path)
     if not review_path.exists():
         raise click.ClickException(

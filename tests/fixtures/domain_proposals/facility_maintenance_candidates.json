@@ -1,0 +1,263 @@
+{
+  "schema_version": "2.0",
+  "domain_name": "facility-maintenance",
+  "domain_description": "Models facilities, installed equipment, and maintenance work orders for asset support planning.",
+  "subdomains": [
+    "asset operations"
+  ],
+  "entity_types": [
+    {
+      "id": "entity-type:facility",
+      "name": "Facility",
+      "parent": null,
+      "description": "A managed building or physical site.",
+      "source_evidence_ids": [
+        "proposal-evidence:229584004727433c22a0e8ed"
+      ],
+      "business_defined": false
+    },
+    {
+      "id": "entity-type:equipment",
+      "name": "Equipment",
+      "parent": null,
+      "description": "An installed maintainable asset.",
+      "source_evidence_ids": [
+        "proposal-evidence:1c84374ee25f7c6a3c8d5e20"
+      ],
+      "business_defined": false
+    },
+    {
+      "id": "entity-type:work-order",
+      "name": "WorkOrder",
+      "parent": null,
+      "description": "An authorized corrective or preventive maintenance task.",
+      "source_evidence_ids": [
+        "proposal-evidence:a5484e3cdf4ca4e03ce0ab0e"
+      ],
+      "business_defined": false
+    }
+  ],
+  "relationship_types": [
+    {
+      "id": "relationship-type:contains",
+      "predicate": "contains",
+      "semantic_key": "contains",
+      "inverse_of": null,
+      "description": "A facility contains installed equipment documented in the equipment register.",
+      "source_types": [
+        "entity-type:facility"
+      ],
+      "target_types": [
+        "entity-type:equipment"
+      ],
+      "endpoint_policy": "allow_subtypes",
+      "competency_question_ids": [
+        "cq:facility-equipment",
+        "cq:facility-work-orders"
+      ],
+      "source_evidence_ids": [
+        "proposal-evidence:229584004727433c22a0e8ed"
+      ],
+      "governance_rule": null,
+      "scores": {
+        "coverage_score": 0.95,
+        "source_support_score": 0.9,
+        "reuse_score": 0.75,
+        "clarity_score": 0.8,
+        "risk_penalty": 0.1,
+        "redundancy_penalty": 0.0
+      }
+    },
+    {
+      "id": "relationship-type:contains-register",
+      "predicate": "contains",
+      "semantic_key": "contains",
+      "inverse_of": null,
+      "description": "The asset register places equipment inside a facility.",
+      "source_types": [
+        "entity-type:facility"
+      ],
+      "target_types": [
+        "entity-type:equipment"
+      ],
+      "endpoint_policy": "allow_subtypes",
+      "competency_question_ids": [
+        "cq:equipment-location"
+      ],
+      "source_evidence_ids": [
+        "proposal-evidence:1c84374ee25f7c6a3c8d5e20"
+      ],
+      "governance_rule": null,
+      "scores": {
+        "coverage_score": 0.7,
+        "source_support_score": 0.7,
+        "reuse_score": 0.4,
+        "clarity_score": 0.55,
+        "risk_penalty": 0.1,
+        "redundancy_penalty": 0.15
+      }
+    },
+    {
+      "id": "relationship-type:installed-in",
+      "predicate": "installed_in",
+      "semantic_key": "contains",
+      "inverse_of": "relationship-type:contains",
+      "description": "Equipment is installed in exactly one facility in the source manual.",
+      "source_types": [
+        "entity-type:equipment"
+      ],
+      "target_types": [
+        "entity-type:facility"
+      ],
+      "endpoint_policy": "allow_subtypes",
+      "competency_question_ids": [
+        "cq:equipment-location"
+      ],
+      "source_evidence_ids": [
+        "proposal-evidence:cd4d73b167a9e3bd01c2a499"
+      ],
+      "governance_rule": null,
+      "scores": {
+        "coverage_score": 0.65,
+        "source_support_score": 0.6,
+        "reuse_score": 0.35,
+        "clarity_score": 0.45,
+        "risk_penalty": 0.15,
+        "redundancy_penalty": 0.2
+      }
+    },
+    {
+      "id": "relationship-type:work-order-for",
+      "predicate": "work_order_for",
+      "semantic_key": "work_order_for",
+      "inverse_of": null,
+      "description": "A work order applies to an equipment asset.",
+      "source_types": [
+        "entity-type:work-order"
+      ],
+      "target_types": [
+        "entity-type:equipment"
+      ],
+      "endpoint_policy": "allow_subtypes",
+      "competency_question_ids": [
+        "cq:work-order-equipment",
+        "cq:facility-work-orders"
+      ],
+      "source_evidence_ids": [
+        "proposal-evidence:a5484e3cdf4ca4e03ce0ab0e"
+      ],
+      "governance_rule": null,
+      "scores": {
+        "coverage_score": 0.92,
+        "source_support_score": 0.88,
+        "reuse_score": 0.7,
+        "clarity_score": 0.8,
+        "risk_penalty": 0.08,
+        "redundancy_penalty": 0.0
+      }
+    },
+    {
+      "id": "relationship-type:work-order-targets",
+      "predicate": "work_order_targets",
+      "semantic_key": "work_order_for",
+      "inverse_of": null,
+      "description": "Maintenance logs tie a work order back to the affected equipment.",
+      "source_types": [
+        "entity-type:work-order"
+      ],
+      "target_types": [
+        "entity-type:equipment"
+      ],
+      "endpoint_policy": "allow_subtypes",
+      "competency_question_ids": [
+        "cq:equipment-work-orders"
+      ],
+      "source_evidence_ids": [
+        "proposal-evidence:9ac54bc6336eab27acb84e44"
+      ],
+      "governance_rule": null,
+      "scores": {
+        "coverage_score": 0.6,
+        "source_support_score": 0.72,
+        "reuse_score": 0.42,
+        "clarity_score": 0.5,
+        "risk_penalty": 0.12,
+        "redundancy_penalty": 0.18
+      }
+    }
+  ],
+  "question_routes": [
+    {
+      "question_id": "cq:equipment-location",
+      "start_type": "entity-type:equipment",
+      "end_type": "entity-type:facility",
+      "unsupported_reason": null
+    },
+    {
+      "question_id": "cq:facility-equipment",
+      "start_type": "entity-type:facility",
+      "end_type": "entity-type:equipment",
+      "unsupported_reason": null
+    },
+    {
+      "question_id": "cq:work-order-equipment",
+      "start_type": "entity-type:work-order",
+      "end_type": "entity-type:equipment",
+      "unsupported_reason": null
+    },
+    {
+      "question_id": "cq:facility-work-orders",
+      "start_type": "entity-type:facility",
+      "end_type": "entity-type:work-order",
+      "unsupported_reason": null
+    },
+    {
+      "question_id": "cq:equipment-work-orders",
+      "start_type": "entity-type:equipment",
+      "end_type": "entity-type:work-order",
+      "unsupported_reason": null
+    },
+    {
+      "question_id": "cq:vendor-response-commitment",
+      "start_type": null,
+      "end_type": null,
+      "unsupported_reason": "Representative samples do not cite vendor response-time commitments for specific equipment assets."
+    }
+  ],
+  "canonical_terms": [
+    {
+      "term": "work order",
+      "definition": "A maintenance task authorized for a specific equipment asset.",
+      "synonyms": [
+        "maintenance order"
+      ]
+    }
+  ],
+  "ambiguous_terms": {
+    "asset": [
+      "facility",
+      "equipment"
+    ]
+  },
+  "positive_examples": [
+    {
+      "text": "Work order WO-17 applies to air handler AHU-4 in Building A.",
+      "expected": [
+        "WorkOrder work_order_for Equipment",
+        "Facility contains Equipment"
+      ]
+    }
+  ],
+  "negative_examples": [
+    {
+      "text": "Automatically shut down AHU-4.",
+      "reason": "Autonomous control actions are outside the approved scope."
+    }
+  ],
+  "assumptions": [
+    "Each work order in scope identifies the primary affected equipment asset."
+  ],
+  "warnings": [
+    "Vendor commitments remain unsupported until a service-contract source is added."
+  ]
+}

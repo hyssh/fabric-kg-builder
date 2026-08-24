@@ -1,20 +1,16 @@
-"""init-domain command — inspect source files then guide domain contract authoring.
+"""Copilot-assisted schema-2.0 domain proposal initialization.
 
-Workflow:
-  1. Inspect source files and build a SourceProfile (observed facts + inferred suggestions).
-  2. Present the profile, clearly separating observed facts from inferred suggestions.
-  3. Incorporate an existing domain description if supplied or found.
-  4. Ask for user approval (default N; --approve to auto-approve in CI/CD).
-  5. Persist the approved profile to .fkg/source-profile.json.
-  6. Ask only questions not already resolved by the profile.
-  7. Generate and save a draft domain.yaml contract.
-
-Existing commands (inspect-source, domain init, enrich) are unchanged.
+The new-project default collects unresolved intake, inspects bounded source
+samples, generates candidates, applies local N/K authority, and presents one
+approve/correct/abort summary. YAML/JSON automation generates draft artifacts
+only. The previous schema-1.0 profile workflow remains available explicitly
+through ``--legacy-schema-1`` and the legacy ``--approve`` alias.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import click
@@ -327,67 +323,7 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
 
-@click.command(
-    "init-domain",
-    epilog=_INIT_DOMAIN_EPILOG,
-    context_settings={"max_content_width": 120},
-)
-@click.option(
-    "--input",
-    "input_path",
-    default=None,
-    type=click.Path(),
-    help="Path to source file or directory to inspect before generating questions.",
-)
-@click.option(
-    "--out",
-    "output_path",
-    default="domain.yaml",
-    show_default=True,
-    type=click.Path(),
-    help="Path to write the draft domain contract YAML.",
-)
-@click.option(
-    "--profile-out",
-    "profile_path",
-    default=str(_DEFAULT_PROFILE_PATH),
-    show_default=True,
-    type=click.Path(),
-    help="Path to persist the approved source profile JSON.",
-)
-@click.option(
-    "--domain-description",
-    "domain_description",
-    default=None,
-    help="Existing domain description to incorporate before generating questions.",
-)
-@click.option(
-    "--domain-file",
-    "domain_file",
-    default=None,
-    type=click.Path(),
-    help="Existing domain.yaml to read description from (alternative to --domain-description).",
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Overwrite existing domain contract and profile without prompting.",
-)
-@click.option(
-    "--approve",
-    is_flag=True,
-    default=False,
-    help="Auto-approve profile without interactive prompt (CI/CD noninteractive mode).",
-)
-@click.option(
-    "--interactive",
-    "force_interactive",
-    is_flag=True,
-    default=False,
-    help="Force interactive approval prompt regardless of TTY detection.",
-)
-def init_domain_cmd(
+def _run_legacy_init_domain(
     input_path: str | None,
     output_path: str,
     profile_path: str,
@@ -517,3 +453,459 @@ def _noninteractive_defaults(profile: SourceProfile) -> dict[str, str]:
         else:
             answers[field_path] = default
     return answers
+
+
+def _slug(value: str, fallback: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return normalized[:48] or fallback
+
+
+def _split_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _collect_v2_intake(profile: SourceProfile):
+    from fabric_kg_builder.domain import DomainIntake
+
+    goal = profile.domain_description or click.prompt(
+        "What business outcome should this graph support?"
+    )
+    users = _split_list(
+        click.prompt("Who will use it? (comma-separated)")
+    )
+    decisions = _split_list(
+        click.prompt("What decisions will they make? (comma-separated)")
+    )
+    in_scope = _split_list(
+        click.prompt("In-scope concepts (comma-separated)")
+    )
+    out_of_scope = _split_list(
+        click.prompt("Explicitly out-of-scope concepts (comma-separated)", default="none")
+    )
+    question_count = click.prompt(
+        "How many competency questions?",
+        default=5,
+        type=click.IntRange(5, 10),
+    )
+    questions = []
+    used_ids: set[str] = set()
+    for index in range(question_count):
+        question = click.prompt(f"Competency question {index + 1}")
+        base = _slug(question, f"question-{index + 1}")
+        question_id = f"cq:{base}"
+        suffix = 2
+        while question_id in used_ids:
+            question_id = f"cq:{base}-{suffix}"
+            suffix += 1
+        used_ids.add(question_id)
+        questions.append(
+            {
+                "id": question_id,
+                "question": question,
+                "business_critical": True,
+            }
+        )
+    sensitive = _split_list(
+        click.prompt(
+            "Safety-, legal-, or policy-sensitive predicates (comma-separated)",
+            default="none",
+        )
+    )
+    return DomainIntake.model_validate(
+        {
+            "schema_version": "2.0",
+            "business_goal": goal,
+            "organization_context": goal,
+            "users": users,
+            "decisions": decisions,
+            "desired_outcomes": [goal],
+            "in_scope": in_scope,
+            "out_of_scope": [
+                item for item in out_of_scope if item.casefold() != "none"
+            ],
+            "competency_questions": questions,
+            "sensitive_predicates": [
+                item for item in sensitive if item.casefold() != "none"
+            ],
+        }
+    )
+
+
+def _build_proposal_client(ctx_obj: dict):
+    from fabric_kg_builder.config.loader import load_config
+    from fabric_kg_builder.enrichment.foundry_client import FoundryClient
+
+    config = load_config(env=ctx_obj.get("env", "dev"))
+    return FoundryClient(config.foundry)
+
+
+def _proposal_model_version(client, ctx_obj: dict) -> str:
+    injected = ctx_obj.get("_foundry_model_version")
+    if isinstance(injected, str) and injected.strip():
+        return injected.strip()
+    config = getattr(client, "_config", None)
+    deployment = getattr(config, "chat_deployment", "")
+    return deployment.strip() if isinstance(deployment, str) and deployment.strip() else "unknown"
+
+
+def _render_proposal_summary(proposal, profile: SourceProfile, findings) -> str:
+    contract = proposal.contract
+    lines = [
+        "Domain proposal summary",
+        f"  Domain: {contract.domain.name}",
+        f"  Description: {contract.domain.description}",
+        f"  Scope: {', '.join(contract.problem.in_scope)}",
+        f"  Out of scope: {', '.join(contract.problem.out_of_scope) or '(none)'}",
+        f"  Users: {', '.join(contract.business.users)}",
+        f"  Decisions: {', '.join(contract.business.decisions)}",
+        f"  Outcomes: {', '.join(contract.problem.desired_outcomes)}",
+        "  Competency questions:",
+    ]
+    plans = {item.question_id: item for item in contract.question_plans}
+    for question in contract.competency_questions:
+        plan = plans[question.id]
+        status = (
+            f"covered in {plan.hop_count} hop(s)"
+            if plan.covered
+            else f"UNSUPPORTED: {plan.unsupported_reason}"
+        )
+        lines.append(f"    - {question.id}: {question.question} [{status}]")
+    lines.append("  Entity types:")
+    for entity in contract.candidate_model.entity_types:
+        lines.append(f"    - {entity.id}: {entity.name}")
+    lines.append("  Relationship types:")
+    for relationship in contract.candidate_model.relationship_types:
+        lines.append(
+            "    - "
+            f"{relationship.id}: {relationship.source_types} -> "
+            f"{relationship.target_types}"
+        )
+    lines.extend(
+        [
+            f"  N: {contract.reasoning_policy.relationship_type_count} "
+            "(deterministic minimum; advisory 8-20, no padding)",
+            f"  K: {contract.reasoning_policy.max_hops} "
+            "(maximum question-scoped shortest path)",
+            "  Evidence examples:",
+        ]
+    )
+    for item in proposal.evidence[:8]:
+        lines.append(
+            f"    - {item.id} [{item.sample_kind}] {item.citation}: {item.excerpt}"
+        )
+    if not proposal.evidence:
+        lines.append("    - (no representative source excerpts available)")
+    risks = list(profile.inferred.extraction_risks)
+    risks.extend(
+        item.message for item in getattr(profile, "sampling_warnings", [])
+    )
+    warnings = [item.message for item in findings if item.severity == "warning"]
+    warnings.extend(proposal.warnings)
+    if risks or warnings:
+        lines.append("  Warnings and extraction risks:")
+        lines.extend(f"    - {item}" for item in [*risks, *warnings])
+    lines.extend(
+        [
+            "  Policies: closed vocabulary; exact evidence span required; "
+            "abstain without evidence; asserted-only publication",
+            f"  Schema: {contract.schema_version}",
+            f"  Source-profile hash: {proposal.source_profile_hash}",
+            f"  Proposal hash: {proposal.proposal_hash}",
+            f"  Prompt: {proposal.prompt_version} ({proposal.prompt_hash})",
+            f"  Model: {proposal.model_version} ({proposal.model_hash})",
+            f"  Contract hash: {proposal.contract_hash}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _resolve_interactive_approver(explicit: str | None) -> str:
+    return (
+        explicit
+        or os.environ.get("FABRIC_KG_APPROVER")
+        or os.environ.get("GIT_AUTHOR_EMAIL")
+        or os.environ.get("USERNAME")
+        or os.environ.get("USER")
+        or "local-user"
+    )
+
+
+def _run_v2_init_domain(
+    ctx: click.Context,
+    *,
+    input_path: str | None,
+    output_path: str,
+    profile_path: str,
+    proposal_path: str,
+    intake_path: str | None,
+    domain_description: str | None,
+    force: bool,
+    non_interactive: bool,
+    approved_by: str | None,
+) -> None:
+    from pydantic import ValidationError
+
+    from fabric_kg_builder.domain import (
+        ProposalArtifactError,
+        ProposalSelectionError,
+        approve_domain_proposal,
+        generate_domain_proposal,
+        load_domain_intake,
+        run_deterministic_validation,
+        save_domain_proposal,
+    )
+
+    out_path = Path(output_path)
+    prof_path = Path(profile_path)
+    prop_path = Path(proposal_path)
+    for artifact in (out_path, prof_path, prop_path):
+        if artifact.exists() and not force:
+            raise click.ClickException(
+                f"Refusing to overwrite existing artifact '{artifact}'. Re-run with --force."
+            )
+
+    if input_path:
+        source_path = Path(input_path)
+        if not source_path.exists():
+            raise click.ClickException(f"Source path not found: {input_path}")
+        profile = build_source_profile(
+            source_path,
+            domain_description=domain_description,
+        )
+    else:
+        profile = SourceProfile(
+            domain_description=domain_description,
+            inspected_at_utc=utc_now_text(),
+        )
+    save_source_profile(profile, prof_path)
+
+    if intake_path:
+        try:
+            intake = load_domain_intake(intake_path)
+        except (ProposalArtifactError, ValidationError) as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif non_interactive:
+        raise click.ClickException(
+            "--non-interactive requires a complete YAML or JSON --intake file."
+        )
+    else:
+        try:
+            intake = _collect_v2_intake(profile)
+        except ValidationError as exc:
+            raise click.ClickException(f"Interactive intake is invalid: {exc}") from exc
+
+    ctx.ensure_object(dict)
+    client = ctx.obj.get("_foundry_client")
+    if client is None:
+        try:
+            client = _build_proposal_client(ctx.obj)
+        except (EnvironmentError, ImportError, OSError, ValidationError) as exc:
+            raise click.ClickException(
+                f"Could not build Foundry client for domain proposal: {exc}"
+            ) from exc
+    model_version = _proposal_model_version(client, ctx.obj)
+    correction: str | None = None
+
+    while True:
+        try:
+            proposal = generate_domain_proposal(
+                intake,
+                profile,
+                client=client,
+                model_version=model_version,
+                correction_instruction=correction,
+            )
+        except (ProposalArtifactError, ProposalSelectionError, ValidationError, ValueError) as exc:
+            raise click.ClickException(f"Domain proposal generation failed: {exc}") from exc
+
+        findings, _coverage = run_deterministic_validation(proposal.contract)
+        errors = [item for item in findings if item.severity == "error"]
+        save_domain_proposal(proposal, prop_path)
+        save_domain_contract(proposal.contract, out_path)
+
+        if non_interactive:
+            click.echo(f"[init-domain] source profile written → {prof_path}")
+            click.echo(f"[init-domain] draft proposal written → {prop_path}")
+            click.echo(f"[init-domain] draft schema-2.0 contract written → {out_path}")
+            click.echo(
+                "[init-domain] approval is still required: fabric-kg domain approve "
+                f"--file {out_path} --proposal {prop_path} --source-profile {prof_path} "
+                '--approved-by "$OPERATOR"'
+            )
+            return
+
+        click.echo("")
+        click.echo(_render_proposal_summary(proposal, profile, findings))
+        click.echo("")
+        action = click.prompt(
+            "Approve, Correct, or Abort",
+            type=click.Choice(["approve", "correct", "abort"], case_sensitive=False),
+            show_choices=True,
+        ).casefold()
+        if action == "abort":
+            click.echo("[init-domain] aborted; draft artifacts remain unapproved.", err=True)
+            raise click.exceptions.Exit(4)
+        if action == "correct":
+            correction = click.prompt("Correction instruction").strip()
+            if not correction:
+                raise click.ClickException("Correction instruction cannot be empty.")
+            continue
+        if errors:
+            click.echo(
+                f"[init-domain] approval blocked by {len(errors)} deterministic error(s); "
+                "choose correct or abort.",
+                err=True,
+            )
+            correction = click.prompt("Correction instruction").strip()
+            if not correction:
+                raise click.ClickException("Correction instruction cannot be empty.")
+            continue
+
+        approver = _resolve_interactive_approver(approved_by)
+        try:
+            approved = approve_domain_proposal(
+                proposal.contract,
+                proposal,
+                profile,
+                approved_by=approver,
+                approved_at_utc=utc_now_text(),
+            )
+        except ProposalArtifactError as exc:
+            raise click.ClickException(str(exc)) from exc
+        profile.approved = True
+        profile.approved_at_utc = utc_now_text()
+        profile.approved_by = approver
+        save_source_profile(profile, prof_path)
+        save_domain_contract(approved, out_path)
+        click.echo(f"[init-domain] approved schema-2.0 contract written → {out_path}")
+        click.echo(f"[init-domain] cited proposal written → {prop_path}")
+        return
+
+
+_INIT_DOMAIN_V2_EPILOG = """\b
+Examples:
+  fabric-kg init-domain --input ./sources
+  fabric-kg init-domain --input ./sources --intake domain-intake.yaml --non-interactive
+  fabric-kg init-domain --legacy-schema-1 --input ./sources --approve
+
+Noninteractive generation never approves. Use `fabric-kg domain approve` as a
+separate explicit action.
+"""
+
+
+@click.command(
+    "init-domain",
+    epilog=_INIT_DOMAIN_V2_EPILOG,
+    context_settings={"max_content_width": 120},
+)
+@click.option("--input", "input_path", type=click.Path(), help="Source file or directory.")
+@click.option(
+    "--out",
+    "output_path",
+    default="domain.yaml",
+    show_default=True,
+    type=click.Path(),
+)
+@click.option(
+    "--profile-out",
+    "profile_path",
+    default=str(_DEFAULT_PROFILE_PATH),
+    show_default=True,
+    type=click.Path(),
+)
+@click.option(
+    "--proposal-out",
+    "proposal_path",
+    default=str(Path(".fkg") / "domain-proposal.json"),
+    show_default=True,
+    type=click.Path(),
+)
+@click.option("--intake", "intake_path", type=click.Path(exists=True))
+@click.option("--domain-description", default=None)
+@click.option("--domain-file", default=None, type=click.Path())
+@click.option("--force", is_flag=True, default=False)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    default=False,
+    help="Generate draft artifacts from --intake without approval.",
+)
+@click.option(
+    "--approved-by",
+    default=None,
+    help="Identity recorded when an interactive user chooses approve.",
+)
+@click.option(
+    "--legacy-schema-1",
+    is_flag=True,
+    default=False,
+    help="Run the unchanged schema-1.0 source-profile workflow.",
+)
+@click.option(
+    "--approve",
+    is_flag=True,
+    default=False,
+    help="Legacy schema-1.0 compatibility alias; never approves schema 2.0.",
+)
+@click.option(
+    "--interactive",
+    "force_interactive",
+    is_flag=True,
+    default=False,
+    help="Force terminal interaction (schema 2.0 is interactive by default).",
+)
+@click.pass_context
+def init_domain_cmd(
+    ctx: click.Context,
+    input_path: str | None,
+    output_path: str,
+    profile_path: str,
+    proposal_path: str,
+    intake_path: str | None,
+    domain_description: str | None,
+    domain_file: str | None,
+    force: bool,
+    non_interactive: bool,
+    approved_by: str | None,
+    legacy_schema_1: bool,
+    approve: bool,
+    force_interactive: bool,
+) -> None:
+    """Generate and explicitly approve a cited schema-2.0 domain proposal."""
+
+    if legacy_schema_1 or approve:
+        if non_interactive or intake_path:
+            raise click.ClickException(
+                "Schema-1.0 compatibility mode cannot be combined with "
+                "--non-interactive or --intake."
+            )
+        if approve and not legacy_schema_1:
+            click.echo(
+                "[init-domain] --approve selects legacy schema-1.0 compatibility; "
+                "schema 2.0 is never auto-approved.",
+                err=True,
+            )
+        _run_legacy_init_domain(
+            input_path=input_path,
+            output_path=output_path,
+            profile_path=profile_path,
+            domain_description=domain_description,
+            domain_file=domain_file,
+            force=force,
+            approve=approve,
+            force_interactive=force_interactive,
+        )
+        return
+
+    _run_v2_init_domain(
+        ctx,
+        input_path=input_path,
+        output_path=output_path,
+        profile_path=profile_path,
+        proposal_path=proposal_path,
+        intake_path=intake_path,
+        domain_description=domain_description,
+        force=force,
+        non_interactive=non_interactive,
+        approved_by=approved_by,
+    )

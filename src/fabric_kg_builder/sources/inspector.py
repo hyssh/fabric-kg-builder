@@ -13,13 +13,42 @@ import io
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from zipfile import BadZipFile
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from fabric_kg_builder.model.ids import content_hash as compute_content_hash
+from fabric_kg_builder.model.ids import make_id
+from fabric_kg_builder.model.schemas import DocumentElementRow
+from fabric_kg_builder.release.redact import redact_secret_text
+from fabric_kg_builder.sources import router
+from fabric_kg_builder.sources.adapter import AdapterError
 
 
 PROFILE_SCHEMA_VERSION = "1.0"
+
+MAX_PROPOSAL_SAMPLES = 12
+MAX_PROPOSAL_SAMPLES_PER_KIND = 4
+MAX_PROPOSAL_SAMPLES_PER_FILE = 3
+MAX_SAMPLE_EXCERPT_CHARS = 240
+MAX_SAMPLE_EXCERPT_TOTAL_CHARS = 1_800
+MIN_SAMPLE_EXCERPT_CHARS = 32
+
+_SAMPLE_KIND_ORDER = ("heading", "text", "table", "visual")
+_SAMPLE_KIND_BY_ELEMENT_TYPE: dict[str, str] = {
+    "section": "heading",
+    "paragraph": "text",
+    "ocr_text": "text",
+    "table": "table",
+    "table_row": "table",
+    "vision_description": "visual",
+}
+_PROFILE_HASH_EXCLUDED_KEYS = frozenset(
+    {"approved", "approved_at_utc", "approved_by", "inspected_at_utc", "profile_hash"}
+)
 
 # ---------------------------------------------------------------------------
 # Extension sets
@@ -106,12 +135,41 @@ class InferredSuggestions(BaseModel):
     extraction_risks: list[str] = Field(default_factory=list)
 
 
+class SourceProposalSample(BaseModel):
+    """Bounded, cited source excerpt used for domain proposal review."""
+
+    sample_id: str
+    sample_kind: str
+    element_type: str
+    source_file_id: str
+    citation_path: str
+    page_number: int | None = None
+    section_path: str | None = None
+    row_index: int | None = None
+    col_index: int | None = None
+    sort_order: int | None = None
+    excerpt: str
+    content_hash: str
+
+
+class SourceSamplingWarning(BaseModel):
+    """Visible sampling warning preserving typed extraction failures."""
+
+    warning_id: str
+    warning_type: str
+    citation_path: str
+    source_file_id: str | None = None
+    message: str
+
+
 class SourceProfile(BaseModel):
     """Approved source profile persisted before domain contract generation."""
 
     schema_version: str = PROFILE_SCHEMA_VERSION
     observed: ObservedFacts = Field(default_factory=ObservedFacts)
     inferred: InferredSuggestions = Field(default_factory=InferredSuggestions)
+    proposal_samples: list[SourceProposalSample] = Field(default_factory=list)
+    sampling_warnings: list[SourceSamplingWarning] = Field(default_factory=list)
     domain_description: str | None = None
     domain_hash: str | None = None  # contract_hash of domain.yaml if incorporated
     source_hash: str = ""          # SHA-256 over (name, size, mtime) of all files
@@ -120,6 +178,12 @@ class SourceProfile(BaseModel):
     approved_at_utc: str | None = None
     approved_by: str | None = None
     user_corrected: bool = False   # True when user explicitly corrected inferred fields
+    profile_hash: str = ""
+
+    @model_validator(mode="after")
+    def _refresh_profile_hash(self) -> SourceProfile:
+        self.profile_hash = compute_source_profile_hash(self)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +301,266 @@ def _compute_source_hash(files: list[Path]) -> str:
     return h.hexdigest()
 
 
+def _canonicalize_profile_hash_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_profile_hash_value(val)
+            for key, val in sorted(value.items())
+            if key not in _PROFILE_HASH_EXCLUDED_KEYS
+        }
+    if isinstance(value, list):
+        return [_canonicalize_profile_hash_value(item) for item in value]
+    return value
+
+
+def compute_source_profile_hash(profile: SourceProfile | dict[str, object]) -> str:
+    """Return a canonical, approval-stable hash for a source profile."""
+    raw = profile.model_dump(mode="json") if isinstance(profile, SourceProfile) else dict(profile)
+    canonical = _canonicalize_profile_hash_value(raw)
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class _SampleCandidate:
+    sample_id: str
+    sample_kind: str
+    element_type: str
+    source_file_id: str
+    citation_path: str
+    page_number: int | None
+    section_path: str | None
+    row_index: int | None
+    col_index: int | None
+    sort_order: int | None
+    excerpt: str
+    content_hash: str
+
+    def to_model(self) -> SourceProposalSample:
+        return SourceProposalSample(
+            sample_id=self.sample_id,
+            sample_kind=self.sample_kind,
+            element_type=self.element_type,
+            source_file_id=self.source_file_id,
+            citation_path=self.citation_path,
+            page_number=self.page_number,
+            section_path=self.section_path,
+            row_index=self.row_index,
+            col_index=self.col_index,
+            sort_order=self.sort_order,
+            excerpt=self.excerpt,
+            content_hash=self.content_hash,
+        )
+
+
+def _safe_citation_path(file_path: Path, source_root: Path) -> str:
+    try:
+        return file_path.resolve().relative_to(source_root.resolve()).as_posix()
+    except ValueError:
+        return file_path.name
+
+
+def _excerpt_text(text: str, limit: int) -> str:
+    compact = re.sub(r"\s+", " ", redact_secret_text(text)).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _candidate_from_element(
+    element: DocumentElementRow,
+    citation_path: str,
+) -> _SampleCandidate | None:
+    sample_kind = _SAMPLE_KIND_BY_ELEMENT_TYPE.get(element.element_type)
+    if sample_kind is None:
+        return None
+    raw_text = (element.content or element.title or "").strip()
+    if not raw_text:
+        return None
+    excerpt = _excerpt_text(raw_text, MAX_SAMPLE_EXCERPT_CHARS)
+    if not excerpt:
+        return None
+    excerpt_hash = compute_content_hash(excerpt)
+    return _SampleCandidate(
+        sample_id=make_id("sample", f"{sample_kind}:{element.document_element_id}"),
+        sample_kind=sample_kind,
+        element_type=element.element_type,
+        source_file_id=element.source_file_id,
+        citation_path=citation_path,
+        page_number=element.page_number,
+        section_path=element.section_path,
+        row_index=element.row_index,
+        col_index=element.col_index,
+        sort_order=element.sort_order,
+        excerpt=excerpt,
+        content_hash=excerpt_hash,
+    )
+
+
+def _candidate_sort_key(candidate: _SampleCandidate) -> tuple[object, ...]:
+    return (
+        candidate.citation_path,
+        _SAMPLE_KIND_ORDER.index(candidate.sample_kind),
+        candidate.page_number if candidate.page_number is not None else -1,
+        candidate.sort_order if candidate.sort_order is not None else -1,
+        candidate.row_index if candidate.row_index is not None else -1,
+        candidate.col_index if candidate.col_index is not None else -1,
+        candidate.section_path or "",
+        candidate.sample_id,
+    )
+
+
+def _warning_type(exc: Exception) -> str:
+    if isinstance(exc, AdapterError):
+        return exc.failure_type.value
+    if isinstance(exc, BadZipFile):
+        return "bad_zip_file"
+    if isinstance(exc, UnicodeDecodeError):
+        return "unicode_decode_error"
+    if isinstance(exc, csv.Error):
+        return "csv_error"
+    if isinstance(exc, FileNotFoundError):
+        return "not_found"
+    if isinstance(exc, OSError):
+        return "os_error"
+    if isinstance(exc, (ModuleNotFoundError, ImportError)):
+        return "import_error"
+    return "value_error"
+
+
+def _sampling_warning(citation_path: str, exc: Exception) -> SourceSamplingWarning:
+    safe_message = redact_secret_text(str(exc))
+    return SourceSamplingWarning(
+        warning_id=make_id("samplewarn", f"{citation_path}:{_warning_type(exc)}:{exc}"),
+        warning_type=_warning_type(exc),
+        citation_path=citation_path,
+        message=safe_message,
+    )
+
+
+def _sample_source_file(
+    file_path: Path,
+    source_root: Path,
+) -> tuple[list[_SampleCandidate], SourceSamplingWarning | None]:
+    citation_path = _safe_citation_path(file_path, source_root)
+    try:
+        result = router.extract(file_path)
+    except (AdapterError, BadZipFile, FileNotFoundError, OSError, UnicodeDecodeError, csv.Error, ImportError, ValueError) as exc:
+        return [], _sampling_warning(citation_path, exc)
+
+    elements = sorted(
+        getattr(result, "document_elements", []),
+        key=lambda element: (
+            element.sort_order if element.sort_order is not None else -1,
+            element.page_number if element.page_number is not None else -1,
+            element.row_index if element.row_index is not None else -1,
+            element.col_index if element.col_index is not None else -1,
+            element.document_element_id,
+        ),
+    )
+    candidates = [
+        candidate
+        for element in elements
+        if (candidate := _candidate_from_element(element, citation_path)) is not None
+    ]
+    return sorted(candidates, key=_candidate_sort_key), None
+
+
+def _try_add_candidate(
+    candidate: _SampleCandidate,
+    *,
+    selected: list[_SampleCandidate],
+    selected_ids: set[str],
+    per_kind: Counter[str],
+    per_file: Counter[str],
+    total_chars: int,
+) -> int:
+    if candidate.sample_id in selected_ids:
+        return total_chars
+    if len(selected) >= MAX_PROPOSAL_SAMPLES:
+        return total_chars
+    if per_kind[candidate.sample_kind] >= MAX_PROPOSAL_SAMPLES_PER_KIND:
+        return total_chars
+    if per_file[candidate.citation_path] >= MAX_PROPOSAL_SAMPLES_PER_FILE:
+        return total_chars
+    remaining = MAX_SAMPLE_EXCERPT_TOTAL_CHARS - total_chars
+    if remaining < MIN_SAMPLE_EXCERPT_CHARS:
+        return total_chars
+
+    excerpt = candidate.excerpt
+    if len(excerpt) > remaining:
+        excerpt = _excerpt_text(excerpt, remaining)
+        if len(excerpt) < MIN_SAMPLE_EXCERPT_CHARS:
+            return total_chars
+        candidate = _SampleCandidate(
+            sample_id=candidate.sample_id,
+            sample_kind=candidate.sample_kind,
+            element_type=candidate.element_type,
+            source_file_id=candidate.source_file_id,
+            citation_path=candidate.citation_path,
+            page_number=candidate.page_number,
+            section_path=candidate.section_path,
+            row_index=candidate.row_index,
+            col_index=candidate.col_index,
+            sort_order=candidate.sort_order,
+            excerpt=excerpt,
+            content_hash=compute_content_hash(excerpt),
+        )
+
+    selected.append(candidate)
+    selected_ids.add(candidate.sample_id)
+    per_kind[candidate.sample_kind] += 1
+    per_file[candidate.citation_path] += 1
+    return total_chars + len(candidate.excerpt)
+
+
+def _select_proposal_samples(candidates: list[_SampleCandidate]) -> list[SourceProposalSample]:
+    grouped: dict[str, dict[str, list[_SampleCandidate]]] = {
+        kind: {} for kind in _SAMPLE_KIND_ORDER
+    }
+    for candidate in sorted(candidates, key=_candidate_sort_key):
+        grouped[candidate.sample_kind].setdefault(candidate.citation_path, []).append(candidate)
+
+    selected: list[_SampleCandidate] = []
+    selected_ids: set[str] = set()
+    per_kind: Counter[str] = Counter()
+    per_file: Counter[str] = Counter()
+    total_chars = 0
+
+    for kind in _SAMPLE_KIND_ORDER:
+        for citation_path in sorted(grouped[kind]):
+            if grouped[kind][citation_path]:
+                total_chars = _try_add_candidate(
+                    grouped[kind][citation_path].pop(0),
+                    selected=selected,
+                    selected_ids=selected_ids,
+                    per_kind=per_kind,
+                    per_file=per_file,
+                    total_chars=total_chars,
+                )
+
+    made_progress = True
+    while made_progress and len(selected) < MAX_PROPOSAL_SAMPLES and total_chars < MAX_SAMPLE_EXCERPT_TOTAL_CHARS:
+        made_progress = False
+        for kind in _SAMPLE_KIND_ORDER:
+            for citation_path in sorted(grouped[kind]):
+                bucket = grouped[kind][citation_path]
+                if not bucket:
+                    continue
+                before = len(selected)
+                total_chars = _try_add_candidate(
+                    bucket.pop(0),
+                    selected=selected,
+                    selected_ids=selected_ids,
+                    per_kind=per_kind,
+                    per_file=per_file,
+                    total_chars=total_chars,
+                )
+                made_progress = made_progress or len(selected) > before
+
+    return [candidate.to_model() for candidate in selected]
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -308,10 +632,21 @@ def build_source_profile(
         extraction_risks=_assess_extraction_risks(files),
     )
 
+    source_root = source_path if source_path.is_dir() else source_path.parent
+    sample_candidates: list[_SampleCandidate] = []
+    sampling_warnings: list[SourceSamplingWarning] = []
+    for file_path in files:
+        candidates, warning = _sample_source_file(file_path, source_root)
+        sample_candidates.extend(candidates)
+        if warning is not None:
+            sampling_warnings.append(warning)
+
     return SourceProfile(
         schema_version=PROFILE_SCHEMA_VERSION,
         observed=observed,
         inferred=inferred,
+        proposal_samples=_select_proposal_samples(sample_candidates),
+        sampling_warnings=sampling_warnings,
         domain_description=domain_description,
         source_hash=_compute_source_hash(files),
         inspected_at_utc=datetime.now(tz=timezone.utc).isoformat(),
@@ -322,6 +657,7 @@ def build_source_profile(
 def save_source_profile(profile: SourceProfile, path: Path) -> None:
     """Persist *profile* as JSON to *path*, creating parent directories."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    profile.profile_hash = compute_source_profile_hash(profile)
     path.write_text(
         json.dumps(profile.model_dump(mode="json"), indent=2),
         encoding="utf-8",
@@ -339,7 +675,9 @@ def load_source_profile(path: Path) -> SourceProfile:
         When the JSON is malformed or fails schema validation.
     """
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return SourceProfile.model_validate(raw)
+    profile = SourceProfile.model_validate(raw)
+    profile.profile_hash = compute_source_profile_hash(profile)
+    return profile
 
 
 def render_profile_text(profile: SourceProfile) -> str:
@@ -388,6 +726,14 @@ def render_profile_text(profile: SourceProfile) -> str:
         lines.append("  Extraction risks:")
         for risk in inf.extraction_risks:
             lines.append(f"    - {risk}")
+
+    if profile.proposal_samples:
+        lines.append(f"  Proposal samples: {len(profile.proposal_samples)} bounded excerpt(s)")
+
+    if profile.sampling_warnings:
+        lines.append("  Sampling warnings:")
+        for warning in profile.sampling_warnings:
+            lines.append(f"    - [{warning.warning_type}] {warning.citation_path}: {warning.message}")
 
     if profile.user_corrected:
         lines.append("  (profile contains user corrections)")

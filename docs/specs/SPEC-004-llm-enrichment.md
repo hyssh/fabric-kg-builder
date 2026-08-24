@@ -1555,6 +1555,39 @@ The approved K is the same value used by domain question paths, extraction path
 validation, and Graph query planning. Extraction may use fewer hops but cannot
 raise or replace K.
 
+### 12.13 Domain proposal prompt and local authority
+
+The schema-2.0 domain proposal is a separate strict JSON artifact. The
+developer-controlled system prompt contains only role, safety, and output
+constraints. Business intake, representative source excerpts, and correction
+instructions are delimited in the user message and treated as untrusted data.
+The request uses deterministic JSON completion settings and records a canonical
+hash of the prompt version/text and non-secret model execution identity.
+
+Source inspection contributes at most 12 excerpts, at most four per kind, at
+most three per file, and at most 1,800 total characters. Supported kinds are
+heading, text, table, and already-available visual description. Each excerpt
+has a stable sample ID, source-file ID, relative citation, element locator, and
+content hash. Conservative secret patterns are redacted before persistence or
+model submission. Adapter failures remain visible as typed sampling warnings.
+
+Copilot may propose up to 48 candidate entity and relationship types. Each
+relationship includes a semantic key, optional explicit inverse declaration,
+directed endpoints, question support, evidence or governance justification,
+and selector scores. Local code:
+
+1. merges only identical endpoint signatures with the same semantic key, or an
+   explicitly declared inverse with the same key and exactly reversed endpoints;
+2. enumerates question-scoped typed paths of at most four hops;
+3. chooses the minimum union of one valid path per coverable question plus
+   mandatory governance relationships, with deterministic score/ID tie-breaks;
+4. recomputes shortest paths in the selected graph and records hop direction;
+5. derives K from the maximum selected shortest path; and
+6. preserves unsupported questions, blocking approval when one is critical.
+
+The proposal layer does not enforce extraction spans or activate schema-2.0
+enrichment. Those remain later-layer responsibilities.
+
 ---
 
 ## Appendix A: JSON Schema Reference

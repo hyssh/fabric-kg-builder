@@ -430,7 +430,7 @@ def test_schema_2_foundation_does_not_activate_enrichment(tmp_path: Path) -> Non
     domain_path.write_text(_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
     status = evaluate_domain_guard_status(str(domain_path))
     assert status.ready_for_enrichment is False
-    assert any("not enabled in the schema foundation layer" in item for item in status.messages)
+    assert any("not approved" in item for item in status.messages)
 
 
 def test_domain_validate_accepts_valid_schema_2_contract() -> None:
@@ -440,11 +440,26 @@ def test_domain_validate_accepts_valid_schema_2_contract() -> None:
     assert "passed deterministic checks" in result.output
 
 
-@pytest.mark.parametrize("command", ["review", "approve"])
-def test_schema_2_cannot_enter_schema_1_approval_flow(command: str) -> None:
+def test_schema_2_cannot_enter_schema_1_review_flow() -> None:
     result = CliRunner().invoke(
         cli,
-        ["domain", command, "--file", str(_FIXTURE)],
+        ["domain", "review", "--file", str(_FIXTURE)],
     )
     assert result.exit_code != 0
-    assert "not enabled in the schema foundation layer" in result.output
+    assert "standalone 'domain review' command remains schema-1.0-only" in result.output
+
+
+def test_schema_2_approval_requires_cited_proposal() -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "domain",
+            "approve",
+            "--file",
+            str(_FIXTURE),
+            "--approved-by",
+            "operator@example.com",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "requires --proposal" in result.output

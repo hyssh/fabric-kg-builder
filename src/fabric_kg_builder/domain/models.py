@@ -511,6 +511,7 @@ class ApprovalMetadataV2(V2StrictModel):
     prompt_hash: str | None = None
     prompt_version: str | None = None
     model_version: str | None = None
+    model_hash: str | None = None
     notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -526,12 +527,13 @@ class ApprovalMetadataV2(V2StrictModel):
             self.prompt_hash,
             self.prompt_version,
             self.model_version,
+            self.model_hash,
         )
         if any(not value for value in required):
             raise ValueError(
                 "Approved schema-2.0 contracts require approver, timestamp, "
                 "contract/proposal/source-profile/prompt hashes, prompt version, "
-                "and model version."
+                "model version, and model hash."
             )
         return self
 

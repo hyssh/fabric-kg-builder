@@ -1,0 +1,434 @@
+{
+  "schema_version": "2.0",
+  "intake_hash": "ad81699e1748a6feff01757b8aca3ded17649b92e7dc86951249ccc54411bcb8",
+  "source_profile_hash": "9dc7c49dca0feadb9ee2b03e3951ece7c28720e931ebe4b6c5ddfec5b17187e2",
+  "prompt_hash": "79323630d8ea5ab96c29cd25a89e844c3e6157716aaef67f96ec7ed5d824346e",
+  "prompt_version": "domain-proposal-2.0.0",
+  "model_version": "gpt-test-domain-1",
+  "model_hash": "8e382af255093621508b7b06b5887b1a24d878aac07696d2940037af7a81d381",
+  "contract_hash": "b32dd64927b656d9cd1025490d907c51e1447e27fb198e9a5cb15b19cfb32668",
+  "proposal_hash": "fd82d99a4db31fb0174f13c4b399e62c089e4e3371553c05127cbc5dfb2258f7",
+  "evidence": [
+    {
+      "id": "proposal-evidence:229584004727433c22a0e8ed",
+      "source_sample_id": "sample:facility-layout",
+      "source_file_id": "source-file:facility-layout",
+      "sample_kind": "heading",
+      "citation": "docs/facility-layout.pdf#page=1",
+      "locator": {
+        "page": 1,
+        "section": "Facility summary"
+      },
+      "excerpt": "Building A contains air handler AHU-4 and pump P-220 in the central plant.",
+      "content_hash": "2bc20502a1821fa1a8d81799c1dac2319dcff9b4f27fe590a3d516e2f03b7fa2"
+    },
+    {
+      "id": "proposal-evidence:1c84374ee25f7c6a3c8d5e20",
+      "source_sample_id": "sample:equipment-register",
+      "source_file_id": "source-file:equipment-register",
+      "sample_kind": "table",
+      "citation": "data/equipment-register.csv",
+      "locator": {
+        "row": 14
+      },
+      "excerpt": "AHU-4, Building A, HVAC, Active",
+      "content_hash": "48b07d63badc07814ce8b077a32c14b4aef2b27ea843a2492f08f203511c9a22"
+    },
+    {
+      "id": "proposal-evidence:a5484e3cdf4ca4e03ce0ab0e",
+      "source_sample_id": "sample:work-order-log",
+      "source_file_id": "source-file:work-order-log",
+      "sample_kind": "text",
+      "citation": "logs/work-orders.md#wo-17",
+      "locator": {
+        "line": 17
+      },
+      "excerpt": "WO-17 applies to AHU-4 after a vibration alarm in Building A.",
+      "content_hash": "8f62cb1891b9d547428c12177be269ab9c16ce130286719151db96cc976d6afa"
+    },
+    {
+      "id": "proposal-evidence:9ac54bc6336eab27acb84e44",
+      "source_sample_id": "sample:maintenance-log",
+      "source_file_id": "source-file:maintenance-log",
+      "sample_kind": "text",
+      "citation": "logs/maintenance-history.md#ahu-4",
+      "locator": {
+        "line": 44
+      },
+      "excerpt": "Maintenance history lists WO-12 and WO-17 against AHU-4.",
+      "content_hash": "6d83a11824babb38ee311776f25eca7f810f78521ec8632af27ab6a71d8bdaf8"
+    },
+    {
+      "id": "proposal-evidence:cd4d73b167a9e3bd01c2a499",
+      "source_sample_id": "sample:service-manual",
+      "source_file_id": "source-file:service-manual",
+      "sample_kind": "visual_description",
+      "citation": "manuals/ahu-4-service.pdf#page=3",
+      "locator": {
+        "page": 3
+      },
+      "excerpt": "The service manual labels AHU-4 as installed in Building A.",
+      "content_hash": "9cd1ce722164f98f86f82dd8d3e13cabf7c32e298b099f4a1401a3b89ce9dbde"
+    }
+  ],
+  "candidate_relationship_count": 5,
+  "selected_relationship_ids": [
+    "relationship-type:contains",
+    "relationship-type:work-order-for"
+  ],
+  "relationship_merge_groups": {
+    "relationship-type:contains": [
+      "relationship-type:contains",
+      "relationship-type:contains-register",
+      "relationship-type:installed-in"
+    ],
+    "relationship-type:work-order-for": [
+      "relationship-type:work-order-for",
+      "relationship-type:work-order-targets"
+    ]
+  },
+  "assumptions": [
+    "Each work order in scope identifies the primary affected equipment asset."
+  ],
+  "warnings": [
+    "Vendor commitments remain unsupported until a service-contract source is added."
+  ],
+  "correction_instruction": null,
+  "contract": {
+    "schema_version": "2.0",
+    "domain": {
+      "name": "facility-maintenance",
+      "description": "Models facilities, installed equipment, and maintenance work orders for asset support planning.",
+      "subdomains": [
+        "asset operations"
+      ]
+    },
+    "business": {
+      "organization_context": "A facility-maintenance team manages buildings, installed assets, and corrective work orders across a campus.",
+      "users": [
+        "facility manager",
+        "maintenance planner",
+        "operations supervisor"
+      ],
+      "decisions": [
+        "Prioritize maintenance work by building and asset criticality.",
+        "Confirm which work orders affect a specific facility or equipment asset."
+      ]
+    },
+    "problem": {
+      "statement": "Help facilities planners trace how buildings, installed equipment, and maintenance work orders relate so they can prioritize repairs and answer asset history questions.",
+      "desired_outcomes": [
+        "Connect facilities, equipment, and work orders with evidence-backed relationships.",
+        "Keep unsupported vendor-response questions visible for later source expansion."
+      ],
+      "in_scope": [
+        "facilities",
+        "installed equipment",
+        "maintenance work orders"
+      ],
+      "out_of_scope": [
+        "automatic control actions",
+        "vendor SLA negotiation"
+      ]
+    },
+    "competency_questions": [
+      {
+        "id": "cq:equipment-location",
+        "question": "Which facility contains a specified equipment asset?",
+        "business_critical": true
+      },
+      {
+        "id": "cq:facility-equipment",
+        "question": "Which equipment assets are installed in a facility?",
+        "business_critical": true
+      },
+      {
+        "id": "cq:work-order-equipment",
+        "question": "Which equipment asset is addressed by a work order?",
+        "business_critical": true
+      },
+      {
+        "id": "cq:facility-work-orders",
+        "question": "Which work orders affect equipment in a facility?",
+        "business_critical": true
+      },
+      {
+        "id": "cq:equipment-work-orders",
+        "question": "Which work orders have been recorded for an equipment asset?",
+        "business_critical": true
+      },
+      {
+        "id": "cq:vendor-response-commitment",
+        "question": "Which vendor response-time commitment applies to an equipment asset?",
+        "business_critical": true
+      }
+    ],
+    "terminology": {
+      "canonical_terms": [
+        {
+          "term": "work order",
+          "definition": "A maintenance task authorized for a specific equipment asset.",
+          "synonyms": [
+            "maintenance order"
+          ]
+        }
+      ],
+      "ambiguous_terms": [
+        {
+          "term": "asset",
+          "meanings": [
+            "facility",
+            "equipment"
+          ]
+        }
+      ]
+    },
+    "candidate_model": {
+      "entity_types": [
+        {
+          "id": "entity-type:facility",
+          "name": "Facility",
+          "parent": null,
+          "description": "A managed building or physical site.",
+          "source_evidence_ids": [
+            "proposal-evidence:229584004727433c22a0e8ed"
+          ],
+          "business_defined": false
+        },
+        {
+          "id": "entity-type:equipment",
+          "name": "Equipment",
+          "parent": null,
+          "description": "An installed maintainable asset.",
+          "source_evidence_ids": [
+            "proposal-evidence:1c84374ee25f7c6a3c8d5e20"
+          ],
+          "business_defined": false
+        },
+        {
+          "id": "entity-type:work-order",
+          "name": "WorkOrder",
+          "parent": null,
+          "description": "An authorized corrective or preventive maintenance task.",
+          "source_evidence_ids": [
+            "proposal-evidence:a5484e3cdf4ca4e03ce0ab0e"
+          ],
+          "business_defined": false
+        }
+      ],
+      "relationship_types": [
+        {
+          "id": "relationship-type:contains",
+          "predicate": "contains",
+          "description": "A facility contains installed equipment documented in the equipment register.",
+          "source_types": [
+            "entity-type:facility"
+          ],
+          "target_types": [
+            "entity-type:equipment"
+          ],
+          "direction": "source_to_target",
+          "endpoint_policy": "allow_subtypes",
+          "evidence_policy": "exact_span_required",
+          "publication_policy": "asserted_only",
+          "competency_question_ids": [
+            "cq:equipment-location",
+            "cq:facility-equipment",
+            "cq:facility-work-orders"
+          ],
+          "governance_rule": null,
+          "source_evidence_ids": [
+            "proposal-evidence:1c84374ee25f7c6a3c8d5e20",
+            "proposal-evidence:229584004727433c22a0e8ed",
+            "proposal-evidence:cd4d73b167a9e3bd01c2a499"
+          ]
+        },
+        {
+          "id": "relationship-type:work-order-for",
+          "predicate": "work_order_for",
+          "description": "A work order applies to an equipment asset.",
+          "source_types": [
+            "entity-type:work-order"
+          ],
+          "target_types": [
+            "entity-type:equipment"
+          ],
+          "direction": "source_to_target",
+          "endpoint_policy": "allow_subtypes",
+          "evidence_policy": "exact_span_required",
+          "publication_policy": "asserted_only",
+          "competency_question_ids": [
+            "cq:equipment-work-orders",
+            "cq:facility-work-orders",
+            "cq:work-order-equipment"
+          ],
+          "governance_rule": null,
+          "source_evidence_ids": [
+            "proposal-evidence:9ac54bc6336eab27acb84e44",
+            "proposal-evidence:a5484e3cdf4ca4e03ce0ab0e"
+          ]
+        }
+      ]
+    },
+    "constraints": {
+      "temporal": [
+        "Preserve work-order effective dates."
+      ],
+      "regulatory": [],
+      "privacy": [],
+      "safety": [
+        "Do not initiate maintenance actions automatically."
+      ]
+    },
+    "examples": {
+      "positive": [
+        {
+          "text": "Work order WO-17 applies to air handler AHU-4 in Building A.",
+          "expected": [
+            "WorkOrder work_order_for Equipment",
+            "Facility contains Equipment"
+          ]
+        }
+      ],
+      "negative": [
+        {
+          "text": "Automatically shut down AHU-4.",
+          "reason": "Autonomous control actions are outside the approved scope."
+        }
+      ]
+    },
+    "reasoning_policy": {
+      "relationship_type_count": 2,
+      "recommended_relationship_type_range": [
+        8,
+        20
+      ],
+      "max_relationship_types": 24,
+      "relationship_type_count_rationale": null,
+      "max_hops": 2,
+      "absolute_max_hops": 4,
+      "max_hops_rationale": null,
+      "max_relations_per_work_unit": 25
+    },
+    "extraction_policy": {
+      "vocabulary_mode": "closed",
+      "exact_evidence_span_required": true,
+      "abstain_without_evidence": true,
+      "allow_subtype_endpoints": true
+    },
+    "publication_policy": {
+      "included_states": [
+        "asserted"
+      ],
+      "excluded_states": [
+        "unresolved",
+        "rejected"
+      ],
+      "source_table": "semantic_relationships"
+    },
+    "question_plans": [
+      {
+        "question_id": "cq:equipment-location",
+        "required_path": [
+          {
+            "from_type": "entity-type:equipment",
+            "relationship_type": "relationship-type:contains",
+            "to_type": "entity-type:facility",
+            "traversal": "reverse"
+          }
+        ],
+        "hop_count": 1,
+        "covered": true,
+        "shortest_path": true,
+        "unsupported_reason": null
+      },
+      {
+        "question_id": "cq:equipment-work-orders",
+        "required_path": [
+          {
+            "from_type": "entity-type:equipment",
+            "relationship_type": "relationship-type:work-order-for",
+            "to_type": "entity-type:work-order",
+            "traversal": "reverse"
+          }
+        ],
+        "hop_count": 1,
+        "covered": true,
+        "shortest_path": true,
+        "unsupported_reason": null
+      },
+      {
+        "question_id": "cq:facility-equipment",
+        "required_path": [
+          {
+            "from_type": "entity-type:facility",
+            "relationship_type": "relationship-type:contains",
+            "to_type": "entity-type:equipment",
+            "traversal": "forward"
+          }
+        ],
+        "hop_count": 1,
+        "covered": true,
+        "shortest_path": true,
+        "unsupported_reason": null
+      },
+      {
+        "question_id": "cq:facility-work-orders",
+        "required_path": [
+          {
+            "from_type": "entity-type:facility",
+            "relationship_type": "relationship-type:contains",
+            "to_type": "entity-type:equipment",
+            "traversal": "forward"
+          },
+          {
+            "from_type": "entity-type:equipment",
+            "relationship_type": "relationship-type:work-order-for",
+            "to_type": "entity-type:work-order",
+            "traversal": "reverse"
+          }
+        ],
+        "hop_count": 2,
+        "covered": true,
+        "shortest_path": true,
+        "unsupported_reason": null
+      },
+      {
+        "question_id": "cq:vendor-response-commitment",
+        "required_path": [],
+        "hop_count": 0,
+        "covered": false,
+        "shortest_path": true,
+        "unsupported_reason": "Representative samples do not cite vendor response-time commitments for specific equipment assets."
+      },
+      {
+        "question_id": "cq:work-order-equipment",
+        "required_path": [
+          {
+            "from_type": "entity-type:work-order",
+            "relationship_type": "relationship-type:work-order-for",
+            "to_type": "entity-type:equipment",
+            "traversal": "forward"
+          }
+        ],
+        "hop_count": 1,
+        "covered": true,
+        "shortest_path": true,
+        "unsupported_reason": null
+      }
+    ],
+    "approval": {
+      "status": "draft",
+      "approved_by": null,
+      "approved_at_utc": null,
+      "contract_hash": null,
+      "proposal_hash": null,
+      "source_profile_hash": null,
+      "prompt_hash": null,
+      "prompt_version": null,
+      "model_version": null,
+      "model_hash": null,
+      "notes": []
+    }
+  }
+}

@@ -803,7 +803,7 @@ fabric-kg = "fabric_kg_builder.cli.main:cli"
 
 ---
 
-## 11. Domain Contract 2.0 Foundation
+## 11. Domain Contract 2.0 Proposal and Approval
 
 ### 11.1 Version boundary
 
@@ -820,14 +820,26 @@ Schema 2.0 uses strict section models rather than the scalar/null-to-list
 coercion retained for 1.0 compatibility. Required text is trimmed and must remain
 nonempty; list fields require JSON/YAML arrays with nonblank members.
 
-The schema-foundation layer may load, hash, and deterministically validate 2.0
-contracts, but it must not activate 2.0 enrichment until the Copilot proposal
-and one-summary approval implementation is present.
+Schema-2.0 proposal generation and approval are enabled for new projects.
+Extraction remains disabled for 2.0 until the later closed-vocabulary and
+exact-span layer is installed.
 
 ### 11.2 New-project CLI contract
 
-The completed 0.2.4 workflow will make `init-domain` interactive by default and
-will also accept deterministic YAML or JSON intake for automation. It will:
+`init-domain` is interactive by default and also accepts deterministic YAML or
+JSON intake for automation:
+
+```bash
+fabric-kg init-domain --input ./sources
+fabric-kg init-domain --input ./sources --intake domain-intake.yaml \
+  --proposal-out .fkg/domain-proposal.json --non-interactive
+fabric-kg domain approve --file domain.yaml \
+  --proposal .fkg/domain-proposal.json \
+  --source-profile .fkg/source-profile.json \
+  --approved-by "$OPERATOR"
+```
+
+It:
 
 1. collect the business goal, users, decisions, scope, five to ten competency
    questions, and a bounded source profile;
@@ -836,7 +848,7 @@ will also accept deterministic YAML or JSON intake for automation. It will:
 4. derive K from the maximum shortest covered question path;
 5. display one approval summary containing types, paths, N, K, unsupported
    questions, warnings, and sealed hashes; and
-6. require one explicit approval action.
+6. requires one explicit approval action.
 
 Every extracted entity type requires proposal source evidence unless it is
 explicitly `business_defined`. Every relationship type requires proposal source
@@ -846,9 +858,27 @@ governance justification.
 Automation may supply inputs and corrections, but it may not silently approve a
 Copilot-authored proposal.
 
+Interactive review accepts `approve`, `correct`, or `abort`. `correct` captures
+one free-form user instruction in the user-role proposal payload, regenerates
+the candidate proposal, reruns all local selection and validation, and displays
+a new complete summary. Noninteractive generation always writes draft artifacts
+and exits without approval. `--approve` is retained only as an explicit
+schema-1.0 compatibility alias and never approves schema 2.0.
+
+The cited proposal is a strict JSON artifact at
+`src/fabric_kg_builder/domain/domain-proposal.schema.json`. It contains bounded
+source evidence references, candidate and selected relationship counts, merge
+groups, the draft contract, and canonical intake, source-profile, prompt, model,
+contract, and proposal hashes. Unknown keys and scalar coercion fail.
+
 ### 11.3 N and K authority
 
 - N counts approved relationship **types**, not relationship instances.
+- Copilot proposes candidates. Local code merges only candidates whose declared
+  semantic key and endpoint signatures prove duplicate or explicitly declared
+  inverse semantics. It then chooses the exact minimum union of bounded
+  question paths plus mandatory governance relationships, using stable score
+  and identifier tie-breaks.
 - The advisory N range is 8-20. A valid minimal set may be below eight and must
   not be padded. Values 21-24 require a recorded rationale. Values above 24 fail.
 - K is the maximum shortest covered competency-question path. Values 1-3 are
@@ -868,8 +898,10 @@ Schema-2.0 contract hashes use canonical JSON with sorted object keys and exclud
 approval metadata. Array order remains meaningful for ordered question paths.
 Set-like publication state input is normalized to the exact order
 `[unresolved, rejected]` before hashing, with duplicates removed.
-Approval will additionally seal proposal, source-profile, prompt, and model
-identity. Schema-1.0 hashing remains unchanged.
+Approval seals proposal, source-profile, prompt, and model hashes plus prompt
+and model versions. Approval recomputes the proposal, contract, source-profile,
+and installed prompt bindings and rejects stale or mismatched artifacts before
+writing. Schema-1.0 hashing and review/approval remain unchanged.
 
 ---
 

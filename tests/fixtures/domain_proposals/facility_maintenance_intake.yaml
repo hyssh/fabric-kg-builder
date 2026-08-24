@@ -1,0 +1,57 @@
+schema_version: "2.0"
+business_goal: >-
+  Help facilities planners trace how buildings, installed equipment, and
+  maintenance work orders relate so they can prioritize repairs and answer
+  asset history questions.
+organization_context: >-
+  A facility-maintenance team manages buildings, installed assets, and
+  corrective work orders across a campus.
+users:
+  - facility manager
+  - maintenance planner
+  - operations supervisor
+decisions:
+  - Prioritize maintenance work by building and asset criticality.
+  - Confirm which work orders affect a specific facility or equipment asset.
+desired_outcomes:
+  - Connect facilities, equipment, and work orders with evidence-backed relationships.
+  - Keep unsupported vendor-response questions visible for later source expansion.
+in_scope:
+  - facilities
+  - installed equipment
+  - maintenance work orders
+out_of_scope:
+  - automatic control actions
+  - vendor SLA negotiation
+competency_questions:
+  - id: cq:equipment-location
+    question: Which facility contains a specified equipment asset?
+    business_critical: true
+  - id: cq:facility-equipment
+    question: Which equipment assets are installed in a facility?
+    business_critical: true
+  - id: cq:work-order-equipment
+    question: Which equipment asset is addressed by a work order?
+    business_critical: true
+  - id: cq:facility-work-orders
+    question: Which work orders affect equipment in a facility?
+    business_critical: true
+  - id: cq:equipment-work-orders
+    question: Which work orders have been recorded for an equipment asset?
+    business_critical: true
+  - id: cq:vendor-response-commitment
+    question: Which vendor response-time commitment applies to an equipment asset?
+    business_critical: true
+sensitive_predicates:
+  - safety_override
+canonical_terms:
+  - facility
+  - work order
+ambiguous_terms:
+  - asset
+temporal_constraints:
+  - Preserve work-order effective dates.
+regulatory_constraints: []
+privacy_constraints: []
+safety_constraints:
+  - Do not initiate maintenance actions automatically.

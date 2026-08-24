@@ -643,6 +643,7 @@ class TestCorrectionFlowContract:
                 "--input", str(tmp_path),
                 "--out", str(out_yaml),
                 "--profile-out", str(profile_out),
+                "--legacy-schema-1",
                 "--interactive",  # force interactive even in CliRunner
             ],
             input=user_input,

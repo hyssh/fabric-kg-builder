@@ -116,10 +116,37 @@ def evaluate_domain_guard_status(
         )
 
     if isinstance(contract, DomainContractV2):
+        if contract.approval.status != "approved":
+            status.messages.append(
+                "Schema-2.0 contract is not approved. Use the cited proposal in "
+                "'fabric-kg domain approve --proposal ... --approved-by ...'."
+            )
+            return status
+        if contract.approval.contract_hash != status.contract_hash:
+            status.messages.append(
+                "Schema-2.0 approval is stale because its contract hash does not "
+                "match the current domain.yaml."
+            )
+            return status
+        required_v2_metadata = (
+            contract.approval.approved_by,
+            contract.approval.approved_at_utc,
+            contract.approval.proposal_hash,
+            contract.approval.source_profile_hash,
+            contract.approval.prompt_hash,
+            contract.approval.prompt_version,
+            contract.approval.model_version,
+            contract.approval.model_hash,
+        )
+        if any(value in (None, "") for value in required_v2_metadata):
+            status.messages.append(
+                "Schema-2.0 approval metadata is incomplete. Re-run explicit "
+                "proposal approval."
+            )
+            return status
         status.messages.append(
-            "Schema-2.0 contract validation is available, but proposal review, "
-            "one-summary approval, and enrichment activation are not enabled in "
-            "the schema foundation layer."
+            "Schema-2.0 proposal is approved, but schema-2.0 enrichment remains "
+            "disabled until the extraction-enforcement layer is installed."
         )
         return status
 
