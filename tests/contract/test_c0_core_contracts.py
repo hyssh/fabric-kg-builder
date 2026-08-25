@@ -350,7 +350,7 @@ def test_registered_identity_rejects_another_registered_kind() -> None:
 
 
 @pytest.mark.contract
-def test_registry_contains_only_c0_core_kinds() -> None:
+def test_registry_contains_only_registered_c0_kinds() -> None:
     assert set(REGISTERED_CONTRACTS) == {
         "c0.identity",
         "c0.source_unit",
@@ -365,12 +365,16 @@ def test_registry_contains_only_c0_core_kinds() -> None:
         "c0.canonical_property_assertion",
         "c0.audit_projection",
         "c0.semantic_serving_projection",
+        "c0.publication_crosswalk",
+        "c0.projection_equivalence",
+        "c0.governed_asset_reference",
+        "c0.access_policy",
         "c0.artifact_manifest",
         "c0.stage_receipt",
         "c0.stage_resource_metrics",
     }
     assert not any(
-        "citation" in kind or "query" in kind or "crosswalk" in kind
+        "citation" in kind or "query" in kind
         for kind in REGISTERED_CONTRACTS
     )
 
