@@ -75,6 +75,7 @@ def evaluate_domain_guard_status(
     explicit_path: str | None = None,
     *,
     output_dir: Path | None = None,
+    l1_state_root: Path | None = None,
 ) -> DomainGuardStatus:
     """Evaluate missing, stale, legacy, review, and approval state."""
     contract_path, legacy_path = locate_domain_contract(explicit_path, output_dir=output_dir)
@@ -116,11 +117,64 @@ def evaluate_domain_guard_status(
         )
 
     if isinstance(contract, DomainContractV2):
-        status.messages.append(
-            "Schema-2.0 contract validation is available, but proposal review, "
-            "one-summary approval, and enrichment activation are not enabled in "
-            "the schema foundation layer."
-        )
+        if contract.approval.status == "approved":
+            from fabric_kg_builder.contracts.receipts import (
+                ArtifactManifest,
+                StageReceipt,
+            )
+            from fabric_kg_builder.domain.contexts import DomainApprovalContext
+            from fabric_kg_builder.domain.stage import L1_STATE_DIR
+
+            state_root = l1_state_root or L1_STATE_DIR
+            try:
+                approval_context = DomainApprovalContext.model_validate_json(
+                    (state_root / "domain-approval-context.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                receipt = StageReceipt.model_validate_json(
+                    (state_root / "stage-receipt.json").read_text(encoding="utf-8")
+                )
+                output_manifest = ArtifactManifest.model_validate_json(
+                    (state_root / "output-manifest.json").read_text(encoding="utf-8")
+                )
+                if (
+                    contract.approval.domain_approval_context_id
+                    != approval_context.domain_approval_context_id
+                    or contract.approval.domain_approval_context_hash
+                    != approval_context.approval_context_hash
+                    or contract.approval.contract_hash != status.contract_hash
+                ):
+                    status.messages.append(
+                        "Schema-2 approval context does not match domain.yaml."
+                    )
+                    return status
+                if (
+                    receipt.status != "succeeded"
+                    or receipt.output_manifest_id
+                    != output_manifest.artifact_manifest_id
+                    or receipt.output_manifest_hash != output_manifest.manifest_hash
+                    or receipt.identity.domain_contract_hash != status.contract_hash
+                ):
+                    status.messages.append(
+                        "Schema-2 L1 receipt/output-manifest chain is not intact."
+                    )
+                    return status
+            except (OSError, ValidationError, ValueError) as exc:
+                status.messages.append(
+                    f"Schema-2 L1 approval artifacts are missing or invalid: {exc}"
+                )
+                return status
+            status.messages.append(
+                "Schema-2 L1 is approved and intact, but enrichment remains "
+                "fail-closed until the L2 schema-constrained extraction receipt "
+                "integration is installed."
+            )
+        else:
+            status.messages.append(
+                "Schema-2.0 domain design is still a draft. Complete the "
+                "one-summary decision or run explicit 'fabric-kg domain approve'."
+            )
         return status
 
     if review_path.exists():
@@ -174,9 +228,14 @@ def require_ready_domain_contract(
     explicit_path: str | None = None,
     *,
     output_dir: Path | None = None,
+    l1_state_root: Path | None = None,
 ) -> tuple[DomainContract, DomainReview, DomainGuardStatus]:
     """Return the approved contract or raise a clear compatibility/migration error."""
-    status = evaluate_domain_guard_status(explicit_path, output_dir=output_dir)
+    status = evaluate_domain_guard_status(
+        explicit_path,
+        output_dir=output_dir,
+        l1_state_root=l1_state_root,
+    )
     if not status.ready_for_enrichment or status.contract is None or status.review is None:
         raise EnrichmentContractError(" ".join(status.messages))
     return status.contract, status.review, status

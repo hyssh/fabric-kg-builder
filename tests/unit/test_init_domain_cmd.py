@@ -346,6 +346,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(tmp_path / ".fkg" / "source-profile.json"),
@@ -364,6 +365,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(profile_out),
@@ -380,6 +382,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -400,6 +403,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -417,6 +421,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -434,6 +439,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -453,6 +459,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -470,6 +477,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -486,6 +494,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", "/nonexistent/path/xyz",
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -501,6 +510,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
                 "--approve",
@@ -518,6 +528,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -538,6 +549,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -557,6 +569,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -575,6 +588,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -593,6 +607,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -611,6 +626,7 @@ class TestInitDomainCmd:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -672,6 +688,7 @@ class TestSourceProfileContract:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -720,6 +737,7 @@ class TestInteractiveFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -740,6 +758,7 @@ class TestInteractiveFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(profile_out),
@@ -763,6 +782,7 @@ class TestInteractiveFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(profile_out),
@@ -780,6 +800,7 @@ class TestInteractiveFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -800,6 +821,7 @@ class TestInteractiveFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -818,6 +840,7 @@ class TestInteractiveFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -848,6 +871,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -876,6 +900,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -902,6 +927,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "new-domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -927,6 +953,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "new-domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -991,6 +1018,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -1024,6 +1052,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain1.yaml"),
                 "--profile-out", str(profile_out_1),
@@ -1036,6 +1065,7 @@ class TestEdgeCases:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain2.yaml"),
                 "--profile-out", str(profile_out_2),
@@ -1070,6 +1100,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -1093,6 +1124,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -1114,6 +1146,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -1134,6 +1167,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -1152,6 +1186,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(tmp_path / "profile.json"),
@@ -1175,6 +1210,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(tmp_path / "domain.yaml"),
                 "--profile-out", str(profile_out),
@@ -1200,6 +1236,7 @@ class TestCorrectionFlow:
             cli,
             [
                 "init-domain",
+                "--legacy-schema-1",
                 "--input", str(tmp_path),
                 "--out", str(out_yaml),
                 "--profile-out", str(profile_out),

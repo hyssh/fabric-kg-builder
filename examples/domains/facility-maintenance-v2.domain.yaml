@@ -1,203 +1,234 @@
-schema_version: '2.0'
+schema_version: "2.0"
 domain:
-  name: facility-maintenance
+  name: Facility Maintenance
   description: Models facilities, installed equipment, and maintenance work orders.
-  subdomains:
-    - asset operations
+  subdomains: [asset operations]
 business:
   organization_context: A facilities team operates buildings and maintains installed equipment.
-  users:
-    - facility manager
-    - maintenance planner
-  decisions:
-    - Prioritize maintenance work by facility and equipment.
+  users: [facility manager, maintenance planner]
+  decisions: [Prioritize maintenance work by facility and equipment.]
 problem:
   statement: Connect facilities, equipment, and work orders with evidence-backed relationships.
-  desired_outcomes:
-    - Trace maintenance work to installed equipment and its facility.
-  in_scope:
-    - facilities
-    - equipment
-    - work orders
-  out_of_scope:
-    - autonomous equipment control
+  desired_outcomes: [Trace maintenance work to installed equipment and its facility.]
+  in_scope: [equipment, facilities, work orders]
+  out_of_scope: [autonomous equipment control]
 competency_questions:
-  - id: cq:equipment-location
-    question: Which facility contains a specified equipment asset?
-    business_critical: true
-  - id: cq:facility-equipment
-    question: Which equipment assets are installed in a facility?
-    business_critical: true
-  - id: cq:work-order-equipment
-    question: Which equipment asset is addressed by a work order?
-    business_critical: true
-  - id: cq:facility-work-orders
-    question: Which work orders affect equipment in a facility?
-    business_critical: true
-  - id: cq:equipment-work-orders
-    question: Which work orders have been recorded for an equipment asset?
-    business_critical: true
+  - {id: "cq:q1", question: "Which facility contains a specified equipment asset?", business_critical: true}
+  - {id: "cq:q2", question: "Which equipment assets are installed in a facility?", business_critical: true}
+  - {id: "cq:q3", question: "Which equipment asset is addressed by a work order?", business_critical: true}
+  - {id: "cq:q4", question: "Which work orders affect equipment in a facility?", business_critical: true}
+  - {id: "cq:q5", question: "Which work orders have been recorded for an equipment asset?", business_critical: true}
 terminology:
   canonical_terms:
     - term: work order
       definition: A maintenance task authorized for a specific equipment asset.
-      synonyms:
-        - maintenance order
+      synonyms: [maintenance order]
   ambiguous_terms: []
 candidate_model:
   entity_types:
-    - id: entity-type:facility
-      name: Facility
-      parent: null
-      description: A managed physical building or site.
-      source_evidence_ids:
-        - proposal-evidence:facility
-      business_defined: false
-    - id: entity-type:equipment
-      name: Equipment
-      parent: null
+    - type_id: semantic-type:facility-maintenance.equipment
+      semantic_key: equipment
+      display_name: Equipment
       description: An installed maintainable asset.
-      source_evidence_ids:
-        - proposal-evidence:equipment
-      business_defined: false
-    - id: entity-type:work-order
-      name: WorkOrder
-      parent: null
+      aliases: []
+      classification: domain
+      parent_type_id: null
+      abstract: false
+      identity_root_type_id: semantic-type:facility-maintenance.equipment
+      identity_key_policy: {authority: user_approved, namespace: facility-maintenance.equipment, key_mode: business_key, business_key_fields: [equipment_id], normalization_version: "1", collision_behavior: block, missing_key_behavior: unresolved, type_independent: true}
+      declared_properties: []
+      declared_constraints: []
+      sibling_classification_policy: &sibling_policy {mode: unresolved, discriminator_property_id: null, rationale: Ambiguous sibling observations remain unresolved.}
+      generalization_basis: null
+      evidence_span_ids: []
+      competency_question_ids: ["cq:q1", "cq:q2", "cq:q3", "cq:q4", "cq:q5"]
+      governance_rationale: Required by approved facility-maintenance questions.
+      tombstoned: false
+    - type_id: semantic-type:facility-maintenance.facility
+      semantic_key: facility
+      display_name: Facility
+      description: A managed physical building or site.
+      aliases: []
+      classification: domain
+      parent_type_id: null
+      abstract: false
+      identity_root_type_id: semantic-type:facility-maintenance.facility
+      identity_key_policy: {authority: user_approved, namespace: facility-maintenance.facility, key_mode: business_key, business_key_fields: [facility_id], normalization_version: "1", collision_behavior: block, missing_key_behavior: unresolved, type_independent: true}
+      declared_properties: []
+      declared_constraints: []
+      sibling_classification_policy: *sibling_policy
+      generalization_basis: null
+      evidence_span_ids: []
+      competency_question_ids: ["cq:q1", "cq:q2", "cq:q4"]
+      governance_rationale: Required by approved facility-maintenance questions.
+      tombstoned: false
+    - type_id: semantic-type:facility-maintenance.work-order
+      semantic_key: work-order
+      display_name: Work Order
       description: An authorized maintenance task.
-      source_evidence_ids:
-        - proposal-evidence:work-order
-      business_defined: false
+      aliases: []
+      classification: domain
+      parent_type_id: null
+      abstract: false
+      identity_root_type_id: semantic-type:facility-maintenance.work-order
+      identity_key_policy: {authority: user_approved, namespace: facility-maintenance.work-order, key_mode: business_key, business_key_fields: [work_order_id], normalization_version: "1", collision_behavior: block, missing_key_behavior: unresolved, type_independent: true}
+      declared_properties: []
+      declared_constraints: []
+      sibling_classification_policy: *sibling_policy
+      generalization_basis: null
+      evidence_span_ids: []
+      competency_question_ids: ["cq:q3", "cq:q4", "cq:q5"]
+      governance_rationale: Required by approved facility-maintenance questions.
+      tombstoned: false
   relationship_types:
-    - id: relationship-type:contains
-      predicate: contains
+    - relationship_type_id: relationship-type:facility-maintenance.contains
+      predicate_id: predicate:facility-maintenance.contains
+      display_name: contains
       description: A facility contains installed equipment.
-      source_types:
-        - entity-type:facility
-      target_types:
-        - entity-type:equipment
+      source_type_ids: [semantic-type:facility-maintenance.facility]
+      target_type_ids: [semantic-type:facility-maintenance.equipment]
       direction: source_to_target
       endpoint_policy: allow_subtypes
       evidence_policy: exact_span_required
       publication_policy: asserted_only
-      competency_question_ids:
-        - cq:equipment-location
-        - cq:facility-equipment
-        - cq:facility-work-orders
-      source_evidence_ids:
-        - proposal-evidence:contains
-    - id: relationship-type:work-order-for
-      predicate: work_order_for
-      description: A work order applies to an equipment asset.
-      source_types:
-        - entity-type:work-order
-      target_types:
-        - entity-type:equipment
+      identity_policy: &relationship_identity
+        seed_fields: [predicate_id, source_entity_id, target_entity_id, governed_context]
+        excludes_display_labels: true
+        excludes_endpoint_type_labels: true
+        context_policy: approved maintenance context
+      competency_question_ids: ["cq:q1", "cq:q2", "cq:q4"]
+      governance_rationale: Required by approved facility-maintenance questions.
+      evidence_span_ids: []
+    - relationship_type_id: relationship-type:facility-maintenance.work-order-for
+      predicate_id: predicate:facility-maintenance.work-order-for
+      display_name: work order for
+      description: A work order applies to equipment.
+      source_type_ids: [semantic-type:facility-maintenance.work-order]
+      target_type_ids: [semantic-type:facility-maintenance.equipment]
       direction: source_to_target
       endpoint_policy: allow_subtypes
       evidence_policy: exact_span_required
       publication_policy: asserted_only
-      competency_question_ids:
-        - cq:work-order-equipment
-        - cq:facility-work-orders
-        - cq:equipment-work-orders
-      source_evidence_ids:
-        - proposal-evidence:work-order-for
+      identity_policy: *relationship_identity
+      competency_question_ids: ["cq:q3", "cq:q4", "cq:q5"]
+      governance_rationale: Required by approved facility-maintenance questions.
+      evidence_span_ids: []
 constraints:
-  temporal:
-    - Preserve work-order effective dates.
+  temporal: [Preserve work-order effective dates.]
   regulatory: []
   privacy: []
-  safety:
-    - Do not initiate maintenance actions automatically.
+  safety: [Do not initiate maintenance actions automatically.]
 examples:
   positive:
     - text: Work order WO-17 applies to air handler AHU-4 in Building A.
-      expected:
-        - WorkOrder work_order_for Equipment
+      expected: [Work Order work order for Equipment]
   negative:
     - text: Automatically shut down AHU-4.
       reason: Autonomous equipment control is outside the approved scope.
+completeness_requirements: []
+completeness_question_coverage:
+  - {question_id: "cq:q1", requirement_ids: [], covered_role_ids: [], missing_role_ids: [], coverage_status: covered, unsupported_reason: null}
+  - {question_id: "cq:q2", requirement_ids: [], covered_role_ids: [], missing_role_ids: [], coverage_status: covered, unsupported_reason: null}
+  - {question_id: "cq:q3", requirement_ids: [], covered_role_ids: [], missing_role_ids: [], coverage_status: covered, unsupported_reason: null}
+  - {question_id: "cq:q4", requirement_ids: [], covered_role_ids: [], missing_role_ids: [], coverage_status: covered, unsupported_reason: null}
+  - {question_id: "cq:q5", requirement_ids: [], covered_role_ids: [], missing_role_ids: [], coverage_status: covered, unsupported_reason: null}
+hierarchy_closure:
+  direct_parent_by_type:
+    semantic-type:facility-maintenance.equipment: null
+    semantic-type:facility-maintenance.facility: null
+    semantic-type:facility-maintenance.work-order: null
+  ancestors_by_type:
+    semantic-type:facility-maintenance.equipment: []
+    semantic-type:facility-maintenance.facility: []
+    semantic-type:facility-maintenance.work-order: []
+  descendants_by_type:
+    semantic-type:facility-maintenance.equipment: []
+    semantic-type:facility-maintenance.facility: []
+    semantic-type:facility-maintenance.work-order: []
+  effective_property_ids_by_type:
+    semantic-type:facility-maintenance.equipment: []
+    semantic-type:facility-maintenance.facility: []
+    semantic-type:facility-maintenance.work-order: []
+  effective_constraint_ids_by_type:
+    semantic-type:facility-maintenance.equipment: []
+    semantic-type:facility-maintenance.facility: []
+    semantic-type:facility-maintenance.work-order: []
+  compatible_source_type_ids_by_relationship:
+    relationship-type:facility-maintenance.contains: [semantic-type:facility-maintenance.facility]
+    relationship-type:facility-maintenance.work-order-for: [semantic-type:facility-maintenance.work-order]
+  compatible_target_type_ids_by_relationship:
+    relationship-type:facility-maintenance.contains: [semantic-type:facility-maintenance.equipment]
+    relationship-type:facility-maintenance.work-order-for: [semantic-type:facility-maintenance.equipment]
+  hierarchy_hash: 5b4df9a33a59bf22dd1cb1b548f699aaf9192673fcc1467ad3ff086f5d4746ee
+identity_policy_hash: e98df784debc41f085140d4e6c9b3fce3b52bb003162606a8bcbaf53654678d5
+completeness_requirement_hash: 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+approved_external_references: []
+external_reference_decision_hash: 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
 reasoning_policy:
   relationship_type_count: 2
-  recommended_relationship_type_range:
-    - 8
-    - 20
+  recommended_relationship_type_range: [8, 20]
   max_relationship_types: 24
-  relationship_type_count_rationale: null
+  retained_type_rationales: {}
   max_hops: 2
   absolute_max_hops: 4
-  max_hops_rationale: null
+  k4_rationales: []
   max_relations_per_work_unit: 25
 extraction_policy:
   vocabulary_mode: closed
   exact_evidence_span_required: true
   abstain_without_evidence: true
   allow_subtype_endpoints: true
+  unknown_observation_policy: audit_and_request_rereview
 publication_policy:
-  included_states:
-    - asserted
-  excluded_states:
-    - unresolved
-    - rejected
+  included_states: [asserted]
+  excluded_states: [unresolved, rejected]
   source_table: semantic_relationships
 question_plans:
-  - question_id: cq:equipment-location
+  - question_id: "cq:q1"
     required_path:
-      - from_type: entity-type:equipment
-        relationship_type: relationship-type:contains
-        to_type: entity-type:facility
-        traversal: reverse
+      - {from_type_id: semantic-type:facility-maintenance.equipment, relationship_type_id: relationship-type:facility-maintenance.contains, to_type_id: semantic-type:facility-maintenance.facility, traversal: reverse, evidence_span_ids: []}
     hop_count: 1
     covered: true
     shortest_path: true
-  - question_id: cq:facility-equipment
+    unsupported_reason: null
+  - question_id: "cq:q2"
     required_path:
-      - from_type: entity-type:facility
-        relationship_type: relationship-type:contains
-        to_type: entity-type:equipment
-        traversal: forward
+      - {from_type_id: semantic-type:facility-maintenance.facility, relationship_type_id: relationship-type:facility-maintenance.contains, to_type_id: semantic-type:facility-maintenance.equipment, traversal: forward, evidence_span_ids: []}
     hop_count: 1
     covered: true
     shortest_path: true
-  - question_id: cq:work-order-equipment
+    unsupported_reason: null
+  - question_id: "cq:q3"
     required_path:
-      - from_type: entity-type:work-order
-        relationship_type: relationship-type:work-order-for
-        to_type: entity-type:equipment
-        traversal: forward
+      - {from_type_id: semantic-type:facility-maintenance.work-order, relationship_type_id: relationship-type:facility-maintenance.work-order-for, to_type_id: semantic-type:facility-maintenance.equipment, traversal: forward, evidence_span_ids: []}
     hop_count: 1
     covered: true
     shortest_path: true
-  - question_id: cq:facility-work-orders
+    unsupported_reason: null
+  - question_id: "cq:q4"
     required_path:
-      - from_type: entity-type:facility
-        relationship_type: relationship-type:contains
-        to_type: entity-type:equipment
-        traversal: forward
-      - from_type: entity-type:equipment
-        relationship_type: relationship-type:work-order-for
-        to_type: entity-type:work-order
-        traversal: reverse
+      - {from_type_id: semantic-type:facility-maintenance.facility, relationship_type_id: relationship-type:facility-maintenance.contains, to_type_id: semantic-type:facility-maintenance.equipment, traversal: forward, evidence_span_ids: []}
+      - {from_type_id: semantic-type:facility-maintenance.equipment, relationship_type_id: relationship-type:facility-maintenance.work-order-for, to_type_id: semantic-type:facility-maintenance.work-order, traversal: reverse, evidence_span_ids: []}
     hop_count: 2
     covered: true
     shortest_path: true
-  - question_id: cq:equipment-work-orders
+    unsupported_reason: null
+  - question_id: "cq:q5"
     required_path:
-      - from_type: entity-type:equipment
-        relationship_type: relationship-type:work-order-for
-        to_type: entity-type:work-order
-        traversal: reverse
+      - {from_type_id: semantic-type:facility-maintenance.equipment, relationship_type_id: relationship-type:facility-maintenance.work-order-for, to_type_id: semantic-type:facility-maintenance.work-order, traversal: reverse, evidence_span_ids: []}
     hop_count: 1
     covered: true
     shortest_path: true
+    unsupported_reason: null
+drift_policy:
+  triggers: [corpus_manifest_changed, sustained_unresolved_semantic_observation, competency_question_coverage_failed, identity_collision, cardinality_or_order_failed, external_reference_version_changed, governance_changed]
+  signal: DOMAIN_REREVIEW_REQUESTED
+  automatic_schema_mutation: false
 approval:
   status: draft
   approved_by: null
   approved_at_utc: null
   contract_hash: null
-  proposal_hash: null
-  source_profile_hash: null
-  prompt_hash: null
-  prompt_version: null
-  model_version: null
+  domain_approval_context_id: null
+  domain_approval_context_hash: null
   notes: []

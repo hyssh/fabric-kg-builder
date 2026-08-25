@@ -16,6 +16,7 @@
 | 2026-06-24T15:41:07.842-07:00 | Verbal | v5 — Enrichment default corrected to gpt-5.4-mini (deployment `gpt-5-4-mini`, 200K TPM GlobalStandard); 200K TPM minimum documented in §5.1 and §10 decisions; AI Search corrected to IN MVP scope (decision 8); reference REQUIREMENTS-001 for setup. |
 | 2026-08-23 | Copilot | v6 — Added the additive schema-2.0 domain foundation for new projects: strict version discrimination, bounded relationship vocabulary N, derived reasoning depth K, typed directed question paths, and explicit 1.0 compatibility. Interactive proposal and approval automation are specified but activate in a later implementation layer. |
 | 2026-08-24 | Copilot | v7 — Corrected the duplicate section 11 numbering and assigned shared cross-layer identity, evidence, lifecycle, projection, receipt, resource, and version-negotiation ownership to SPEC-006 C0.Core. |
+| 2026-08-25 | Copilot | v8 — Activated the L1 schema-2 domain-design and one-summary approval stage per SPEC-007 while keeping enrichment fail-closed until L2 receipt integration. |
 
 ---
 
@@ -821,14 +822,14 @@ Schema 2.0 uses strict section models rather than the scalar/null-to-list
 coercion retained for 1.0 compatibility. Required text is trimmed and must remain
 nonempty; list fields require JSON/YAML arrays with nonblank members.
 
-The schema-foundation layer may load, hash, and deterministically validate 2.0
-contracts, but it must not activate 2.0 enrichment until the Copilot proposal
-and one-summary approval implementation is present.
+The L1 layer may load, hash, propose, approve, and deterministically validate 2.0
+contracts. It must not activate 2.0 enrichment until the L2 successor receipt
+integration is present.
 
 ### 12.2 New-project CLI contract
 
-The completed 0.2.4 workflow will make `init-domain` interactive by default and
-will also accept deterministic YAML or JSON intake for automation. It will:
+The 0.2.4 L1 workflow makes `init-domain` interactive by default and also
+accepts deterministic YAML or JSON intake for automation. It:
 
 1. collect the business goal, users, decisions, scope, five to ten competency
    questions, and a bounded source profile;
@@ -869,7 +870,8 @@ Schema-2.0 contract hashes use canonical JSON with sorted object keys and exclud
 approval metadata. Array order remains meaningful for ordered question paths.
 Set-like publication state input is normalized to the exact order
 `[unresolved, rejected]` before hashing, with duplicates removed.
-Approval will additionally seal proposal, source-profile, prompt, and model
+Approval additionally seals proposal, complete source corpus, bounded design
+sample, source profile, prompt, model, hierarchy, identity, and completeness
 identity. Schema-1.0 hashing remains unchanged.
 
 ### 12.5 C0.Core boundary
@@ -882,6 +884,9 @@ negotiation. Existing domain, canonical row, lineage, semantic, checkpoint, and
 runtime modules retain their field semantics and are connected by equality
 adapters. C0.Core does not activate schema-2.0 proposal, extraction, publication,
 deployment, or runtime behavior.
+
+SPEC-007 activates only proposal and approval. Extraction, publication,
+deployment, and runtime behavior remain fail-closed.
 
 ---
 

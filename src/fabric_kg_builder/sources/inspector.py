@@ -15,8 +15,35 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from fabric_kg_builder.contracts.base import (
+    ContractModel,
+    Sha256,
+    canonical_sha256,
+    deterministic_contract_id,
+    normalize_nfc,
+)
+from fabric_kg_builder.contracts.evidence import EvidenceSpan, SourceUnit
+from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
+from fabric_kg_builder.domain.contexts import (
+    DomainSourceProfile,
+    SourceProfileWarning,
+)
+from fabric_kg_builder.release.redact import redact_secret_text
+from fabric_kg_builder.sources.adapter import AdapterError
+from fabric_kg_builder.sources.corpus import (
+    DesignSampleEntry,
+    DesignSampleManifest,
+    SourceCorpusManifest,
+    build_design_sample_manifest,
+)
+from fabric_kg_builder.sources.evidence_verifier import (
+    mint_source_unit,
+    mint_verified_span,
+)
 
 
 PROFILE_SCHEMA_VERSION = "1.0"
@@ -422,3 +449,277 @@ def check_source_profile_staleness(profile: SourceProfile, source_path: Path) ->
             f"(approved hash: {profile.source_hash[:8]}…, current: {current_hash[:8]}…)"
         )
     return None
+
+
+class DesignSamplingBudget(ContractModel):
+        """Functional L1 sample bounds; these are not performance thresholds."""
+
+        max_source_files: int = Field(default=12, ge=1)
+        max_samples_per_kind: int = Field(default=4, ge=1)
+        max_excerpt_codepoints: int = Field(default=1_200, ge=1)
+        sample_kinds: tuple[
+            Literal["heading", "text", "table", "visual_description"], ...
+        ] = ("heading", "text", "table", "visual_description")
+        budget_snapshot_hash: Sha256
+
+        @classmethod
+        def default(cls) -> "DesignSamplingBudget":
+            values = {
+                "max_source_files": 12,
+                "max_samples_per_kind": 4,
+                "max_excerpt_codepoints": 1_200,
+                "sample_kinds": (
+                    "heading",
+                    "text",
+                    "table",
+                    "visual_description",
+                ),
+            }
+            return cls(**values, budget_snapshot_hash=canonical_sha256(values))
+
+
+def _sample_kind(element_type: str) -> str | None:
+        normalized = element_type.casefold()
+        if normalized in {"section", "heading", "title"}:
+            return "heading"
+        if normalized in {"table", "table_row", "cell"}:
+            return "table"
+        if normalized in {"vision_description", "visual_description"}:
+            return "visual_description"
+        if normalized in {
+            "paragraph",
+            "text",
+            "ocr_text",
+            "transcript",
+            "list_item",
+        }:
+            return "text"
+        return None
+
+
+def _unit_kind(sample_kind: str) -> str:
+        return {
+            "heading": "heading",
+            "text": "paragraph",
+            "table": "table",
+            "visual_description": "visual_description",
+        }[sample_kind]
+
+
+def _representative_entries(
+        corpus: SourceCorpusManifest,
+        budget: DesignSamplingBudget,
+) -> list:
+        eligible = [entry for entry in corpus.entries if entry.disposition == "eligible"]
+        by_media: dict[str, list] = {}
+        for entry in eligible:
+            by_media.setdefault(entry.media_type, []).append(entry)
+        selected: list = []
+        media_types = sorted(by_media)
+        while len(selected) < budget.max_source_files:
+            added = False
+            for media_type in media_types:
+                entries = by_media[media_type]
+                if entries:
+                    selected.append(entries.pop(0))
+                    added = True
+                    if len(selected) == budget.max_source_files:
+                        break
+            if not added:
+                break
+        return selected
+
+
+def build_l1_design_artifacts(
+        source_path: Path,
+        *,
+        corpus: SourceCorpusManifest,
+        base_identity: CanonicalIdentityEnvelope,
+        verified_at_utc: datetime,
+        budget: DesignSamplingBudget | None = None,
+) -> tuple[
+        DesignSampleManifest,
+        DomainSourceProfile,
+        tuple[SourceUnit, ...],
+        tuple[EvidenceSpan, ...],
+]:
+        """Parse only a bounded representative subset and mint exact design evidence."""
+        budget = budget or DesignSamplingBudget.default()
+        if budget.budget_snapshot_hash != canonical_sha256(
+            budget.model_dump(mode="json", exclude={"budget_snapshot_hash"})
+        ):
+            raise ValueError("budget_snapshot_hash is stale")
+        root = source_path.resolve()
+        source_units: list[SourceUnit] = []
+        evidence_spans: list[EvidenceSpan] = []
+        sample_entries: list[DesignSampleEntry] = []
+        warnings: list[SourceProfileWarning] = []
+        kind_counts: Counter[str] = Counter()
+
+        relative_to_path = {
+            (
+                path.resolve().relative_to(root).as_posix()
+                if root.is_dir()
+                else path.name
+            ): path
+            for path in ([root] if root.is_file() else root.rglob("*"))
+            if path.is_file()
+        }
+        for corpus_entry in _representative_entries(corpus, budget):
+            path = relative_to_path.get(corpus_entry.relative_source_ref)
+            if path is None:
+                warnings.append(
+                    SourceProfileWarning(
+                        warning_id=deterministic_contract_id(
+                            "source-warning",
+                            {
+                                "source_file_id": corpus_entry.source_file_id,
+                                "warning_type": "missing",
+                            },
+                        ),
+                        warning_type="missing",
+                        source_file_id=corpus_entry.source_file_id,
+                        message="Source disappeared after complete corpus inventory.",
+                    )
+                )
+                continue
+            try:
+                from fabric_kg_builder.sources.router import extract
+
+                result = extract(path)
+            except (AdapterError, OSError, UnicodeError, ValueError, ImportError) as exc:
+                warning_type = (
+                    exc.failure_type.value
+                    if isinstance(exc, AdapterError)
+                    else type(exc).__name__.casefold()
+                )
+                warnings.append(
+                    SourceProfileWarning(
+                        warning_id=deterministic_contract_id(
+                            "source-warning",
+                            {
+                                "source_file_id": corpus_entry.source_file_id,
+                                "warning_type": warning_type,
+                            },
+                        ),
+                        warning_type=warning_type,
+                        source_file_id=corpus_entry.source_file_id,
+                        message=redact_secret_text(
+                            f"Design sampling failed for {corpus_entry.relative_source_ref}: {exc}"
+                        ),
+                    )
+                )
+                continue
+
+            elements = sorted(
+                result.document_elements,
+                key=lambda item: (
+                    item.sort_order if item.sort_order is not None else 2**31,
+                    item.document_element_id,
+                ),
+            )
+            for element in elements:
+                sample_kind = _sample_kind(element.element_type)
+                if (
+                    sample_kind is None
+                    or sample_kind not in budget.sample_kinds
+                    or kind_counts[sample_kind] >= budget.max_samples_per_kind
+                ):
+                    continue
+                text = normalize_nfc((element.content or element.title or "").strip())
+                if not text:
+                    continue
+                source_unit = mint_source_unit(
+                    base_identity=base_identity,
+                    corpus_entry=corpus_entry,
+                    source_corpus_manifest_id=corpus.source_corpus_manifest_id,
+                    unit_kind=_unit_kind(sample_kind),
+                    text=text,
+                    ordinal=len(source_units),
+                    section_path=(
+                        tuple(
+                            part
+                            for part in (element.section_path or "").split("/")
+                            if part
+                        )
+                        or None
+                    ),
+                    page=element.page_number,
+                )
+                span_end = min(
+                    source_unit.codepoint_count,
+                    budget.max_excerpt_codepoints,
+                )
+                span = mint_verified_span(
+                    source_unit=source_unit,
+                    span_start=0,
+                    span_end=span_end,
+                    purpose="domain_design",
+                    verified_at_utc=verified_at_utc,
+                )
+                source_units.append(source_unit)
+                evidence_spans.append(span)
+                sample_entries.append(
+                    DesignSampleEntry(
+                        source_file_id=corpus_entry.source_file_id,
+                        source_unit_ids=(source_unit.source_unit_id,),
+                        evidence_span_ids=(span.evidence_span_id,),
+                        sample_kind=sample_kind,
+                        sample_order=len(sample_entries),
+                    )
+                )
+                kind_counts[sample_kind] += 1
+
+        sample_manifest = build_design_sample_manifest(
+            corpus=corpus,
+            entries=tuple(sample_entries),
+            budget_snapshot_hash=budget.budget_snapshot_hash,
+            identity=base_identity,
+        )
+        profile_values = {
+            "contract_version": "1.0.0",
+            "source_corpus_manifest_id": corpus.source_corpus_manifest_id,
+            "source_corpus_manifest_hash": corpus.corpus_hash,
+            "design_sample_manifest_id": sample_manifest.design_sample_manifest_id,
+            "design_sample_manifest_hash": sample_manifest.sample_hash,
+            "budget_snapshot_hash": budget.budget_snapshot_hash,
+            "complete_source_count": corpus.total_entry_count,
+            "eligible_source_count": corpus.eligible_entry_count,
+            "excluded_source_count": corpus.excluded_entry_count,
+            "blocked_source_count": corpus.blocked_entry_count,
+            "observed_media_types": tuple(
+                sorted({entry.media_type for entry in corpus.entries})
+            ),
+            "observed_schema_fields": (),
+            "inferred_suggestions": (),
+            "warnings": tuple(warnings),
+            "completeness_disclaimer": (
+                "design samples are bounded proposal support, not the complete source universe"
+            ),
+        }
+        profile_hash = canonical_sha256(profile_values)
+        profile_id = deterministic_contract_id(
+            "domain-source-profile", {"profile_hash": profile_hash}
+        )
+        profile_identity = base_identity.model_copy(
+            update={
+                "contract_kind": "l1.domain_source_profile",
+                "content_hash": profile_hash,
+                "parent_artifact_ids": (
+                    corpus.source_corpus_manifest_id,
+                    sample_manifest.design_sample_manifest_id,
+                ),
+            }
+        )
+        profile = DomainSourceProfile(
+            identity=profile_identity,
+            domain_source_profile_id=profile_id,
+            **profile_values,
+            profile_hash=profile_hash,
+        )
+        return (
+            sample_manifest,
+            profile,
+            tuple(source_units),
+            tuple(evidence_spans),
+        )

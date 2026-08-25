@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -292,18 +293,112 @@ def domain_review_cmd(
     type=float,
     help="Minimum review quality score required for approval.",
 )
+@click.option(
+    "--proposal",
+    "proposal_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Schema-2 immutable domain proposal JSON.",
+)
+@click.option(
+    "--design-context",
+    "design_context_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Schema-2 immutable design context JSON.",
+)
+@click.option(
+    "--source-profile",
+    "source_profile_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Schema-2 immutable source profile JSON.",
+)
+@click.option(
+    "--source-corpus-manifest",
+    "source_corpus_manifest_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Schema-2 complete source corpus manifest JSON.",
+)
+@click.option(
+    "--design-sample-manifest",
+    "design_sample_manifest_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Schema-2 bounded design sample manifest JSON.",
+)
+@click.option(
+    "--state-dir",
+    default=str(Path(".fkg") / "l1"),
+    show_default=True,
+    type=click.Path(file_okay=False),
+    help="Schema-2 L1 state directory.",
+)
 def domain_approve_cmd(
     contract_path: str,
     approved_by: str | None,
     min_quality_score: float,
+    proposal_path: str | None,
+    design_context_path: str | None,
+    source_profile_path: str | None,
+    source_corpus_manifest_path: str | None,
+    design_sample_manifest_path: str | None,
+    state_dir: str,
 ) -> None:
     """Record explicit approval metadata after a current passing review."""
     contract = load_domain_contract(contract_path)
     if isinstance(contract, DomainContractV2):
-        raise click.ClickException(
-            "Schema-2.0 approval is not enabled in the schema foundation layer. "
-            "The schema-1.0 approval command cannot approve a 2.0 contract."
+        if not approved_by or not approved_by.strip():
+            raise click.ClickException(
+                "Schema-2 approval requires explicit --approved-by."
+            )
+        from fabric_kg_builder.contracts.base import canonical_json
+        from fabric_kg_builder.domain.stage import (
+            L1StageError,
+            approve_persisted_l1_draft,
         )
+
+        state_root = Path(state_dir)
+        explicit_bindings = {
+            "domain-proposal.json": proposal_path,
+            "domain-design-context.json": design_context_path,
+            "source-profile.json": source_profile_path,
+            "source-corpus-manifest.json": source_corpus_manifest_path,
+            "design-sample-manifest.json": design_sample_manifest_path,
+        }
+        for default_name, explicit in explicit_bindings.items():
+            if explicit is None:
+                continue
+            default_path = state_root / default_name
+            try:
+                explicit_data = json.loads(Path(explicit).read_text(encoding="utf-8"))
+                default_data = json.loads(default_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise click.ClickException(
+                    f"Could not reconcile schema-2 approval artifact: {exc}"
+                ) from exc
+            if canonical_json(explicit_data) != canonical_json(default_data):
+                raise click.ClickException(
+                    f"Explicit {default_name} does not match the current L1 state."
+                )
+        try:
+            result = approve_persisted_l1_draft(
+                actor=approved_by.strip(),
+                state_root=state_root,
+                domain_path=Path(contract_path),
+            )
+        except L1StageError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"[domain approve] approved schema-2 contract → {contract_path}")
+        click.echo(
+            f"[domain approve] approval context : "
+            f"{result.approval_context.domain_approval_context_id}"
+        )
+        click.echo(
+            f"[domain approve] receipt          : {result.receipt.stage_receipt_id}"
+        )
+        return
     review_path = review_path_for_contract(contract_path)
     if not review_path.exists():
         raise click.ClickException(
@@ -356,9 +451,19 @@ def domain_approve_cmd(
     type=click.Path(),
     help="Optional explicit path to domain.yaml (or legacy domain.json for diagnostics).",
 )
-def domain_status_cmd(contract_path: str | None) -> None:
+@click.option(
+    "--state-dir",
+    default=str(Path(".fkg") / "l1"),
+    show_default=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Schema-2 L1 state directory containing approval artifacts.",
+)
+def domain_status_cmd(contract_path: str | None, state_dir: Path) -> None:
     """Report contract, review, approval, and enrichment readiness status."""
-    status = evaluate_domain_guard_status(contract_path)
+    status = evaluate_domain_guard_status(
+        contract_path,
+        l1_state_root=state_dir,
+    )
     click.echo(f"[domain status] contract path         : {status.contract_path}")
     click.echo(f"[domain status] review path           : {status.review_path}")
     click.echo(f"[domain status] legacy path           : {status.legacy_path}")

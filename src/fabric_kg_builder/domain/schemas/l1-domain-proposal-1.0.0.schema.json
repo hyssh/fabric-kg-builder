@@ -1,28 +1,5 @@
 {
   "$defs": {
-    "AmbiguousTerm": {
-      "additionalProperties": false,
-      "description": "Ambiguous or overloaded term.",
-      "properties": {
-        "term": {
-          "minLength": 1,
-          "title": "Term",
-          "type": "string"
-        },
-        "meanings": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Meanings",
-          "type": "array"
-        }
-      },
-      "required": [
-        "term"
-      ],
-      "title": "AmbiguousTerm",
-      "type": "object"
-    },
     "AmbiguousTermV2": {
       "additionalProperties": false,
       "properties": {
@@ -48,103 +25,6 @@
         "meanings"
       ],
       "title": "AmbiguousTermV2",
-      "type": "object"
-    },
-    "ApprovalMetadata": {
-      "additionalProperties": false,
-      "description": "Approval state stored with the domain contract.",
-      "properties": {
-        "status": {
-          "default": "draft",
-          "enum": [
-            "draft",
-            "needs_review",
-            "approved"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "approved_by": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Approved By"
-        },
-        "approved_at_utc": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Approved At Utc"
-        },
-        "contract_hash": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Contract Hash"
-        },
-        "schema_version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Schema Version"
-        },
-        "prompt_version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Prompt Version"
-        },
-        "model_version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Model Version"
-        },
-        "notes": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Notes",
-          "type": "array"
-        }
-      },
-      "title": "ApprovalMetadata",
       "type": "object"
     },
     "ApprovalMetadataV2": {
@@ -343,36 +223,6 @@
       "title": "ApprovedExternalSemanticReferenceV2",
       "type": "object"
     },
-    "BusinessSection": {
-      "additionalProperties": false,
-      "description": "Business and organizational context.",
-      "properties": {
-        "organization_context": {
-          "minLength": 1,
-          "title": "Organization Context",
-          "type": "string"
-        },
-        "users": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Users",
-          "type": "array"
-        },
-        "decisions": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Decisions",
-          "type": "array"
-        }
-      },
-      "required": [
-        "organization_context"
-      ],
-      "title": "BusinessSection",
-      "type": "object"
-    },
     "BusinessSectionV2": {
       "additionalProperties": false,
       "properties": {
@@ -411,26 +261,119 @@
       "title": "BusinessSectionV2",
       "type": "object"
     },
-    "CandidateModelSection": {
+    "CandidateAuditV2": {
       "additionalProperties": false,
-      "description": "Candidate entity and relationship categories.",
       "properties": {
-        "entity_categories": {
+        "candidate_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "candidate_kind": {
+          "enum": [
+            "domain_boundary",
+            "semantic_type",
+            "generalization",
+            "relationship",
+            "completeness",
+            "external_reference"
+          ],
+          "title": "Candidate Kind",
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "selected",
+            "proposed",
+            "unresolved",
+            "rejected"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateScoreV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason_codes": {
           "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
             "type": "string"
           },
-          "title": "Entity Categories",
+          "title": "Reason Codes",
           "type": "array"
         },
-        "relationship_categories": {
+        "evidence_span_ids": {
+          "default": [],
           "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
             "type": "string"
           },
-          "title": "Relationship Categories",
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "competency_question_ids": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "governance_references": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Governance References",
+          "type": "array"
+        },
+        "merge_representative_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Merge Representative Id"
+        },
+        "conflict_candidate_ids": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Conflict Candidate Ids",
           "type": "array"
         }
       },
-      "title": "CandidateModelSection",
+      "required": [
+        "candidate_id",
+        "candidate_kind",
+        "disposition",
+        "reason_codes"
+      ],
+      "title": "CandidateAuditV2",
       "type": "object"
     },
     "CandidateModelSectionV2": {
@@ -460,33 +403,327 @@
       "title": "CandidateModelSectionV2",
       "type": "object"
     },
-    "CanonicalTerm": {
+    "CandidateScoreV2": {
       "additionalProperties": false,
-      "description": "Preferred business terminology.",
       "properties": {
-        "term": {
-          "minLength": 1,
-          "title": "Term",
+        "scorer_version": {
+          "const": "l1-domain-candidate-scorer/1.0.0",
+          "default": "l1-domain-candidate-scorer/1.0.0",
+          "title": "Scorer Version",
           "type": "string"
         },
-        "definition": {
-          "minLength": 1,
-          "title": "Definition",
+        "scorer_hash": {
+          "default": "cba8c680b7dcd6c2a3c7f90c0c87c21d47784560c596e3004c6ae0b703e4d0ce",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Scorer Hash",
           "type": "string"
         },
-        "synonyms": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Synonyms",
-          "type": "array"
+        "evidence_quality_score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Evidence Quality Score",
+          "type": "number"
+        },
+        "cq_coverage_score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Cq Coverage Score",
+          "type": "number"
+        },
+        "ambiguity_conflict_penalty": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Ambiguity Conflict Penalty",
+          "type": "number"
+        },
+        "common_domain_fit_score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Common Domain Fit Score",
+          "type": "number"
+        },
+        "ip_governance_eligible": {
+          "title": "Ip Governance Eligible",
+          "type": "boolean"
+        },
+        "total_score": {
+          "title": "Total Score",
+          "type": "number"
+        },
+        "gate_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gate Reason"
         }
       },
       "required": [
-        "term",
-        "definition"
+        "evidence_quality_score",
+        "cq_coverage_score",
+        "ambiguity_conflict_penalty",
+        "common_domain_fit_score",
+        "ip_governance_eligible",
+        "total_score"
       ],
-      "title": "CanonicalTerm",
+      "title": "CandidateScoreV2",
+      "type": "object"
+    },
+    "CanonicalIdentityEnvelope": {
+      "additionalProperties": false,
+      "description": "Shared identity references; contract-specific IDs remain authoritative.",
+      "properties": {
+        "contract_kind": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Contract Kind",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "project_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asset Id"
+        },
+        "asset_version_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asset Version Id"
+        },
+        "run_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "source_file_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source File Id"
+        },
+        "source_unit_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Unit Id"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Content Hash"
+        },
+        "domain_schema_version": {
+          "enum": [
+            "1.0",
+            "2.0"
+          ],
+          "title": "Domain Schema Version",
+          "type": "string"
+        },
+        "domain_contract_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Domain Contract Hash",
+          "type": "string"
+        },
+        "semantic_contract_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Semantic Contract Hash"
+        },
+        "canonical_schema_version": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Canonical Schema Version",
+          "type": "string"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Version"
+        },
+        "prompt_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Hash"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Version"
+        },
+        "model_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Hash"
+        },
+        "extractor_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extractor Name"
+        },
+        "extractor_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extractor Version"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "parent_record_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Record Ids",
+          "type": "array"
+        },
+        "immutable_locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImmutableSourceLocator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contract_kind",
+        "project_id",
+        "asset_id",
+        "asset_version_id",
+        "run_id",
+        "source_file_id",
+        "source_unit_id",
+        "content_hash",
+        "domain_schema_version",
+        "domain_contract_hash",
+        "semantic_contract_hash",
+        "canonical_schema_version",
+        "prompt_version",
+        "prompt_hash",
+        "model_version",
+        "model_hash",
+        "extractor_name",
+        "extractor_version",
+        "immutable_locator"
+      ],
+      "title": "CanonicalIdentityEnvelope",
       "type": "object"
     },
     "CanonicalTermV2": {
@@ -903,42 +1140,6 @@
       "title": "CompletenessRequirementV2",
       "type": "object"
     },
-    "ConstraintsSection": {
-      "additionalProperties": false,
-      "description": "Temporal, regulatory, privacy, and safety constraints.",
-      "properties": {
-        "temporal": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Temporal",
-          "type": "array"
-        },
-        "regulatory": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Regulatory",
-          "type": "array"
-        },
-        "privacy": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Privacy",
-          "type": "array"
-        },
-        "safety": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Safety",
-          "type": "array"
-        }
-      },
-      "title": "ConstraintsSection",
-      "type": "object"
-    },
     "ConstraintsSectionV2": {
       "additionalProperties": false,
       "properties": {
@@ -1011,60 +1212,6 @@
         "expression"
       ],
       "title": "DomainConstraintV2",
-      "type": "object"
-    },
-    "DomainContract": {
-      "additionalProperties": false,
-      "description": "Approved YAML source-of-truth for domain intent.",
-      "properties": {
-        "schema_version": {
-          "const": "1.0",
-          "default": "1.0",
-          "title": "Schema Version",
-          "type": "string"
-        },
-        "domain": {
-          "$ref": "#/$defs/DomainSection"
-        },
-        "business": {
-          "$ref": "#/$defs/BusinessSection"
-        },
-        "problem": {
-          "$ref": "#/$defs/ProblemSection"
-        },
-        "competency_questions": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Competency Questions",
-          "type": "array"
-        },
-        "terminology": {
-          "$ref": "#/$defs/TerminologySection"
-        },
-        "candidate_model": {
-          "$ref": "#/$defs/CandidateModelSection"
-        },
-        "constraints": {
-          "$ref": "#/$defs/ConstraintsSection"
-        },
-        "examples": {
-          "$ref": "#/$defs/ExamplesSection"
-        },
-        "approval": {
-          "$ref": "#/$defs/ApprovalMetadata"
-        }
-      },
-      "required": [
-        "domain",
-        "business",
-        "problem",
-        "terminology",
-        "candidate_model",
-        "constraints",
-        "examples"
-      ],
-      "title": "DomainContract",
       "type": "object"
     },
     "DomainContractV2": {
@@ -1540,35 +1687,6 @@
       "title": "DomainRelationshipTypeV2",
       "type": "object"
     },
-    "DomainSection": {
-      "additionalProperties": false,
-      "description": "Top-level domain description.",
-      "properties": {
-        "name": {
-          "minLength": 1,
-          "title": "Name",
-          "type": "string"
-        },
-        "description": {
-          "minLength": 1,
-          "title": "Description",
-          "type": "string"
-        },
-        "subdomains": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Subdomains",
-          "type": "array"
-        }
-      },
-      "required": [
-        "name",
-        "description"
-      ],
-      "title": "DomainSection",
-      "type": "object"
-    },
     "DomainSectionV2": {
       "additionalProperties": false,
       "properties": {
@@ -1599,28 +1717,6 @@
         "description"
       ],
       "title": "DomainSectionV2",
-      "type": "object"
-    },
-    "ExamplesSection": {
-      "additionalProperties": false,
-      "description": "Positive and negative examples.",
-      "properties": {
-        "positive": {
-          "items": {
-            "$ref": "#/$defs/PositiveExample"
-          },
-          "title": "Positive",
-          "type": "array"
-        },
-        "negative": {
-          "items": {
-            "$ref": "#/$defs/NegativeExample"
-          },
-          "title": "Negative",
-          "type": "array"
-        }
-      },
-      "title": "ExamplesSection",
       "type": "object"
     },
     "ExamplesSectionV2": {
@@ -1789,6 +1885,238 @@
       "title": "IdentityKeyPolicyV2",
       "type": "object"
     },
+    "ImmutableSourceLocator": {
+      "additionalProperties": false,
+      "description": "Typed immutable adapter over ``build_source_locator``.",
+      "properties": {
+        "locator_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Locator Version",
+          "type": "string"
+        },
+        "blob_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blob Uri"
+        },
+        "blob_version_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blob Version Id"
+        },
+        "source_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Uri"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet"
+        },
+        "slide": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slide"
+        },
+        "section_path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Path"
+        },
+        "cell_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cell Range"
+        },
+        "char_start": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char Start"
+        },
+        "char_end": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char End"
+        },
+        "polygon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sheet_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet Zone"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "coordinate_system": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coordinate System"
+        },
+        "transform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "native_layer_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Layer Id"
+        },
+        "native_object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Object Id"
+        },
+        "locator_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Locator Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_hash"
+      ],
+      "title": "ImmutableSourceLocator",
+      "type": "object"
+    },
+    "JsonValue": {},
     "K4RationaleV2": {
       "additionalProperties": false,
       "properties": {
@@ -1830,28 +2158,6 @@
         "rationale"
       ],
       "title": "K4RationaleV2",
-      "type": "object"
-    },
-    "NegativeExample": {
-      "additionalProperties": false,
-      "description": "Representative negative example.",
-      "properties": {
-        "text": {
-          "minLength": 1,
-          "title": "Text",
-          "type": "string"
-        },
-        "reason": {
-          "minLength": 1,
-          "title": "Reason",
-          "type": "string"
-        }
-      },
-      "required": [
-        "text",
-        "reason"
-      ],
-      "title": "NegativeExample",
       "type": "object"
     },
     "NegativeExampleV2": {
@@ -1961,29 +2267,6 @@
       "title": "OrderingPolicyV2",
       "type": "object"
     },
-    "PositiveExample": {
-      "additionalProperties": false,
-      "description": "Representative positive example.",
-      "properties": {
-        "text": {
-          "minLength": 1,
-          "title": "Text",
-          "type": "string"
-        },
-        "expected": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Expected",
-          "type": "array"
-        }
-      },
-      "required": [
-        "text"
-      ],
-      "title": "PositiveExample",
-      "type": "object"
-    },
     "PositiveExampleV2": {
       "additionalProperties": false,
       "properties": {
@@ -2007,43 +2290,6 @@
         "text"
       ],
       "title": "PositiveExampleV2",
-      "type": "object"
-    },
-    "ProblemSection": {
-      "additionalProperties": false,
-      "description": "Problem statement and scoping.",
-      "properties": {
-        "statement": {
-          "minLength": 1,
-          "title": "Statement",
-          "type": "string"
-        },
-        "desired_outcomes": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Desired Outcomes",
-          "type": "array"
-        },
-        "in_scope": {
-          "items": {
-            "type": "string"
-          },
-          "title": "In Scope",
-          "type": "array"
-        },
-        "out_of_scope": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Out Of Scope",
-          "type": "array"
-        }
-      },
-      "required": [
-        "statement"
-      ],
-      "title": "ProblemSection",
       "type": "object"
     },
     "ProblemSectionV2": {
@@ -2521,28 +2767,6 @@
       "title": "StructuredFactSetV2",
       "type": "object"
     },
-    "TerminologySection": {
-      "additionalProperties": false,
-      "description": "Domain terminology catalogue.",
-      "properties": {
-        "canonical_terms": {
-          "items": {
-            "$ref": "#/$defs/CanonicalTerm"
-          },
-          "title": "Canonical Terms",
-          "type": "array"
-        },
-        "ambiguous_terms": {
-          "items": {
-            "$ref": "#/$defs/AmbiguousTerm"
-          },
-          "title": "Ambiguous Terms",
-          "type": "array"
-        }
-      },
-      "title": "TerminologySection",
-      "type": "object"
-    },
     "TerminologySectionV2": {
       "additionalProperties": false,
       "properties": {
@@ -2680,22 +2904,153 @@
       "type": "object"
     }
   },
-  "discriminator": {
-    "mapping": {
-      "1.0": "#/$defs/DomainContract",
-      "2.0": "#/$defs/DomainContractV2"
+  "additionalProperties": false,
+  "properties": {
+    "identity": {
+      "$ref": "#/$defs/CanonicalIdentityEnvelope"
     },
-    "propertyName": "schema_version"
-  },
-  "oneOf": [
-    {
-      "$ref": "#/$defs/DomainContract"
+    "contract_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Contract Version",
+      "type": "string"
     },
-    {
+    "domain_proposal_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Proposal Id",
+      "type": "string"
+    },
+    "domain_design_context_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Design Context Id",
+      "type": "string"
+    },
+    "domain_design_context_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Domain Design Context Hash",
+      "type": "string"
+    },
+    "draft_contract": {
       "$ref": "#/$defs/DomainContractV2"
+    },
+    "domain_contract_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Domain Contract Hash",
+      "type": "string"
+    },
+    "candidate_count": {
+      "minimum": 1,
+      "title": "Candidate Count",
+      "type": "integer"
+    },
+    "selected_candidate_count": {
+      "minimum": 1,
+      "title": "Selected Candidate Count",
+      "type": "integer"
+    },
+    "relationship_merge_groups": {
+      "patternProperties": {
+        ".*\\S.*": {
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "propertyNames": {
+        "minLength": 1
+      },
+      "title": "Relationship Merge Groups",
+      "type": "object"
+    },
+    "selected_relationship_type_ids": {
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Selected Relationship Type Ids",
+      "type": "array"
+    },
+    "completeness_requirement_ids": {
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Completeness Requirement Ids",
+      "type": "array"
+    },
+    "competency_question_coverage_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Competency Question Coverage Hash",
+      "type": "string"
+    },
+    "candidate_audit": {
+      "items": {
+        "$ref": "#/$defs/CandidateAuditV2"
+      },
+      "title": "Candidate Audit",
+      "type": "array"
+    },
+    "assumptions": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "evidence_span_ids": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Evidence Span Ids",
+      "type": "array"
+    },
+    "proposal_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Proposal Hash",
+      "type": "string"
     }
+  },
+  "required": [
+    "identity",
+    "domain_proposal_id",
+    "domain_design_context_id",
+    "domain_design_context_hash",
+    "draft_contract",
+    "domain_contract_hash",
+    "candidate_count",
+    "selected_candidate_count",
+    "relationship_merge_groups",
+    "selected_relationship_type_ids",
+    "completeness_requirement_ids",
+    "competency_question_coverage_hash",
+    "candidate_audit",
+    "proposal_hash"
   ],
+  "title": "DomainProposal",
+  "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "domain.schema.json",
-  "title": "VersionedDomainContract"
+  "$id": "l1-domain-proposal-1.0.0.schema.json"
 }

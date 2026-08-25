@@ -71,6 +71,23 @@ _SECRET_VALUE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"[A-Za-z0-9]{32}$"),
 ]
 
+_FREE_TEXT_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    *_SECRET_VALUE_PATTERNS[:-1],
+    re.compile(
+        r"(?:api[ _-]?key|admin[ _-]?key|token|secret|password)"
+        r"\s*(?::|=|\bis\b)\s*[A-Za-z0-9+/=._~-]{20,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:api[ _-]?key|admin[ _-]?key|token|secret|password)"
+        r"[-/\\]"
+        r"(?=[A-Za-z0-9+_=~]*[A-Za-z])"
+        r"(?=[A-Za-z0-9+_=~]*[0-9])"
+        r"[A-Za-z0-9+_=~]{20,}",
+        re.IGNORECASE,
+    ),
+]
+
 _REDACTED_PLACEHOLDER = "[REDACTED]"
 
 
@@ -80,6 +97,19 @@ def _looks_like_secret(value: str) -> bool:
         if pattern.search(value):
             return True
     return False
+
+
+def looks_like_secret(value: str) -> bool:
+    """Public wrapper for conservative secret detection."""
+    return _looks_like_secret(value)
+
+
+def redact_secret_text(value: str) -> str:
+    """Redact detected secret substrings while preserving safe context."""
+    redacted = value
+    for pattern in _FREE_TEXT_SECRET_PATTERNS:
+        redacted = pattern.sub(_REDACTED_PLACEHOLDER, redacted)
+    return redacted
 
 
 def redact_value(field_name: str, value: Any) -> Any:

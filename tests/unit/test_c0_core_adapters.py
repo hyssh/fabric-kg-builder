@@ -72,7 +72,7 @@ def test_common_lineage_adapter_preserves_fields_and_domain_hash() -> None:
 @pytest.mark.unit
 def test_domain_hash_adapter_equals_domain_service_authority() -> None:
     contract = load_domain_contract(
-        "tests/fixtures/domains/facility-maintenance-v2.yaml"
+        "examples/domains/facility-maintenance-v2.domain.yaml"
     )
     expected = compute_contract_hash(contract)
     assert_domain_hash_authority(contract, expected)
