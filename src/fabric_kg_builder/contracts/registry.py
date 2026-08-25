@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
 
 from .assertions import (
     CanonicalEntityAssertion,
@@ -27,7 +26,9 @@ from .evidence import EvidenceSpan, EvidenceSpanV1_1, SourceUnit
 from .extraction import (
     ExtractionCandidateBatch,
     RequiredMemberManifest,
+    RequiredMemberManifestV1_1,
     RequiredMemberSetProposal,
+    RequiredMemberSetProposalV1_1,
 )
 from .identity import StandaloneCanonicalIdentityEnvelope
 from .lifecycle import CandidateAccountingDisposition, CandidateLifecycleRecord
@@ -57,11 +58,19 @@ SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
     kind: (CONTRACT_VERSION,) for kind in REGISTERED_CONTRACTS
 }
 SUPPORTED_VERSIONS["c0.evidence_span"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.required_member_set_proposal"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.required_member_manifest"] = ("1.0.0", "1.1.0")
 
 REGISTERED_CONTRACT_VERSIONS: dict[tuple[str, str], type[ContractModel]] = {
     (kind, CONTRACT_VERSION): model for kind, model in REGISTERED_CONTRACTS.items()
 }
 REGISTERED_CONTRACT_VERSIONS[("c0.evidence_span", "1.1.0")] = EvidenceSpanV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.required_member_set_proposal", "1.1.0")
+] = RequiredMemberSetProposalV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.required_member_manifest", "1.1.0")
+] = RequiredMemberManifestV1_1
 
 
 def negotiate_contract(kind: str, version: str) -> type[ContractModel]:
@@ -110,7 +119,13 @@ def schema_catalog() -> dict[tuple[str, str], dict[str, Any]]:
             identity_schema = next(
                 definition
                 for name, definition in schema["$defs"].items()
-                if name in {"CanonicalIdentityEnvelope", "EvidenceIdentityV1_1"}
+                if name
+                in {
+                    "CanonicalIdentityEnvelope",
+                    "EvidenceIdentityV1_1",
+                    "RequiredMemberManifestIdentityV1_1",
+                    "RequiredMemberSetProposalIdentityV1_1",
+                }
             )
         identity_schema["properties"]["contract_kind"] = {
             "const": kind,
@@ -142,7 +157,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.1.0",
+        "registry_version": "1.2.0",
         "schemas": [
             {
                 "contract_kind": kind,

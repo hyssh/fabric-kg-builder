@@ -896,7 +896,13 @@ def test_generated_schema_registry_matches_registered_kinds() -> None:
             identity_schema = next(
                 definition
                 for name, definition in schema["$defs"].items()
-                if name in {"CanonicalIdentityEnvelope", "EvidenceIdentityV1_1"}
+                if name
+                in {
+                    "CanonicalIdentityEnvelope",
+                    "EvidenceIdentityV1_1",
+                    "RequiredMemberManifestIdentityV1_1",
+                    "RequiredMemberSetProposalIdentityV1_1",
+                }
             )
         assert (
             identity_schema["properties"]["contract_kind"]["const"]
