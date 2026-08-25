@@ -16,6 +16,9 @@
 | 5 | 2026-08-24 | Copilot | Added the C0.Core contract gate and corrected shared-contract ownership references to SPEC-006; no higher-layer feature gate is activated. |
 | 6 | 2026-08-25 | Copilot | Activated the L1 domain-design/approval test gate from SPEC-007; schema-2 downstream behavior remains fail-closed. |
 | 7 | 2026-08-25 | Copilot | Added the isolated L2 schema-constrained extraction test gate; L3 evidence validation, serving, publication, and schema-2 CLI activation remain excluded. |
+| 8 | 2026-08-25 | Copilot | Added the isolated L3 evidence-validation test gate (§15.4), activated EXT-102/EXT-103, and registered EXT-109–EXT-112; serving, publication, and schema-2 CLI activation remain excluded. |
+| 9 | 2026-08-25 | Copilot | Hardened the L3 gate for fail-closed carrier limits (direction, property owner/value, identity witness, design-evidence counts), leaf-checkpoint integrity, lifecycle cross-checking, collection-carrier partitioning, and fingerprint-scoped rerun; registered EXT-113 and EXT-114. |
+| 10 | 2026-08-25 | Copilot | Required exact collection-policy binding to the sealed `CompletenessRequirementV2`, full leaf re-derivation for every candidate kind against interrupted-run forgery, and leaf fingerprints bound to the complete canonical `SourceUnit` artifact; registered EXT-115 and EXT-116. |
 
 ---
 
@@ -1226,13 +1229,21 @@ remain unchanged.
 | DOM-105 | domain validation | K differs from the maximum shortest covered path on the question-scoped relationship graph, exceeds 4, or K=4 lacks cited rationale |
 | DOM-106 | domain validation | Type IDs, predicates, endpoint signatures, per-hop endpoints, or traversal direction are ambiguous or invalid |
 | EXT-101 | enrichment | A canonical type or predicate is outside the approved closed vocabulary |
-| EXT-102 | L3 validation (reserved) | An asserted relationship lacks a locally verified exact evidence span |
-| EXT-103 | L3 validation (reserved) | Endpoint validation is not transitive, deterministic, or compliant with exact-only policy |
+| EXT-102 | L3 validation | An asserted classification, relationship, or property observation lacks a locally minted, verified C0 evidence span, or an asserted relationship lacks grounded endpoints |
+| EXT-103 | L3 validation | Endpoint validation is not transitive, deterministic, or compliant with exact-only policy |
 | EXT-104 | enrichment | Work-unit overflow truncates candidates instead of deterministic splitting |
 | EXT-105 | enrichment | L2 consumes a missing, non-succeeded, stale, or hash-inconsistent L1 handoff |
 | EXT-106 | enrichment | Any complete-corpus entry lacks a materialized, explicitly-empty, excluded, or blocked disposition |
 | EXT-107 | enrichment | An input candidate lacks exactly one retained/deduplicated accounting disposition |
 | EXT-108 | enrichment | L2 mints verified evidence, emits an asserted state, or activates L3/L4 output |
+| EXT-109 | L3 validation | L3 consumes a non-succeeded/skipped, stale, or hash-inconsistent L2 handoff, or L2 already minted an L3-owned contract |
+| EXT-110 | L3 validation | A retained candidate lacks exactly one appended current lifecycle state, or a terminal record is mutated |
+| EXT-111 | L3 validation | A required-member-set proposal lacks exactly one L3 outcome, or an incomplete collection is sealed as a complete `RequiredMemberManifest` |
+| EXT-112 | L3 validation | L3 consumes a remote resource, emits `AuditProjection`/`SemanticServingProjection`, or activates schema-2 CLI/serving behavior |
+| EXT-113 | L3 validation | A candidate is asserted without local proof: an unproven relationship direction, an unattributed or unvalued property, an unrecomputed entity identity, or a count proven by L1 design-sample evidence |
+| EXT-114 | L3 validation | A reused leaf checkpoint is trusted without recomputing its canonical payload hash, a reported current state diverges from its sealed appended transition or from `classify_state`, or any published leaf is not byte-identical to a full re-derivation from the sealed L2 proposal, verified SourceUnits, and compiled Domain authority |
+| EXT-115 | L3 validation | A required-member-set proposal is accepted on self-consistency instead of exact equality with the sealed `CompletenessRequirementV2` membership relationship, ordering policy, cardinality bounds, and required roles |
+| EXT-116 | L3 validation | A leaf fingerprint binds less than the complete canonical `SourceUnit` artifact, allowing a same-text unit with a changed `unit_kind`, `offset_unit`, `ordinal`, or locator to reuse a stale leaf |
 | SEM-100 | compile-data | `semantic_entities` contains a non-asserted, unapproved, stale-hash, or unevidenced extracted row |
 | SEM-101 | compile-data | `semantic_relationships` contains a state other than asserted |
 | SEM-102 | compile-data | A semantic relationship lacks a valid evidence FK |
@@ -1311,3 +1322,177 @@ The L2 merge gate runs offline and covers:
 No numeric latency, throughput, memory, retry, or cache threshold is introduced
 by this gate. The approved maximum relationship-candidate count is semantic
 policy rather than a performance target.
+
+### 15.4 L3 evidence-validation gate
+
+The L3 merge gate runs offline, makes no remote call of any kind, and covers:
+
+- intact succeeded or skipped L2 receipt, output/input manifests, resource
+  metrics, exact L2 accepted-contract versions, and the complete L1 authority
+  chain, with `L3_INPUT_RECEIPT_INVALID`, `L3_INPUT_MANIFEST_INVALID`,
+  `L3_CONTRACT_VERSION_UNSUPPORTED`, and `L3_SOURCE_UNIT_MISSING` fail-closed
+  entry paths;
+- complete L2 accounting before validation: one disposition per input, one
+  sequence-zero proposed event per retained candidate, retained candidates equal
+  to proposal partitions, resolvable dedup targets, and every required-member
+  proposal bound to its exact merged batch, requirement, and requirement hash;
+- every required-member collection policy re-bound to its sealed
+  `CompletenessRequirementV2` rather than accepted on proposal self-consistency:
+  membership semantic relationship, ordering policy (including the ordered
+  carrier's `member_order_encoding`), expected/minimum/maximum cardinality, and
+  required roles must equal the approved authority exactly, with
+  `L3_COMPLETENESS_HASH_MISMATCH` covering Domain-ordered vs proposal-unordered,
+  Domain `expected=3` vs an omitted proposal bound, a membership-predicate
+  mismatch, and a required-role mismatch;
+- rejection of any handoff in which L2 already minted `c0.evidence_span` or
+  `c0.required_member_manifest`;
+- exhaustive Unicode code-point evidence verification across Latin, accented,
+  CJK, combining-mark, astral-plane, and emoji text, including deterministic
+  replay of the same C0 evidence ID and refusal to mint on invalid ranges, empty
+  quotes, quote mismatch, or source-hash drift;
+- every L3-minted span is `c0.evidence_span@1.1.0` with
+  `purpose=extraction_assertion`, the accepted purpose-policy version, and the
+  L3 extraction verifier identity; changing verifier implementation version or
+  purpose-policy version changes the evidence ID deterministically;
+- L1 `domain_design` spans, whether read as 1.0 or adapted to 1.1 through the C0
+  trusted-context adapter, can never assert an extraction candidate, and no 1.0
+  artifact can adapt to `extraction_assertion`;
+- model-authored evidence IDs are ignored as identity, recorded as
+  `MODEL_EVIDENCE_ID_IGNORED`, and never enter the verified evidence set;
+- endpoint grounding inside the relationship span, unique exact label matching,
+  exact occurrence anchors for repeated names, and refusal to ground two
+  endpoints to one occurrence;
+- case-folded local endpoint references that resolve to exactly one retained
+  entity candidate, and `ENDPOINT_UNRESOLVED` when they do not;
+- forward-only direction, rejection of reverse/unknown proposals without silent
+  endpoint swapping, and `SOURCE_TYPE_MISMATCH`/`TARGET_TYPE_MISMATCH` through
+  the sealed ancestor closure only;
+- direction proof treated as a separate obligation from endpoint compatibility:
+  because the frozen L2 carrier never persists the model-proposed direction
+  token, no relationship candidate may reach `asserted`, forward/reverse/unknown
+  proposals all transition to `unsupported` with
+  `EVIDENCE_MODALITY_UNSUPPORTED`, and a more precise blocking reason
+  (`DIRECTION_MISMATCH`, `ENDPOINT_UNRESOLVED`, `ENDPOINT_EVIDENCE_UNGROUNDED`,
+  `EVIDENCE_MISSING`) keeps its own state instead of being masked;
+- property observations that never claim inherited-property validity or value
+  conformance while owner attribution and value are unpersisted, transitioning
+  to `unsupported` rather than `asserted`;
+- direct and multi-level subtype compatibility with recorded deterministic
+  inheritance paths, exact-only policy rejecting child endpoints, and no
+  word/label similarity anywhere;
+- generated acyclic hierarchies returning insertion-order-independent
+  inheritance paths, generated cyclic hierarchies terminating with
+  `SUBTYPE_HIERARCHY_CYCLE`, and unknown parents failing closed with
+  `HIERARCHY_CONCEPT_MISSING`;
+- abstract types that can never be instantiated, root-to-leaf inherited
+  property/constraint conjunctions, incompatible descendant overrides, and
+  properties that remain unresolved under an unresolved sibling classification;
+- competing sibling classifications that stay unresolved on one stable entity ID
+  in every permutation, and a uniquely most-specific concrete classification that
+  asserts without changing entity identity;
+- type-independent entity identity recomputation through the sealed root policy
+  and C0 ID primitive, business-key normalization, prohibition of any identity
+  seed carrying classification/ancestry/depth, and relationship identity that is
+  invariant under endpoint reclassification;
+- non-assertable identity witnesses: an unpersisted witness is `unresolved` with
+  `IDENTITY_WITNESS_UNAVAILABLE`, a witness that does not reproduce the persisted
+  stable ID is `rejected` with `IDENTITY_POLICY_VIOLATION` — including the
+  regression where one model-authored `stable_source_identity` collapses two
+  distinct local references onto one stable ID — and reconciliation refuses any
+  asserted entity whose identity was not recomputed;
+- deterministic reason-code to state mapping with the fixed precedence
+  rejected > unsupported > discovery > unresolved > asserted, rejection of
+  unstable reason codes, exactly one appended transition per retained candidate,
+  refusal to mutate a terminal record, and refusal to assert without evidence;
+- hierarchy depth reported independently of K, and receipts exposing the exact
+  domain, hierarchy, root identity-policy, completeness-requirement, and approved
+  external-reference-decision hashes;
+- authority drift blocking the stage while observation drift emits deterministic
+  discovery plus `DOMAIN_REREVIEW_REQUESTED` without mutating any sealed
+  authority or serving schema;
+- generic structured-collection validation parameterized across unrelated
+  manufacturing, clinical, and logistics domains covering unordered/roleless,
+  unordered/role-bearing, and ordered/role-bearing policies;
+- missing members, missing required roles, member type/role mismatch, missing
+  membership evidence, duplicate/missing ordinals, ordinal policy violations,
+  broken/duplicate/extra/branching/cyclic adjacency edges, unsupported count
+  claims, count-bound violations, and collection-hash mismatch all keeping the
+  collection `unresolved`;
+- adjacency obligations that are never invented from ordinal order, and counts
+  that are never inferred when the Domain contract does not specify them;
+- `source_evidence` cardinality proven only by locally minted
+  `extraction_assertion` spans, with bounded L1 design-sample span IDs passed as
+  an explicitly prohibited set so a design-evidenced count keeps the collection
+  `unresolved` with `CARDINALITY_EVIDENCE_INVALID`;
+- exactly one deterministic L3 outcome per required-member-set proposal, with a
+  sealed `c0.required_member_manifest@1.1.0` only for complete collections and an
+  audit-addressable unresolved outcome naming its missing obligations otherwise;
+- the sealed-manifest and unresolved-outcome carriers forming a strict partition
+  of the proposal set — every proposal appears exactly once across the two, with
+  no duplicate, no drop, no proposal in both, and no manifest naming a foreign
+  proposal — recorded as an explicit frozen-contract constraint because
+  `c0.required_member_manifest@1.1.0` cannot represent an incomplete collection;
+- member permutations producing identical member identity sets, order, and
+  collection hashes;
+- manifest reconciliation covering one current state per retained candidate,
+  resolvable evidence references, asserted relationships with grounded endpoints,
+  asserted classifications/property observations with approved IDs, evidence, and
+  the exact sealed hashes, unique appended lifecycle record IDs, and no duplicate
+  stable node or edge ID;
+- lifecycle cross-checking of every reported current state against the sealed
+  appended transition and against an independent `classify_state` re-derivation,
+  so a structurally valid, resealed leaf checkpoint that upgrades a candidate to
+  `asserted` — with or without matching reason codes — fails closed with
+  `L3_LIFECYCLE_CHAIN_INVALID`;
+- full re-derivation of every published leaf from the sealed L2 proposal
+  partition, the verified `SourceUnit` artifacts, and the compiled Domain
+  authority, requiring byte-exact equality for the complete reason set and state
+  of every candidate kind plus its classifications, property observations, minted
+  evidence, appended transitions, and leaf fingerprint;
+- interrupted-run forgery rejected for every candidate kind: a checkpoint whose
+  candidate result, lifecycle transition hash, and leaf payload hash are all
+  resealed to upgrade a relationship or property from `unsupported` to
+  `asserted`, with nothing published to collide against, fails closed with
+  `L3_VALIDATION_RESULT_INCOMPLETE` and the rerun recomputes the correct
+  `unsupported` outcome instead of publishing the forgery;
+- leaf checkpoints that carry a canonical payload hash recomputed before reuse
+  and are content-addressed by their leaf fingerprint, so a corrupt or stale
+  checkpoint is discarded at the cache gate and a resealed checkpoint is caught
+  by reconciliation rather than trusted;
+- leaf fingerprints that bind the complete canonical `SourceUnit` artifact rather
+  than its ID and text hash, so a same-text unit whose `unit_kind`,
+  `offset_unit`, `ordinal`, locator, or identity changed yields a different
+  fingerprint, cannot address the earlier checkpoint, and cannot republish the
+  stale states it would have implied;
+- deterministic replay producing an identical receipt hash and output-manifest
+  hash, intact leaf reuse, corrupt-leaf rerun that leaves intact leaves
+  untouched, and receipt recovery after a lost receipt;
+- fingerprint-scoped run directories for mutable per-run stage artifacts, so a
+  changed validator, source, or candidate set reruns into its own directory
+  without an immutable-artifact collision and without reusing a stale leaf, while
+  the immutable content-addressed collision rule stays enforced within a run;
+- every remote resource dimension remaining exactly zero, no `AuditProjection` or
+  `SemanticServingProjection`, no schema-2 product CLI activation, and no import
+  of CLI, Graph, serving, compile, deploy, runtime, canonical/Arrow, or legacy
+  entity-ID modules from either L3 module.
+
+No numeric latency, throughput, memory, retry, token, byte, or cache threshold is
+introduced by this gate. Hierarchy depth is a reported dimension and is never
+compared to or derived from K.
+
+Validation command:
+
+```
+PYTHONPATH=src uv run --offline --no-project pytest -q \
+  tests/contract/test_c0_core_contracts.py \
+  tests/contract/test_c0_extraction_contracts.py \
+  tests/unit/test_c0_core_adapters.py \
+  tests/unit/test_schema2_sources.py \
+  tests/unit/test_schema2_extraction.py \
+  tests/unit/test_schema2_work_units.py \
+  tests/unit/test_schema2_evidence.py \
+  tests/unit/test_schema2_validation_stage.py \
+  tests/unit/test_graph_occurrence.py \
+  tests/unit/test_lineage_common.py \
+  tests/unit/test_schemas.py
+```
