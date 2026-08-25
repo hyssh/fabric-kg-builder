@@ -1546,7 +1546,12 @@ clients. It covers:
 - persisted definition inputs before publication and exact post-update
   resource, version, policy, schema, count, ID-set, row, and definition
   read-back;
-- bounded target calls with no N+1 table operations;
+- manifest-specific equivalence for empty, non-empty, distinct, misassigned, and
+  swapped required-member collections using actual persisted carried rows;
+- uniform accounting for inspect/read-back/mutation calls, including positive
+  bytes, retries/waits, globally unique operation references, and remote errors;
+- an enforced, derived 20-call worst-case target state machine with rollback
+  contained inside the same budget and no N+1 table operations;
 - idempotent reuse after local integrity and current target read-back;
 - corruption, stale target version, authority/policy drift, partial failure,
   cleanup, and failure receipt/resource metrics;

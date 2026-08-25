@@ -1688,6 +1688,16 @@ conditionally restored after partial failure; either action is applied only
 while the ownership token still matches. Failed or blocked attempts cannot emit
 a successful L5 receipt.
 
+Every remote inspect, publish, read-back, cleanup, and restore returns uniform
+accounting metadata. L5a records calls, positive request/response bytes,
+retries, wait time, globally unique operation references, and remote error
+codes. Missing or malformed accounting fails closed. The derived worst-case
+state machine permits at most 20 calls: four stale-reuse read-backs, four
+inspections, four publications, four post-publication read-backs, and four
+rollback mutations. Ambiguous publication recovery can add one inspection, but
+that path does not perform the post-publication read-back phase and therefore
+does not exceed the same bound.
+
 Stable canonical IDs remain in reserved identity and endpoint columns.
 Crosswalk property/key columns are emitted as schema-only nullable columns
 because sealed L4 does not carry property owner/value data; L5a fails closed if
@@ -1697,7 +1707,11 @@ Checkpoint reuse is keyed by the exact L4 seals, target IDs, target definitions,
 crosswalks, access policy, governed assets, and L5a code version. Local artifact
 integrity and current target read-back are both required before reuse. The
 resulting `ProjectionEquivalence` records are persisted for all four structured
-targets and all required-member authorities.
+targets and all required-member authorities. Each proof is manifest-specific:
+L5a groups the actual persisted carried manifest/member rows by exact
+`required_member_manifest_id`, derives deterministic manifest/member canonical
+IDs, and fingerprints the carried rows. It compares those read-back observations
+to the anchored L3 authority without redefining or recomputing L3 membership.
 
 ## 13. Revision History
 

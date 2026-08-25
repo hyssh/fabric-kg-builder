@@ -30,15 +30,22 @@ from fabric_kg_builder.contracts.resources import StageResourceMetrics
 from fabric_kg_builder.serving.lifecycle_projection import run_l4
 from fabric_kg_builder.semantic.source_tables import require_l5_publication_receipt
 from fabric_kg_builder.serving.structured_publication import (
+    L5A_MAX_FABRIC_CALLS,
     L5A_TARGET_ORDER,
     L5aPublishOperation,
     L5aPublicationError,
+    L5aRemoteAccounting,
+    L5aStateOperation,
     L5aTableSnapshot,
     L5aTargetState,
     build_l5a_governed_assets,
     compile_l5a_publication,
     require_l5a_publication_receipt,
     run_l5a,
+    _CallAccounting,
+    _equivalences,
+    _expected_state,
+    _required_member_snapshots,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
 
@@ -51,10 +58,28 @@ class _FakeClient:
         self.raise_after_create: str | None = None
         self.tamper_read_back: str | None = None
         self.raise_read_back: str | None = None
+        self.tamper_required_members: str | None = None
+        self.remote_sequence = 0
+
+    def _accounting(self, verb, target_kind, *, errors=()):
+        self.remote_sequence += 1
+        return L5aRemoteAccounting(
+            operation_refs=(
+                f"remote:{self.remote_sequence}:{verb}:{target_kind}",
+            ),
+            request_bytes=11,
+            response_bytes=7,
+            retry_count=1 if verb == "publish" else 0,
+            retry_wait_ms=2 if verb == "publish" else 0,
+            error_codes=tuple(errors),
+        )
 
     def inspect(self, target_kind, target_id):
         self.calls.append(("inspect", target_kind))
-        return self.states.get((target_kind, target_id))
+        return L5aStateOperation(
+            state=self.states.get((target_kind, target_id)),
+            accounting=self._accounting("inspect", target_kind),
+        )
 
     def publish(
         self,
@@ -69,12 +94,35 @@ class _FakeClient:
     ):
         self.calls.append(("publish", target_kind))
         if self.fail_publish == target_kind:
-            raise RuntimeError(f"forced {target_kind} failure")
+            return L5aPublishOperation(
+                target_kind=target_kind,
+                target_id=target_id,
+                created=False,
+                publication_token=publication_token,
+                applied=False,
+                accounting=self._accounting(
+                    "publish",
+                    target_kind,
+                    errors=("REMOTE_PUBLISH_FAILED",),
+                ),
+            )
         assert definition_path.is_file()
         assert table_paths and all(path.is_file() for path in table_paths.values())
         definition = json.loads(definition_path.read_text("utf-8"))
         snapshots = tuple(
             L5aTableSnapshot(**item) for item in definition["tables"]
+        )
+        required_member_manifest_rows = tuple(
+            dict(row)
+            for row in pq.read_table(
+                table_paths["l4_semantic_required_member_manifests"]
+            ).to_pylist()
+        )
+        required_member_rows = tuple(
+            dict(row)
+            for row in pq.read_table(
+                table_paths["l4_semantic_required_members"]
+            ).to_pylist()
         )
         key = (target_kind, target_id)
         if self.states.get(key) != expected_state:
@@ -89,6 +137,8 @@ class _FakeClient:
             access_policy_id=access_policy.access_policy_id,
             access_policy_hash=access_policy.policy_hash,
             publication_token=publication_token,
+            required_member_manifest_rows=required_member_manifest_rows,
+            required_member_rows=required_member_rows,
         )
         if self.raise_after_create == target_kind:
             raise RuntimeError(f"response lost after {target_kind} creation")
@@ -98,9 +148,7 @@ class _FakeClient:
             created=created,
             publication_token=publication_token,
             applied=True,
-            operation_refs=(f"operation:{target_kind}",),
-            request_bytes=10,
-            response_bytes=5,
+            accounting=self._accounting("publish", target_kind),
         )
 
     def read_back(self, target_kind, target_id):
@@ -112,8 +160,18 @@ class _FakeClient:
         if state is not None and self.tamper_read_back == target_kind:
             definition = dict(state.definition)
             definition["source_projection_hash"] = "f" * 64
-            return dataclasses.replace(state, definition=definition)
-        return state
+            state = dataclasses.replace(state, definition=definition)
+        if state is not None and self.tamper_required_members == target_kind:
+            changed_rows = [dict(row) for row in state.required_member_rows]
+            changed_rows[0]["member_canonical_id"] = "entity:wrong"
+            state = dataclasses.replace(
+                state,
+                required_member_rows=tuple(changed_rows),
+            )
+        return L5aStateOperation(
+            state=state,
+            accounting=self._accounting("read-back", target_kind),
+        )
 
     def cleanup(self, target_kind, target_id, *, publication_token):
         self.calls.append(("cleanup", target_kind))
@@ -127,7 +185,7 @@ class _FakeClient:
             created=False,
             publication_token=publication_token,
             applied=applied,
-            operation_refs=(f"cleanup:{target_kind}",),
+            accounting=self._accounting("cleanup", target_kind),
         )
 
     def restore(
@@ -149,7 +207,7 @@ class _FakeClient:
             created=False,
             publication_token=publication_token,
             applied=applied,
-            operation_refs=(f"restore:{target_kind}",),
+            accounting=self._accounting("restore", target_kind),
         )
 
 
@@ -330,9 +388,10 @@ def _crosswalk(source) -> PublicationCrosswalk:
     )
 
 
-def _inputs(tmp_path: Path):
+def _inputs(tmp_path: Path, *, member_count: int = 1):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     l4 = run_l4(
-        _l3_with_sealed_manifest(tmp_path),
+        _l3_with_sealed_manifest(tmp_path, member_count=member_count),
         state_root=tmp_path / ".fkg" / "l4",
     )
     source = l4.sealed_source()
@@ -370,6 +429,11 @@ def test_l5a_persists_and_reads_back_all_structured_targets(tmp_path: Path) -> N
 
     assert result.receipt.status == "succeeded"
     assert result.metrics.fabric_calls == 12
+    assert result.metrics.network_request_bytes == 12 * 11
+    assert result.metrics.network_response_bytes == 12 * 7
+    assert result.metrics.retry_count == 4
+    assert result.metrics.retry_wait_ms == 8
+    assert len(result.receipt.remote_operation_refs) == 13
     assert result.metrics.search_calls == 0
     assert result.metrics.search_documents_written == 0
     assert {proof.projection_kind for proof in result.projection_equivalences} == set(
@@ -392,6 +456,198 @@ def test_l5a_persists_and_reads_back_all_structured_targets(tmp_path: Path) -> N
     assert not any("search" in kind for kind in result.compiled.definitions)
     require_l5a_publication_receipt(inputs["source"], result)
     require_l5_publication_receipt(inputs["source"], result)
+    required = result.compiled.required_member_snapshots[0]
+    for proof in result.projection_equivalences:
+        assert proof.authority.required_member_manifest_id == (
+            required.required_member_manifest_id
+        )
+        assert proof.expected.count == len(required.canonical_ids)
+        assert proof.expected.canonical_id_set_hash == canonical_sha256(
+            required.canonical_ids
+        )
+        if proof.projection_kind == "parquet":
+            assert proof.expected.row_fingerprint == required.row_fingerprint
+
+
+@pytest.mark.unit
+def test_l5a_empty_and_nonempty_member_evidence_cannot_match(
+    tmp_path: Path,
+) -> None:
+    result = run_l5a(
+        **_inputs(tmp_path),
+        client=_FakeClient(),
+        state_root=tmp_path / ".fkg" / "l5a",
+    )
+    nonempty = result.compiled.required_member_snapshots[0]
+    empty = dataclasses.replace(
+        nonempty,
+        canonical_ids=(nonempty.canonical_ids[0],),
+        row_fingerprint=canonical_sha256({
+            "manifest": nonempty.required_member_manifest_id,
+            "members": [],
+        }),
+    )
+
+    assert len(empty.canonical_ids) == 1
+    assert canonical_sha256(empty.canonical_ids) != canonical_sha256(
+        nonempty.canonical_ids
+    )
+    assert empty.row_fingerprint != nonempty.row_fingerprint
+
+
+@pytest.mark.unit
+def test_l5a_different_collections_have_unique_manifest_proofs(
+    tmp_path: Path,
+) -> None:
+    first_inputs = _inputs(tmp_path / "one", member_count=1)
+    second_inputs = _inputs(tmp_path / "two", member_count=2)
+    first = run_l5a(
+        **first_inputs,
+        client=_FakeClient(),
+        state_root=tmp_path / "one" / ".fkg" / "l5a",
+    )
+    second = run_l5a(
+        **second_inputs,
+        client=_FakeClient(),
+        state_root=tmp_path / "two" / ".fkg" / "l5a",
+    )
+
+    assert first.projection_equivalences[0].expected != (
+        second.projection_equivalences[0].expected
+    )
+    swapped = dataclasses.replace(
+        first,
+        projection_equivalences=second.projection_equivalences,
+    )
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PUBLICATION_RECEIPT_INVALID",
+    ):
+        require_l5a_publication_receipt(first_inputs["source"], swapped)
+
+
+@pytest.mark.unit
+def test_l5a_multi_manifest_proofs_are_unique_and_manifest_specific(
+    tmp_path: Path,
+) -> None:
+    first = compile_l5a_publication(
+        **_inputs(tmp_path / "one", member_count=1)
+    )
+    second = compile_l5a_publication(
+        **_inputs(tmp_path / "two", member_count=2)
+    )
+    second_crosswalk_values = second.crosswalks[0].model_dump(
+        mode="python",
+        exclude={"crosswalk_hash"},
+    )
+    authority_values = dict(second_crosswalk_values["authority"])
+    authority_values.update({
+        "source_artifact_manifest_id": (
+            first.source.input_manifest.artifact_manifest_id
+        ),
+        "source_artifact_manifest_hash": first.source.input_manifest.manifest_hash,
+    })
+    second_crosswalk_values["authority"] = PublicationAuthorityReferences(
+        **authority_values
+    )
+    second_crosswalk_values["publication_crosswalk_id"] = (
+        "publication-crosswalk:l5a:second"
+    )
+    second_crosswalk = PublicationCrosswalk(
+        **second_crosswalk_values,
+        crosswalk_hash=canonical_sha256(second_crosswalk_values),
+    )
+    second_snapshot = dataclasses.replace(
+        second.required_member_snapshots[0],
+        source_artifact_manifest_id=(
+            first.source.input_manifest.artifact_manifest_id
+        ),
+        source_artifact_manifest_hash=first.source.input_manifest.manifest_hash,
+    )
+    combined = dataclasses.replace(
+        first,
+        crosswalks=(first.crosswalks[0], second_crosswalk),
+        required_member_snapshots=(
+            first.required_member_snapshots[0],
+            second_snapshot,
+        ),
+        required_member_manifest_rows=(
+            *first.required_member_manifest_rows,
+            *second.required_member_manifest_rows,
+        ),
+        required_member_rows=(
+            *first.required_member_rows,
+            *second.required_member_rows,
+        ),
+    )
+    states = {
+        kind: _expected_state(
+            combined,
+            kind,
+            publication_token="multi-manifest",
+        )
+        for kind in L5A_TARGET_ORDER
+    }
+
+    proofs = _equivalences(combined, states)
+
+    assert len(proofs) == 2 * len(L5A_TARGET_ORDER)
+    assert len({proof.projection_equivalence_id for proof in proofs}) == len(proofs)
+    by_manifest = {}
+    for proof in proofs:
+        by_manifest.setdefault(
+            proof.authority.required_member_manifest_id,
+            set(),
+        ).add((
+            proof.expected.count,
+            proof.expected.canonical_id_set_hash,
+            proof.expected.row_fingerprint
+            or proof.expected.definition_fingerprint,
+        ))
+    assert len(by_manifest) == 2
+    assert len({next(iter(values)) for values in by_manifest.values()}) == 2
+
+    graph_state = states["graph"]
+    changed_rows = [dict(row) for row in graph_state.required_member_rows]
+    changed_rows[0]["required_member_manifest_id"] = (
+        second_snapshot.required_member_manifest_id
+    )
+    tampered_states = {
+        **states,
+        "graph": dataclasses.replace(
+            graph_state,
+            required_member_rows=tuple(changed_rows),
+        ),
+    }
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_REQUIRED_MEMBER_EQUIVALENCE_FAILED",
+    ):
+        _equivalences(combined, tampered_states)
+
+
+@pytest.mark.unit
+def test_l5a_required_member_proof_uses_only_carried_l4_tables(
+    tmp_path: Path,
+) -> None:
+    compiled = compile_l5a_publication(**_inputs(tmp_path))
+    shadowed = {
+        **compiled.tables,
+        "semantic_required_member_manifests": compiled.tables[
+            next(
+                table_id
+                for table_id in compiled.tables
+                if table_id.startswith("l5a_")
+            )
+        ],
+        "semantic_required_members": compiled.tables[
+            "l4_semantic_asserted_entities"
+        ],
+    }
+
+    assert _required_member_snapshots(compiled.source, shadowed) == (
+        compiled.required_member_snapshots
+    )
 
 
 @pytest.mark.unit
@@ -408,19 +664,81 @@ def test_l5a_idempotent_reuse_reads_back_without_republishing(tmp_path: Path) ->
     assert second.reused
     assert second.receipt.status == "skipped"
     assert second.metrics.fabric_calls == 4
+    assert second.metrics.network_request_bytes == 4 * 11
+    assert second.metrics.network_response_bytes == 4 * 7
+    assert len(second.receipt.remote_operation_refs) == 4
     assert client.calls == [
         ("read_back", "parquet"),
         ("read_back", "semantic_model"),
         ("read_back", "ontology"),
         ("read_back", "graph"),
     ]
-    with pytest.raises(L5aPublicationError):
-        require_l5a_publication_receipt(inputs["source"], second)
-    require_l5a_publication_receipt(
-        inputs["source"],
-        second,
-        client=client,
+    calls_before_readiness = list(client.calls)
+    require_l5a_publication_receipt(inputs["source"], second)
+    assert client.calls == calls_before_readiness
+
+
+@pytest.mark.unit
+def test_l5a_reuse_readiness_accepts_accounted_retries(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _RetryingReadbackClient(_FakeClient):
+        def _accounting(self, verb, target_kind, *, errors=()):
+            accounting = super()._accounting(
+                verb,
+                target_kind,
+                errors=errors,
+            )
+            if verb == "read-back":
+                return dataclasses.replace(
+                    accounting,
+                    retry_count=1,
+                    retry_wait_ms=3,
+                )
+            return accounting
+
+    client = _RetryingReadbackClient()
+    state_root = tmp_path / ".fkg" / "l5a"
+    run_l5a(**inputs, client=client, state_root=state_root)
+    reused = run_l5a(**inputs, client=client, state_root=state_root)
+
+    assert reused.metrics.retry_count == 4
+    assert reused.metrics.retry_wait_ms == 12
+    require_l5a_publication_receipt(inputs["source"], reused)
+
+
+@pytest.mark.unit
+def test_l5a_readiness_rejects_extra_remote_references(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    client = _FakeClient()
+    state_root = tmp_path / ".fkg" / "l5a"
+    run_l5a(**inputs, client=client, state_root=state_root)
+    reused = run_l5a(**inputs, client=client, state_root=state_root)
+    values = reused.receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
     )
+    values["remote_operation_refs"] = (
+        *reused.receipt.remote_operation_refs,
+        "remote:forged-extra",
+    )
+    forged_receipt = StageReceipt(
+        **values,
+        receipt_hash=canonical_sha256({
+            key: value
+            for key, value in values.items()
+            if key not in {"started_at_utc", "completed_at_utc"}
+        }),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PUBLICATION_RECEIPT_INVALID",
+    ):
+        require_l5a_publication_receipt(
+            inputs["source"],
+            dataclasses.replace(reused, receipt=forged_receipt),
+        )
 
 
 @pytest.mark.unit
@@ -469,6 +787,28 @@ def test_l5a_readback_drift_fails_and_cleans_created_resources(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_l5a_rejects_misassigned_required_member_readback(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    client = _FakeClient()
+    client.tamper_required_members = "graph"
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_REQUIRED_MEMBER_EQUIVALENCE_FAILED",
+    ) as raised:
+        run_l5a(
+            **inputs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert raised.value.receipt.status == "failed"
+
+
+@pytest.mark.unit
 def test_l5a_partial_publish_failure_has_no_success_receipt(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     client = _FakeClient()
@@ -483,6 +823,10 @@ def test_l5a_partial_publish_failure_has_no_success_receipt(tmp_path: Path) -> N
 
     assert raised.value.receipt is not None
     assert raised.value.receipt.status == "failed"
+    assert "REMOTE_PUBLISH_FAILED" in raised.value.receipt.error_codes
+    assert raised.value.metrics is not None
+    assert raised.value.metrics.network_request_bytes > 0
+    assert raised.value.metrics.network_response_bytes > 0
     assert ("cleanup", "semantic_model") in client.calls
     assert ("cleanup", "parquet") in client.calls
     assert not client.states
@@ -529,6 +873,29 @@ def test_l5a_recovers_ambiguous_create_and_cleans_resource(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_l5a_ambiguous_update_counts_publish_and_restore_rows(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    client = _FakeClient()
+    state_root = tmp_path / ".fkg" / "l5a"
+    first = run_l5a(**inputs, client=client, state_root=state_root)
+    shutil.rmtree(first.run_root)
+    prior_states = dict(client.states)
+    client.raise_after_create = "ontology"
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(**inputs, client=client, state_root=state_root)
+
+    assert raised.value.metrics is not None
+    rows_per_target = sum(
+        item.row_count for item in first.compiled.table_snapshots
+    )
+    assert raised.value.metrics.fabric_rows_written == rows_per_target * 6
+    assert client.states == prior_states
+
+
+@pytest.mark.unit
 def test_l5a_does_not_delete_concurrently_created_resource(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
 
@@ -572,6 +939,8 @@ def test_l5a_does_not_cleanup_completed_concurrent_update(tmp_path: Path) -> Non
                     access_policy_id="concurrent",
                     access_policy_hash="f" * 64,
                     publication_token="concurrent-publication",
+                    required_member_manifest_rows=(),
+                    required_member_rows=(),
                 )
             return super().publish(target_kind, target_id, **kwargs)
 
@@ -658,6 +1027,7 @@ def test_l5a_records_malformed_cleanup_as_partial_failure(tmp_path: Path) -> Non
                 created=False,
                 publication_token=publication_token,
                 applied=True,
+                accounting=self._accounting("cleanup", target_kind),
             )
 
     client = _MalformedCleanupClient()
@@ -715,7 +1085,11 @@ def test_l5a_accounting_failure_still_rolls_back_owned_target(
         def publish(self, target_kind, target_id, **kwargs):
             operation = super().publish(target_kind, target_id, **kwargs)
             if target_kind == "ontology":
-                object.__setattr__(operation, "request_bytes", -1)
+                object.__setattr__(
+                    operation,
+                    "accounting",
+                    dataclasses.replace(operation.accounting, request_bytes=-1),
+                )
             return operation
 
     client = _BadAccountingClient()
@@ -744,6 +1118,8 @@ def test_l5a_rejects_unsupported_existing_target_before_mutation(tmp_path: Path)
         access_policy_id=compiled.access_policy.access_policy_id,
         access_policy_hash=compiled.access_policy.policy_hash,
         publication_token="stale-publication",
+        required_member_manifest_rows=compiled.required_member_manifest_rows,
+        required_member_rows=compiled.required_member_rows,
     )
     client.states[("parquet", compiled.target_ids["parquet"])] = expected
 
@@ -755,6 +1131,172 @@ def test_l5a_rejects_unsupported_existing_target_before_mutation(tmp_path: Path)
         )
 
     assert not any(call[0] == "publish" for call in client.calls)
+
+
+@pytest.mark.unit
+def test_l5a_inspect_without_accounting_fails_closed(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _MissingInspectAccounting(_FakeClient):
+        def inspect(self, target_kind, target_id):
+            self.calls.append(("inspect", target_kind))
+            return self.states.get((target_kind, target_id))
+
+    client = _MissingInspectAccounting()
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert "L5A_REMOTE_ACCOUNTING_MISSING" in (
+        raised.value.receipt.error_codes
+    )
+    assert raised.value.metrics is not None
+    assert raised.value.metrics.fabric_calls == 1
+
+
+@pytest.mark.unit
+def test_l5a_custom_adapter_exception_records_missing_accounting(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _CustomExceptionClient(_FakeClient):
+        def inspect(self, target_kind, target_id):
+            self.calls.append(("inspect", target_kind))
+            raise KeyError("adapter decode failure")
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=_CustomExceptionClient(),
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert "L5A_REMOTE_ACCOUNTING_MISSING" in (
+        raised.value.receipt.error_codes
+    )
+
+
+@pytest.mark.unit
+def test_l5a_adapter_contract_error_without_result_is_unaccounted(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _ContractErrorClient(_FakeClient):
+        def inspect(self, target_kind, target_id):
+            raise L5aPublicationError(
+                "ADAPTER_REPORTED_ERROR",
+                "raised before returning accounting",
+            )
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=_ContractErrorClient(),
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert "L5A_REMOTE_ACCOUNTING_MISSING" in (
+        raised.value.receipt.error_codes
+    )
+    assert "ADAPTER_REPORTED_ERROR" not in raised.value.receipt.error_codes
+
+
+@pytest.mark.unit
+def test_l5a_reused_remote_reference_fails_before_success(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _ReusedReferenceClient(_FakeClient):
+        def _accounting(self, verb, target_kind, *, errors=()):
+            return L5aRemoteAccounting(
+                operation_refs=("remote:reused",),
+                request_bytes=11,
+                response_bytes=7,
+                retry_count=0,
+                retry_wait_ms=0,
+                error_codes=tuple(errors),
+            )
+
+    client = _ReusedReferenceClient()
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert "L5A_REMOTE_REFERENCE_REUSED" in raised.value.receipt.error_codes
+
+
+@pytest.mark.unit
+def test_l5a_readback_malformed_accounting_fails_closed(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _MalformedReadbackAccounting(_FakeClient):
+        def read_back(self, target_kind, target_id):
+            operation = super().read_back(target_kind, target_id)
+            if target_kind == "graph":
+                return dataclasses.replace(
+                    operation,
+                    accounting=dataclasses.replace(
+                        operation.accounting,
+                        response_bytes=0,
+                    ),
+                )
+            return operation
+
+    client = _MalformedReadbackAccounting()
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert "L5A_REMOTE_ACCOUNTING_INVALID" in (
+        raised.value.receipt.error_codes
+    )
+    assert not client.states
+
+
+@pytest.mark.unit
+def test_l5a_valid_accounting_survives_malformed_state_payload(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+
+    class _MalformedStateClient(_FakeClient):
+        def inspect(self, target_kind, target_id):
+            self.calls.append(("inspect", target_kind))
+            return L5aStateOperation(
+                state="invalid",  # type: ignore[arg-type]
+                accounting=self._accounting("inspect", target_kind),
+            )
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=_MalformedStateClient(),
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.metrics is not None
+    assert raised.value.metrics.network_request_bytes == 11
+    assert raised.value.metrics.network_response_bytes == 7
+    assert raised.value.receipt is not None
+    assert "L5A_REMOTE_STATE_INVALID" in raised.value.receipt.error_codes
+    assert len(raised.value.receipt.remote_operation_refs) == 2
 
 
 @pytest.mark.unit
@@ -775,7 +1317,9 @@ def test_l5a_local_tamper_prevents_checkpoint_reuse(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_l5a_reuse_readback_exception_enters_normal_repair(tmp_path: Path) -> None:
+def test_l5a_reuse_readback_without_accounting_fails_closed(
+    tmp_path: Path,
+) -> None:
     inputs = _inputs(tmp_path)
     client = _FakeClient()
     state_root = tmp_path / ".fkg" / "l5a"
@@ -783,10 +1327,16 @@ def test_l5a_reuse_readback_exception_enters_normal_repair(tmp_path: Path) -> No
     client.raise_read_back = "parquet"
     client.calls.clear()
 
-    repaired = run_l5a(**inputs, client=client, state_root=state_root)
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(**inputs, client=client, state_root=state_root)
 
-    assert not repaired.reused
-    assert repaired.receipt.status == "succeeded"
+    assert raised.value.receipt is not None
+    assert raised.value.receipt.status == "failed"
+    assert "L5A_REMOTE_ACCOUNTING_MISSING" in (
+        raised.value.receipt.error_codes
+    )
+    assert raised.value.metrics is not None
+    assert raised.value.metrics.fabric_calls == 17
     assert sum(call[0] == "publish" for call in client.calls) == 4
 
 
@@ -805,6 +1355,43 @@ def test_l5a_remote_drift_invalidates_reuse_and_republishes(tmp_path: Path) -> N
     assert repaired.receipt.status == "succeeded"
     assert repaired.metrics.fabric_calls == 16
     assert sum(call[0] == "publish" for call in client.calls) == 4
+
+
+@pytest.mark.unit
+def test_l5a_worst_case_state_machine_is_exactly_bounded(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    client = _FakeClient()
+    state_root = tmp_path / ".fkg" / "l5a"
+    run_l5a(**inputs, client=client, state_root=state_root)
+    client.tamper_required_members = "graph"
+    client.calls.clear()
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(**inputs, client=client, state_root=state_root)
+
+    assert raised.value.metrics is not None
+    assert raised.value.metrics.fabric_calls == L5A_MAX_FABRIC_CALLS == 20
+    assert not raised.value.metrics.exceeded_dimensions
+    assert len(client.calls) == L5A_MAX_FABRIC_CALLS
+    assert sum(call[0] == "restore" for call in client.calls) == 4
+
+
+@pytest.mark.unit
+def test_l5a_stops_before_exceeding_remote_call_budget() -> None:
+    accounting = _CallAccounting()
+    for _ in range(L5A_MAX_FABRIC_CALLS):
+        accounting.begin_call()
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_CALL_BUDGET_EXCEEDED",
+    ):
+        accounting.begin_call()
+
+    assert accounting.fabric_calls == L5A_MAX_FABRIC_CALLS
+    assert accounting.exceeded_dimensions == ("fabric_calls",)
 
 
 @pytest.mark.unit
@@ -869,23 +1456,16 @@ def test_l5a_readiness_rejects_forged_receipt_metrics(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_l5a_skipped_readiness_wraps_client_exception(tmp_path: Path) -> None:
+def test_l5a_skipped_readiness_does_not_make_unaccounted_calls(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     client = _FakeClient()
     state_root = tmp_path / ".fkg" / "l5a"
     run_l5a(**inputs, client=client, state_root=state_root)
     reused = run_l5a(**inputs, client=client, state_root=state_root)
-    client.raise_read_back = "parquet"
+    client.calls.clear()
 
-    with pytest.raises(
-        L5aPublicationError,
-        match="L5A_PUBLICATION_RECEIPT_INVALID",
-    ):
-        require_l5a_publication_receipt(
-            inputs["source"],
-            reused,
-            client=client,
-        )
+    require_l5a_publication_receipt(inputs["source"], reused)
+    assert client.calls == []
 
 
 @pytest.mark.unit

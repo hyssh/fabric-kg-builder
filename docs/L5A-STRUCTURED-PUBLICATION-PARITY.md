@@ -31,6 +31,10 @@ rebuilt on the merged C0.Publish contracts and the receipt-anchored
   limited to crosswalk-approved identities and endpoints;
 - all four L5a targets use a bounded batched lifecycle and deterministic
   read-back evidence;
+- every required-member proof is manifest-specific and recomputed from the
+  actual persisted carried rows, never echoed definition metadata;
+- every remote call supplies uniform accounting, and the mutually exclusive
+  success/ambiguous-failure paths are enforced under a 20-call maximum;
 - publication, cleanup, and restore use inspected-state compare-and-swap plus a
   per-attempt ownership token so concurrent changes are not overwritten;
 - stable canonical IDs use reserved physical identity columns; mapped property
