@@ -20,6 +20,7 @@
 | 9 | 2026-08-25 | Copilot | Hardened the L3 gate for fail-closed carrier limits (direction, property owner/value, identity witness, design-evidence counts), leaf-checkpoint integrity, lifecycle cross-checking, collection-carrier partitioning, and fingerprint-scoped rerun; registered EXT-113 and EXT-114. |
 | 10 | 2026-08-25 | Copilot | Required exact collection-policy binding to the sealed `CompletenessRequirementV2`, full leaf re-derivation for every candidate kind against interrupted-run forgery, and leaf fingerprints bound to the complete canonical `SourceUnit` artifact; registered EXT-115 and EXT-116. |
 | 11 | 2026-08-26 | Copilot | Added the isolated local L4 audit and asserted-only serving projection gate (§15.5); L5 deployment/publication, runtime, and schema-2 CLI activation remain excluded. |
+| 12 | 2026-08-25 | Copilot | Added the isolated L5a structured publication gate (§15.6) with persisted target definitions, bounded fake-client lifecycle, exact read-back equivalence, corruption-safe reuse, and no Search/L6/L7 activation. |
 
 ---
 
@@ -1481,7 +1482,7 @@ No numeric latency, throughput, memory, retry, token, byte, or cache threshold i
 introduced by this gate. Hierarchy depth is a reported dimension and is never
 compared to or derived from K.
 
-Validation command:
+L3 validation command:
 
 ```
 PYTHONPATH=src uv run --offline --no-project pytest -q \
@@ -1533,7 +1534,35 @@ The L4 merge gate is local-only and covers:
   schema-1 source resolution, no schema-2 CLI activation, and fail-closed
   product readiness until an L5 persisted publication receipt exists.
 
-Validation command:
+### 15.6 L5a structured publication gate
+
+The L5a gate uses only a real persisted `SealedL4ServingSource` and fake target
+clients. It covers:
+
+- exact per-manifest C0.Publish authority and anchored L3 artifact-manifest
+  equality;
+- deterministic typed Parquet and Semantic Model, Ontology, and Graph
+  definitions with explicit hierarchy flattening and approved endpoints;
+- persisted definition inputs before publication and exact post-update
+  resource, version, policy, schema, count, ID-set, row, and definition
+  read-back;
+- bounded target calls with no N+1 table operations;
+- idempotent reuse after local integrity and current target read-back;
+- corruption, stale target version, authority/policy drift, partial failure,
+  cleanup, and failure receipt/resource metrics;
+- unchanged schema-1 behavior and no Search, L6 runtime, Data Agent, synthesis,
+  CLI, or live Fabric activation.
+
+L5a validation command:
+
+```text
+PYTHONPATH=src pytest -q \
+  tests/unit/test_l5a_structured_publication.py \
+  tests/unit/test_schema2_projection_stage.py \
+  tests/contract/test_c0_publish_contracts.py
+```
+
+L4 validation command:
 
 ```text
 PYTHONPATH=src pytest -q \
