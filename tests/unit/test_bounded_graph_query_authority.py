@@ -16,6 +16,7 @@ from fabric_kg_builder.app.api import (
 from fabric_kg_builder.app.auth import AuthError, InboundAuthVerifier
 from fabric_kg_builder.app.config import AppConfigError, load_app_config
 from fabric_kg_builder.app.models import ChatRequest
+from fabric_kg_builder.agent.tools.kb_tool import KBResult
 from fabric_kg_builder.cli.app_cmd import deploy_app_cmd
 from click.testing import CliRunner
 from fabric_kg_builder.domain.models import DomainContractV2
@@ -31,6 +32,14 @@ from fabric_kg_builder.runtime.contract import (
     compile_competency_contract,
 )
 from fabric_kg_builder.runtime.executors import FabricGraphExecutor
+from fabric_kg_builder.runtime.acceptance import validate_deployment_evidence
+from fabric_kg_builder.runtime.collector import (
+    DeploymentRuntimeConfig,
+    GraphRuntimeConfig,
+    McpRuntimeConfig,
+    RuntimeConfig,
+    SearchRuntimeConfig,
+)
 from fabric_kg_builder.semantic.instructions import (
     build_contract_agent_instructions,
 )
@@ -497,6 +506,17 @@ def test_schema2_agent_tool_disables_raw_gql_and_executes_approved_plan() -> Non
     assert result.gql == ""
     assert len(client.queries) == 1
     assert "LIMIT 20" in client.queries[0]
+    assert result.execution_receipt["actual_hop_count"] == 1
+    assert result.execution_receipt["route"] == "direct_graph"
+    assert result.execution_receipt["status"] == "ok"
+    assert result.execution_receipt["row_count"] == 1
+    assert result.execution_receipt["semantic_plan_hash"]
+    assert result.execution_receipt["query_authority_hash"]
+    assert result.execution_receipt["query_schema_hash"]
+    assert result.execution_receipt["domain_contract_hash"]
+    serialized_receipt = json.dumps(result.execution_receipt)
+    for forbidden in ("MATCH", "filter", "question", "intent", "source_content"):
+        assert forbidden not in serialized_receipt
 
 
 def test_schema1_agent_tool_keeps_explicit_compatibility_mode() -> None:
@@ -770,6 +790,18 @@ class _EmptyKnowledgeBase:
         return []
 
 
+class _SearchKnowledgeBase:
+    def retrieve(self, question: str, top_k: int = 5):
+        return [
+            KBResult(
+                chunk_id="chunk:1",
+                source_id="search-index",
+                text="Pump A is blue.",
+                score=1.0,
+            )
+        ]
+
+
 def test_authenticated_chat_model_accepts_only_sealed_plan_id_shape() -> None:
     request = ChatRequest(
         question="Run the approved graph question.",
@@ -804,7 +836,7 @@ def test_approved_plan_serving_executes_locally_and_graph_intent_abstains() -> N
 
     client.queries.clear()
     answer, route, citations, refused = _answer_question(
-        question="Which suppliers feed Plant A?",
+        question="How are these entities connected?",
         kb=_EmptyKnowledgeBase(),
         graph=adapter,
     )
@@ -813,6 +845,41 @@ def test_approved_plan_serving_executes_locally_and_graph_intent_abstains() -> N
     assert "approved bounded Graph plan" in answer
     assert client.queries == []
     assert citations == []
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_route", "expected_refused"),
+    [
+        ("What color is Pump A?", "search", False),
+        ("Find documents about Pump A.", "search", False),
+        ("What is the status of component A?", "search", False),
+        ("Find documents about component A.", "search", False),
+        ("Find documents about graph topology.", "search", False),
+        ("What depends on Pump A?", "unsupported", True),
+        (
+            "Which components are related to Pump A and what document describes them?",
+            "unsupported",
+            True,
+        ),
+    ],
+)
+def test_schema2_routing_preserves_search_and_abstains_graph_intent(
+    question: str,
+    expected_route: str,
+    expected_refused: bool,
+) -> None:
+    adapter = FabricDataAgentAdapter(
+        _client=_GraphClient(),
+        schema_mode="schema2_bounded",
+        query_schema=_query_schema(3),
+    )
+    _answer, route, _citations, refused = _answer_question(
+        question=question,
+        kb=_SearchKnowledgeBase(),
+        graph=adapter,
+    )
+    assert route == expected_route
+    assert refused is expected_refused
 
 
 def test_readiness_requires_configured_graph_only() -> None:
@@ -889,4 +956,140 @@ def test_approved_plan_serving_path_is_authenticated() -> None:
     )
     assert response.status_code == 200
     assert response.json()["route_type"] == "ontology"
+    receipt = response.json()["execution_receipt"]
+    assert receipt["actual_hop_count"] == 1
+    assert receipt["query_authority_hash"]
     assert graph_client.queries
+
+
+class _FailingGraphClient(_GraphClient):
+    def execute_gql(self, gql: str) -> dict[str, object]:
+        self.queries.append(gql)
+        raise RuntimeError("remote details must not leak")
+
+
+def test_failed_approved_plan_returns_sanitized_receipt() -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    app = create_app(
+        auth_verifier=_HeaderVerifier(),
+        kb_tool=_EmptyKnowledgeBase(),
+        graph_adapter=FabricDataAgentAdapter(
+            _client=_FailingGraphClient(),
+            schema_mode="schema2_bounded",
+            query_schema=_query_schema(3),
+        ),
+        _allow_all_override=True,
+    )
+    response = TestClient(app).post(
+        "/chat",
+        json={
+            "question": "Run approved graph plan.",
+            "approved_plan_id": "cq:q1",
+        },
+        headers={"Authorization": "Bearer approved"},
+    )
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    receipt = detail["execution_receipt"]
+    assert receipt["status"] == "error"
+    assert receipt["actual_hop_count"] == 1
+    assert receipt["query_authority_hash"]
+    assert "remote details" not in json.dumps(detail)
+    assert "MATCH" not in json.dumps(detail)
+
+    stream = TestClient(app).post(
+        "/stream",
+        json={
+            "question": "Run approved graph plan.",
+            "approved_plan_id": "cq:q1",
+        },
+        headers={"Authorization": "Bearer approved"},
+    )
+    assert stream.status_code == 200
+    assert stream.headers["content-type"].startswith("text/event-stream")
+    assert '"type":"error"' in stream.text
+    assert '"actual_hop_count":1' in stream.text
+    assert "remote details" not in stream.text
+    assert "MATCH" not in stream.text
+
+
+def test_schema2_runtime_config_omits_data_agent_requirements() -> None:
+    deployment = DeploymentRuntimeConfig(
+        schema_mode="schema2_bounded",
+        artifact_validation_status="passed",
+        data_agent_published=False,
+        compiled_instruction_hash="",
+        deployed_instruction_hash="",
+    )
+    config = RuntimeConfig(
+        environment="test",
+        contract_hash="sha256:" + "a" * 64,
+        deployment=deployment,
+        graph=GraphRuntimeConfig(
+            workspace_id="workspace",
+            graph_model_id="graph",
+        ),
+        search=SearchRuntimeConfig(
+            endpoint="https://search.example.com",
+            index_name="index",
+        ),
+    )
+    assert config.data_agent_mcp is None
+    with pytest.raises(Exception, match="cannot configure data_agent_mcp"):
+        RuntimeConfig(
+            environment="test",
+            contract_hash="sha256:" + "a" * 64,
+            deployment=deployment,
+            graph=config.graph,
+            search=config.search,
+            data_agent_mcp=McpRuntimeConfig(
+                endpoint="https://api.fabric.microsoft.com/mcp",
+                workspace_id="workspace",
+                data_agent_id="agent",
+            ),
+        )
+
+
+def test_schema2_acceptance_does_not_require_data_agent_or_instructions() -> None:
+    digest = "sha256:" + "a" * 64
+    evidence = {
+        "contract_hash": digest,
+        "environment": "test",
+        "deployment": {
+            "schema_mode": "schema2_bounded",
+            "artifact_validation_status": "passed",
+            "receipt_sha256": digest,
+            "semantic_contract_hash": digest,
+            "semantic_artifact_set_hash": digest,
+            "graph_artifact_set_hash": digest,
+            "search_artifact_set_hash": digest,
+            "semantic_model_manifest_hash": digest,
+            "ontology_persisted_projection_hash": digest,
+            "graph_persisted_projection_hash": digest,
+            "persisted_query_schema_hash": digest,
+            "competency_contract_hash": digest,
+            "package_hash": digest,
+            "contract_hash_consistent": True,
+            "graph_model_id": "graph",
+            "search_index_name": "index",
+            "data_agent_published": False,
+            "compiled_instruction_hash": "",
+            "deployed_instruction_hash": "",
+        },
+        "runtime_targets": {
+            "graph_model_id": "graph",
+            "search_mode": "direct_search",
+            "search_index_name": "index",
+            "data_agent_id": None,
+        },
+        "cases": [],
+    }
+    validation = validate_deployment_evidence(
+        evidence,
+        require_spec008a_diagnostic=False,
+    )
+    assert validation["status"] == "passed", validation
+    assert validation["checks"]["data_agent_published"] is True
+    assert validation["checks"]["instruction_hash_matches"] is True

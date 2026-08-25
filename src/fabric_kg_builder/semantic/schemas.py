@@ -2496,7 +2496,7 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
     ontology_projection_hash: str
     graph_projection_hash: str
     search_projection_hash: str
-    instruction_hash: str
+    instruction_hash: str = ""
     source_selection_hash: str
     query_schema_hash: str
     route: str = Field(default="composed", min_length=1)
@@ -2545,7 +2545,7 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
         _check_nonempty_hash
     )
     _check_instruction_hash = field_validator("instruction_hash", mode="after")(
-        _check_nonempty_hash
+        _check_hash
     )
     _check_source_selection_hash = field_validator(
         "source_selection_hash", mode="after"
@@ -2580,6 +2580,10 @@ class SemanticDiagnosticRecord(_StrictPersistedModel):
                     "Schema-2 diagnostics require domain and query authority hashes."
                 )
         else:
+            if not self.instruction_hash:
+                raise ValueError(
+                    "Schema-1 compatibility diagnostics require instruction_hash."
+                )
             if self.semantic_plan is None:
                 raise ValueError(
                     "Schema-1 compatibility diagnostics require semantic_plan."

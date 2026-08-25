@@ -47,7 +47,7 @@ from fabric_kg_builder.agent.tools.fabric_data import (
     FabricDataAgentAdapter,
     FabricDataError,
 )
-from fabric_kg_builder.knowledge.routing import RouteCategory, classify_question
+from fabric_kg_builder.knowledge.routing import classify_question
 from fabric_kg_builder.app.visual_search import VisualSearchError, VisualSearchTool
 
 try:
@@ -66,6 +66,15 @@ _READINESS_CACHE_SECONDS = 30.0
 
 class DownstreamServiceError(RuntimeError):
     """Safe public error raised when a configured downstream call fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        execution_receipt: dict[str, Any] | None = None,
+    ) -> None:
+        self.execution_receipt = execution_receipt
+        super().__init__(message)
 
 
 class RateLimiter:
@@ -353,16 +362,27 @@ def create_app(
     # ── Downstream execution helper ────────────────────────────────────────
 
     async def _run_answer(body: ChatRequest):
+        receipt: dict[str, Any] = {}
         try:
-            return await run_in_threadpool(
+            outcome = await run_in_threadpool(
                 _answer_question,
                 question=body.question,
                 kb=_kb,
                 graph=_graph,
                 top_k=body.top_k,
                 approved_plan_id=body.approved_plan_id,
+                receipt_sink=receipt,
             )
-        except (KnowledgeBaseError, FabricDataError, DownstreamServiceError) as exc:
+            return (*outcome, receipt or None)
+        except DownstreamServiceError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": str(exc),
+                    "execution_receipt": exc.execution_receipt,
+                },
+            ) from exc
+        except (KnowledgeBaseError, FabricDataError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # ── POST /chat ──────────────────────────────────────────────────────────
@@ -377,7 +397,13 @@ def create_app(
         request_id = _make_request_id()
         t0 = time.monotonic()
 
-        answer, route_type, citations, refused = await _run_answer(body)
+        (
+            answer,
+            route_type,
+            citations,
+            refused,
+            execution_receipt,
+        ) = await _run_answer(body)
 
         latency_ms = int((time.monotonic() - t0) * 1000)
         citation_responses = (
@@ -392,6 +418,7 @@ def create_app(
             citations=citation_responses,
             refused=refused,
             latency_ms=latency_ms,
+            execution_receipt=execution_receipt,
         )
 
     # ── POST /stream ─────────────────────────────────────────────────────────
@@ -404,7 +431,40 @@ def create_app(
         _rate: None = Depends(_check_rate_limit),
     ) -> StreamingResponse:
         request_id = _make_request_id()
-        answer, route_type, citations, refused = await _run_answer(body)
+        try:
+            (
+                answer,
+                route_type,
+                citations,
+                refused,
+                execution_receipt,
+            ) = await _run_answer(body)
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                message = str(detail.get("message") or "Downstream failure.")
+                execution_receipt = detail.get("execution_receipt")
+            else:
+                message = str(detail)
+                execution_receipt = None
+
+            async def _error_generator() -> AsyncGenerator[str, None]:
+                error_chunk = StreamChunk(
+                    type="error",
+                    content=message,
+                    request_id=request_id,
+                    execution_receipt=execution_receipt,
+                )
+                yield f"data: {error_chunk.model_dump_json()}\n\n"
+
+            return StreamingResponse(
+                _error_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "X-Request-Id": request_id,
+                    "Cache-Control": "no-cache",
+                },
+            )
 
         async def _event_generator() -> AsyncGenerator[str, None]:
             # Emit route activity
@@ -439,7 +499,11 @@ def create_app(
                     yield f"data: {citation_chunk.model_dump_json()}\n\n"
 
             # Done
-            done_chunk = StreamChunk(type="done", request_id=request_id)
+            done_chunk = StreamChunk(
+                type="done",
+                request_id=request_id,
+                execution_receipt=execution_receipt,
+            )
             yield f"data: {done_chunk.model_dump_json()}\n\n"
 
         return StreamingResponse(
@@ -543,6 +607,7 @@ def _answer_question(
     graph: FabricDataAgentAdapter,
     top_k: int = 5,
     approved_plan_id: str | None = None,
+    receipt_sink: dict[str, Any] | None = None,
 ) -> tuple[str, str, list, bool]:
     """Offline/grounded answer builder.
 
@@ -589,9 +654,12 @@ def _answer_question(
             approved_plan_id,
             intent=question,
         )
+        if receipt_sink is not None:
+            receipt_sink.update(graph_result.execution_receipt)
         if graph_result.status == "error":
             raise DownstreamServiceError(
-                "Fabric GraphModel approved-plan execution failed."
+                "Fabric GraphModel approved-plan execution failed.",
+                execution_receipt=graph_result.execution_receipt,
             )
         if graph_result.status == "unsupported":
             return (
@@ -630,7 +698,8 @@ def _answer_question(
 
     if (
         graph.schema_mode == "schema2_bounded"
-        and routing.category != RouteCategory.SEARCH
+        and bool(routing.graph_signals)
+        and not routing.explicit_search_request
     ):
         return (
             "No approved bounded Graph plan is mapped to this graph-intent "
@@ -645,7 +714,7 @@ def _answer_question(
     for r in kb_results:
         raw_citations.append(r.to_citation_dict())
 
-    if routing.graph_signals:
+    if routing.graph_signals and not routing.explicit_search_request:
         route_type = "ontology"
         graph_result = graph.query_keyword(_graph_keyword(question))
         if graph_result.status == "error":

@@ -1204,7 +1204,6 @@ _REQUIRED_DIAGNOSTIC_FIELDS: frozenset[str] = frozenset({
     "ontology_projection_hash",
     "graph_projection_hash",
     "search_projection_hash",
-    "instruction_hash",
     "source_selection_hash",
     "query_schema_hash",
     "route",
@@ -1286,6 +1285,12 @@ def validate_diagnostic_record(
                     "Incomplete schema-2 diagnostic envelope: required field "
                     f"'{field}' is absent or empty.",
                 ))
+    elif not raw.get("instruction_hash"):
+        findings.append(QueryFinding(
+            "DIAGNOSTIC_FIELD_MISSING",
+            "Incomplete schema-1 diagnostic envelope: required field "
+            "'instruction_hash' is absent or empty.",
+        ))
 
     result_cat = raw.get("result_category")
     final_status = raw.get("final_semantic_status")

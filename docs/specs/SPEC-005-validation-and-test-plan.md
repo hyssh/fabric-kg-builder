@@ -1345,6 +1345,13 @@ live-smoke evidence without weakening these gates.
 - configured versus absent Graph readiness behavior; and
 - authenticated approved-plan-ID execution plus graph-intent abstention when no
   approved ID is supplied.
+- schema-2 runtime-config/acceptance generation omits Data Agent ID, publication,
+  deployed instruction, and MCP while requiring direct Graph plus Search;
+- approved-plan app responses include QRY-106 sanitized execution receipts and
+  receipt canaries reject GQL, filter, question/intent, parameter, and source
+  content leakage; and
+- ordinary factual and explicit Search questions use Search, true Graph questions
+  abstain, and true Mixed questions abstain without an approved plan ID.
 
 ### 15.2 Layer-5 deployment regression matrix
 

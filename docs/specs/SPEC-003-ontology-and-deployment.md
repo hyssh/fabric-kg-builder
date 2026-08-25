@@ -1751,6 +1751,20 @@ arbitrary structured plan. Graph-intent requests without an approved plan ID
 abstain. `/ready` requires a successful bounded Graph readiness query whenever a
 Graph dependency is configured.
 
+Each approved-plan app execution returns a sanitized
+`fabric-kg.bounded-query-receipt.v1` containing only actual hop count, route,
+status, latency, row count, and physical-query/plan/authority/query-schema/domain
+hashes. The receipt never contains GQL, filters, question text, intent text, raw
+parameters, or source content. Schema-2 runtime acceptance is direct Graph plus
+Search only and does not require a Data Agent ID, MCP configuration, Data Agent
+publication, or deployed Data Agent instruction hash. Schema-1 acceptance keeps
+those requirements.
+
+Deterministic routing abstains only when explicit Graph signals are present.
+Explicit Search signals and unclassified factual questions remain Search-safe
+fallbacks. A true mixed request contains both Search and Graph signals and
+therefore abstains without an approved plan ID.
+
 ## 13. Revision History
 
 | Date | Author | Summary |

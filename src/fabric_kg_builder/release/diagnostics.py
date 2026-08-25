@@ -585,6 +585,11 @@ def redact_record(canonical: dict[str, Any]) -> dict[str, Any]:
 
 def _field_present(field_name: str, redacted: dict[str, Any]) -> bool:
     """Return True when *field_name* counts as present for §10.4 completeness."""
+    if (
+        field_name == "instruction_hash"
+        and redacted.get("schema_mode") == "schema2_bounded"
+    ):
+        return True
     if field_name == "error_category":
         result_cat = redacted.get("result_category")
         if result_cat is None or result_cat not in _FAILURE_STATUS_VALUES:

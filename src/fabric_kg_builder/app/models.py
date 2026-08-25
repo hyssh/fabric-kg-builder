@@ -117,6 +117,7 @@ class ChatResponse(BaseModel):
     citations: list[CitationResponse] = Field(default_factory=list)
     refused: bool = False
     latency_ms: int | None = None
+    execution_receipt: dict[str, Any] | None = None
 
 
 class StreamChunk(BaseModel):
@@ -127,6 +128,7 @@ class StreamChunk(BaseModel):
     citation: CitationResponse | None = None
     route_type: str | None = None
     request_id: str | None = None
+    execution_receipt: dict[str, Any] | None = None
 
 
 class HealthResponse(BaseModel):

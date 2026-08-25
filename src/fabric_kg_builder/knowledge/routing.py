@@ -76,10 +76,8 @@ _GRAPH_KEYWORDS: list[str] = [
     r"\brelated\s+to\b",
     r"\bhas[_\s]component",
     r"\bhas[_\s]part\b",
-    r"\bentit(?:y|ies)\b",
     r"\bedge(?:s)?\b",
     r"\bgraph\b",
-    r"\bnode(?:s)?\b",
     r"\bparent\b",
     r"\bchild(?:ren)?\b",
     r"\bancestor(?:s)?\b",
@@ -92,7 +90,7 @@ _GRAPH_KEYWORDS: list[str] = [
     r"\bcypher\b",
     r"\bmatch\s*\(",
     r"\bontolog(?:y|ies)\b",
-    r"\bcomponent(?:s)?\b",
+    r"\bcomponent(?:s)?\s+(?:of|under|within|connected|related|depend)",
 ]
 
 # Strong indicators of SEARCH questions (content / document / factual lookup)
@@ -155,6 +153,7 @@ class RoutingResult:
     category: RouteCategory
     graph_signals: list[str] = field(default_factory=list)
     search_signals: list[str] = field(default_factory=list)
+    explicit_search_request: bool = False
     rationale: str = ""
 
 
@@ -171,6 +170,14 @@ def classify_question(question: str) -> RoutingResult:
 
     has_graph = bool(graph_signals)
     has_search = bool(search_signals)
+    explicit_search_request = bool(
+        has_search
+        and re.match(
+            r"^\s*(?:find|search|locate|retrieve)\b",
+            q,
+            re.IGNORECASE,
+        )
+    )
 
     if has_graph and has_search:
         category = RouteCategory.MIXED
@@ -201,6 +208,7 @@ def classify_question(question: str) -> RoutingResult:
         category=category,
         graph_signals=graph_signals,
         search_signals=search_signals,
+        explicit_search_request=explicit_search_request,
         rationale=rationale,
     )
 

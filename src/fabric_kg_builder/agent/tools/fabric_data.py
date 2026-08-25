@@ -27,13 +27,15 @@ No secrets are stored in instances; auth is via injected credentials.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
 from fabric_kg_builder.semantic.query_rendering import (
     compile_approved_query_plan,
     render_bounded_gql,
 )
+from fabric_kg_builder.semantic.query_validation import compute_physical_query_hash
 from fabric_kg_builder.semantic.schemas import PersistedQuerySchema
 
 
@@ -63,6 +65,7 @@ class FabricDataResult:
     rows: list[dict[str, Any]] = field(default_factory=list)
     gql: str = ""
     error_message: str = ""
+    execution_receipt: dict[str, Any] = field(default_factory=dict)
 
     @property
     def entity_count(self) -> int:
@@ -441,6 +444,7 @@ class FabricDataAgentAdapter:
         intent: str,
     ) -> FabricDataResult:
         """Execute one sealed schema-2 plan after deterministic local rendering."""
+        started = time.monotonic()
         if self.schema_mode != "schema2_bounded" or self.query_schema is None:
             return FabricDataResult(
                 status="unsupported",
@@ -462,11 +466,57 @@ class FabricDataAgentAdapter:
             )
             gql = render_bounded_gql(plan, self.query_schema)
         except ValueError as exc:
+            authority = self.query_schema.authority
             return FabricDataResult(
                 status="unsupported",
                 error_message=str(exc),
+                execution_receipt={
+                    "schema": "fabric-kg.bounded-query-receipt.v1",
+                    "actual_hop_count": 0,
+                    "route": "direct_graph",
+                    "status": "unsupported",
+                    "latency_ms": round(
+                        (time.monotonic() - started) * 1000,
+                        3,
+                    ),
+                    "row_count": 0,
+                    "semantic_plan_hash": "",
+                    "query_authority_hash": (
+                        authority.authority_hash if authority else ""
+                    ),
+                    "query_schema_hash": self.query_schema.schema_hash,
+                    "domain_contract_hash": (
+                        authority.domain_contract_hash if authority else ""
+                    ),
+                    "error_category": "plan_not_approved",
+                },
             )
-        return self._execute(gql, expose_query=False)
+        result = self._execute(gql, expose_query=False)
+        authority = self.query_schema.authority
+        receipt = {
+            "schema": "fabric-kg.bounded-query-receipt.v1",
+            "actual_hop_count": len(plan.path_steps),
+            "route": "direct_graph",
+            "status": result.status,
+            "latency_ms": round(
+                (time.monotonic() - started) * 1000,
+                3,
+            ),
+            "row_count": len(result.rows),
+            "semantic_plan_hash": plan.plan_hash,
+            "physical_query_hash": compute_physical_query_hash(gql),
+            "query_authority_hash": (
+                authority.authority_hash if authority else ""
+            ),
+            "query_schema_hash": self.query_schema.schema_hash,
+            "domain_contract_hash": (
+                authority.domain_contract_hash if authority else ""
+            ),
+            "error_category": (
+                result.status if result.status == "error" else None
+            ),
+        }
+        return replace(result, execution_receipt=receipt)
 
     def is_unsupported_query_type(self, query_lower: str) -> bool:
         """Return True if this query type is definitively unsupported by any graph."""

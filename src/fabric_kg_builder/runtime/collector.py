@@ -568,12 +568,13 @@ class McpRuntimeConfig(_StrictModel):
 
 
 class DeploymentRuntimeConfig(_StrictModel):
+    schema_mode: str = "schema1_compatibility"
     artifact_validation_status: str
     knowledge_http_status: int = 200
     partial_source: bool = False
-    data_agent_published: bool
-    compiled_instruction_hash: str = Field(min_length=1)
-    deployed_instruction_hash: str = Field(min_length=1)
+    data_agent_published: bool = False
+    compiled_instruction_hash: str = ""
+    deployed_instruction_hash: str = ""
     unintended_duplicate_deployments: int = Field(default=0, ge=0)
     breaking_change: bool = False
     migration_approved: bool = False
@@ -602,6 +603,28 @@ class DeploymentRuntimeConfig(_StrictModel):
     knowledge_base_id: str | None = None
     contract_hash_consistent: bool | None = None
 
+    @model_validator(mode="after")
+    def _validate_schema_mode(self) -> "DeploymentRuntimeConfig":
+        if self.schema_mode not in {
+            "schema1_compatibility",
+            "schema2_bounded",
+        }:
+            raise ValueError("Unsupported runtime deployment schema_mode.")
+        if self.schema_mode == "schema1_compatibility":
+            if not self.data_agent_published:
+                raise ValueError(
+                    "Schema-1 runtime requires a published Data Agent."
+                )
+            if not self.compiled_instruction_hash or not self.deployed_instruction_hash:
+                raise ValueError(
+                    "Schema-1 runtime requires compiled and deployed instruction hashes."
+                )
+        elif self.data_agent_id is not None:
+            raise ValueError(
+                "Schema-2 runtime cannot carry a Data Agent ID."
+            )
+        return self
+
 
 class RuntimeConfig(_StrictModel):
     schema_version: str = "1.0"
@@ -611,6 +634,19 @@ class RuntimeConfig(_StrictModel):
     graph: GraphRuntimeConfig | None = None
     search: SearchRuntimeConfig | None = None
     data_agent_mcp: McpRuntimeConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_routes(self) -> "RuntimeConfig":
+        if self.deployment.schema_mode == "schema2_bounded":
+            if self.data_agent_mcp is not None:
+                raise ValueError(
+                    "Schema-2 runtime cannot configure data_agent_mcp."
+                )
+            if self.graph is None or self.search is None:
+                raise ValueError(
+                    "Schema-2 runtime acceptance requires direct Graph and Search."
+                )
+        return self
 
 
 def load_runtime_config(path: Path | str) -> RuntimeConfig:
@@ -664,6 +700,9 @@ def _merge_deployment_receipt(
             + hashlib.sha256(receipt_bytes).hexdigest(),
             "semantic_contract_hash": receipt.get(
                 "semantic_contract_hash"
+            ),
+            "schema_mode": receipt.get(
+                "schema_mode", "schema1_compatibility"
             ),
             "domain_contract_hash": receipt.get("domain_contract_hash"),
             "reasoning_policy_hash": receipt.get("reasoning_policy_hash"),
@@ -735,16 +774,19 @@ def _validate_deployment_linkage(config: RuntimeConfig) -> None:
         "graph_persisted_projection_hash": (
             deployment.graph_persisted_projection_hash
         ),
-        "receipt_instruction_hash": deployment.receipt_instruction_hash,
-        "receipt_deployed_instruction_hash": (
-            deployment.receipt_deployed_instruction_hash
-        ),
         "persisted_query_schema_hash": (
             deployment.persisted_query_schema_hash
         ),
         "competency_contract_hash": deployment.competency_contract_hash,
         "package_hash": deployment.package_hash,
     }
+    if deployment.schema_mode == "schema1_compatibility":
+        required_hashes.update({
+            "receipt_instruction_hash": deployment.receipt_instruction_hash,
+            "receipt_deployed_instruction_hash": (
+                deployment.receipt_deployed_instruction_hash
+            ),
+        })
     missing_hashes = [
         name for name, value in required_hashes.items() if not value
     ]
@@ -808,6 +850,8 @@ def _validate_deployment_linkage(config: RuntimeConfig) -> None:
                 "workspace and Data Agent IDs."
             )
     if (
+        deployment.schema_mode == "schema1_compatibility"
+        and
         deployment.receipt_instruction_hash
         and deployment.receipt_instruction_hash
         != deployment.compiled_instruction_hash
@@ -816,6 +860,8 @@ def _validate_deployment_linkage(config: RuntimeConfig) -> None:
             "Compiled instruction hash does not match the deployment receipt."
         )
     if (
+        deployment.schema_mode == "schema1_compatibility"
+        and
         deployment.receipt_deployed_instruction_hash
         and deployment.receipt_deployed_instruction_hash
         != deployment.deployed_instruction_hash
@@ -824,6 +870,8 @@ def _validate_deployment_linkage(config: RuntimeConfig) -> None:
             "Deployed instruction hash does not match the deployment receipt."
         )
     if (
+        deployment.schema_mode == "schema1_compatibility"
+        and
         deployment.receipt_instruction_hash
         != deployment.receipt_deployed_instruction_hash
     ):
@@ -1337,14 +1385,15 @@ class RuntimeEvidenceCollector:
             "search_artifact_set_hash": (
                 deployment.search_artifact_set_hash
             ),
-            "instruction_hash": (
-                deployment.receipt_deployed_instruction_hash
-                or deployment.deployed_instruction_hash
-            ),
             "persisted_query_schema_hash": (
                 deployment.persisted_query_schema_hash
             ),
         }
+        if query_schema.schema_mode == "schema1_compatibility":
+            required_hashes["instruction_hash"] = (
+                deployment.receipt_deployed_instruction_hash
+                or deployment.deployed_instruction_hash
+            )
         missing_hashes = sorted(
             name for name, value in required_hashes.items() if not value
         )
@@ -1513,7 +1562,7 @@ class RuntimeEvidenceCollector:
                     required_hashes["search_artifact_set_hash"]
                 ),
                 instruction_hash=str(
-                    required_hashes["instruction_hash"]
+                    required_hashes.get("instruction_hash") or ""
                 ),
                 source_selection_hash=source_selection_hash,
                 query_schema_hash=str(

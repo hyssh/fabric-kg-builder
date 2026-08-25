@@ -427,6 +427,7 @@ def _write_semantic_deployment_receipt(
     )
     receipt = {
         "schema": "fabric-kg.semantic-deployment-receipt.v1",
+        "schema_mode": agent.get("schema_mode"),
         "run_id": run_id,
         "environment": environment,
         "created_at_utc": _utc_now(),
@@ -2029,6 +2030,13 @@ def _prepare_runtime_acceptance_config(
             "Runtime config template must contain a JSON object."
         )
     receipt = _read_json_object(receipt_path)
+    schema_mode = str(
+        receipt.get("schema_mode") or "schema1_compatibility"
+    )
+    if schema_mode not in {"schema1_compatibility", "schema2_bounded"}:
+        raise BuildDeployError(
+            f"Deployment receipt has unsupported schema_mode={schema_mode!r}."
+        )
     competency_hash = receipt.get("competency_contract_hash")
     if not competency_hash:
         raise BuildDeployError(
@@ -2036,23 +2044,23 @@ def _prepare_runtime_acceptance_config(
             "Pass --competency-suite when building."
         )
     instruction_hash = receipt.get("instruction_hash")
-    deployed_instruction_hash = receipt.get(
-        "deployed_instruction_hash"
-    )
+    deployed_instruction_hash = receipt.get("deployed_instruction_hash")
     if not instruction_hash:
         raise BuildDeployError(
             "Deployment receipt has no compiled instruction hash."
         )
-    if not deployed_instruction_hash:
+    if schema_mode == "schema1_compatibility" and not deployed_instruction_hash:
         raise BuildDeployError(
             "Deployment receipt has no independently read deployed "
             "instruction hash."
         )
-    for field, label in (
+    required_targets = [
         ("graph_model_id", "Graph Model ID"),
         ("search_index_name", "Search index name"),
-        ("data_agent_id", "Data Agent ID"),
-    ):
+    ]
+    if schema_mode == "schema1_compatibility":
+        required_targets.append(("data_agent_id", "Data Agent ID"))
+    for field, label in required_targets:
         if not receipt.get(field):
             raise BuildDeployError(
                 f"Deployment receipt has no {label}; runtime acceptance "
@@ -2068,12 +2076,15 @@ def _prepare_runtime_acceptance_config(
         )
     deployment.update(
         {
+            "schema_mode": schema_mode,
             "artifact_validation_status": "passed",
             "data_agent_published": (
                 receipt.get("data_agent_published") is True
             ),
             "compiled_instruction_hash": instruction_hash,
-            "deployed_instruction_hash": deployed_instruction_hash,
+            "deployed_instruction_hash": (
+                deployed_instruction_hash or ""
+            ),
             "receipt_path": str(receipt_path.resolve()),
         }
     )
@@ -2133,7 +2144,9 @@ def _prepare_runtime_acceptance_config(
                 )
 
     data_agent_mcp = payload.get("data_agent_mcp")
-    if isinstance(data_agent_mcp, dict):
+    if schema_mode == "schema2_bounded":
+        payload.pop("data_agent_mcp", None)
+    elif isinstance(data_agent_mcp, dict):
         workspace_id = str(
             outputs.get("fabricWorkspaceId")
             or data_agent_mcp.get("workspace_id")

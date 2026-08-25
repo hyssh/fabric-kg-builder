@@ -866,23 +866,31 @@ def validate_deployment_evidence(
         if isinstance(evidence.get("runtime_targets"), dict)
         else {}
     )
+    schema_mode = str(
+        deployment.get("schema_mode") or "schema1_compatibility"
+    )
+    schema2_bounded = schema_mode == "schema2_bounded"
     receipt_present = bool(deployment.get("receipt_sha256"))
-    receipt_hashes_present = all(
-        deployment.get(key)
-        for key in (
-            "semantic_contract_hash",
-            "semantic_artifact_set_hash",
-            "graph_artifact_set_hash",
-            "search_artifact_set_hash",
-            "semantic_model_manifest_hash",
-            "ontology_persisted_projection_hash",
-            "graph_persisted_projection_hash",
+    required_receipt_hashes = [
+        "semantic_contract_hash",
+        "semantic_artifact_set_hash",
+        "graph_artifact_set_hash",
+        "search_artifact_set_hash",
+        "semantic_model_manifest_hash",
+        "ontology_persisted_projection_hash",
+        "graph_persisted_projection_hash",
+        "persisted_query_schema_hash",
+        "competency_contract_hash",
+        "package_hash",
+    ]
+    if not schema2_bounded:
+        required_receipt_hashes.extend([
             "receipt_instruction_hash",
             "receipt_deployed_instruction_hash",
-            "persisted_query_schema_hash",
-            "competency_contract_hash",
-            "package_hash",
-        )
+        ])
+    receipt_hashes_present = all(
+        deployment.get(key)
+        for key in required_receipt_hashes
     )
     receipt_linked = (
         receipt_present
@@ -891,12 +899,17 @@ def validate_deployment_evidence(
             and deployment.get("contract_hash_consistent") is True
             and deployment.get("competency_contract_hash")
             == evidence.get("contract_hash")
-            and deployment.get("receipt_instruction_hash")
-            == deployment.get("compiled_instruction_hash")
-            and deployment.get("receipt_deployed_instruction_hash")
-            == deployment.get("deployed_instruction_hash")
-            and deployment.get("receipt_instruction_hash")
-            == deployment.get("receipt_deployed_instruction_hash")
+            and (
+                schema2_bounded
+                or (
+                    deployment.get("receipt_instruction_hash")
+                    == deployment.get("compiled_instruction_hash")
+                    and deployment.get("receipt_deployed_instruction_hash")
+                    == deployment.get("deployed_instruction_hash")
+                    and deployment.get("receipt_instruction_hash")
+                    == deployment.get("receipt_deployed_instruction_hash")
+                )
+            )
             and (
                 not deployment.get("graph_model_id")
                 or deployment.get("graph_model_id")
@@ -930,12 +943,16 @@ def validate_deployment_evidence(
         )
         and int(deployment.get("knowledge_http_status") or 200) != 206,
         "data_agent_published": (
-            deployment.get("data_agent_published") is True
+            schema2_bounded
+            or deployment.get("data_agent_published") is True
         ),
         "instruction_hash_matches": (
-            bool(deployment.get("compiled_instruction_hash"))
-            and deployment.get("compiled_instruction_hash")
-            == deployment.get("deployed_instruction_hash")
+            schema2_bounded
+            or (
+                bool(deployment.get("compiled_instruction_hash"))
+                and deployment.get("compiled_instruction_hash")
+                == deployment.get("deployed_instruction_hash")
+            )
         ),
         "no_duplicate_deployments": int(
             deployment.get("unintended_duplicate_deployments") or 0
@@ -1068,13 +1085,14 @@ def validate_deployment_evidence(
             "search_projection_hash": deployment.get(
                 "search_artifact_set_hash"
             ),
-            "instruction_hash": deployment.get(
-                "receipt_deployed_instruction_hash"
-            ),
             "query_schema_hash": deployment.get(
                 "persisted_query_schema_hash"
             ),
         }
+        if not schema2_bounded:
+            expected_diagnostic_hashes["instruction_hash"] = deployment.get(
+                "receipt_deployed_instruction_hash"
+            )
         for _diagnostic_index, _diag_raw in enumerate(
             _diagnostic_payloads
         ):
