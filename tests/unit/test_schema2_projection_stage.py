@@ -16,11 +16,17 @@ import pytest
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.contracts.extraction import (
     RequiredMemberManifestV1_1,
+    RequiredMemberReferenceV1_1,
     RequiredMemberSetProposalV1_1,
+    _member_hashes_v1_1,
+    authoritative_collection_hash_v1_1,
 )
 from fabric_kg_builder.contracts.lifecycle import AssertionState
 from fabric_kg_builder.contracts.projection import AuditProjection
-from fabric_kg_builder.contracts.publication import ProjectionEquivalence
+from fabric_kg_builder.contracts.publication import (
+    ProjectionEquivalence,
+    ProjectionEvidence,
+)
 from fabric_kg_builder.contracts.receipts import ArtifactManifest, StageReceipt
 from fabric_kg_builder.contracts.resources import StageResourceMetrics
 from fabric_kg_builder.enrichment import schema2_validation_stage
@@ -217,6 +223,130 @@ def _rewrite_l4_artifacts(
         encoding="utf-8",
     )
     return manifest, metrics, receipt
+
+
+def _rewrite_required_member_artifacts(
+    result,
+    manifest_rows: list[dict[str, object]],
+    member_rows: list[dict[str, object]],
+) -> tuple[ArtifactManifest, StageResourceMetrics, StageReceipt]:
+    manifest_path = (
+        result.run_root / "semantic_required_member_manifests.parquet"
+    )
+    member_path = result.run_root / "semantic_required_members.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            manifest_rows,
+            schema=L4_PROJECTION_TABLE_SCHEMAS[
+                "semantic_required_member_manifests"
+            ],
+        ),
+        manifest_path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            member_rows,
+            schema=L4_PROJECTION_TABLE_SCHEMAS["semantic_required_members"],
+        ),
+        member_path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    manifest_row = manifest_rows[0]
+    ordered_members = sorted(
+        member_rows,
+        key=lambda row: int(row["manifest_member_index"]),
+    )
+    composite_ids = sorted(
+        f"{row['required_member_manifest_id']}|{row['member_canonical_id']}"
+        for row in ordered_members
+    )
+    evidence = ProjectionEvidence(
+        count=len(ordered_members),
+        canonical_id_set_hash=canonical_sha256(composite_ids),
+        row_fingerprint=canonical_sha256({
+            "manifest": manifest_row,
+            "members": ordered_members,
+        }),
+    )
+    original = result.projection_equivalences[0]
+    authority = original.authority.model_copy(update={
+        "required_member_manifest_hash": manifest_row["manifest_hash"],
+        "authoritative_collection_hash": manifest_row[
+            "authoritative_collection_hash"
+        ],
+    })
+    proof_values = original.model_dump(
+        mode="python",
+        exclude={"equivalence_hash"},
+    )
+    proof_values.update({
+        "authority": authority,
+        "publication_crosswalk_hash": canonical_sha256({
+            "publication_crosswalk_id": original.publication_crosswalk_id,
+            "source_tables": [
+                "semantic_required_member_manifests",
+                "semantic_required_members",
+            ],
+            "field_mapping": {
+                name: [
+                    field.name for field in L4_PROJECTION_TABLE_SCHEMAS[name]
+                ]
+                for name in (
+                    "semantic_required_member_manifests",
+                    "semantic_required_members",
+                )
+            },
+            "authority": authority,
+        }),
+        "expected": evidence,
+        "compiled": evidence,
+        "deployed": evidence,
+        "read_back": evidence,
+    })
+    proof = ProjectionEquivalence(
+        **proof_values,
+        equivalence_hash=canonical_sha256(proof_values),
+    )
+    proof_payload = (canonical_json((proof,)) + "\n").encode("utf-8")
+    return _rewrite_l4_artifacts(
+        result,
+        (
+            (
+                "l4-table:semantic_required_member_manifests",
+                "semantic_required_member_manifests.parquet",
+                manifest_path.read_bytes(),
+                {
+                    "canonical_id_set_hash": canonical_sha256(sorted({
+                        str(row["required_member_manifest_id"])
+                        for row in manifest_rows
+                    })),
+                    "row_count": len(manifest_rows),
+                },
+            ),
+            (
+                "l4-table:semantic_required_members",
+                "semantic_required_members.parquet",
+                member_path.read_bytes(),
+                {
+                    "canonical_id_set_hash": canonical_sha256(composite_ids),
+                    "row_count": len(member_rows),
+                },
+            ),
+            (
+                "l4-parquet-projection-equivalence",
+                "projection-equivalence.json",
+                proof_payload,
+                {"row_count": 1},
+            ),
+        ),
+    )
 
 
 @pytest.mark.unit
@@ -1599,17 +1729,47 @@ def _sealed_manifest(tmp_path: Path):
     )
 
 
-def _l3_with_sealed_manifest(tmp_path: Path):
+def _l3_with_sealed_manifest(
+    tmp_path: Path,
+    *,
+    ordered: bool = False,
+    roles: bool = False,
+    member_count: int = 1,
+):
     fact_set = _fact_set(
         "manufacturing",
-        ordered=False,
-        roles=False,
+        ordered=ordered,
+        roles=roles,
         expected_count=None,
     )
+    mutate = None
+    if ordered or roles or member_count > 1:
+        def mutate(candidates, _work_unit):
+            values = [dict(candidate) for candidate in candidates]
+            relationship = dict(values[2])
+            relationship["member_role_id"] = (
+                "role:manufacturing.subject" if roles else None
+            )
+            relationship["member_order"] = 0 if ordered else None
+            values[2] = relationship
+            if member_count > 1:
+                second_member = {
+                    **values[1],
+                    "local_id": "subject-2",
+                    "label": "Subject 2",
+                }
+                second_relationship = {
+                    **relationship,
+                    "target_local_id": "subject-2",
+                    "member_order": 1 if ordered else None,
+                }
+                values.extend((second_member, second_relationship))
+            return values
     l1_root, domain_path, l2 = _pipeline(
         tmp_path,
         "manufacturing",
         fact_set=fact_set,
+        mutate=mutate,
     )
     l3 = _l3(tmp_path, l1_root, domain_path)
     manifest = schema2_validation_stage._seal_manifest(
@@ -1755,6 +1915,266 @@ def test_l4_persists_and_reads_back_required_member_equivalence(
         "type": "array",
         "items": ProjectionEquivalence.model_json_schema(),
     })
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("member_canonical_id", "entity:forged"),
+        ("member_semantic_type_id", "semantic-type:forged"),
+        ("member_role_id", "role:forged"),
+        ("candidate_id", "candidate:forged"),
+        ("member_order", 0),
+        ("supporting_evidence_span_ids", ["evidence-span:forged"]),
+    ),
+)
+def test_sealed_source_rejects_resealed_required_member_field_drift(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    manifest_rows = [
+        dict(row) for row in result.rows.semantic_required_member_manifests
+    ]
+    member_rows = [
+        dict(row) for row in result.rows.semantic_required_members
+    ]
+    member_rows[0][field] = replacement
+    member_rows[0]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in member_rows[0].items()
+        if key != "row_hash"
+    })
+    manifest, _metrics, receipt = _rewrite_required_member_artifacts(
+        result,
+        manifest_rows,
+        member_rows,
+    )
+
+    with pytest.raises(ValueError, match="carried C0 authority"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("member_set_hash", "d" * 64),
+        ("ordered_member_tuple_hash", "e" * 64),
+        ("authoritative_collection_hash", "f" * 64),
+        ("expected_cardinality", 99),
+        ("minimum_cardinality", -1),
+        ("required_role_ids", ["role:z", "role:a"]),
+    ),
+)
+def test_sealed_source_rejects_resealed_required_member_aggregate_drift(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    manifest_rows = [
+        dict(row) for row in result.rows.semantic_required_member_manifests
+    ]
+    member_rows = [
+        dict(row) for row in result.rows.semantic_required_members
+    ]
+    manifest_rows[0][field] = replacement
+    manifest_rows[0]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in manifest_rows[0].items()
+        if key != "row_hash"
+    })
+    for row in member_rows:
+        row[field] = replacement
+        row["row_hash"] = canonical_sha256({
+            key: value for key, value in row.items() if key != "row_hash"
+        })
+    manifest, _metrics, receipt = _rewrite_required_member_artifacts(
+        result,
+        manifest_rows,
+        member_rows,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="carried C0 authority",
+    ):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_sealed_source_binds_recomputed_member_hashes_to_l3_manifest_hash(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    carried = result.source.required_member_manifests[0]
+    manifest_rows = [
+        dict(row) for row in result.rows.semantic_required_member_manifests
+    ]
+    member_rows = [
+        dict(row) for row in result.rows.semantic_required_members
+    ]
+    member_values = carried.members[0].model_dump(
+        mode="python",
+        exclude={"member_hash"},
+    )
+    member_values["member_canonical_id"] = "entity:forged"
+    forged_member = RequiredMemberReferenceV1_1.seal(**member_values)
+    members = (forged_member, *carried.members[1:])
+    member_set_hash, ordered_tuple_hash = _member_hashes_v1_1(
+        members,
+        ordering_mode=carried.ordering_policy.mode,
+    )
+    collection_hash = authoritative_collection_hash_v1_1(
+        authority=carried.authority,
+        scope_canonical_id=carried.scope_canonical_id,
+        membership_semantic_relationship_id=(
+            carried.membership_semantic_relationship_id
+        ),
+        ordering_policy=carried.ordering_policy,
+        expected_cardinality=carried.expected_cardinality,
+        minimum_cardinality=carried.minimum_cardinality,
+        maximum_cardinality=carried.maximum_cardinality,
+        required_role_ids=carried.required_role_ids,
+        members=members,
+    )
+    member_rows[0].update({
+        **forged_member.model_dump(mode="json"),
+        "member_set_hash": member_set_hash,
+        "ordered_member_tuple_hash": ordered_tuple_hash,
+        "authoritative_collection_hash": collection_hash,
+    })
+    member_rows[0]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in member_rows[0].items()
+        if key != "row_hash"
+    })
+    manifest_rows[0].update({
+        "member_set_hash": member_set_hash,
+        "ordered_member_tuple_hash": ordered_tuple_hash,
+        "authoritative_collection_hash": collection_hash,
+    })
+    manifest_rows[0]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in manifest_rows[0].items()
+        if key != "row_hash"
+    })
+    manifest, _metrics, receipt = _rewrite_required_member_artifacts(
+        result,
+        manifest_rows,
+        member_rows,
+    )
+
+    with pytest.raises(ValueError, match="carried C0 authority"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_sealed_source_rejects_resealed_required_member_index_swap(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path, member_count=2),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    manifest_rows = [
+        dict(row) for row in result.rows.semantic_required_member_manifests
+    ]
+    member_rows = [
+        dict(row) for row in result.rows.semantic_required_members
+    ]
+    assert len(member_rows) >= 2
+    first_index = member_rows[0]["manifest_member_index"]
+    member_rows[0]["manifest_member_index"] = member_rows[1][
+        "manifest_member_index"
+    ]
+    member_rows[1]["manifest_member_index"] = first_index
+    for row in member_rows[:2]:
+        row["row_hash"] = canonical_sha256({
+            key: value for key, value in row.items() if key != "row_hash"
+        })
+    manifest, _metrics, receipt = _rewrite_required_member_artifacts(
+        result,
+        manifest_rows,
+        member_rows,
+    )
+
+    with pytest.raises(ValueError, match="carried C0 authority"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_sealed_source_rejects_resealed_noncanonical_required_roles(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path, roles=True),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    manifest_rows = [
+        dict(row) for row in result.rows.semantic_required_member_manifests
+    ]
+    member_rows = [
+        dict(row) for row in result.rows.semantic_required_members
+    ]
+    roles = list(manifest_rows[0]["required_role_ids"])
+    assert roles
+    manifest_rows[0]["required_role_ids"] = [*roles, roles[0]]
+    manifest_rows[0]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in manifest_rows[0].items()
+        if key != "row_hash"
+    })
+    for row in member_rows:
+        row["required_role_ids"] = [*roles, roles[0]]
+        row["row_hash"] = canonical_sha256({
+            key: value for key, value in row.items() if key != "row_hash"
+        })
+    manifest, _metrics, receipt = _rewrite_required_member_artifacts(
+        result,
+        manifest_rows,
+        member_rows,
+    )
+
+    with pytest.raises(ValueError, match="carried C0 authority"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
 
 
 @pytest.mark.unit

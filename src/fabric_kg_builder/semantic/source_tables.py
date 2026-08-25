@@ -15,7 +15,11 @@ from fabric_kg_builder.contracts.base import (
     canonical_sha256,
     deterministic_contract_id,
 )
-from fabric_kg_builder.contracts.extraction import RequiredMemberManifestV1_1
+from fabric_kg_builder.contracts.extraction import (
+    RequiredMemberManifestV1_1,
+    RequiredMemberOrderingPolicyV1_1,
+    RequiredMemberReferenceV1_1,
+)
 from fabric_kg_builder.contracts.lifecycle import AssertionState
 from fabric_kg_builder.contracts.projection import (
     AuditProjection,
@@ -905,6 +909,193 @@ class SealedL4ServingSource:
                 raise ValueError(
                     f"required-member rows differ from carried authority {manifest_id}"
                 )
+            try:
+                ordering_payload = {
+                    "mode": manifest_row["ordering_mode"],
+                    "ordinal_property_id": manifest_row[
+                        "ordinal_property_id"
+                    ],
+                    "ordinal_value_type": manifest_row[
+                        "ordinal_value_type"
+                    ],
+                    "direction": manifest_row["ordering_direction"],
+                    "unique_ordinals": manifest_row["unique_ordinals"],
+                    "contiguous": manifest_row["contiguous"],
+                    "member_order_encoding": manifest_row[
+                        "member_order_encoding"
+                    ],
+                }
+                ordering_policy = (
+                    RequiredMemberOrderingPolicyV1_1.model_validate(
+                        ordering_payload
+                    )
+                )
+                if (
+                    ordering_policy.model_dump(mode="json")
+                    != ordering_payload
+                ):
+                    raise ValueError(
+                        "required-member ordering policy is not canonical"
+                    )
+                member_payloads = tuple({
+                    "member_canonical_id": member["member_canonical_id"],
+                    "member_semantic_type_id": member[
+                        "member_semantic_type_id"
+                    ],
+                    "member_role_id": member["member_role_id"],
+                    "member_order": member["member_order"],
+                    "candidate_id": member["candidate_id"],
+                    "supporting_evidence_span_ids": member[
+                        "supporting_evidence_span_ids"
+                    ],
+                    "member_hash": member["member_hash"],
+                } for member in members)
+                member_references = tuple(
+                    RequiredMemberReferenceV1_1.model_validate(payload)
+                    for payload in member_payloads
+                )
+                if any(
+                    reference.model_dump(mode="json") != payload
+                    for reference, payload in zip(
+                        member_references,
+                        member_payloads,
+                        strict=True,
+                    )
+                ):
+                    raise ValueError(
+                        "required-member fields are not in canonical C0 form"
+                    )
+                manifest_identity = self.receipt.identity.model_dump(
+                    mode="python"
+                )
+                manifest_identity.update({
+                    "contract_kind": "c0.required_member_manifest",
+                    "contract_version": "1.1.0",
+                    "semantic_contract_hash": None,
+                    "canonical_schema_version": "c0-core/1.0.0",
+                    "parent_artifact_ids": tuple(
+                        artifact_id
+                        for artifact_id in self.receipt.identity.parent_artifact_ids
+                        if artifact_id != self.receipt.input_manifest_id
+                    ),
+                })
+                validated_manifest = RequiredMemberManifestV1_1.model_validate({
+                    "identity": manifest_identity,
+                    "required_member_manifest_id": manifest_id,
+                    "required_member_set_proposal_id": manifest_row[
+                        "required_member_set_proposal_id"
+                    ],
+                    "required_member_set_proposal_hash": manifest_row[
+                        "required_member_set_proposal_hash"
+                    ],
+                    "extraction_candidate_batch_id": manifest_row[
+                        "extraction_candidate_batch_id"
+                    ],
+                    "extraction_candidate_batch_hash": manifest_row[
+                        "extraction_candidate_batch_hash"
+                    ],
+                    "source_corpus_manifest_id": manifest_row[
+                        "source_corpus_manifest_id"
+                    ],
+                    "source_corpus_manifest_hash": manifest_row[
+                        "source_corpus_manifest_hash"
+                    ],
+                    "source_unit_manifest_id": manifest_row[
+                        "source_unit_manifest_id"
+                    ],
+                    "source_unit_manifest_hash": manifest_row[
+                        "source_unit_manifest_hash"
+                    ],
+                    "domain_contract_hash": manifest_row[
+                        "domain_contract_hash"
+                    ],
+                    "completeness_requirement_id": manifest_row[
+                        "completeness_requirement_id"
+                    ],
+                    "completeness_requirement_hash": manifest_row[
+                        "completeness_requirement_hash"
+                    ],
+                    "hierarchy_hash": manifest_row["hierarchy_hash"],
+                    "identity_policy_hash": manifest_row[
+                        "identity_policy_hash"
+                    ],
+                    "scope_canonical_id": manifest_row[
+                        "scope_canonical_id"
+                    ],
+                    "membership_semantic_relationship_id": manifest_row[
+                        "membership_semantic_relationship_id"
+                    ],
+                    "ordering_policy": ordering_policy,
+                    "expected_cardinality": manifest_row[
+                        "expected_cardinality"
+                    ],
+                    "minimum_cardinality": manifest_row[
+                        "minimum_cardinality"
+                    ],
+                    "maximum_cardinality": manifest_row[
+                        "maximum_cardinality"
+                    ],
+                    "required_role_ids": manifest_row["required_role_ids"],
+                    "members": member_references,
+                    "member_set_hash": manifest_row["member_set_hash"],
+                    "ordered_member_tuple_hash": manifest_row[
+                        "ordered_member_tuple_hash"
+                    ],
+                    "authoritative_collection_hash": manifest_row[
+                        "authoritative_collection_hash"
+                    ],
+                    "validator_name": manifest_row["validator_name"],
+                    "validator_version": manifest_row["validator_version"],
+                    "sealed_at_utc": self.receipt.started_at_utc,
+                    "manifest_hash": manifest_row["manifest_hash"],
+                })
+                exact_manifest_fields = (
+                    "required_member_manifest_id",
+                    "required_member_set_proposal_id",
+                    "required_member_set_proposal_hash",
+                    "extraction_candidate_batch_id",
+                    "extraction_candidate_batch_hash",
+                    "source_corpus_manifest_id",
+                    "source_corpus_manifest_hash",
+                    "source_unit_manifest_id",
+                    "source_unit_manifest_hash",
+                    "domain_contract_hash",
+                    "completeness_requirement_id",
+                    "completeness_requirement_hash",
+                    "hierarchy_hash",
+                    "identity_policy_hash",
+                    "scope_canonical_id",
+                    "membership_semantic_relationship_id",
+                    "expected_cardinality",
+                    "minimum_cardinality",
+                    "maximum_cardinality",
+                    "member_set_hash",
+                    "ordered_member_tuple_hash",
+                    "authoritative_collection_hash",
+                    "validator_name",
+                    "validator_version",
+                    "manifest_hash",
+                )
+                if (
+                    any(
+                        getattr(validated_manifest, field)
+                        != manifest_row[field]
+                        for field in exact_manifest_fields
+                    )
+                    or validated_manifest.required_role_ids
+                    != tuple(manifest_row["required_role_ids"])
+                    or validated_manifest.ordering_policy != ordering_policy
+                    or validated_manifest.members != member_references
+                ):
+                    raise ValueError(
+                        "required-member manifest physical order or fields "
+                        "are not canonical"
+                    )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "required-member rows do not satisfy carried C0 authority "
+                    f"{manifest_id}"
+                ) from exc
             ids = [
                 f"{manifest_id}|{row['member_canonical_id']}" for row in members
             ]
