@@ -8,7 +8,9 @@ from fabric_kg_builder.infra.apply import (
     _arm_authority_record,
     apply_plan,
     load_outputs,
+    load_state,
     save_outputs,
+    save_state,
 )
 from fabric_kg_builder.infra.runner import FakeCommandRunner
 from fabric_kg_builder.infra.runtime_sync import sync_runtime_configuration
@@ -317,7 +319,7 @@ def test_connected_resource_rejects_endpoint_query_and_fragment(tmp_path):
 
 
 def test_save_outputs_rejects_query_endpoint_before_persistence(tmp_path):
-    with pytest.raises(ValueError, match="without userinfo, query"):
+    with pytest.raises(ValueError, match="safe HTTPS endpoint"):
         save_outputs(
             {
                 "searchEndpoint": (
@@ -329,6 +331,154 @@ def test_save_outputs_rejects_query_endpoint_before_persistence(tmp_path):
         )
 
     assert not (tmp_path / "infra" / "dev" / "outputs.json").exists()
+
+
+def test_save_outputs_omits_nested_credential_containers(tmp_path):
+    secret = "opaque-short-secret"
+    path = save_outputs(
+        {
+            "searchEndpoint": "https://search.example.test",
+            "credentials": {
+                "primaryKey": secret,
+                "nested": [{"secondaryKey": secret}],
+            },
+            "keys": [{"secretAccessKey": secret}],
+        },
+        tmp_path,
+        "dev",
+    )
+
+    persisted = path.read_text(encoding="utf-8")
+    assert secret not in persisted
+    assert json.loads(persisted) == {
+        "searchEndpoint": "https://search.example.test"
+    }
+
+
+def test_save_outputs_rejects_unknown_nested_authority(tmp_path):
+    with pytest.raises(ValueError, match="Unknown infrastructure output"):
+        save_outputs(
+            {
+                "metadata": {
+                    "credentials": {"primaryKey": "opaque-short"}
+                }
+            },
+            tmp_path,
+            "dev",
+        )
+
+
+@pytest.mark.parametrize("value", [7, True, {"value": "nested"}])
+def test_save_outputs_rejects_non_string_target_values(
+    tmp_path,
+    value,
+):
+    with pytest.raises(ValueError, match="must be a string|scalar"):
+        save_outputs(
+            {"searchEndpoint": value},
+            tmp_path,
+            "dev",
+        )
+
+
+def test_load_outputs_rewrites_nested_credentials(tmp_path):
+    path = tmp_path / "infra" / "dev" / "outputs.json"
+    path.parent.mkdir(parents=True)
+    secret = "opaque-loaded-secret"
+    path.write_text(
+        json.dumps({
+            "searchEndpoint": "https://search.example.test",
+            "credentials": {
+                "keys": [{"primaryKey": secret}]
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    outputs = load_outputs(tmp_path, "dev")
+
+    assert outputs == {
+        "searchEndpoint": "https://search.example.test"
+    }
+    assert secret not in path.read_text(encoding="utf-8")
+
+
+def test_load_and_save_state_sanitizes_nested_credentials(tmp_path):
+    state_path = tmp_path / "infra" / "dev" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    secret = "opaque-state-secret"
+    state_path.write_text(
+        json.dumps({
+            "schema_version": "1.0",
+            "environment": "dev",
+            "last_operation": "apply",
+            "last_operation_id": (
+                "00000000-0000-4000-8000-000000000001"
+            ),
+            "last_operation_status": "succeeded",
+            "managed_resource_ids": {
+                "Microsoft.Search/searchServices": (
+                    "/subscriptions/sub/resourceGroups/rg/providers/"
+                    "Microsoft.Search/searchServices/search-one"
+                )
+            },
+            "adopted_resource_ids": {},
+            "outputs": {
+                "searchEndpoint": "https://search.example.test",
+                "credentials": {"primaryKey": secret},
+            },
+            "credentials": {
+                "keys": [{"secretAccessKey": secret}]
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    state = load_state(tmp_path, "dev")
+    saved = save_state(state, tmp_path)
+    persisted = saved.read_text(encoding="utf-8")
+
+    assert secret not in persisted
+    assert state.outputs == {
+        "searchEndpoint": "https://search.example.test"
+    }
+    assert "credentials" not in json.loads(persisted)
+
+
+@pytest.mark.parametrize(
+    "state_update",
+    [
+        {"last_operation_id": "A" * 32},
+        {
+            "managed_resource_ids": {
+                "Fabric/Workspace": "A" * 32,
+            }
+        },
+    ],
+)
+def test_load_state_rejects_secret_shaped_allowed_fields(
+    tmp_path,
+    state_update,
+):
+    state_path = tmp_path / "infra" / "dev" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    payload = {
+        "schema_version": "1.0",
+        "environment": "dev",
+        "last_operation": "apply",
+        "last_operation_id": (
+            "00000000-0000-4000-8000-000000000001"
+        ),
+        "last_operation_status": "succeeded",
+        "managed_resource_ids": {},
+        "adopted_resource_ids": {},
+        "outputs": {},
+    }
+    payload.update(state_update)
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="UUID|invalid ID"):
+        load_state(tmp_path, "dev")
 
 
 def test_connected_foundry_project_never_synthesizes_missing_endpoint(

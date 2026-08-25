@@ -44,13 +44,13 @@ scripts/smoke-0.2.4-local.sh
 Full fast suite:
 
 ```text
-3069 passed, 2 skipped, 4 deselected
+3081 passed, 2 skipped, 4 deselected
 ```
 
 Focused hardening result:
 
 ```text
-223 passed
+235 passed
 ```
 
 The wheel and the exact locked core/dev dependency closure were installed into
@@ -89,8 +89,8 @@ remains delegated to the existing CI 3.10 matrix.
 
 | Artifact | SHA-256 |
 |---|---|
-| `fabric_kg_builder-0.2.4-py3-none-any.whl` | `fd82af5e875676940c9484f00d574e0f74382d8d1ba43535b82f03e733e0608f` |
-| `fabric_kg_builder-0.2.4.tar.gz` | `acac4fa63d91242c3382c0a1e5fcb4a19ba754f44f33beadc069a50f22a9b177` |
+| `fabric_kg_builder-0.2.4-py3-none-any.whl` | `e21d890bf27f6679dad3617f6c9fdba6481adeb8de19541f690a7fe0c25af76b` |
+| `fabric_kg_builder-0.2.4.tar.gz` | `c40dff1801af754ee8930b20a9cf0d239f0c661cd685fae6f3a467a4030c2655` |
 
 ## Acceptance status
 

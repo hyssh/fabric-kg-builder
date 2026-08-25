@@ -1138,17 +1138,15 @@ def _load_infrastructure_outputs_authority(
         raise BuildDeployError(
             "Infrastructure output authority must be a JSON object."
         )
-    for key in payload:
-        key_text = str(key)
-        if _is_non_authority_key(key_text):
-            continue
-        if _canonical_authority_key(key_text) not in (
-            _INFRA_OUTPUT_AUTHORITY_KEYS
-        ):
-            raise BuildDeployError(
-                f"Unknown infrastructure output authority field: {key_text}"
-            )
-    safe = _secret_free_authority(payload)
+    from fabric_kg_builder.infra.authority import (
+        sanitize_infrastructure_outputs,
+    )
+
+    try:
+        typed_outputs = sanitize_infrastructure_outputs(payload)
+    except ValueError as exc:
+        raise BuildDeployError(str(exc)) from exc
+    safe = _secret_free_authority(typed_outputs)
     _assert_complete_authority(safe)
     return {
         "sha256": _canonical_json_hash(safe),
@@ -1161,6 +1159,30 @@ def _load_deployment_authority(path: Path) -> dict[str, Any]:
 
     effective = load_deployment_manifest(path).model_dump(mode="json")
     safe = _secret_free_authority(effective)
+    return {
+        "sha256": _canonical_json_hash(safe),
+        "value": safe,
+    }
+
+
+def _merge_authoritative_runtime_outputs(
+    imported_outputs: dict[str, Any],
+    authoritative_arm_outputs: dict[str, Any],
+) -> dict[str, Any]:
+    from fabric_kg_builder.infra.authority import (
+        sanitize_infrastructure_outputs,
+    )
+
+    merged = {
+        **dict(imported_outputs.get("value") or {}),
+        **dict(authoritative_arm_outputs.get("runtime_outputs") or {}),
+    }
+    try:
+        safe = sanitize_infrastructure_outputs(merged)
+    except ValueError as exc:
+        raise BuildDeployError(
+            f"Merged infrastructure output authority is invalid: {exc}"
+        ) from exc
     return {
         "sha256": _canonical_json_hash(safe),
         "value": safe,
@@ -1243,6 +1265,7 @@ def _infrastructure_authority_source(
     environment: str,
     run_root: Path,
     explicit_outputs_path: Path | None,
+    authoritative_overrides: dict[str, Any] | None = None,
 ) -> tuple[Path | None, Path | None]:
     target_outputs = run_root / "infra" / environment / "outputs.json"
     external_candidates = (
@@ -1267,6 +1290,19 @@ def _infrastructure_authority_source(
         external_authority = _load_infrastructure_outputs_authority(
             external_outputs
         )
+        if authoritative_overrides:
+            from fabric_kg_builder.infra.authority import (
+                sanitize_infrastructure_outputs,
+            )
+
+            for authority in (target_authority, external_authority):
+                assert authority is not None
+                merged = sanitize_infrastructure_outputs({
+                    **authority["value"],
+                    **authoritative_overrides,
+                })
+                authority["value"] = merged
+                authority["sha256"] = _canonical_json_hash(merged)
         if target_authority != external_authority:
             raise BuildDeployError(
                 "Run-local infrastructure outputs differ from their approved "
@@ -1305,10 +1341,20 @@ def _resolve_cli_mutation_authority(
     from fabric_kg_builder.infra.runner import RealCommandRunner
     from fabric_kg_builder.infra.schema import InfraState
 
+    authority_runner = RealCommandRunner()
+    arm_outputs = resolve_connected_arm_authority(
+        manifest,
+        authority_runner,
+    )
     outputs_path, source_state_path = _infrastructure_authority_source(
         environment=environment,
         run_root=run_root,
         explicit_outputs_path=infra_outputs_path,
+        authoritative_overrides=(
+            dict(arm_outputs.get("runtime_outputs") or {})
+            if not provision
+            else None
+        ),
     )
     imported_outputs = (
         _load_infrastructure_outputs_authority(outputs_path)
@@ -1318,17 +1364,24 @@ def _resolve_cli_mutation_authority(
     if baseline_state is not None:
         plan_state = InfraState.model_validate(baseline_state)
     elif source_state_path is not None:
+        from fabric_kg_builder.infra.authority import (
+            sanitize_infrastructure_state,
+        )
+
         plan_state = InfraState.model_validate(
-            json.loads(source_state_path.read_text(encoding="utf-8"))
+            sanitize_infrastructure_state(
+                json.loads(source_state_path.read_text(encoding="utf-8")),
+                environment=environment,
+            )
         )
     else:
         plan_state = load_state(run_root, environment)
     plan = build_plan(manifest, existing_state=plan_state)
-    authority_runner = RealCommandRunner()
-    arm_outputs = resolve_connected_arm_authority(
-        manifest,
-        authority_runner,
-    )
+    if not provision and imported_outputs is not None:
+        imported_outputs = _merge_authoritative_runtime_outputs(
+            imported_outputs,
+            arm_outputs,
+        )
     fallback_deployment_path = (
         Path("ontology") / "environments" / f"{environment}.json"
     )
@@ -2082,7 +2135,28 @@ def _import_infrastructure_state(
             raise BuildDeployError(
                 f"Could not load infrastructure state from {source_state}: {exc}"
             ) from exc
-        _atomic_json(target_state, state_payload)
+        from fabric_kg_builder.infra.authority import (
+            sanitize_infrastructure_state,
+        )
+        from fabric_kg_builder.infra.apply import save_state
+        from fabric_kg_builder.infra.schema import InfraState
+
+        try:
+            imported_state = InfraState.model_validate(
+                sanitize_infrastructure_state(
+                    state_payload,
+                    environment=environment,
+                )
+            )
+        except ValueError as exc:
+            raise BuildDeployError(
+                f"Imported infrastructure state is invalid: {exc}"
+            ) from exc
+        save_state(imported_state, run_root)
+    if target_state.exists():
+        from fabric_kg_builder.infra.apply import load_state, save_state
+
+        save_state(load_state(run_root, environment), run_root)
 
     return {
         "source_outputs": str(source_outputs),
@@ -4611,8 +4685,63 @@ def build_deploy_cmd(
             dependencies=("infrastructure_preflight",),
         )
 
-    from fabric_kg_builder.infra.apply import load_outputs
+    from fabric_kg_builder.infra.apply import load_outputs, save_outputs
     from fabric_kg_builder.infra.runtime_sync import sync_runtime_configuration
+
+    if not provision:
+        reviewed = state.data.get("resolved_mutation_authority")
+        reviewed_baseline = (
+            reviewed.get("infrastructure", {}).get("baseline_state")
+            if isinstance(reviewed, dict)
+            else None
+        )
+        refreshed_snapshot, refreshed_hash = (
+            _resolve_cli_mutation_authority(
+                manifest=manifest,
+                environment=env,
+                run_root=run_root,
+                infra_outputs_path=(
+                    infra_outputs.resolve() if infra_outputs else None
+                ),
+                provision=False,
+                deployment_manifest_path=(
+                    Path(deploy_manifest_path).resolve()
+                    if deploy_manifest_path
+                    else None
+                ),
+                densify_config_path=(
+                    Path(densify_config).resolve()
+                    if densify_config
+                    else None
+                ),
+                enabled_stages=planned_stages,
+                behavior_flags=mutation_behavior_flags,
+                baseline_state=reviewed_baseline,
+            )
+        )
+        if (
+            is_schema2
+            and live_mutation_selected
+            and (
+                refreshed_hash
+                != state.data.get("resolved_mutation_authority_hash")
+                or refreshed_snapshot != reviewed
+            )
+        ):
+            raise BuildDeployError(
+                "Fresh connected-resource authority differs from the reviewed "
+                "dry-run. Run a new --dry-run before mutation."
+            )
+        merged_runtime_outputs = (
+            refreshed_snapshot.get("infrastructure", {})
+            .get("imported_outputs", {})
+            .get("value")
+        )
+        if not isinstance(merged_runtime_outputs, dict):
+            raise BuildDeployError(
+                "No-provision execution has no validated merged outputs."
+            )
+        save_outputs(merged_runtime_outputs, run_root, env)
 
     outputs = load_outputs(run_root, env)
     if not outputs:

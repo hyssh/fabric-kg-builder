@@ -68,7 +68,22 @@ def _load_infra_outputs(environment: str) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise click.ClickException(f"Unable to read infrastructure outputs at {path}: {exc}")
-    return payload if isinstance(payload, dict) else {}
+    from fabric_kg_builder.infra.authority import (
+        sanitize_infrastructure_outputs,
+    )
+
+    try:
+        safe_outputs = sanitize_infrastructure_outputs(payload)
+    except ValueError as exc:
+        raise click.ClickException(
+            f"Invalid infrastructure outputs at {path}: {exc}"
+        ) from exc
+    if safe_outputs != payload:
+        path.write_text(
+            json.dumps(safe_outputs, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    return safe_outputs
 
 
 def _load_serving_environment(environment: str) -> dict[str, Any]:

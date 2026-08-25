@@ -35,8 +35,12 @@ _load_authority_document = _MODULE._load_authority_document
 _load_deployment_authority = _MODULE._load_deployment_authority
 _identity_authority_environment = _MODULE._identity_authority_environment
 _infrastructure_authority_source = _MODULE._infrastructure_authority_source
+_import_infrastructure_state = _MODULE._import_infrastructure_state
 _load_infrastructure_outputs_authority = (
     _MODULE._load_infrastructure_outputs_authority
+)
+_merge_authoritative_runtime_outputs = (
+    _MODULE._merge_authoritative_runtime_outputs
 )
 _resolve_live_identity_authority = _MODULE._resolve_live_identity_authority
 _runtime_environment = _MODULE._runtime_environment
@@ -1348,6 +1352,113 @@ def test_run_local_outputs_must_match_external_authority(
             run_root=run_root,
             explicit_outputs_path=external,
         )
+    selected, _ = _infrastructure_authority_source(
+        environment="dev",
+        run_root=run_root,
+        explicit_outputs_path=external,
+        authoritative_overrides={
+            "searchEndpoint": "https://search-fresh.example.test"
+        },
+    )
+    assert selected == run_outputs.resolve()
+
+
+def test_imported_state_and_outputs_never_copy_nested_credentials(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source" / "outputs.json"
+    source.parent.mkdir()
+    output_secret = "opaque-output-secret"
+    state_secret = "opaque-state-secret"
+    source.write_text(
+        json.dumps({
+            "searchEndpoint": "https://search.example.test",
+            "credentials": {
+                "keys": [{"primaryKey": output_secret}]
+            },
+        }),
+        encoding="utf-8",
+    )
+    source.with_name("state.json").write_text(
+        json.dumps({
+            "schema_version": "1.0",
+            "environment": "dev",
+            "last_operation": "apply",
+            "last_operation_id": (
+                "00000000-0000-4000-8000-000000000001"
+            ),
+            "last_operation_status": "succeeded",
+            "managed_resource_ids": {},
+            "adopted_resource_ids": {},
+            "outputs": {
+                "searchEndpoint": "https://search.example.test",
+                "secrets": {"secondaryKey": state_secret},
+            },
+            "credentials": [{"secretAccessKey": state_secret}],
+        }),
+        encoding="utf-8",
+    )
+    run_root = tmp_path / "run"
+
+    _import_infrastructure_state(
+        environment="dev",
+        run_root=run_root,
+        explicit_outputs_path=source,
+    )
+
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            run_root / "infra" / "dev" / "outputs.json",
+            run_root / "infra" / "dev" / "state.json",
+        )
+    )
+    assert output_secret not in persisted
+    assert state_secret not in persisted
+
+
+def test_same_path_import_rewrites_run_local_state_credentials(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    target = run_root / "infra" / "dev"
+    target.mkdir(parents=True)
+    secret = "opaque-run-local-secret"
+    outputs = target / "outputs.json"
+    outputs.write_text(
+        '{"searchEndpoint":"https://search.example.test"}',
+        encoding="utf-8",
+    )
+    (target / "state.json").write_text(
+        json.dumps({
+            "schema_version": "1.0",
+            "environment": "dev",
+            "last_operation": "apply",
+            "last_operation_id": (
+                "00000000-0000-4000-8000-000000000001"
+            ),
+            "last_operation_status": "succeeded",
+            "managed_resource_ids": {},
+            "adopted_resource_ids": {},
+            "outputs": {
+                "searchEndpoint": "https://search.example.test",
+                "credentials": {"primaryKey": secret},
+            },
+            "secrets": [{"secondaryKey": secret}],
+        }),
+        encoding="utf-8",
+    )
+
+    _import_infrastructure_state(
+        environment="dev",
+        run_root=run_root,
+        explicit_outputs_path=outputs,
+    )
+
+    persisted = (target / "state.json").read_text(encoding="utf-8")
+    assert secret not in persisted
+    assert "credentials" not in persisted
+    assert "secrets" not in persisted
 
 
 def test_typed_infrastructure_outputs_preserve_model_targets_and_reject_unknown(
@@ -1383,6 +1494,42 @@ def test_typed_infrastructure_outputs_preserve_model_targets_and_reject_unknown(
     )
     with pytest.raises(BuildDeployError, match="Unknown infrastructure"):
         _load_infrastructure_outputs_authority(path)
+
+
+def test_fresh_arm_endpoints_replace_all_no_provision_cached_values() -> None:
+    imported = {
+        "sha256": "sha256:" + "0" * 64,
+        "value": {
+            "blobEndpoint": "https://blob-stale.example.test",
+            "documentIntelligenceEndpoint": (
+                "https://documents-stale.example.test"
+            ),
+            "foundryEndpoint": "https://foundry-stale.example.test",
+            "foundryOpenAIEndpoint": "https://openai-stale.example.test",
+            "foundryProjectEndpoint": "https://project-stale.example.test",
+            "searchEndpoint": "https://search-stale.example.test",
+            "fabricWorkspaceId": "workspace-approved",
+        },
+    }
+    fresh = {
+        "runtime_outputs": {
+            "blobEndpoint": "https://blob-fresh.example.test",
+            "documentIntelligenceEndpoint": (
+                "https://documents-fresh.example.test"
+            ),
+            "foundryEndpoint": "https://foundry-fresh.example.test",
+            "foundryOpenAIEndpoint": "https://openai-fresh.example.test",
+            "foundryProjectEndpoint": "https://project-fresh.example.test",
+            "searchEndpoint": "https://search-fresh.example.test",
+        }
+    }
+
+    merged = _merge_authoritative_runtime_outputs(imported, fresh)
+
+    assert merged["value"]["fabricWorkspaceId"] == "workspace-approved"
+    for key, value in fresh["runtime_outputs"].items():
+        assert merged["value"][key] == value
+    assert "stale" not in str(merged)
 
 
 def test_deployment_authority_interpolates_and_preserves_all_targets(

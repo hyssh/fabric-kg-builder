@@ -26,6 +26,10 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from fabric_kg_builder.release.redact import canonicalize_https_authority
+from fabric_kg_builder.infra.authority import (
+    sanitize_infrastructure_outputs,
+    sanitize_infrastructure_state,
+)
 
 from .runner import CommandRunner, CommandError
 from .schema import (
@@ -74,15 +78,21 @@ def load_state(build_root: Path, environment: str) -> InfraState:
     if not path.exists():
         return InfraState(environment=environment)
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return InfraState.model_validate(raw)
+    return InfraState.model_validate(
+        sanitize_infrastructure_state(raw, environment=environment)
+    )
 
 
 def save_state(state: InfraState, build_root: Path) -> Path:
     """Persist state to build/infra/<env>/state.json."""
     path = _state_path(build_root, state.environment)
     path.parent.mkdir(parents=True, exist_ok=True)
+    safe_state = sanitize_infrastructure_state(
+        state.model_dump(mode="json"),
+        environment=state.environment,
+    )
     path.write_text(
-        json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True),
+        json.dumps(safe_state, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     return path
@@ -90,17 +100,7 @@ def save_state(state: InfraState, build_root: Path) -> Path:
 
 def save_outputs(outputs: dict, build_root: Path, environment: str) -> Path:
     """Persist non-secret outputs to build/infra/<env>/outputs.json."""
-    _secret_keys = {"key", "secret", "password", "token", "connection_string", "connectionstring", "sas"}
-    safe_outputs = {
-        k: v for k, v in outputs.items()
-        if not any(s in k.lower() for s in _secret_keys)
-    }
-    for key, value in list(safe_outputs.items()):
-        if key.lower().endswith("endpoint") and value not in (None, ""):
-            safe_outputs[key] = canonicalize_https_endpoint(
-                value,
-                authority=key,
-            )
+    safe_outputs = sanitize_infrastructure_outputs(outputs)
     path = _outputs_path(build_root, environment)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -115,7 +115,11 @@ def load_outputs(build_root: Path, environment: str) -> dict:
     path = _outputs_path(build_root, environment)
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    safe = sanitize_infrastructure_outputs(raw)
+    if safe != raw:
+        save_outputs(safe, build_root, environment)
+    return safe
 
 
 # ---------------------------------------------------------------------------
