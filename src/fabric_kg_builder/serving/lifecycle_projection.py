@@ -72,22 +72,16 @@ from fabric_kg_builder.enrichment.schema2_validation_stage import (
     l3_input_fingerprint,
 )
 from fabric_kg_builder.model.arrow_schemas import L4_PROJECTION_TABLE_SCHEMAS
-from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
+from fabric_kg_builder.semantic.source_tables import (
+    L4_ACCEPTED_VERSIONS,
+    L4_PROJECTION_CODE_VERSION,
+    SealedL4ServingSource,
+)
 
 L4_STAGE_NAME = "schema2-audit-serving-projection"
 L4_STAGE_CONTRACT_VERSION = "1.0.0"
-L4_PROJECTION_CODE_VERSION = "l4-projection/1.0.0"
 L4_STATE_DIR = Path(".fkg") / "l4"
 L4_RUNS_DIRNAME = "runs"
-L4_ACCEPTED_VERSIONS = {
-    **L3_ACCEPTED_VERSIONS,
-    "c0.audit_projection": "1.0.0",
-    "c0.projection_equivalence": "1.0.0",
-    "c0.semantic_serving_projection": "1.0.0",
-    "l3.classification_assertion": "1.0.0",
-    "l3.property_observation": "1.0.0",
-    "l4.projection_code": L4_PROJECTION_CODE_VERSION,
-}
 
 _TABLE_ORDER = tuple(L4_PROJECTION_TABLE_SCHEMAS)
 _PROJECTION_FILES = {
@@ -1131,7 +1125,9 @@ def _serving_rows(
                 "identity_policy_hash": hierarchy.identity_policy_hash,
             }))
 
-    served_entity_ids = {row["entity_id"] for row in entity_rows}
+    entity_type_by_id = {
+        row["entity_id"]: row["most_specific_type_id"] for row in entity_rows
+    }
     relationship_rows: list[dict[str, Any]] = []
     for (kind, relationship_id), group in sorted(by_kind_and_id.items()):
         if kind != "relationship":
@@ -1153,24 +1149,16 @@ def _serving_rows(
             definition is None
             or definition.publication_policy != "asserted_only"
             or definition.evidence_policy != "exact_span_required"
-            or source_id not in served_entity_ids
-            or target_id not in served_entity_ids
+            or source_id not in entity_type_by_id
+            or target_id not in entity_type_by_id
         ):
             raise L4ProjectionError(
                 "L4_ASSERTED_RELATIONSHIP_INVALID",
                 f"asserted relationship {relationship_id} has unpublished endpoints "
                 "or stale policy",
             )
-        source_type = next(
-            row["most_specific_type_id"]
-            for row in entity_rows
-            if row["entity_id"] == source_id
-        )
-        target_type = next(
-            row["most_specific_type_id"]
-            for row in entity_rows
-            if row["entity_id"] == target_id
-        )
+        source_type = entity_type_by_id[source_id]
+        target_type = entity_type_by_id[target_id]
         source_outcome = hierarchy.endpoint_outcome(
             semantic_relationship_id,
             source_type,

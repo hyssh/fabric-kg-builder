@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pyarrow as pa
 import pytest
 
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
@@ -16,12 +19,15 @@ from fabric_kg_builder.contracts.extraction import (
     RequiredMemberSetProposalV1_1,
 )
 from fabric_kg_builder.contracts.lifecycle import AssertionState
+from fabric_kg_builder.contracts.projection import AuditProjection
 from fabric_kg_builder.contracts.publication import ProjectionEquivalence
 from fabric_kg_builder.contracts.receipts import ArtifactManifest, StageReceipt
 from fabric_kg_builder.contracts.resources import StageResourceMetrics
 from fabric_kg_builder.enrichment import schema2_validation_stage
 from fabric_kg_builder.model.arrow_schemas import L4_PROJECTION_TABLE_SCHEMAS
 from fabric_kg_builder.semantic.source_tables import (
+    L4_ACCEPTED_VERSIONS,
+    SealedL4ServingSource,
     require_l5_publication_receipt,
     resolve_semantic_source_parquet,
 )
@@ -105,6 +111,114 @@ def _replace_manifest_entry(
     )
 
 
+def _rewrite_l4_artifact(
+    result,
+    *,
+    artifact_id: str,
+    file_name: str,
+    payload: bytes,
+) -> tuple[ArtifactManifest, StageResourceMetrics, StageReceipt]:
+    manifest = _replace_manifest_entry(
+        result.output_manifest,
+        artifact_id,
+        content_hash=hashlib.sha256(payload).hexdigest(),
+        byte_count=len(payload),
+    )
+    manifest_payload = (canonical_json(manifest) + "\n").encode("utf-8")
+    metrics_values = result.metrics.model_dump(
+        mode="python",
+        exclude={"metrics_hash"},
+    )
+    metrics_values["storage_write_bytes"] = (
+        manifest.total_byte_count + len(manifest_payload)
+    )
+    metrics = StageResourceMetrics(
+        **metrics_values,
+        metrics_hash=canonical_sha256(metrics_values),
+    )
+    receipt_values = result.receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+    )
+    receipt_values.update({
+        "output_manifest_hash": manifest.manifest_hash,
+        "resource_metrics_hash": metrics.metrics_hash,
+    })
+    receipt = StageReceipt(
+        **receipt_values,
+        receipt_hash=canonical_sha256({
+            key: value
+            for key, value in receipt_values.items()
+            if key not in {"started_at_utc", "completed_at_utc"}
+        }),
+    )
+    (result.run_root / file_name).write_bytes(payload)
+    (result.run_root / "output-manifest.json").write_bytes(manifest_payload)
+    (result.run_root / "resource-metrics.json").write_text(
+        canonical_json(metrics) + "\n",
+        encoding="utf-8",
+    )
+    (result.run_root / "stage-receipt.json").write_text(
+        canonical_json(receipt) + "\n",
+        encoding="utf-8",
+    )
+    return manifest, metrics, receipt
+
+
+def _rewrite_l4_artifacts(
+    result,
+    artifacts: tuple[tuple[str, str, bytes, dict[str, object]], ...],
+) -> tuple[ArtifactManifest, StageResourceMetrics, StageReceipt]:
+    manifest = result.output_manifest
+    for artifact_id, file_name, payload, entry_updates in artifacts:
+        manifest = _replace_manifest_entry(
+            manifest,
+            artifact_id,
+            content_hash=hashlib.sha256(payload).hexdigest(),
+            byte_count=len(payload),
+            **entry_updates,
+        )
+        (result.run_root / file_name).write_bytes(payload)
+    manifest_payload = (canonical_json(manifest) + "\n").encode("utf-8")
+    metrics_values = result.metrics.model_dump(
+        mode="python",
+        exclude={"metrics_hash"},
+    )
+    metrics_values["storage_write_bytes"] = (
+        manifest.total_byte_count + len(manifest_payload)
+    )
+    metrics = StageResourceMetrics(
+        **metrics_values,
+        metrics_hash=canonical_sha256(metrics_values),
+    )
+    receipt_values = result.receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+    )
+    receipt_values.update({
+        "output_manifest_hash": manifest.manifest_hash,
+        "resource_metrics_hash": metrics.metrics_hash,
+    })
+    receipt = StageReceipt(
+        **receipt_values,
+        receipt_hash=canonical_sha256({
+            key: value
+            for key, value in receipt_values.items()
+            if key not in {"started_at_utc", "completed_at_utc"}
+        }),
+    )
+    (result.run_root / "output-manifest.json").write_bytes(manifest_payload)
+    (result.run_root / "resource-metrics.json").write_text(
+        canonical_json(metrics) + "\n",
+        encoding="utf-8",
+    )
+    (result.run_root / "stage-receipt.json").write_text(
+        canonical_json(receipt) + "\n",
+        encoding="utf-8",
+    )
+    return manifest, metrics, receipt
+
+
 @pytest.mark.unit
 def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> None:
     l1_root, domain_path, _ = _pipeline(
@@ -162,7 +276,11 @@ def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> No
 def test_l4_parquet_is_typed_deterministic_resumable_and_corruption_safe(
     tmp_path: Path,
 ) -> None:
-    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    l1_root, domain_path, _ = _pipeline(
+        tmp_path,
+        "records",
+        mutate=_all_lifecycle_mutation,
+    )
     l3 = _l3(tmp_path, l1_root, domain_path)
     state_root = tmp_path / ".fkg" / "l4"
 
@@ -507,6 +625,809 @@ def test_schema2_source_requires_sealed_l4_and_never_falls_back_to_raw(
     assert resolve_semantic_source_parquet(legacy_root, "semantic_entities").name == (
         "entities.parquet"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", ["missing", "extra", "stale"])
+def test_schema2_source_requires_exact_l4_accepted_versions(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    accepted = dict(L4_ACCEPTED_VERSIONS)
+    if mutation == "missing":
+        accepted.pop("c0.audit_projection")
+    elif mutation == "extra":
+        accepted["future.contract"] = "1.0.0"
+    else:
+        accepted["c0.audit_projection"] = "9.9.9"
+    receipt_values = result.receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+    )
+    receipt_values["accepted_contract_versions"] = accepted
+    receipt = StageReceipt(
+        **receipt_values,
+        receipt_hash=canonical_sha256({
+            key: value
+            for key, value in receipt_values.items()
+            if key not in {"started_at_utc", "completed_at_utc"}
+        }),
+    )
+
+    with pytest.raises(ValueError, match="successful L4 receipt"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=result.output_manifest,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_rejects_cross_projection_inconsistency(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    values = result.audit_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    values["entity_assertion_ids"] = ()
+    forged = AuditProjection(
+        **values,
+        projection_hash=canonical_sha256(values),
+    )
+    payload = (canonical_json(forged) + "\n").encode("utf-8")
+    manifest, _metrics, receipt = _rewrite_l4_artifact(
+        result,
+        artifact_id="l4-audit-projection",
+        file_name="audit-projection.json",
+        payload=payload,
+    )
+
+    with pytest.raises(ValueError, match="audit projection"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_requires_exact_audit_disposition_coverage(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(
+        tmp_path,
+        "records",
+        mutate=_all_lifecycle_mutation,
+    )
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in L4_PROJECTION_TABLE_SCHEMAS
+    }
+    audit_rows = list(tables["audit_candidates"])
+    audit_rows[1] = dict(audit_rows[0])
+    tables["audit_candidates"] = tuple(audit_rows)
+
+    with pytest.raises(ValueError, match="exactly cover"):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            result.serving_projection,
+            result.projection_equivalences,
+            tables,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_derives_asserted_membership_from_audit_rows(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(
+        tmp_path,
+        "records",
+        mutate=_all_lifecycle_mutation,
+    )
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    assert not result.projection_equivalences
+    serving_entity_ids = {
+        row["entity_id"] for row in result.rows.semantic_asserted_entities
+    }
+    nonasserted_id = next(
+        row["semantic_assertion_id"]
+        for row in result.rows.audit_candidates
+        if row["candidate_kind"] == "entity"
+        and row["lifecycle_state"] != AssertionState.ASSERTED.value
+        and row["semantic_assertion_id"] not in serving_entity_ids
+    )
+    template = result.rows.semantic_asserted_entities[0]
+    added_entity = {
+        **template,
+        "entity_id": nonasserted_id,
+    }
+    added_entity["row_hash"] = canonical_sha256({
+        key: value for key, value in added_entity.items() if key != "row_hash"
+    })
+    entity_rows = tuple(sorted(
+        (*result.rows.semantic_asserted_entities, added_entity),
+        key=lambda row: row["entity_id"],
+    ))
+    template_type_rows = [
+        row
+        for row in result.rows.semantic_entity_type_assertions
+        if row["entity_id"] == template["entity_id"]
+    ]
+    added_type_rows = []
+    for row in template_type_rows:
+        added = {**row, "entity_id": nonasserted_id}
+        added["row_hash"] = canonical_sha256({
+            key: value for key, value in added.items() if key != "row_hash"
+        })
+        added_type_rows.append(added)
+    type_rows = tuple(sorted(
+        (*result.rows.semantic_entity_type_assertions, *added_type_rows),
+        key=lambda row: (
+            row["entity_id"],
+            not row["is_most_specific"],
+            row["semantic_type_id"],
+        ),
+    ))
+    entity_path = result.run_root / "semantic_asserted_entities.parquet"
+    type_path = result.run_root / "semantic_entity_type_assertions.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            list(entity_rows),
+            schema=L4_PROJECTION_TABLE_SCHEMAS["semantic_asserted_entities"],
+        ),
+        entity_path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            list(type_rows),
+            schema=L4_PROJECTION_TABLE_SCHEMAS[
+                "semantic_entity_type_assertions"
+            ],
+        ),
+        type_path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    serving_values = result.serving_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    serving_hashes = dict(result.serving_projection.canonical_id_set_hashes)
+    serving_row_hashes = dict(result.serving_projection.canonical_row_hashes)
+    entity_ids = tuple(sorted(row["entity_id"] for row in entity_rows))
+    serving_values["entity_assertion_ids"] = entity_ids
+    serving_hashes["entity"] = canonical_sha256(entity_ids)
+    serving_row_hashes["entity"] = canonical_sha256(entity_rows)
+    serving_values["canonical_id_set_hashes"] = serving_hashes
+    serving_values["canonical_row_hashes"] = serving_row_hashes
+    serving = type(result.serving_projection)(
+        **serving_values,
+        projection_hash=canonical_sha256({
+            key: value
+            for key, value in serving_values.items()
+            if key != "sealed_at_utc"
+        }),
+    )
+    audit_values = result.audit_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    audit_row_hashes = dict(result.audit_projection.canonical_row_hashes)
+    if tuple(result.audit_projection.entity_assertion_ids) == entity_ids:
+        audit_row_hashes["entity"] = serving_row_hashes["entity"]
+    audit_values["canonical_row_hashes"] = audit_row_hashes
+    audit = AuditProjection(
+        **audit_values,
+        projection_hash=canonical_sha256(audit_values),
+    )
+    manifest, _metrics, receipt = _rewrite_l4_artifacts(
+        result,
+        (
+            (
+                "l4-table:semantic_asserted_entities",
+                "semantic_asserted_entities.parquet",
+                entity_path.read_bytes(),
+                {
+                    "canonical_id_set_hash": canonical_sha256(entity_ids),
+                    "row_count": len(entity_rows),
+                },
+            ),
+            (
+                "l4-table:semantic_entity_type_assertions",
+                "semantic_entity_type_assertions.parquet",
+                type_path.read_bytes(),
+                {
+                    "canonical_id_set_hash": canonical_sha256(sorted({
+                        f"{row['entity_id']}|{row['semantic_type_id']}"
+                        for row in type_rows
+                    })),
+                    "row_count": len(type_rows),
+                },
+            ),
+            (
+                "l4-semantic-serving-projection",
+                "semantic-serving-projection.json",
+                (canonical_json(serving) + "\n").encode("utf-8"),
+                {},
+            ),
+            (
+                "l4-audit-projection",
+                "audit-projection.json",
+                (canonical_json(audit) + "\n").encode("utf-8"),
+                {},
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="audit and serving"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=serving,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_rejects_resealed_serving_lineage_mismatch(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    assert not result.projection_equivalences
+    rows = [dict(row) for row in result.rows.semantic_asserted_entities]
+    rows[0]["candidate_ids"] = ["candidate:forged"]
+    rows[0]["row_hash"] = canonical_sha256({
+        key: value for key, value in rows[0].items() if key != "row_hash"
+    })
+    rows_tuple = tuple(rows)
+    path = result.run_root / "semantic_asserted_entities.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            rows,
+            schema=L4_PROJECTION_TABLE_SCHEMAS["semantic_asserted_entities"],
+        ),
+        path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    serving_values = result.serving_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    serving_row_hashes = dict(result.serving_projection.canonical_row_hashes)
+    serving_row_hashes["entity"] = canonical_sha256(rows_tuple)
+    serving_values["canonical_row_hashes"] = serving_row_hashes
+    serving = type(result.serving_projection)(
+        **serving_values,
+        projection_hash=canonical_sha256({
+            key: value
+            for key, value in serving_values.items()
+            if key != "sealed_at_utc"
+        }),
+    )
+    audit_values = result.audit_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    audit_row_hashes = dict(result.audit_projection.canonical_row_hashes)
+    if (
+        tuple(result.audit_projection.entity_assertion_ids)
+        == tuple(result.serving_projection.entity_assertion_ids)
+    ):
+        audit_row_hashes["entity"] = serving_row_hashes["entity"]
+    audit_values["canonical_row_hashes"] = audit_row_hashes
+    audit = AuditProjection(
+        **audit_values,
+        projection_hash=canonical_sha256(audit_values),
+    )
+    manifest, _metrics, receipt = _rewrite_l4_artifacts(
+        result,
+        (
+            (
+                "l4-table:semantic_asserted_entities",
+                "semantic_asserted_entities.parquet",
+                path.read_bytes(),
+                {},
+            ),
+            (
+                "l4-semantic-serving-projection",
+                "semantic-serving-projection.json",
+                (canonical_json(serving) + "\n").encode("utf-8"),
+                {},
+            ),
+            (
+                "l4-audit-projection",
+                "audit-projection.json",
+                (canonical_json(audit) + "\n").encode("utf-8"),
+                {},
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="serving entity lineage"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=serving,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_rejects_equivalence_authority_mismatch(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    proof = result.projection_equivalences[0]
+    authority = proof.authority.model_copy(update={
+        "source_artifact_manifest_hash": "f" * 64,
+    })
+    values = proof.model_dump(mode="python", exclude={"equivalence_hash"})
+    values["authority"] = authority
+    forged = ProjectionEquivalence(
+        **values,
+        equivalence_hash=canonical_sha256(values),
+    )
+    payload = (canonical_json((forged,)) + "\n").encode("utf-8")
+    manifest, _metrics, receipt = _rewrite_l4_artifact(
+        result,
+        artifact_id="l4-parquet-projection-equivalence",
+        file_name="projection-equivalence.json",
+        payload=payload,
+    )
+
+    with pytest.raises(ValueError, match="projection equivalence"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_requires_deterministic_output_manifest_lineage(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    for updates in (
+        {"artifact_manifest_id": "artifact-manifest:foreign"},
+        {
+            "identity": result.output_manifest.identity.model_copy(update={
+                "parent_artifact_ids": ("artifact-manifest:foreign-parent",),
+            })
+        },
+    ):
+        values = result.output_manifest.model_dump(
+            mode="python",
+            exclude={"manifest_hash"},
+        )
+        values.update(updates)
+        manifest = ArtifactManifest(
+            **values,
+            manifest_hash=canonical_sha256(values),
+        )
+        receipt_values = result.receipt.model_dump(
+            mode="python",
+            exclude={"receipt_hash"},
+        )
+        receipt_values.update({
+            "output_manifest_id": manifest.artifact_manifest_id,
+            "output_manifest_hash": manifest.manifest_hash,
+        })
+        receipt = StageReceipt(
+            **receipt_values,
+            receipt_hash=canonical_sha256({
+                key: value
+                for key, value in receipt_values.items()
+                if key not in {"started_at_utc", "completed_at_utc"}
+            }),
+        )
+
+        with pytest.raises(ValueError, match="artifact manifest"):
+            SealedL4ServingSource(
+                root=result.run_root,
+                projection=result.serving_projection,
+                receipt=receipt,
+                manifest=manifest,
+            )
+
+
+@pytest.mark.unit
+def test_schema2_source_requires_l3_manifest_in_identity_ancestry(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    foreign_receipt_identity = result.receipt.identity.model_copy(update={
+        "parent_artifact_ids": ("artifact-manifest:foreign",),
+    })
+    manifest_values = result.output_manifest.model_dump(
+        mode="python",
+        exclude={"manifest_hash"},
+    )
+    manifest_values["identity"] = foreign_receipt_identity.model_copy(update={
+        "contract_kind": "c0.artifact_manifest",
+    })
+    manifest = ArtifactManifest(
+        **manifest_values,
+        manifest_hash=canonical_sha256(manifest_values),
+    )
+    serving_values = result.serving_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    serving_values["identity"] = foreign_receipt_identity.model_copy(update={
+        "contract_kind": "c0.semantic_serving_projection",
+    })
+    serving = type(result.serving_projection)(
+        **serving_values,
+        projection_hash=canonical_sha256({
+            key: value
+            for key, value in serving_values.items()
+            if key != "sealed_at_utc"
+        }),
+    )
+    receipt_values = result.receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+    )
+    receipt_values.update({
+        "identity": foreign_receipt_identity,
+        "output_manifest_hash": manifest.manifest_hash,
+    })
+    receipt = StageReceipt(
+        **receipt_values,
+        receipt_hash=canonical_sha256({
+            key: value
+            for key, value in receipt_values.items()
+            if key not in {"started_at_utc", "completed_at_utc"}
+        }),
+    )
+
+    with pytest.raises(ValueError, match="artifact manifest"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=serving,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_rejects_resealed_invalid_parquet_row_hash(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    table_name = "semantic_asserted_entities"
+    path = result.run_root / f"{table_name}.parquet"
+    rows = pq.read_table(path).to_pylist()
+    rows[0]["row_hash"] = "0" * 64
+    pq.write_table(
+        pa.Table.from_pylist(
+            rows,
+            schema=L4_PROJECTION_TABLE_SCHEMAS[table_name],
+        ),
+        path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    manifest, _metrics, receipt = _rewrite_l4_artifact(
+        result,
+        artifact_id=f"l4-table:{table_name}",
+        file_name=f"{table_name}.parquet",
+        payload=path.read_bytes(),
+    )
+
+    with pytest.raises(ValueError, match="row hash"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.unit
+def test_l4_relationship_projection_uses_entity_type_index() -> None:
+    source = inspect.getsource(lifecycle_projection._serving_rows)
+
+    assert "entity_type_by_id = {" in source
+    assert "source_type = entity_type_by_id[source_id]" in source
+    assert "target_type = entity_type_by_id[target_id]" in source
+    assert source.count("for row in entity_rows") == 1
+    assert "source_type = next(" not in source
+    assert "target_type = next(" not in source
+
+
+@pytest.mark.unit
+def test_schema2_source_rejects_duplicate_entity_type_keys(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in L4_PROJECTION_TABLE_SCHEMAS
+    }
+    type_rows = list(tables["semantic_entity_type_assertions"])
+    type_rows.append(dict(type_rows[0]))
+    tables["semantic_entity_type_assertions"] = tuple(type_rows)
+
+    with pytest.raises(ValueError, match="type assertion IDs"):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            result.serving_projection,
+            result.projection_equivalences,
+            tables,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_rejects_contradictory_type_markers_and_depths(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    base_tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in L4_PROJECTION_TABLE_SCHEMAS
+    }
+    type_rows = list(base_tables["semantic_entity_type_assertions"])
+    marker_rows = [dict(row) for row in type_rows]
+    marker_rows[0]["is_most_specific"] = False
+    marker_rows[0]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in marker_rows[0].items()
+        if key != "row_hash"
+    })
+    marker_tables = dict(base_tables)
+    marker_tables["semantic_entity_type_assertions"] = tuple(marker_rows)
+    with pytest.raises(ValueError, match="entity type assertions"):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            result.serving_projection,
+            result.projection_equivalences,
+            marker_tables,
+        )
+
+    depth_rows = [dict(row) for row in type_rows]
+    depth_rows[1]["semantic_type_id"] = depth_rows[0]["semantic_type_id"]
+    depth_rows[1]["hierarchy_depth"] = depth_rows[0]["hierarchy_depth"] + 1
+    depth_rows[1]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in depth_rows[1].items()
+        if key != "row_hash"
+    })
+    depth_tables = dict(base_tables)
+    depth_tables["semantic_entity_type_assertions"] = tuple(depth_rows)
+    with pytest.raises(
+        ValueError,
+        match="hierarchy depths|entity type assertions",
+    ):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            result.serving_projection,
+            result.projection_equivalences,
+            depth_tables,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_binds_audit_rows_to_disposition_targets(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(
+        tmp_path,
+        "records",
+        mutate=_all_lifecycle_mutation,
+    )
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in L4_PROJECTION_TABLE_SCHEMAS
+    }
+    audit_rows = [dict(row) for row in tables["audit_candidates"]]
+    deduplicated_index = next(
+        index
+        for index, row in enumerate(audit_rows)
+        if row["disposition"] == "deduplicated"
+    )
+    wrong_target = next(
+        row["candidate_id"]
+        for row in audit_rows
+        if row["disposition"] == "retained"
+        and row["candidate_id"]
+        != audit_rows[deduplicated_index]["candidate_id"]
+    )
+    audit_rows[deduplicated_index]["candidate_id"] = wrong_target
+    audit_rows[deduplicated_index]["row_hash"] = canonical_sha256({
+        key: value
+        for key, value in audit_rows[deduplicated_index].items()
+        if key != "row_hash"
+    })
+    tables["audit_candidates"] = tuple(audit_rows)
+
+    with pytest.raises(ValueError, match="disposition target"):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            result.serving_projection,
+            result.projection_equivalences,
+            tables,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_reconciles_relationship_hierarchy_authority(
+    tmp_path: Path,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    result = run_l4(
+        _l3(tmp_path, l1_root, domain_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in L4_PROJECTION_TABLE_SCHEMAS
+    }
+    entities = tables["semantic_asserted_entities"]
+    relationship = {
+        "relationship_id": "relationship:forged",
+        "semantic_relationship_id": "semantic-relationship:forged",
+        "source_entity_id": entities[0]["entity_id"],
+        "target_entity_id": entities[1]["entity_id"],
+        "candidate_ids": ["candidate:forged"],
+        "evidence_span_ids": list(entities[0]["evidence_span_ids"]),
+        "source_inheritance_path": [],
+        "target_inheritance_path": [],
+        "hierarchy_hash": "f" * 64,
+        "domain_contract_hash": result.serving_projection.sealed_domain_contract_hash,
+        "semantic_contract_hash": (
+            result.serving_projection.sealed_semantic_contract_hash
+        ),
+    }
+    relationship["row_hash"] = canonical_sha256(relationship)
+    tables["semantic_asserted_relationships"] = (relationship,)
+    serving_values = result.serving_projection.model_dump(
+        mode="python",
+        exclude={"projection_hash"},
+    )
+    id_hashes = dict(result.serving_projection.canonical_id_set_hashes)
+    row_hashes = dict(result.serving_projection.canonical_row_hashes)
+    id_hashes["relationship"] = canonical_sha256(["relationship:forged"])
+    row_hashes["relationship"] = canonical_sha256([relationship])
+    serving_values.update({
+        "relationship_assertion_ids": ("relationship:forged",),
+        "canonical_id_set_hashes": id_hashes,
+        "canonical_row_hashes": row_hashes,
+    })
+    serving = type(result.serving_projection)(
+        **serving_values,
+        projection_hash=canonical_sha256({
+            key: value
+            for key, value in serving_values.items()
+            if key != "sealed_at_utc"
+        }),
+    )
+    object.__setattr__(source, "projection", serving)
+
+    with pytest.raises(ValueError, match="hierarchy authority"):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            serving,
+            result.projection_equivalences,
+            tables,
+        )
+
+
+@pytest.mark.unit
+def test_schema2_source_reconciles_required_member_authority_hashes(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in L4_PROJECTION_TABLE_SCHEMAS
+    }
+    for table_name in (
+        "semantic_required_member_manifests",
+        "semantic_required_members",
+    ):
+        rows = [dict(row) for row in tables[table_name]]
+        for row in rows:
+            row["hierarchy_hash"] = "f" * 64
+            row["identity_policy_hash"] = "e" * 64
+            row["row_hash"] = canonical_sha256({
+                key: value for key, value in row.items() if key != "row_hash"
+            })
+        tables[table_name] = tuple(rows)
+
+    with pytest.raises(ValueError, match="hierarchy authority"):
+        source._validate_cross_artifact_invariants(
+            result.audit_projection,
+            result.serving_projection,
+            result.projection_equivalences,
+            tables,
+        )
 
 
 @pytest.mark.unit
