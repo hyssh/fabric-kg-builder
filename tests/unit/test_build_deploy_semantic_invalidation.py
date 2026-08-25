@@ -25,6 +25,7 @@ _STAGE_DEPENDENCIES = _MODULE._STAGE_DEPENDENCIES
 _approve_schema2_live_plan = _MODULE._approve_schema2_live_plan
 _build_resolved_mutation_snapshot = _MODULE._build_resolved_mutation_snapshot
 _canonical_authority_key = _MODULE._canonical_authority_key
+_canonical_json_hash = _MODULE._canonical_json_hash
 _load_authority_document = _MODULE._load_authority_document
 _secret_free_authority = _MODULE._secret_free_authority
 BuildDeployError = _MODULE.BuildDeployError
@@ -766,6 +767,26 @@ def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
         "clientCertificate",
         "certificateData",
         "privateMaterial",
+        "primaryKey",
+        "backupPrimaryKey",
+        "primaryKeyValue",
+        "BACKUPPRIMARYKEYVALUE",
+        "secondaryKey",
+        "secondary_key",
+        "secretAccessKey",
+        "accessKey",
+        "sharedKey",
+        "masterKey",
+        "adminKey",
+        "functionKey",
+        "hostKey",
+        "BACKUPPASSWORDVALUE",
+        "BACKUPTOKENVALUE",
+        "BACKUPSECRETVALUE",
+        "BACKUPAUTHORIZATIONVALUE",
+        "BACKUPCREDENTIALVALUE",
+        "BACKUPCERTIFICATEVALUE",
+        "BACKUPSUBSCRIPTIONKEYVALUE",
     )
     opaque_values = {
         key: f"opaque-value-{index:02d}"
@@ -773,7 +794,10 @@ def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
     }
     authority = {
         "endpoint": "https://service.example.test",
-        "resourceId": "/subscriptions/sub/resourceGroups/rg/resources/item",
+        "resourceId": (
+            "/subscriptions/sub/resourceGroups/rg/providers/"
+            "Microsoft.Example/resources/item"
+        ),
         "nested": [
             {"safeName": "resource-name", **opaque_values},
             {
@@ -805,7 +829,9 @@ def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
         assert secret not in str(snapshot)
         assert secret not in persisted
     assert sanitized["endpoint"] == "https://service.example.test"
-    assert sanitized["resourceId"].endswith("/resources/item")
+    assert sanitized["resourceId"].endswith(
+        "/Microsoft.Example/resources/item"
+    )
     assert sanitized["nested"][0]["safeName"] == "resource-name"
     assert set(snapshot_hash) <= set("sha256:0123456789abcdef")
 
@@ -841,6 +867,201 @@ def test_authority_document_hash_ignores_redacted_credential_changes(
     assert first_hash == second_hash
     assert "opaque-one" not in str(first_snapshot)
     assert "opaque-two" not in str(second_snapshot)
+
+
+def test_safe_endpoint_and_arm_id_bypass_generic_secret_scanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "fabric_kg_builder.release.redact.looks_like_secret",
+        lambda _value: True,
+    )
+    resource_id = (
+        "/subscriptions/00000000-0000-4000-8000-000000000001/"
+        "resourceGroups/release-resource-group-with-a-long-name/providers/"
+        "Microsoft.Search/searchServices/search-service-with-a-long-name"
+    )
+
+    sanitized = _secret_free_authority({
+        "endpoint": (
+            "https://Search-Service-With-A-Long-Name.Example.Test/"
+            "api/projects/release?sig=opaque-sas#fragment"
+        ),
+        "resourceId": resource_id,
+        "safeName": "ordinary-but-non-allowlisted",
+    })
+
+    assert sanitized["endpoint"] == (
+        "https://search-service-with-a-long-name.example.test/"
+        "api/projects/release"
+    )
+    assert sanitized["resourceId"] == resource_id
+    assert sanitized["safeName"] == "[REDACTED_NON_AUTHORITY]"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (
+            "endpoint",
+            "https://user:password@service.example.test/path",
+        ),
+        ("endpoint", "http://service.example.test/path"),
+        (
+            "endpoint",
+            "https://service.example.test/AccountKey="
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/PrimaryKey/short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/Secondary_Key=short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/SecretAccessKey/short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/FunctionKey/short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/HostKey/short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/SharedAccessKey/short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/%50rimary%4Bey/short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/api/PRIMARYKEY/opaque-short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/"
+            "%25252550rimary%2525254Bey/opaque-short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/"
+            "%252542ACKUPCONNECTIONSTRINGVALUE/opaque-short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/"
+            "%252542ACKUPPASSWORDVALUE/opaque-short",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/"
+            "%252542ACKUPSUBSCRIPTIONKEYVALUE/opaque-short",
+        ),
+        (
+            "resourceId",
+            "/subscriptions/sub/resourceGroups/rg/providers/"
+            "Microsoft.Example/resources/item?sig=opaque",
+        ),
+        (
+            "resourceId",
+            "/subscriptions/sub/resourceGroups/rg/resources/item",
+        ),
+    ],
+)
+def test_unsafe_endpoint_and_resource_authority_is_rejected(
+    key: str,
+    value: str,
+) -> None:
+    assert _secret_free_authority({key: value})[key] == (
+        "[REDACTED_NON_AUTHORITY]"
+    )
+
+
+def test_distinct_long_endpoint_and_resource_ids_change_authority_hash() -> None:
+    first = _secret_free_authority({
+        "endpoint": "https://service-one-with-a-long-name.example.test/api",
+        "resourceId": (
+            "/subscriptions/sub/resourceGroups/rg/providers/"
+            "Microsoft.Example/resources/"
+            "resource-with-a-long-distinct-name-one"
+        ),
+    })
+    second = _secret_free_authority({
+        "endpoint": "https://service-two-with-a-long-name.example.test/api",
+        "resourceId": (
+            "/subscriptions/sub/resourceGroups/rg/providers/"
+            "Microsoft.Example/resources/"
+            "resource-with-a-long-distinct-name-two"
+        ),
+    })
+
+    assert first["endpoint"] != second["endpoint"]
+    assert first["resourceId"] != second["resourceId"]
+    assert _canonical_json_hash(first) != _canonical_json_hash(second)
+
+
+def test_dynamic_arm_state_maps_preserve_distinct_resource_authority() -> None:
+    first_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.Search/searchServices/"
+        "search-service-with-a-long-distinct-name-one"
+    )
+    second_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.Search/searchServices/"
+        "search-service-with-a-long-distinct-name-two"
+    )
+    first, first_hash = _mutation_authority(
+        infrastructure_baseline_state={
+            "environment": "test",
+            "managed_resource_ids": {
+                "Microsoft.Search/searchServices": first_id,
+            },
+        },
+    )
+    second, second_hash = _mutation_authority(
+        infrastructure_baseline_state={
+            "environment": "test",
+            "managed_resource_ids": {
+                "Microsoft.Search/searchServices": second_id,
+            },
+        },
+    )
+
+    assert first_id in str(first)
+    assert second_id in str(second)
+    assert first_hash != second_hash
+
+
+def test_secret_bearing_endpoint_path_never_enters_snapshot_state(
+    tmp_path: Path,
+) -> None:
+    secret = "A" * 32
+    endpoint = f"https://service.example.test/AccountKey={secret}"
+    snapshot, snapshot_hash = _mutation_authority(
+        imported_outputs={"value": {"searchEndpoint": endpoint}},
+    )
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    state.data["resolved_mutation_authority"] = snapshot
+    state.data["resolved_mutation_authority_hash"] = snapshot_hash
+    state.save()
+
+    persisted = (tmp_path / "state.json").read_text(encoding="utf-8")
+    assert endpoint not in str(snapshot)
+    assert secret not in persisted
+    assert "AccountKey" not in persisted
 
 
 def test_approved_snapshot_retry_is_unchanged_after_partial_failure(

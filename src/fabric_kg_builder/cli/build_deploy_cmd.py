@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import click
 import yaml
@@ -82,6 +82,72 @@ _NON_AUTHORITY_KEY_SUFFIXES = frozenset({
     "subscriptionkey",
     "token",
 })
+_NON_AUTHORITY_KEY_MARKERS = frozenset({
+    "accesskey",
+    "accountkey",
+    "adminkey",
+    "apikey",
+    "clientsecret",
+    "functionkey",
+    "hostkey",
+    "masterkey",
+    "primarykey",
+    "privatekey",
+    "secondarykey",
+    "secretaccesskey",
+    "sharedaccesskey",
+    "sharedkey",
+    "signingkey",
+    "storageaccountkey",
+})
+_NON_AUTHORITY_COMPOUND_MARKERS = (
+    _NON_AUTHORITY_KEY_MARKERS
+    | frozenset({
+        "accesstoken",
+        "certificatedata",
+        "certificatematerial",
+        "clientsecret",
+        "connectionstring",
+        "authorization",
+        "certificate",
+        "credential",
+        "idtoken",
+        "password",
+        "privatematerial",
+        "refreshtoken",
+        "sas",
+        "sastoken",
+        "secret",
+        "subscriptionkey",
+        "token",
+    })
+)
+_NON_AUTHORITY_KEY_SEQUENCES = (
+    ("access", "key"),
+    ("account", "key"),
+    ("admin", "key"),
+    ("api", "key"),
+    ("client", "secret"),
+    ("function", "key"),
+    ("host", "key"),
+    ("master", "key"),
+    ("primary", "key"),
+    ("private", "key"),
+    ("secondary", "key"),
+    ("secret", "access", "key"),
+    ("shared", "access", "key"),
+    ("shared", "key"),
+    ("signing", "key"),
+    ("storage", "account", "key"),
+)
+_NON_AUTHORITY_SECURITY_TOKENS = frozenset({
+    "authorization",
+    "certificate",
+    "credential",
+    "password",
+    "secret",
+    "token",
+})
 _NON_AUTHORITY_SOURCE_SUFFIXES = frozenset({
     "body",
     "bodytext",
@@ -97,6 +163,25 @@ _NON_AUTHORITY_SOURCE_SUFFIXES = frozenset({
     "sourcetext",
     "text",
 })
+_ARM_RESOURCE_ID_KEYS = frozenset({
+    "chatdeploymentid",
+    "containerregistryid",
+    "documentintelligenceid",
+    "embeddingdeploymentid",
+    "foundryaccountid",
+    "foundryprojectid",
+    "identityid",
+    "resourceid",
+    "searchserviceid",
+    "storageaccountid",
+})
+_ARM_RESOURCE_ID = re.compile(
+    r"^/subscriptions/(?P<subscription>[^/?#\s]+)"
+    r"/resourceGroups/(?P<resource_group>[^/?#\s]+)"
+    r"/providers/(?P<provider>[^/?#\s]+)"
+    r"(?P<resources>(?:/[^/?#\s]+/[^/?#\s]+)+)/?$",
+    re.IGNORECASE,
+)
 
 _STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "semantic_compatibility": ("domain_gate",),
@@ -244,21 +329,41 @@ def _canonical_json_hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _canonical_authority_key(field_name: str) -> str:
-    """Normalize camel/Pascal/separator key variants for security checks."""
+def _authority_key_tokens(field_name: str) -> tuple[str, ...]:
+    """Split camel/Pascal/separator key variants into lowercase tokens."""
     separated = re.sub(
         r"([A-Z]+)([A-Z][a-z])",
         r"\1_\2",
         str(field_name),
     )
     separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
-    return "".join(re.findall(r"[A-Za-z0-9]+", separated)).lower()
+    return tuple(
+        token.lower()
+        for token in re.findall(r"[A-Za-z0-9]+", separated)
+    )
+
+
+def _canonical_authority_key(field_name: str) -> str:
+    """Canonical key used for allowlist and denylist comparisons."""
+    return "".join(_authority_key_tokens(field_name))
 
 
 def _is_non_authority_key(field_name: str) -> bool:
     canonical = _canonical_authority_key(field_name)
+    tokens = _authority_key_tokens(field_name)
+    contains_security_sequence = any(
+        tokens[index:index + len(sequence)] == sequence
+        for sequence in _NON_AUTHORITY_KEY_SEQUENCES
+        for index in range(len(tokens) - len(sequence) + 1)
+    )
     return (
         canonical in _NON_AUTHORITY_EXACT_KEYS
+        or contains_security_sequence
+        or any(
+            marker in canonical
+            for marker in _NON_AUTHORITY_COMPOUND_MARKERS
+        )
+        or any(token in _NON_AUTHORITY_SECURITY_TOKENS for token in tokens)
         or any(
             canonical.endswith(suffix)
             for suffix in (
@@ -269,9 +374,69 @@ def _is_non_authority_key(field_name: str) -> bool:
     )
 
 
+def _canonical_https_authority(value: str) -> str | None:
+    candidate = value.strip()
+    if not candidate or any(
+        character.isspace() or ord(character) < 32
+        for character in candidate
+    ):
+        return None
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    decoded_path = parsed.path
+    for _ in range(8):
+        expanded = unquote(decoded_path)
+        if expanded == decoded_path:
+            break
+        decoded_path = expanded
+    else:
+        return None
+    if re.search(r"%[0-9A-Fa-f]{2}", decoded_path):
+        return None
+    canonical_path = _canonical_authority_key(decoded_path)
+    if (
+        _is_non_authority_key(decoded_path)
+        or any(
+            marker in canonical_path
+            for marker in _NON_AUTHORITY_COMPOUND_MARKERS
+        )
+    ):
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit(("https", netloc, parsed.path, "", ""))
+
+
+def _canonical_arm_resource_id(value: str) -> str | None:
+    match = _ARM_RESOURCE_ID.fullmatch(value.strip())
+    if match is None:
+        return None
+    return (
+        f"/subscriptions/{match.group('subscription')}"
+        f"/resourceGroups/{match.group('resource_group')}"
+        f"/providers/{match.group('provider')}"
+        f"{match.group('resources').rstrip('/')}"
+    )
+
+
 def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
     """Remove source/auth material while preserving mutation authority."""
-    from fabric_kg_builder.release.redact import looks_like_secret
+    from fabric_kg_builder.release.redact import (
+        looks_like_secret,
+        redact_secret_text,
+    )
 
     if field_name and _is_non_authority_key(field_name):
         return _NON_AUTHORITY_PLACEHOLDER
@@ -286,6 +451,23 @@ def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
             for item in value
         ]
     if isinstance(value, str):
+        canonical_key = _canonical_authority_key(field_name)
+        if canonical_key.endswith("endpoint"):
+            endpoint = _canonical_https_authority(value)
+            if (
+                endpoint is None
+                or redact_secret_text(endpoint) != endpoint
+            ):
+                return _NON_AUTHORITY_PLACEHOLDER
+            return endpoint
+        if canonical_key in _ARM_RESOURCE_ID_KEYS:
+            return (
+                _canonical_arm_resource_id(value)
+                or _NON_AUTHORITY_PLACEHOLDER
+            )
+        arm_resource_id = _canonical_arm_resource_id(value)
+        if arm_resource_id is not None:
+            return arm_resource_id
         if looks_like_secret(value):
             return _NON_AUTHORITY_PLACEHOLDER
         parsed = urlsplit(value)
