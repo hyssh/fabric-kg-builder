@@ -11,6 +11,8 @@ from .assertions import (
     CanonicalRelationshipAssertion,
 )
 from .adapters import (
+    TrustedL1DesignEvidenceManifestContext,
+    adapt_evidence_span_v1_0_to_v1_1,
     assert_domain_hash_authority,
     checkpoint_fingerprint_from_authority,
     identity_from_common_lineage,
@@ -21,12 +23,20 @@ from .base import (
     CONTRACT_VERSION,
     ContractError,
     ContractModel,
+    EvidencePurposeAmbiguousError,
+    EvidencePurposePromotionError,
     UnknownContractKindError,
     UnknownContractMajorError,
     canonical_json,
     canonical_sha256,
 )
-from .evidence import EvidenceSpan, SourceUnit
+from .evidence import (
+    EvidencePurpose,
+    EvidenceSpan,
+    EvidenceSpanV1_0,
+    EvidenceSpanV1_1,
+    SourceUnit,
+)
 from .extraction import (
     ExtractionAuthorityReferences,
     ExtractionCandidateBatch,
@@ -55,6 +65,8 @@ from .receipts import (
 )
 from .registry import (
     REGISTERED_CONTRACTS,
+    REGISTERED_CONTRACT_VERSIONS,
+    SUPPORTED_VERSIONS,
     negotiate_contract,
     parse_contract,
     write_registered_schemas,
@@ -75,12 +87,18 @@ __all__ = [
     "CanonicalRelationshipAssertion",
     "ContractError",
     "ContractModel",
+    "EvidencePurpose",
+    "EvidencePurposeAmbiguousError",
+    "EvidencePurposePromotionError",
     "EvidenceSpan",
+    "EvidenceSpanV1_0",
+    "EvidenceSpanV1_1",
     "ExtractionAuthorityReferences",
     "ExtractionCandidateBatch",
     "ExtractionCandidateReference",
     "ImmutableSourceLocator",
     "REGISTERED_CONTRACTS",
+    "REGISTERED_CONTRACT_VERSIONS",
     "RequiredMemberManifest",
     "RequiredMemberReference",
     "RequiredMemberSetProposal",
@@ -88,10 +106,13 @@ __all__ = [
     "SourceUnit",
     "StageReceipt",
     "StageResourceMetrics",
+    "SUPPORTED_VERSIONS",
+    "TrustedL1DesignEvidenceManifestContext",
     "UnknownContractKindError",
     "UnknownContractMajorError",
     "canonical_json",
     "canonical_sha256",
+    "adapt_evidence_span_v1_0_to_v1_1",
     "authoritative_collection_hash",
     "assert_domain_hash_authority",
     "checkpoint_fingerprint_from_authority",
