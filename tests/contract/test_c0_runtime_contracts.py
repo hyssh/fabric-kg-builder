@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from fabric_kg_builder.contracts import (
     ActivityReceipt,
+    AdjacencyEdge,
     AgenticRetrievalCoverageReceipt,
     AgenticRetrievalRequestContext,
     AuthoritativeReceiptReference,
@@ -20,6 +21,7 @@ from fabric_kg_builder.contracts import (
     CitationCanonicalMapping,
     CitationPresentation,
     CoverageBudgetObservation,
+    CoverageMemberReference,
     ExtractionAuthorityReferences,
     ImmutableSourceLocator,
     OntologyScopeEnvelope,
@@ -275,6 +277,7 @@ def ontology_scope(
         "aggregate_semantic_type_id": "type:aggregate",
         "requested_member_semantic_type_ids": ("type:component",),
         "membership_relationship_semantic_id": "relationship:has-member",
+        "approved_relationship_semantic_ids": ("relationship:has-member",),
         "requested_member_role_ids": ("role:component",),
         "required_role_ids": ("role:component",),
         "approved_graph_path_ids": ("graph-path:aggregate-members",),
@@ -430,6 +433,14 @@ def resolved_ontology_scope(
         "requested_root_semantic_type_ids": (
             envelope.canonical_root_semantic_type_ids
         ),
+        "requested_member_semantic_type_ids": (
+            envelope.requested_member_semantic_type_ids
+        ),
+        "approved_relationship_semantic_ids": (
+            envelope.approved_relationship_semantic_ids
+        ),
+        "requested_member_role_ids": envelope.requested_member_role_ids,
+        "approved_graph_path_ids": envelope.approved_graph_path_ids,
         "resolved_exact_type_ids": exact_type_ids,
         "resolved_ancestor_type_ids": (
             (expanded_type_id,) if mode == "ancestors_context" else ()
@@ -462,6 +473,8 @@ def resolved_ontology_scope(
             )
         ),
         "included_canonical_ids": entity_ids,
+        "requested_include_canonical_ids": envelope.include_canonical_ids,
+        "requested_exclude_canonical_ids": envelope.exclude_canonical_ids,
         "excluded_canonical_ids": (),
         "adjacency_edges": (),
         "collection_policy": collection_policy(
@@ -481,6 +494,9 @@ def resolved_ontology_scope(
         "search_index_fingerprint": envelope.search_index_fingerprint,
         "asserted_publication_hash": envelope.asserted_publication_hash,
         "acl_scope_hash": envelope.acl_scope_hash,
+        "project_scope_id": envelope.project_scope_id,
+        "agent_policy_id": envelope.agent_policy_id,
+        "agent_policy_hash": envelope.agent_policy_hash,
         "resolver_capability_id": "resolver:direct-gql",
         "resolver_version": "1.0.0",
         "authoritative_receipts": (
@@ -540,6 +556,7 @@ def resolved_retrieval_scope(
         "membership_relationship_semantic_id": (
             resolved.membership_relationship_semantic_id
         ),
+        "relationship_semantic_ids": resolved.relationship_semantic_ids,
         "canonical_member_ids": entity_ids,
         "canonical_key_set_hash": resolved.canonical_key_set_hash,
         "hierarchy_scope_mode": resolved.hierarchy_scope_mode,
@@ -670,6 +687,10 @@ def request_context(
         "request_activity": preview,
         "expected_canonical_key_set_hash": scope.canonical_key_set_hash,
         "expected_member_collection_hash": scope.collection_hash,
+        "expected_member_type_role_set_hash": scope.member_type_role_set_hash,
+        "expected_group_membership_hash": scope.group_membership_hash,
+        "expected_sequence_hash": scope.sequence_hash,
+        "expected_adjacency_hash": scope.adjacency_hash,
     }
     context = seal(
         AgenticRetrievalRequestContext,
@@ -705,8 +726,30 @@ def coverage_receipt(
     returned = required[:-missing] if missing else required
     missing_ids = tuple(sorted(set(required) - set(returned)))
     collection_hash = context.expected_member_collection_hash
-    returned_collection_hash = (
-        collection_hash if not missing else canonical_sha256(returned)
+    citations = tuple(
+        search_citation(entity_id=entity_id, index=index)
+        for index, entity_id in enumerate(returned)
+    )
+    returned_members = tuple(
+        seal(
+            CoverageMemberReference,
+            "member_hash",
+            {
+                "canonical_entity_id": entity_id,
+                "canonical_semantic_type_id": "type:component",
+                "member_role_id": "role:component",
+                "group_id": None,
+                "sequence_position": None,
+                "search_reference_ids": (citations[index].search_reference_id,),
+                "search_citation_envelope_ids": (
+                    citations[index].search_citation_envelope_id,
+                ),
+            },
+        )
+        for index, entity_id in enumerate(returned)
+    )
+    returned_collection_hash = canonical_sha256(
+        [item.model_dump(mode="json") for item in returned_members]
     )
     warning_codes = ("warning:output-truncated",) if truncated else ()
     failures = (
@@ -762,6 +805,8 @@ def coverage_receipt(
         "reference_count": len(returned),
         "unique_canonical_id_count": len(returned),
         "canonical_citation_count": len(returned),
+        "returned_members": returned_members,
+        "returned_adjacency_edges": (),
         "required_canonical_ids": required,
         "returned_canonical_ids": returned,
         "missing_canonical_ids": missing_ids,
@@ -770,12 +815,12 @@ def coverage_receipt(
         "orphan_canonical_ids": (),
         "required_canonical_id_set_hash": canonical_sha256(sorted(required)),
         "returned_canonical_id_set_hash": canonical_sha256(sorted(returned)),
-        "required_group_hash": HASH_D,
-        "returned_group_hash": HASH_D,
-        "required_sequence_hash": HASH_E,
-        "returned_sequence_hash": HASH_E,
-        "required_adjacency_hash": HASH_F,
-        "returned_adjacency_hash": HASH_F,
+        "required_group_hash": context.expected_group_membership_hash,
+        "returned_group_hash": context.expected_group_membership_hash,
+        "required_sequence_hash": context.expected_sequence_hash,
+        "returned_sequence_hash": context.expected_sequence_hash,
+        "required_adjacency_hash": context.expected_adjacency_hash,
+        "returned_adjacency_hash": context.expected_adjacency_hash,
         "required_role_ids": context.required_role_ids,
         "returned_role_ids": context.required_role_ids,
         "expected_cardinality": count,
@@ -795,8 +840,11 @@ def coverage_receipt(
         "citation_mappings": tuple(
             CitationCanonicalMapping(
                 canonical_entity_id=entity_id,
-                search_reference_id=f"reference:{index}",
-                search_citation_envelope_id=f"citation:{index}",
+                search_reference_id=citations[index].search_reference_id,
+                search_citation_envelope_id=(
+                    citations[index].search_citation_envelope_id
+                ),
+                search_citation_envelope_hash=citations[index].citation_hash,
             )
             for index, entity_id in enumerate(returned)
         ),
@@ -807,20 +855,40 @@ def coverage_receipt(
         "partial_response": missing > 0,
         "unsupported_capability_codes": (),
         "budget": CoverageBudgetObservation(
+            max_ontology_graph_scope_requests=(
+                query_budget_contract.max_ontology_graph_scope_requests
+            ),
+            max_agentic_retrieval_invocations=(
+                query_budget_contract.max_agentic_retrieval_invocations
+            ),
             max_agentic_internal_subqueries=(
                 query_budget_contract.max_agentic_internal_subqueries
             ),
             max_agentic_source_calls=query_budget_contract.max_agentic_source_calls,
+            max_direct_search_requests=(
+                query_budget_contract.max_direct_search_requests
+            ),
             max_output_documents=query_budget_contract.max_output_documents,
             max_output_tokens=query_budget_contract.max_output_tokens,
             max_output_bytes=query_budget_contract.max_output_bytes,
             max_runtime_milliseconds=(
                 query_budget_contract.max_runtime_milliseconds
             ),
+            max_graph_result_records=query_budget_contract.max_graph_result_records,
+            max_search_result_records=(
+                query_budget_contract.max_search_result_records
+            ),
+            observed_ontology_graph_scope_requests=1,
+            observed_agentic_retrieval_invocations=(0 if fallback else 1),
+            observed_agentic_internal_subqueries=0,
+            observed_agentic_source_calls=(0 if fallback else 1),
+            observed_direct_search_requests=(1 if fallback else 0),
             observed_output_documents=len(returned),
             observed_output_tokens=1024,
             observed_output_bytes=16384,
             observed_runtime_milliseconds=1000,
+            observed_graph_result_records=count,
+            observed_search_result_records=len(returned),
             budget_exhausted_dimensions=(
                 ("max_output_documents",) if truncated else ()
             ),
@@ -841,6 +909,7 @@ def coverage_receipt(
         originating_context=originating_context,
         originating_budget=originating_budget,
     )
+    receipt.validate_citations(citations)
     return receipt
 
 
@@ -868,7 +937,11 @@ def locator() -> ImmutableSourceLocator:
     return ImmutableSourceLocator(**values, locator_hash=canonical_sha256(values))
 
 
-def search_citation() -> SearchCitationEnvelope:
+def search_citation(
+    *,
+    entity_id: str = "entity:member-1",
+    index: int = 1,
+) -> SearchCitationEnvelope:
     quote = "Exact authorized evidence."
     source_locator = locator()
     source_identity = CanonicalIdentityEnvelope.model_validate(
@@ -884,9 +957,9 @@ def search_citation() -> SearchCitationEnvelope:
     )
     values = {
         "identity": source_identity,
-        "search_citation_envelope_id": "search-citation:member-1",
-        "search_reference_id": "search-reference:member-1",
-        "search_document_id": "delivery-document:42",
+        "search_citation_envelope_id": f"search-citation:{index}",
+        "search_reference_id": f"search-reference:{index}",
+        "search_document_id": f"delivery-document:{index}",
         "original_document_name": "Original Service Manual.pdf",
         "source_id": "source:manual",
         "source_file_id": "source-file:manual",
@@ -894,9 +967,9 @@ def search_citation() -> SearchCitationEnvelope:
         "chunk_id": "chunk:paragraph-4",
         "evidence_span_ids": ("evidence:paragraph-4",),
         "canonical_scope_id": "scope:generic",
-        "canonical_entity_ids": ("entity:member-1",),
+        "canonical_entity_ids": (entity_id,),
         "canonical_relationship_ids": ("relationship:has-member",),
-        "canonical_assertion_ids": ("assertion:member-1",),
+        "canonical_assertion_ids": (f"assertion:{entity_id}",),
         "exact_authorized_quote": quote,
         "quote_hash": canonical_sha256(quote),
         "page": 4,
@@ -945,10 +1018,14 @@ def citation_presentation(
         "governed_asset_reference_hash": citation.governed_asset_reference_hash,
     }
     presentation_hash = canonical_sha256(values)
-    return CitationPresentation(
+    presentation = CitationPresentation(
         **values,
-        transient_authorized_asset_url=transient_url,
         presentation_hash=presentation_hash,
+    )
+    return (
+        presentation.with_transient_authorized_asset_url(transient_url)
+        if transient_url is not None
+        else presentation
     )
 
 
@@ -1131,6 +1208,17 @@ def test_descendant_and_ancestor_expansion_traces_are_deterministic() -> None:
     with pytest.raises(ValidationError, match="requires deterministic expansion trace"):
         ResolvedOntologyScope.model_validate(payload)
 
+    payload = descendants.model_dump(mode="python")
+    payload["resolved_exact_type_ids"] = (
+        *descendants.resolved_exact_type_ids,
+        "type:untraced",
+    )
+    payload["resolved_scope_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "resolved_scope_hash"}
+    )
+    with pytest.raises(ValidationError, match="inconsistent resolved type sets"):
+        ResolvedOntologyScope.model_validate(payload)
+
 
 @pytest.mark.contract
 def test_scope_authority_staleness_collision_and_orphan_fail_closed() -> None:
@@ -1143,6 +1231,7 @@ def test_scope_authority_staleness_collision_and_orphan_fail_closed() -> None:
         publication_crosswalk_hash=scope.publication_crosswalk_hash,
         type_hierarchy_hash=scope.type_hierarchy_hash,
         type_closure_hash=scope.type_closure_hash,
+        graph_model_hash=scope.graph_model_hash,
         search_index_fingerprint=scope.search_index_fingerprint,
     )
     with pytest.raises(ValueError, match="stale publication crosswalk"):
@@ -1154,6 +1243,19 @@ def test_scope_authority_staleness_collision_and_orphan_fail_closed() -> None:
             publication_crosswalk_hash=HASH_F,
             type_hierarchy_hash=scope.type_hierarchy_hash,
             type_closure_hash=scope.type_closure_hash,
+            graph_model_hash=scope.graph_model_hash,
+            search_index_fingerprint=scope.search_index_fingerprint,
+        )
+    with pytest.raises(ValueError, match="stale Graph model"):
+        scope.validate_authorities(
+            canonical_key_set_hash=scope.canonical_key_set_hash,
+            acl_scope_hash=scope.acl_scope_hash,
+            asserted_publication_hash=scope.asserted_publication_hash,
+            semantic_projection_hash=scope.semantic_projection_hash,
+            publication_crosswalk_hash=scope.publication_crosswalk_hash,
+            type_hierarchy_hash=scope.type_hierarchy_hash,
+            type_closure_hash=scope.type_closure_hash,
+            graph_model_hash=HASH_E,
             search_index_fingerprint=scope.search_index_fingerprint,
         )
 
@@ -1181,6 +1283,66 @@ def test_resolved_scope_receipts_hierarchy_and_exclusions_fail_closed() -> None:
         {key: value for key, value in payload.items() if key != "resolved_scope_hash"}
     )
     with pytest.raises(ValidationError, match="receipt references"):
+        ResolvedOntologyScope.model_validate(payload)
+
+    payload = resolved.model_dump(mode="python")
+    payload["type_assertions"] = (
+        *payload["type_assertions"],
+        payload["type_assertions"][0],
+    )
+    payload["resolved_scope_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "resolved_scope_hash"}
+    )
+    with pytest.raises(ValidationError, match="assertion entity IDs must be unique"):
+        ResolvedOntologyScope.model_validate(payload)
+
+    envelope = ontology_scope()
+    payload = resolved.model_dump(mode="python")
+    payload["requested_member_role_ids"] = ()
+    payload["resolved_scope_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "resolved_scope_hash"}
+    )
+    with pytest.raises(ValidationError, match="member role exceeds"):
+        ResolvedOntologyScope.model_validate(payload)
+
+    envelope_payload = envelope.model_dump(mode="python")
+    envelope_payload["exclude_canonical_ids"] = (
+        resolved.members[0].canonical_entity_id,
+    )
+    envelope_payload["scope_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in envelope_payload.items()
+            if key != "scope_hash"
+        }
+    )
+    excluding_envelope = OntologyScopeEnvelope.model_validate(envelope_payload)
+    payload = resolved.model_dump(mode="python")
+    payload["ontology_scope_envelope_hash"] = excluding_envelope.scope_hash
+    payload["requested_exclude_canonical_ids"] = (
+        resolved.members[0].canonical_entity_id,
+    )
+    payload["excluded_canonical_ids"] = (resolved.members[0].canonical_entity_id,)
+    payload["resolved_scope_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "resolved_scope_hash"}
+    )
+    with pytest.raises(ValidationError, match="cannot remain resolved members"):
+        ResolvedOntologyScope.model_validate(payload)
+
+    payload = resolved.model_dump(mode="python")
+    payload["adjacency_edges"] = (
+        AdjacencyEdge(
+            from_canonical_entity_id="entity:outside-scope",
+            to_canonical_entity_id=resolved.members[0].canonical_entity_id,
+            relationship_semantic_id=resolved.membership_relationship_semantic_id,
+            relationship_assertion_id=resolved.assertion_ids[0],
+            evidence_span_ids=(resolved.evidence_span_ids[0],),
+        ),
+    )
+    payload["resolved_scope_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "resolved_scope_hash"}
+    )
+    with pytest.raises(ValidationError, match="endpoint is outside"):
         ResolvedOntologyScope.model_validate(payload)
 
     payload = resolved.model_dump(mode="python")
@@ -1222,6 +1384,24 @@ def test_resolved_scope_receipts_hierarchy_and_exclusions_fail_closed() -> None:
         {key: value for key, value in payload.items() if key != "retrieval_scope_hash"}
     )
     with pytest.raises(ValidationError):
+        ResolvedRetrievalScope.model_validate(payload)
+
+    payload = retrieval.model_dump(mode="python")
+    payload["graph_scope_filter"]["canonical_relationship_ids"] = (
+        "relationship:has-member",
+        "relationship:outside-authority",
+    )
+    payload["graph_scope_filter"]["filter_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload["graph_scope_filter"].items()
+            if key != "filter_hash"
+        }
+    )
+    payload["retrieval_scope_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "retrieval_scope_hash"}
+    )
+    with pytest.raises(ValidationError, match="relationships must equal"):
         ResolvedRetrievalScope.model_validate(payload)
 
 
@@ -1305,6 +1485,15 @@ def test_preview_narrowing_and_direct_prefilter_contracts() -> None:
     assert direct.vector_filter_mode == "preFilter"
     assert direct.filter_add_on is None
     assert direct.capability.preview_feature_enabled is False
+
+    budget_payload = preview_budget.model_dump(mode="python")
+    budget_payload["identity"]["project_id"] = "project:conflicting"
+    budget_payload["budget_hash"] = canonical_sha256(
+        {key: value for key, value in budget_payload.items() if key != "budget_hash"}
+    )
+    conflicting_budget = QueryBudget.model_validate(budget_payload)
+    with pytest.raises(ValueError, match="identity authority"):
+        preview.validate_budget(conflicting_budget)
 
 
 @pytest.mark.contract
@@ -1411,7 +1600,7 @@ def test_complete_coverage_rejects_hidden_activity_and_budget_gaps() -> None:
             if key != "coverage_receipt_hash"
         }
     )
-    with pytest.raises(ValidationError, match="exact bounded structural"):
+    with pytest.raises(ValidationError, match="observed internal subqueries"):
         AgenticRetrievalCoverageReceipt.model_validate(payload)
 
     budget_payload = complete.budget.model_dump(mode="python")
@@ -1420,6 +1609,22 @@ def test_complete_coverage_rejects_hidden_activity_and_budget_gaps() -> None:
     )
     with pytest.raises(ValidationError, match="exceeds undeclared"):
         CoverageBudgetObservation.model_validate(budget_payload)
+
+    budget_payload = complete.budget.model_dump(mode="python")
+    budget_payload["observed_direct_search_requests"] = 1
+    with pytest.raises(ValidationError, match="max_direct_search_requests"):
+        CoverageBudgetObservation.model_validate(budget_payload)
+
+    with pytest.raises(ValidationError, match="requires response hash"):
+        SourceCallReceipt(
+            source_call_id="source-call:unsealed",
+            knowledge_source_id="knowledge-source:generic",
+            request_hash=HASH_A,
+            response_hash=None,
+            status="succeeded",
+            matched_count=1,
+            returned_count=1,
+        )
 
 
 @pytest.mark.contract
@@ -1474,11 +1679,54 @@ def test_complete_coverage_is_anchored_to_scope_context_and_budget() -> None:
             if key != "coverage_receipt_hash"
         }
     )
-    self_attested_roles = AgenticRetrievalCoverageReceipt.model_validate(
+    with pytest.raises(ValidationError, match="returned role IDs"):
+        AgenticRetrievalCoverageReceipt.model_validate(receipt_payload)
+
+    receipt_payload = receipt.model_dump(mode="python")
+    receipt_payload["required_group_hash"] = HASH_A
+    receipt_payload["returned_group_hash"] = HASH_A
+    receipt_payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in receipt_payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="returned group hash"):
+        AgenticRetrievalCoverageReceipt.model_validate(receipt_payload)
+
+    receipt_payload = receipt.model_dump(mode="python")
+    receipt_payload["returned_collection_hash"] = HASH_A
+    receipt_payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in receipt_payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="returned collection hash"):
+        AgenticRetrievalCoverageReceipt.model_validate(receipt_payload)
+
+    citations = tuple(
+        search_citation(entity_id=entity_id, index=index)
+        for index, entity_id in enumerate(receipt.returned_canonical_ids)
+    )
+    receipt_payload = receipt.model_dump(mode="python")
+    receipt_payload["citation_mappings"][0][
+        "search_citation_envelope_hash"
+    ] = HASH_A
+    receipt_payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in receipt_payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    wrong_citation_hash = AgenticRetrievalCoverageReceipt.model_validate(
         receipt_payload
     )
-    with pytest.raises(ValueError, match="required role IDs"):
-        self_attested_roles.validate_request_context(context, budget)
+    with pytest.raises(ValueError, match="citation hash"):
+        wrong_citation_hash.validate_citations(citations)
 
     receipt_payload = receipt.model_dump(mode="python")
     receipt_payload["canonical_citation_count"] = 999
@@ -1501,9 +1749,7 @@ def test_complete_coverage_is_anchored_to_scope_context_and_budget() -> None:
             if key != "coverage_receipt_hash"
         }
     )
-    with pytest.raises(
-        ValidationError, match="source-call returns cannot be below returned documents"
-    ):
+    with pytest.raises(ValidationError, match="observed retrieval request counts"):
         AgenticRetrievalCoverageReceipt.model_validate(receipt_payload)
 
     receipt_payload = receipt.model_dump(mode="python")
@@ -1511,6 +1757,7 @@ def test_complete_coverage_is_anchored_to_scope_context_and_budget() -> None:
     receipt_payload["returned_document_count"] = 0
     receipt_payload["reference_count"] = 0
     receipt_payload["budget"]["observed_output_documents"] = 0
+    receipt_payload["budget"]["observed_search_result_records"] = 0
     receipt_payload["source_calls"] = tuple(
         {
             **call,
@@ -1578,7 +1825,17 @@ def test_citation_exactness_authorization_and_transient_url_exclusion() -> None:
     assert with_url.presentation_hash == presentation.presentation_hash
     assert canonical_json(with_url) == canonical_json(presentation)
     assert "transient_authorized_asset_url" not in with_url.model_dump(mode="json")
+    assert (
+        "transient_authorized_asset_url"
+        not in CitationPresentation.model_json_schema()["properties"]
+    )
     assert "short-lived" not in repr(with_url)
+    persisted_payload = presentation.model_dump(mode="python")
+    persisted_payload["transient_authorized_asset_url"] = (
+        "https://delivery.example.test/persisted"
+    )
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        CitationPresentation.model_validate(persisted_payload)
 
     with pytest.raises(ValidationError, match="quote_hash"):
         presentation.model_copy(
@@ -1593,6 +1850,15 @@ def test_citation_exactness_authorization_and_transient_url_exclusion() -> None:
     changed_asset = CitationPresentation.model_validate(payload)
     with pytest.raises(ValueError, match="asset hash"):
         changed_asset.validate_citation(citation)
+
+    payload = presentation.model_dump(mode="python")
+    payload["identity"]["project_id"] = "project:conflicting"
+    payload["presentation_hash"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "presentation_hash"}
+    )
+    conflicting_identity = CitationPresentation.model_validate(payload)
+    with pytest.raises(ValueError, match="identity authority"):
+        conflicting_identity.validate_citation(citation)
 
     payload = citation.model_dump(mode="python")
     payload["identity"]["source_file_id"] = "source-file:conflicting"

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from .base import (
     ContractModel,
@@ -194,6 +194,84 @@ def _validate_hash(model: ContractModel, hash_field: str) -> None:
         raise ValueError(f"{hash_field} does not match canonical contract content")
 
 
+def _validate_identity_authority(
+    child: CanonicalIdentityEnvelope,
+    parent: CanonicalIdentityEnvelope,
+    *,
+    relationship: str,
+    include_source: bool = True,
+) -> None:
+    fields = [
+        "project_id",
+        "run_id",
+        "domain_schema_version",
+        "domain_contract_hash",
+        "semantic_contract_hash",
+        "canonical_schema_version",
+    ]
+    if include_source:
+        fields.extend(
+            (
+                "asset_id",
+                "asset_version_id",
+                "source_file_id",
+                "source_unit_id",
+                "content_hash",
+                "immutable_locator",
+            )
+        )
+    if any(getattr(child, field) != getattr(parent, field) for field in fields):
+        raise ValueError(f"{relationship} identity authority differs")
+
+
+def _group_membership_hash(members: tuple[Any, ...]) -> str | None:
+    grouped = sorted(
+        (item.canonical_entity_id, item.group_id)
+        for item in members
+        if item.group_id is not None
+    )
+    return canonical_sha256(grouped) if grouped else None
+
+
+def _sequence_hash(
+    members: tuple[Any, ...],
+    *,
+    ordering_mode: Literal["unordered", "ordered"],
+) -> str | None:
+    if ordering_mode == "unordered":
+        return None
+    return canonical_sha256(
+        [
+            (item.sequence_position, item.canonical_entity_id)
+            for item in sorted(
+                members,
+                key=lambda member: (
+                    member.sequence_position
+                    if member.sequence_position is not None
+                    else -1
+                ),
+            )
+        ]
+    )
+
+
+def _adjacency_hash(edges: tuple[Any, ...]) -> str | None:
+    if not edges:
+        return None
+    return canonical_sha256(
+        sorted(
+            (
+                edge.from_canonical_entity_id,
+                edge.to_canonical_entity_id,
+                edge.relationship_semantic_id,
+                edge.relationship_assertion_id,
+                edge.evidence_span_ids,
+            )
+            for edge in edges
+        )
+    )
+
+
 def _validate_citation_identity(
     identity: CanonicalIdentityEnvelope,
     *,
@@ -262,19 +340,17 @@ def _validate_scope_type_sets(
     ):
         raise ValueError("exact_type scope must contain exact assertions only")
     if mode == "descendants" and (
-        not requested <= exact
+        exact != requested.union(descendant_type_ids)
         or not descendant_type_ids
         or ancestor_type_ids
-        or not set(descendant_type_ids) <= exact
     ):
         raise ValueError(
             "descendant expansion has inconsistent resolved type sets"
         )
     if mode == "ancestors_context" and (
-        not requested <= exact
+        exact != requested.union(ancestor_type_ids)
         or not ancestor_type_ids
         or descendant_type_ids
-        or not set(ancestor_type_ids) <= exact
     ):
         raise ValueError(
             "ancestors_context has inconsistent resolved type sets"
@@ -526,6 +602,7 @@ class OntologyScopeEnvelope(ContractModel):
     aggregate_semantic_type_id: RequiredText | None = None
     requested_member_semantic_type_ids: tuple[str, ...] = ()
     membership_relationship_semantic_id: RequiredText | None = None
+    approved_relationship_semantic_ids: tuple[str, ...] = ()
     requested_member_role_ids: tuple[str, ...] = ()
     required_role_ids: tuple[str, ...] = ()
     approved_graph_path_ids: tuple[str, ...] = ()
@@ -555,6 +632,7 @@ class OntologyScopeEnvelope(ContractModel):
         "canonical_root_semantic_type_ids",
         "explicit_canonical_entity_ids",
         "requested_member_semantic_type_ids",
+        "approved_relationship_semantic_ids",
         "requested_member_role_ids",
         "required_role_ids",
         "approved_graph_path_ids",
@@ -607,6 +685,12 @@ class OntologyScopeEnvelope(ContractModel):
         )
         if selected_ids.intersection(self.exclude_canonical_ids):
             raise ValueError("excluded canonical IDs cannot remain selected")
+        if (
+            self.membership_relationship_semantic_id is not None
+            and self.membership_relationship_semantic_id
+            not in self.approved_relationship_semantic_ids
+        ):
+            raise ValueError("membership relationship requires approved authority")
         _validate_hash(self, "scope_hash")
         return self
 
@@ -640,19 +724,17 @@ class OntologyScopeEnvelope(ContractModel):
         )
         if any(getattr(self, field) != getattr(parent, field) for field in invariant_fields):
             raise ValueError("relative scope cannot replace sealed authority or scope semantics")
-        if (
-            self.identity.project_id != parent.identity.project_id
-            or self.identity.domain_contract_hash
-            != parent.identity.domain_contract_hash
-            or self.identity.canonical_schema_version
-            != parent.identity.canonical_schema_version
-        ):
-            raise ValueError("relative scope identity authority differs from parent")
+        _validate_identity_authority(
+            self.identity,
+            parent.identity,
+            relationship="relative/parent scope",
+        )
 
         set_fields = (
             "canonical_root_semantic_type_ids",
             "explicit_canonical_entity_ids",
             "requested_member_semantic_type_ids",
+            "approved_relationship_semantic_ids",
             "requested_member_role_ids",
             "approved_graph_path_ids",
             "include_canonical_ids",
@@ -707,6 +789,10 @@ class ResolvedOntologyScope(ContractModel):
     membership_relationship_semantic_id: RequiredText
     hierarchy_scope_mode: ScopeMode
     requested_root_semantic_type_ids: tuple[str, ...] = ()
+    requested_member_semantic_type_ids: tuple[str, ...] = ()
+    approved_relationship_semantic_ids: tuple[str, ...] = ()
+    requested_member_role_ids: tuple[str, ...] = ()
+    approved_graph_path_ids: tuple[str, ...] = ()
     resolved_exact_type_ids: tuple[str, ...]
     resolved_ancestor_type_ids: tuple[str, ...] = ()
     resolved_descendant_type_ids: tuple[str, ...] = ()
@@ -723,6 +809,8 @@ class ResolvedOntologyScope(ContractModel):
     assertion_ids: tuple[str, ...]
     evidence_span_ids: tuple[str, ...]
     included_canonical_ids: tuple[str, ...]
+    requested_include_canonical_ids: tuple[str, ...] = ()
+    requested_exclude_canonical_ids: tuple[str, ...] = ()
     excluded_canonical_ids: tuple[str, ...] = ()
     adjacency_edges: tuple[AdjacencyEdge, ...] = ()
     collection_policy: RuntimeCollectionPolicy
@@ -737,6 +825,9 @@ class ResolvedOntologyScope(ContractModel):
     search_index_fingerprint: Sha256
     asserted_publication_hash: Sha256
     acl_scope_hash: Sha256
+    project_scope_id: RequiredText
+    agent_policy_id: RequiredText
+    agent_policy_hash: Sha256
     resolver_capability_id: RequiredText
     resolver_version: SemVer
     authoritative_receipts: tuple[AuthoritativeReceiptReference, ...]
@@ -745,6 +836,10 @@ class ResolvedOntologyScope(ContractModel):
 
     @field_validator(
         "requested_root_semantic_type_ids",
+        "requested_member_semantic_type_ids",
+        "approved_relationship_semantic_ids",
+        "requested_member_role_ids",
+        "approved_graph_path_ids",
         "resolved_exact_type_ids",
         "resolved_ancestor_type_ids",
         "resolved_descendant_type_ids",
@@ -752,6 +847,8 @@ class ResolvedOntologyScope(ContractModel):
         "assertion_ids",
         "evidence_span_ids",
         "included_canonical_ids",
+        "requested_include_canonical_ids",
+        "requested_exclude_canonical_ids",
         "excluded_canonical_ids",
         mode="before",
     )
@@ -816,8 +913,19 @@ class ResolvedOntologyScope(ContractModel):
             raise ValueError("resolved scope member IDs must be unique")
         if set(self.included_canonical_ids) != set(member_ids):
             raise ValueError("included canonical IDs must equal resolved members")
+        if not set(self.requested_include_canonical_ids) <= set(member_ids):
+            raise ValueError("requested include IDs must remain resolved members")
+        if set(self.requested_exclude_canonical_ids) != set(
+            self.excluded_canonical_ids
+        ):
+            raise ValueError("requested and resolved exclusions must agree")
         if set(member_ids).intersection(self.excluded_canonical_ids):
             raise ValueError("excluded canonical IDs cannot remain resolved members")
+        assertion_entity_ids = [
+            item.canonical_entity_id for item in self.type_assertions
+        ]
+        if len(assertion_entity_ids) != len(set(assertion_entity_ids)):
+            raise ValueError("resolved scope type assertion entity IDs must be unique")
         assertion_by_entity = {
             item.canonical_entity_id: item for item in self.type_assertions
         }
@@ -834,6 +942,34 @@ class ResolvedOntologyScope(ContractModel):
                 raise ValueError("member and type assertion identity disagree")
         if self.membership_relationship_semantic_id not in self.relationship_semantic_ids:
             raise ValueError("membership relationship is absent from resolved relationships")
+        if not set(self.relationship_semantic_ids) <= set(
+            self.approved_relationship_semantic_ids
+        ):
+            raise ValueError("resolved relationship exceeds approved authority")
+        edge_keys: list[tuple[str, str, str, str]] = []
+        member_id_set = set(member_ids)
+        for edge in self.adjacency_edges:
+            edge_keys.append(
+                (
+                    edge.from_canonical_entity_id,
+                    edge.to_canonical_entity_id,
+                    edge.relationship_semantic_id,
+                    edge.relationship_assertion_id,
+                )
+            )
+            if (
+                edge.from_canonical_entity_id not in member_id_set
+                or edge.to_canonical_entity_id not in member_id_set
+            ):
+                raise ValueError("adjacency edge endpoint is outside resolved members")
+            if edge.relationship_semantic_id not in self.relationship_semantic_ids:
+                raise ValueError("adjacency relationship is outside resolved authority")
+            if edge.relationship_assertion_id not in self.assertion_ids:
+                raise ValueError("adjacency assertion is outside resolved authority")
+            if not set(edge.evidence_span_ids) <= set(self.evidence_span_ids):
+                raise ValueError("adjacency evidence is outside resolved authority")
+        if len(edge_keys) != len(set(edge_keys)):
+            raise ValueError("adjacency edges must be unique")
         if self.relationship_k == 4 and self.relationship_k_4_justification is None:
             raise ValueError("relationship K=4 requires reviewed justification")
         if self.relationship_k != 4 and self.relationship_k_4_justification is not None:
@@ -857,6 +993,15 @@ class ResolvedOntologyScope(ContractModel):
         member_types = {item.canonical_semantic_type_id for item in self.members}
         if not member_types <= exact_types:
             raise ValueError("member type is absent from resolved exact types")
+        if not member_types <= set(self.requested_member_semantic_type_ids):
+            raise ValueError("member type exceeds requested member type authority")
+        member_roles = {
+            item.member_role_id
+            for item in self.members
+            if item.member_role_id is not None
+        }
+        if not member_roles <= set(self.requested_member_role_ids):
+            raise ValueError("member role exceeds requested member role authority")
         _validate_scope_type_sets(
             mode=self.hierarchy_scope_mode,
             requested_root_type_ids=self.requested_root_semantic_type_ids,
@@ -961,6 +1106,11 @@ class ResolvedOntologyScope(ContractModel):
         manifest: "RequiredMemberManifestV1_1",
     ) -> None:
         self.required_member_manifest.validate_manifest(manifest)
+        _validate_identity_authority(
+            self.identity,
+            manifest.identity,
+            relationship="resolved scope/manifest",
+        )
         manifest_members = {
             item.member_canonical_id: item for item in manifest.members
         }
@@ -1047,6 +1197,11 @@ class ResolvedOntologyScope(ContractModel):
                     )
 
     def validate_envelope(self, envelope: "OntologyScopeEnvelope") -> None:
+        _validate_identity_authority(
+            self.identity,
+            envelope.identity,
+            relationship="resolved scope/envelope",
+        )
         checks = (
             (
                 "scope envelope ID",
@@ -1063,6 +1218,26 @@ class ResolvedOntologyScope(ContractModel):
                 "requested root types",
                 self.requested_root_semantic_type_ids,
                 envelope.canonical_root_semantic_type_ids,
+            ),
+            (
+                "requested member types",
+                self.requested_member_semantic_type_ids,
+                envelope.requested_member_semantic_type_ids,
+            ),
+            (
+                "approved relationships",
+                self.approved_relationship_semantic_ids,
+                envelope.approved_relationship_semantic_ids,
+            ),
+            (
+                "requested member roles",
+                self.requested_member_role_ids,
+                envelope.requested_member_role_ids,
+            ),
+            (
+                "approved Graph paths",
+                self.approved_graph_path_ids,
+                envelope.approved_graph_path_ids,
             ),
             ("hierarchy ID", self.type_hierarchy_id, envelope.type_hierarchy_id),
             (
@@ -1120,6 +1295,19 @@ class ResolvedOntologyScope(ContractModel):
                 self.search_index_fingerprint,
                 envelope.search_index_fingerprint,
             ),
+            (
+                "requested include IDs",
+                self.requested_include_canonical_ids,
+                envelope.include_canonical_ids,
+            ),
+            (
+                "requested exclude IDs",
+                self.requested_exclude_canonical_ids,
+                envelope.exclude_canonical_ids,
+            ),
+            ("project scope ID", self.project_scope_id, envelope.project_scope_id),
+            ("agent policy ID", self.agent_policy_id, envelope.agent_policy_id),
+            ("agent policy hash", self.agent_policy_hash, envelope.agent_policy_hash),
         )
         for name, resolved, requested in checks:
             if resolved != requested:
@@ -1174,6 +1362,7 @@ class ResolvedRetrievalScope(ContractModel):
     aggregate_semantic_type_id: RequiredText
     collection_canonical_id: RequiredText
     membership_relationship_semantic_id: RequiredText
+    relationship_semantic_ids: tuple[str, ...]
     canonical_member_ids: tuple[str, ...]
     canonical_key_set_hash: Sha256
     hierarchy_scope_mode: ScopeMode
@@ -1212,6 +1401,7 @@ class ResolvedRetrievalScope(ContractModel):
 
     @field_validator(
         "canonical_member_ids",
+        "relationship_semantic_ids",
         "requested_root_semantic_type_ids",
         "resolved_exact_type_ids",
         "resolved_ancestor_type_ids",
@@ -1235,6 +1425,8 @@ class ResolvedRetrievalScope(ContractModel):
             raise ValueError("invalid scope requires validation findings")
         if set(self.include_canonical_ids).intersection(self.exclude_canonical_ids):
             raise ValueError("include and exclude canonical IDs must be disjoint")
+        if not set(self.include_canonical_ids) <= set(self.canonical_member_ids):
+            raise ValueError("included canonical IDs must remain validated members")
         if set(self.canonical_member_ids).intersection(self.exclude_canonical_ids):
             raise ValueError("excluded canonical IDs cannot remain validated members")
         if tuple(self.graph_scope_filter.canonical_entity_ids) != tuple(
@@ -1251,11 +1443,10 @@ class ResolvedRetrievalScope(ContractModel):
             raise ValueError(
                 "Graph filter ancestor types must equal resolved ancestor types"
             )
-        if (
-            self.membership_relationship_semantic_id
-            not in self.graph_scope_filter.canonical_relationship_ids
+        if tuple(self.graph_scope_filter.canonical_relationship_ids) != tuple(
+            self.relationship_semantic_ids
         ):
-            raise ValueError("Graph filter must include the membership relationship")
+            raise ValueError("Graph filter relationships must equal resolved authority")
         if self.graph_scope_filter.filter_hash == self.collection_hash:
             raise ValueError("filter and collection hashes have distinct semantics")
         if self.relationship_k == 4 and self.relationship_k_4_justification is None:
@@ -1287,6 +1478,7 @@ class ResolvedRetrievalScope(ContractModel):
         publication_crosswalk_hash: str,
         type_hierarchy_hash: str,
         type_closure_hash: str,
+        graph_model_hash: str,
         search_index_fingerprint: str,
     ) -> None:
         checks = (
@@ -1309,6 +1501,7 @@ class ResolvedRetrievalScope(ContractModel):
             ),
             ("type hierarchy", self.type_hierarchy_hash, type_hierarchy_hash),
             ("type closure", self.type_closure_hash, type_closure_hash),
+            ("Graph model", self.graph_model_hash, graph_model_hash),
             ("Search index", self.search_index_fingerprint, search_index_fingerprint),
         )
         for name, sealed, authoritative in checks:
@@ -1316,6 +1509,11 @@ class ResolvedRetrievalScope(ContractModel):
                 raise ValueError(f"stale {name} hash")
 
     def validate_resolved_scope(self, scope: ResolvedOntologyScope) -> None:
+        _validate_identity_authority(
+            self.identity,
+            scope.identity,
+            relationship="retrieval/resolved scope",
+        )
         member_ids = tuple(item.canonical_entity_id for item in scope.members)
         type_assertion_hash = canonical_sha256(
             [item.model_dump(mode="json") for item in scope.type_assertions]
@@ -1330,6 +1528,12 @@ class ResolvedRetrievalScope(ContractModel):
                 for item in scope.members
             )
         )
+        group_membership_hash = _group_membership_hash(scope.members)
+        sequence_hash = _sequence_hash(
+            scope.members,
+            ordering_mode=scope.collection_policy.ordering_mode,
+        )
+        adjacency_hash = _adjacency_hash(scope.adjacency_edges)
         checks = (
             (
                 "resolved Ontology scope ID",
@@ -1361,6 +1565,11 @@ class ResolvedRetrievalScope(ContractModel):
                 "membership relationship",
                 self.membership_relationship_semantic_id,
                 scope.membership_relationship_semantic_id,
+            ),
+            (
+                "relationship semantic IDs",
+                self.relationship_semantic_ids,
+                scope.relationship_semantic_ids,
             ),
             ("canonical members", self.canonical_member_ids, member_ids),
             (
@@ -1425,6 +1634,9 @@ class ResolvedRetrievalScope(ContractModel):
                 self.required_role_ids,
                 scope.collection_policy.required_role_ids,
             ),
+            ("group membership", self.group_membership_hash, group_membership_hash),
+            ("sequence", self.sequence_hash, sequence_hash),
+            ("adjacency", self.adjacency_hash, adjacency_hash),
             (
                 "collection policy",
                 self.collection_policy_hash,
@@ -1461,6 +1673,16 @@ class ResolvedRetrievalScope(ContractModel):
                 "collection hash",
                 self.collection_hash,
                 scope.required_member_manifest.authoritative_collection_hash,
+            ),
+            (
+                "include canonical IDs",
+                self.include_canonical_ids,
+                scope.requested_include_canonical_ids,
+            ),
+            (
+                "exclude canonical IDs",
+                self.exclude_canonical_ids,
+                scope.requested_exclude_canonical_ids,
             ),
         )
         for name, validated, authoritative in checks:
@@ -1521,6 +1743,10 @@ class AgenticRetrievalRequestContext(ContractModel):
     request_activity: bool
     expected_canonical_key_set_hash: Sha256
     expected_member_collection_hash: Sha256
+    expected_member_type_role_set_hash: Sha256
+    expected_group_membership_hash: Sha256 | None = None
+    expected_sequence_hash: Sha256 | None = None
+    expected_adjacency_hash: Sha256 | None = None
     request_context_hash: Sha256
 
     @field_validator(
@@ -1609,6 +1835,11 @@ class AgenticRetrievalRequestContext(ContractModel):
         return self
 
     def validate_budget(self, budget: QueryBudget) -> None:
+        _validate_identity_authority(
+            self.identity,
+            budget.identity,
+            relationship="request/query budget",
+        )
         if budget.query_budget_id != self.query_budget_id:
             raise ValueError("query budget ID mismatch")
         if budget.budget_hash != self.query_budget_hash:
@@ -1619,6 +1850,11 @@ class AgenticRetrievalRequestContext(ContractModel):
     def validate_scope(self, scope: ResolvedRetrievalScope) -> None:
         if scope.resolution_status != "valid":
             raise ValueError("resolved retrieval scope is invalid and must fail closed")
+        _validate_identity_authority(
+            self.identity,
+            scope.identity,
+            relationship="request/retrieval scope",
+        )
         checks = (
             (
                 "resolved retrieval scope ID",
@@ -1667,6 +1903,18 @@ class AgenticRetrievalRequestContext(ContractModel):
                 self.expected_member_collection_hash,
                 scope.collection_hash,
             ),
+            (
+                "member type/role set hash",
+                self.expected_member_type_role_set_hash,
+                scope.member_type_role_set_hash,
+            ),
+            (
+                "group membership hash",
+                self.expected_group_membership_hash,
+                scope.group_membership_hash,
+            ),
+            ("sequence hash", self.expected_sequence_hash, scope.sequence_hash),
+            ("adjacency hash", self.expected_adjacency_hash, scope.adjacency_hash),
         )
         for name, requested, resolved in checks:
             if requested != resolved:
@@ -1687,6 +1935,11 @@ class AgenticRetrievalRequestContext(ContractModel):
             or self.fallback_for_request_context_hash != origin.request_context_hash
         ):
             raise ValueError("direct fallback context does not reference its origin")
+        _validate_identity_authority(
+            self.identity,
+            origin.identity,
+            relationship="fallback/origin request",
+        )
         invariant_fields = (
             "resolved_retrieval_scope_id",
             "resolved_retrieval_scope_hash",
@@ -1714,6 +1967,10 @@ class AgenticRetrievalRequestContext(ContractModel):
             "request_source_data",
             "expected_canonical_key_set_hash",
             "expected_member_collection_hash",
+            "expected_member_type_role_set_hash",
+            "expected_group_membership_hash",
+            "expected_sequence_hash",
+            "expected_adjacency_hash",
         )
         if any(getattr(self, field) != getattr(origin, field) for field in invariant_fields):
             raise ValueError("direct fallback context differs from originating scope")
@@ -1765,18 +2022,38 @@ class SourceCallReceipt(ContractModel):
     matched_count: NonNegativeInt | None = None
     returned_count: NonNegativeInt
 
+    @model_validator(mode="after")
+    def _invariants(self) -> "SourceCallReceipt":
+        if self.status in {"succeeded", "partial"} and self.response_hash is None:
+            raise ValueError("successful source call requires response hash")
+        if self.status == "failed" and self.returned_count != 0:
+            raise ValueError("failed source call cannot return records")
+        return self
+
 
 class CoverageBudgetObservation(ContractModel):
+    max_ontology_graph_scope_requests: Annotated[int, Field(ge=0, le=1)]
+    max_agentic_retrieval_invocations: Annotated[int, Field(ge=0, le=1)]
     max_agentic_internal_subqueries: NonNegativeInt
     max_agentic_source_calls: NonNegativeInt
+    max_direct_search_requests: Annotated[int, Field(ge=0, le=1)]
     max_output_documents: PositiveInt
     max_output_tokens: PositiveInt
     max_output_bytes: PositiveInt
     max_runtime_milliseconds: PositiveInt
+    max_graph_result_records: PositiveInt
+    max_search_result_records: PositiveInt
+    observed_ontology_graph_scope_requests: NonNegativeInt
+    observed_agentic_retrieval_invocations: NonNegativeInt
+    observed_agentic_internal_subqueries: NonNegativeInt
+    observed_agentic_source_calls: NonNegativeInt
+    observed_direct_search_requests: NonNegativeInt
     observed_output_documents: NonNegativeInt
     observed_output_tokens: NonNegativeInt
     observed_output_bytes: NonNegativeInt
     observed_runtime_milliseconds: NonNegativeInt
+    observed_graph_result_records: NonNegativeInt
+    observed_search_result_records: NonNegativeInt
     budget_exhausted_dimensions: tuple[str, ...] = ()
 
     @field_validator("budget_exhausted_dimensions", mode="before")
@@ -1788,6 +2065,31 @@ class CoverageBudgetObservation(ContractModel):
     def _invariants(self) -> "CoverageBudgetObservation":
         comparisons = (
             (
+                "max_ontology_graph_scope_requests",
+                self.observed_ontology_graph_scope_requests,
+                self.max_ontology_graph_scope_requests,
+            ),
+            (
+                "max_agentic_retrieval_invocations",
+                self.observed_agentic_retrieval_invocations,
+                self.max_agentic_retrieval_invocations,
+            ),
+            (
+                "max_agentic_internal_subqueries",
+                self.observed_agentic_internal_subqueries,
+                self.max_agentic_internal_subqueries,
+            ),
+            (
+                "max_agentic_source_calls",
+                self.observed_agentic_source_calls,
+                self.max_agentic_source_calls,
+            ),
+            (
+                "max_direct_search_requests",
+                self.observed_direct_search_requests,
+                self.max_direct_search_requests,
+            ),
+            (
                 "max_output_documents",
                 self.observed_output_documents,
                 self.max_output_documents,
@@ -1798,6 +2100,16 @@ class CoverageBudgetObservation(ContractModel):
                 "max_runtime_milliseconds",
                 self.observed_runtime_milliseconds,
                 self.max_runtime_milliseconds,
+            ),
+            (
+                "max_graph_result_records",
+                self.observed_graph_result_records,
+                self.max_graph_result_records,
+            ),
+            (
+                "max_search_result_records",
+                self.observed_search_result_records,
+                self.max_search_result_records,
             ),
         )
         exhausted = set(self.budget_exhausted_dimensions)
@@ -1816,6 +2128,34 @@ class CitationCanonicalMapping(ContractModel):
     canonical_entity_id: RequiredText
     search_reference_id: RequiredText
     search_citation_envelope_id: RequiredText
+    search_citation_envelope_hash: Sha256
+
+
+class CoverageMemberReference(ContractModel):
+    canonical_entity_id: RequiredText
+    canonical_semantic_type_id: RequiredText
+    member_role_id: RequiredText | None = None
+    group_id: RequiredText | None = None
+    sequence_position: NonNegativeInt | None = None
+    search_reference_ids: tuple[str, ...]
+    search_citation_envelope_ids: tuple[str, ...]
+    member_hash: Sha256
+
+    @field_validator(
+        "search_reference_ids",
+        "search_citation_envelope_ids",
+        mode="before",
+    )
+    @classmethod
+    def _sets(cls, value: object, info: Any) -> object:
+        return _sorted_set(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _invariants(self) -> "CoverageMemberReference":
+        if not self.search_reference_ids or not self.search_citation_envelope_ids:
+            raise ValueError("returned evidence member requires reference and citation IDs")
+        _validate_hash(self, "member_hash")
+        return self
 
 
 class AgenticRetrievalCoverageReceipt(ContractModel):
@@ -1842,6 +2182,8 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
     reference_count: NonNegativeInt
     unique_canonical_id_count: NonNegativeInt
     canonical_citation_count: NonNegativeInt
+    returned_members: tuple[CoverageMemberReference, ...]
+    returned_adjacency_edges: tuple[AdjacencyEdge, ...] = ()
     required_canonical_ids: tuple[str, ...]
     returned_canonical_ids: tuple[str, ...]
     missing_canonical_ids: tuple[str, ...] = ()
@@ -1909,6 +2251,22 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
     def _sets(cls, value: object, info: Any) -> object:
         return _sorted_set(value, field_name=info.field_name)
 
+    @field_validator("returned_members", mode="before")
+    @classmethod
+    def _returned_members(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.canonical_entity_id
+                        if isinstance(item, CoverageMemberReference)
+                        else str(item.get("canonical_entity_id", ""))
+                    ),
+                )
+            )
+        return value
+
     @model_validator(mode="after")
     def _invariants(self) -> "AgenticRetrievalCoverageReceipt":
         _validate_identity(
@@ -1919,6 +2277,42 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
         required = set(self.required_canonical_ids)
         returned = set(self.returned_canonical_ids)
         duplicates = set(self.duplicate_canonical_ids)
+        returned_member_ids = [
+            item.canonical_entity_id for item in self.returned_members
+        ]
+        if len(returned_member_ids) != len(set(returned_member_ids)):
+            raise ValueError("returned evidence member IDs must be unique")
+        if set(returned_member_ids) != returned:
+            raise ValueError("returned evidence members must equal returned canonical IDs")
+        returned_roles = tuple(
+            sorted(
+                {
+                    item.member_role_id
+                    for item in self.returned_members
+                    if item.member_role_id is not None
+                }
+            )
+        )
+        if returned_roles != self.returned_role_ids:
+            raise ValueError("returned role IDs do not match returned evidence members")
+        if _group_membership_hash(self.returned_members) != self.returned_group_hash:
+            raise ValueError("returned group hash does not match returned evidence members")
+        ordering_mode: Literal["unordered", "ordered"] = (
+            "ordered" if self.required_sequence_hash is not None else "unordered"
+        )
+        if (
+            _sequence_hash(self.returned_members, ordering_mode=ordering_mode)
+            != self.returned_sequence_hash
+        ):
+            raise ValueError(
+                "returned sequence hash does not match returned evidence members"
+            )
+        if _adjacency_hash(self.returned_adjacency_edges) != self.returned_adjacency_hash:
+            raise ValueError("returned adjacency hash does not match returned edges")
+        if self.returned_collection_hash != canonical_sha256(
+            [item.model_dump(mode="json") for item in self.returned_members]
+        ):
+            raise ValueError("returned collection hash does not match returned evidence")
         if set(self.missing_canonical_ids) != required - returned:
             raise ValueError("missing canonical IDs do not match required minus returned")
         if set(self.unexpected_canonical_ids) != returned - required:
@@ -1944,6 +2338,39 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
         if self.budget.observed_output_documents != self.returned_document_count:
             raise ValueError("observed output documents must equal returned documents")
         if (
+            self.budget.observed_search_result_records
+            != self.returned_document_count
+        ):
+            raise ValueError("observed Search result records must equal returned documents")
+        if self.budget.observed_graph_result_records < len(required):
+            raise ValueError("observed Graph records cannot omit required canonical IDs")
+        if self.budget.observed_agentic_internal_subqueries != len(
+            self.planned_subqueries
+        ):
+            raise ValueError("observed internal subqueries must equal receipt subqueries")
+        expected_agentic_invocations = (
+            1 if self.retrieval_mode.startswith("agentic_") else 0
+        )
+        expected_agentic_source_calls = (
+            len(self.source_calls)
+            if self.retrieval_mode.startswith("agentic_")
+            else 0
+        )
+        expected_direct_requests = (
+            len(self.source_calls)
+            if self.retrieval_mode == "direct_hybrid_prefilter"
+            else 0
+        )
+        if (
+            self.budget.observed_agentic_retrieval_invocations
+            != expected_agentic_invocations
+            or self.budget.observed_agentic_source_calls
+            != expected_agentic_source_calls
+            or self.budget.observed_direct_search_requests
+            != expected_direct_requests
+        ):
+            raise ValueError("observed retrieval request counts differ from receipt")
+        if (
             self.retrieval_mode.startswith("agentic_")
             and len(self.planned_subqueries)
             > self.budget.max_agentic_internal_subqueries
@@ -1955,13 +2382,54 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
         ):
             raise ValueError("source calls exceed declared request ceiling")
         mapped_ids = {item.canonical_entity_id for item in self.citation_mappings}
+        mapping_keys = [
+            (
+                item.canonical_entity_id,
+                item.search_reference_id,
+                item.search_citation_envelope_id,
+            )
+            for item in self.citation_mappings
+        ]
+        if len(mapping_keys) != len(set(mapping_keys)):
+            raise ValueError("citation mappings must be unique")
         mapped_reference_ids = {
             item.search_reference_id for item in self.citation_mappings
+        }
+        mapped_citation_ids = {
+            item.search_citation_envelope_id for item in self.citation_mappings
+        }
+        member_reference_ids = {
+            reference_id
+            for item in self.returned_members
+            for reference_id in item.search_reference_ids
+        }
+        member_citation_ids = {
+            citation_id
+            for item in self.returned_members
+            for citation_id in item.search_citation_envelope_ids
         }
         if self.canonical_citation_count != len(self.citation_mappings):
             raise ValueError("canonical citation count must equal citation mappings")
         if len(mapped_reference_ids) > self.reference_count:
             raise ValueError("citation mappings exceed recorded Search references")
+        if (
+            mapped_reference_ids != member_reference_ids
+            or mapped_citation_ids != member_citation_ids
+        ):
+            raise ValueError("citation mappings differ from returned evidence members")
+        returned_members_by_id = {
+            item.canonical_entity_id: item for item in self.returned_members
+        }
+        for mapping in self.citation_mappings:
+            member = returned_members_by_id.get(mapping.canonical_entity_id)
+            if member is None or (
+                mapping.search_reference_id not in member.search_reference_ids
+                or mapping.search_citation_envelope_id
+                not in member.search_citation_envelope_ids
+            ):
+                raise ValueError(
+                    "citation mapping differs from its returned evidence member"
+                )
         if sum(call.returned_count for call in self.source_calls) < (
             self.returned_document_count
         ):
@@ -1972,7 +2440,6 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
             and not self.orphan_canonical_ids
             and mapped_ids >= required
             and set(self.required_role_ids) <= set(self.returned_role_ids)
-            and self.required_collection_hash == self.returned_collection_hash
             and self.required_group_hash == self.returned_group_hash
             and self.required_sequence_hash == self.returned_sequence_hash
             and self.required_adjacency_hash == self.returned_adjacency_hash
@@ -2040,6 +2507,11 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
         originating_budget: QueryBudget | None = None,
     ) -> None:
         context.validate_budget(budget)
+        _validate_identity_authority(
+            self.identity,
+            context.identity,
+            relationship="coverage/request context",
+        )
         if self.fallback_used:
             if originating_context is None or originating_budget is None:
                 raise ValueError("fallback receipt requires its originating request context")
@@ -2118,9 +2590,34 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
                 context.expected_member_collection_hash,
             ),
             (
+                "required group hash",
+                self.required_group_hash,
+                context.expected_group_membership_hash,
+            ),
+            (
+                "required sequence hash",
+                self.required_sequence_hash,
+                context.expected_sequence_hash,
+            ),
+            (
+                "required adjacency hash",
+                self.required_adjacency_hash,
+                context.expected_adjacency_hash,
+            ),
+            (
                 "required role IDs",
                 self.required_role_ids,
                 context.required_role_ids,
+            ),
+            (
+                "max Ontology Graph scope requests",
+                self.budget.max_ontology_graph_scope_requests,
+                budget.max_ontology_graph_scope_requests,
+            ),
+            (
+                "max agentic retrieval invocations",
+                self.budget.max_agentic_retrieval_invocations,
+                budget.max_agentic_retrieval_invocations,
             ),
             (
                 "max internal subqueries",
@@ -2131,6 +2628,11 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
                 "max source calls",
                 self.budget.max_agentic_source_calls,
                 budget.max_agentic_source_calls,
+            ),
+            (
+                "max direct Search requests",
+                self.budget.max_direct_search_requests,
+                budget.max_direct_search_requests,
             ),
             (
                 "max output documents",
@@ -2152,11 +2654,81 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
                 self.budget.max_runtime_milliseconds,
                 budget.max_runtime_milliseconds,
             ),
+            (
+                "max Graph result records",
+                self.budget.max_graph_result_records,
+                budget.max_graph_result_records,
+            ),
+            (
+                "max Search result records",
+                self.budget.max_search_result_records,
+                budget.max_search_result_records,
+            ),
             ("API version", self.api_version, context.capability.api_version),
         )
         for name, observed, authoritative in checks:
             if observed != authoritative:
                 raise ValueError(f"{name} differs from request context or budget")
+        if self.coverage_status == "complete":
+            returned_type_role_hash = canonical_sha256(
+                sorted(
+                    (
+                        item.canonical_entity_id,
+                        item.canonical_semantic_type_id,
+                        item.member_role_id,
+                    )
+                    for item in self.returned_members
+                )
+            )
+            if (
+                returned_type_role_hash
+                != context.expected_member_type_role_set_hash
+            ):
+                raise ValueError(
+                    "returned member type/role facts differ from request context"
+                )
+
+    def validate_citations(
+        self,
+        citations: tuple["SearchCitationEnvelope", ...],
+    ) -> None:
+        citations_by_id = {
+            citation.search_citation_envelope_id: citation
+            for citation in citations
+        }
+        if len(citations_by_id) != len(citations):
+            raise ValueError("Search citation envelope IDs must be unique")
+        mapped_ids = {
+            mapping.search_citation_envelope_id
+            for mapping in self.citation_mappings
+        }
+        if set(citations_by_id) != mapped_ids:
+            raise ValueError("Search citation envelopes differ from citation mappings")
+        for mapping in self.citation_mappings:
+            citation = citations_by_id[mapping.search_citation_envelope_id]
+            _validate_identity_authority(
+                citation.identity,
+                self.identity,
+                relationship="citation/coverage receipt",
+                include_source=False,
+            )
+            checks = (
+                (
+                    "citation hash",
+                    mapping.search_citation_envelope_hash,
+                    citation.citation_hash,
+                ),
+                (
+                    "Search reference ID",
+                    mapping.search_reference_id,
+                    citation.search_reference_id,
+                ),
+            )
+            for name, mapped, authoritative in checks:
+                if mapped != authoritative:
+                    raise ValueError(f"{name} differs from Search citation envelope")
+            if mapping.canonical_entity_id not in citation.canonical_entity_ids:
+                raise ValueError("citation mapping entity is absent from citation envelope")
 
 
 class SearchCitationEnvelope(ContractModel):
@@ -2249,35 +2821,18 @@ class CitationPresentation(ContractModel):
     asset_hash: Sha256
     governed_asset_reference_id: RequiredText | None = None
     governed_asset_reference_hash: Sha256 | None = None
-    transient_authorized_asset_url: str | None = Field(
-        default=None,
-        exclude=True,
-        repr=False,
-    )
     presentation_hash: Sha256
+    _transient_authorized_asset_url: str | None = PrivateAttr(default=None)
 
     @field_validator("evidence_span_ids", mode="before")
     @classmethod
     def _evidence(cls, value: object) -> object:
         return _sorted_set(value, field_name="evidence_span_ids")
 
-    @field_validator("transient_authorized_asset_url")
-    @classmethod
-    def _transient_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise ValueError("transient asset URL must be HTTPS")
-        return value
-
     @model_validator(mode="after")
     def _invariants(self) -> "CitationPresentation":
         _validate_identity(self.identity, kind="c0.citation_presentation")
-        persisted = self.model_dump(
-            mode="python",
-            exclude={"transient_authorized_asset_url", "immutable_locator"},
-        )
+        persisted = self.model_dump(mode="python", exclude={"immutable_locator"})
         _reject_secrets_and_urls(persisted)
         _validate_citation_identity(
             self.identity,
@@ -2297,7 +2852,29 @@ class CitationPresentation(ContractModel):
         _validate_hash(self, "presentation_hash")
         return self
 
+    @property
+    def transient_authorized_asset_url(self) -> str | None:
+        return self._transient_authorized_asset_url
+
+    def with_transient_authorized_asset_url(
+        self,
+        value: str,
+    ) -> "CitationPresentation":
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("transient asset URL must be HTTPS")
+        presentation = self.model_copy(deep=True)
+        presentation.__pydantic_private__[
+            "_transient_authorized_asset_url"
+        ] = value
+        return presentation
+
     def validate_citation(self, citation: SearchCitationEnvelope) -> None:
+        _validate_identity_authority(
+            self.identity,
+            citation.identity,
+            relationship="presentation/citation",
+        )
         if citation.search_citation_envelope_id != self.search_citation_envelope_id:
             raise ValueError("Search citation envelope ID mismatch")
         if citation.citation_hash != self.search_citation_envelope_hash:

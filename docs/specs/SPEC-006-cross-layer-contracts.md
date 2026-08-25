@@ -457,7 +457,10 @@ decomposition, retry, synthesis, deployment, or live acceptance.
 relationship, role, path, and policy identities. Its modes are `exact_type`,
 `descendants`, `ancestors_context`, and `explicit_member_set`. A relative scope
 change is `exact`, `narrow`, or `expand`, with parent ID/hash identity required
-for narrow or expand. Display names, natural-language resolver output, raw GQL,
+for narrow or expand. Narrowing cannot add members, types, roles, paths,
+includes, hierarchy depth, or relationship K, remove exclusions, or replace
+sealed authority; expansion applies the inverse constraints. Display names,
+natural-language resolver output, raw GQL,
 raw OData, untrusted filters, ontology definitions, and schema deltas have no
 authority. Hierarchy expansion policy/depth and relationship traversal K are
 distinct fields and cannot substitute for each other. Normal relationship
@@ -470,24 +473,34 @@ sealed hierarchy/closure identity and deterministic expansion trace; exact
 projection, crosswalk, Graph, publication, ACL, and receipt hashes; and a
 deterministic canonical key-set hash. Canonical entity IDs remain stable across
 subtype reclassification while type-assertion versions and affected scope hashes
-change. Natural-language-only, label-only, omitted-key, stale-hash, ambiguous,
-collision, unauthorized, or orphan results fail closed.
+change. Its acceptance hook binds every authority-bearing envelope dimension,
+including includes/exclusions, requested types/roles/paths, project scope, and
+agent policy, requires expanded types to equal the exact traced hierarchy
+closure, constrains every relationship to approved authority, validates
+adjacency endpoints/assertions/evidence, and rejects duplicate current type
+assertions. Natural-language-only, label-only, omitted-key, stale-hash,
+ambiguous, collision, unauthorized, or orphan results fail closed.
 
 `ResolvedRetrievalScope` records local validation of the resolver response and
 the safe canonical-ID Graph filter. It references
 `RequiredMemberManifest@1.1.0` by exact ID, version, schema hash, manifest hash,
 and authoritative collection hash. That L3 manifest remains the sole
 completeness and membership authority; C0.Runtime does not define or infer a
-competing member manifest.
+competing member manifest. Acceptance validates the referenced manifest object
+itself and requires exact scope, relationship, ordering, cardinality, unique
+member count, roles, canonical members, semantic types, member order, supporting
+evidence, manifest hash, and authoritative collection hash.
 
 `QueryBudget` records Agent-selected request ceilings for one bounded
 Ontology/Graph scope request and one mutually exclusive Search retrieval mode.
 Agentic modes permit one Agent-owned retrieval invocation and zero direct Search
 requests; the stable fallback permits one direct Search request and zero
 agentic invocations. Internal subquery/source-call, document, token, byte, time,
-and result fields are request ceilings and observed-budget dimensions, not
-approved performance thresholds. The contract contains no synthesis or hidden
-retry field.
+Graph/Search request, and Graph/Search result fields are request ceilings and
+observed-budget dimensions, not approved performance thresholds. Coverage binds
+every declared ceiling to its exact budget and reconciles observed invocation,
+subquery, source-call, direct-request, document, and Search-result counts. The
+contract contains no synthesis or hidden retry field.
 
 `AgenticRetrievalRequestContext` seals knowledge-base, knowledge-source, Search
 index, capability, static base-policy, ACL, publication, hierarchy, scope,
@@ -502,9 +515,17 @@ baseFilter AND filterAddOn
 The add-on may narrow but cannot replace or broaden the static project, ACL, and
 asserted-publication boundary. The stable fallback is
 `direct_hybrid_prefilter` with the exact canonical Graph-ID scope and
-`vectorFilterMode=preFilter`. Capability loss selects only the declared fallback
-or a typed fail-closed result; a scope filter is never silently removed. Search
-document ID is delivery identity only and never substitutes for canonical keys.
+`vectorFilterMode=preFilter`. A fallback execution context hash-references its
+originating agentic context, preserves the exact scope and authority dimensions,
+and binds its own direct-mode budget. Capability loss selects only the declared
+fallback or a typed fail-closed result; a scope filter is never silently removed.
+Search document ID is delivery identity only and never substitutes for canonical
+keys.
+
+Every cross-contract acceptance hook conserves canonical identity authority,
+including project, asset/version, run, source, content, Domain, Semantic,
+canonical-schema, and locator identity. Child artifacts cannot retain a parent
+ID/hash while changing those authority dimensions.
 
 `AgenticRetrievalCoverageReceipt` records required, returned, missing,
 unexpected, duplicate, and orphan canonical IDs; groups, roles, ordering,
@@ -512,7 +533,14 @@ adjacency, counts, collection hashes, subqueries, activity, references, source
 calls, warnings, truncation, budget observations, citations, and typed
 remediation. Status is `complete`, `partial`, or `invalid`. `complete` means
 exact structural coverage inside the declared canonical scope and request
-budget. It never means exhaustive discovery of every fact in a corpus. Missing
+budget. Required group, sequence, and adjacency hashes are copied through the
+validated retrieval scope and request context; equal self-attested receipt hashes
+cannot establish completeness. Returned member/type/role/group/order records and
+adjacency edges deterministically produce the returned hashes, source successes
+carry response hashes, and every citation mapping includes the exact citation
+envelope hash. Citation acceptance resolves those hashes against the actual
+`SearchCitationEnvelope` artifacts. It never means exhaustive discovery of every
+fact in a corpus. Missing
 members or roles, duplicates, collection mismatch, warning, truncation, source
 failure, missing reference, unsupported capability, or budget exhaustion cannot
 produce `complete`.
@@ -521,7 +549,10 @@ produce `complete`.
 name, source/file/unit/chunk/evidence IDs, canonical entity/relationship/assertion
 IDs, exact caller-authorized quote, page/section, immutable locator, and
 quote/content/asset hashes. An optional governed asset is referenced by exact
-ID/hash. A protected asset URL is response-only, HTTPS-only, and excluded from
+ID/hash. Duplicated source-file, source-unit, content-hash, locator, page, and
+section lineage must equal the canonical identity envelope exactly. A protected
+asset URL is response-only and HTTPS-only. It is a private out-of-band response
+value that is absent from the registered persisted schema as well as
 serialization, canonical hashes, caches, logs, metrics, fixtures, and durable
 receipts. Secrets, tokens, durable access URLs, unauthorized quotes, stale
 authority, and missing exact evidence fail closed.
