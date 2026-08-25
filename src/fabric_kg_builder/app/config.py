@@ -61,6 +61,10 @@ class AppConfig:
     required_app_role: str
     query_schema_mode: str
     query_schema_path: str
+    query_schema_hash: str
+    query_authority_hash: str
+    domain_contract_hash: str
+    approved_max_hops: int | None
 
     @property
     def live_mode(self) -> bool:
@@ -129,12 +133,65 @@ def load_app_config() -> AppConfig:
     required_app_role = os.environ.get("FABRIC_KG_REQUIRED_APP_ROLE", "").strip()
     query_schema_mode = os.environ.get(
         "FABRIC_KG_QUERY_SCHEMA_MODE",
-        "schema1_compatibility",
+        "",
     ).strip()
     query_schema_path = os.environ.get(
         "FABRIC_KG_QUERY_SCHEMA_PATH",
         "",
     ).strip()
+    query_schema_hash = os.environ.get(
+        "FABRIC_KG_QUERY_SCHEMA_HASH", ""
+    ).strip()
+    query_authority_hash = os.environ.get(
+        "FABRIC_KG_QUERY_AUTHORITY_HASH", ""
+    ).strip()
+    domain_contract_hash = os.environ.get(
+        "FABRIC_KG_DOMAIN_CONTRACT_HASH", ""
+    ).strip()
+    raw_approved_max_hops = os.environ.get(
+        "FABRIC_KG_APPROVED_MAX_HOPS", ""
+    ).strip()
+    try:
+        approved_max_hops = (
+            int(raw_approved_max_hops)
+            if raw_approved_max_hops
+            else None
+        )
+    except ValueError as exc:
+        raise AppConfigError(
+            "FABRIC_KG_APPROVED_MAX_HOPS must be an integer."
+        ) from exc
+    if (
+        query_schema_mode == "schema2_bounded"
+        and approved_max_hops is not None
+        and not 1 <= approved_max_hops <= 4
+    ):
+        raise AppConfigError(
+            "FABRIC_KG_APPROVED_MAX_HOPS must be between 1 and 4."
+        )
+    if query_schema_mode == "schema2_bounded":
+        required_query_authority = {
+            "FABRIC_KG_QUERY_SCHEMA_PATH": query_schema_path,
+            "FABRIC_KG_QUERY_SCHEMA_HASH": query_schema_hash,
+            "FABRIC_KG_QUERY_AUTHORITY_HASH": query_authority_hash,
+            "FABRIC_KG_DOMAIN_CONTRACT_HASH": domain_contract_hash,
+            "FABRIC_KG_APPROVED_MAX_HOPS": approved_max_hops,
+        }
+        missing_authority = [
+            name
+            for name, value in required_query_authority.items()
+            if value in {None, ""}
+        ]
+        if missing_authority:
+            raise AppConfigError(
+                "Schema-2 runtime authority configuration is incomplete: "
+                + ", ".join(missing_authority)
+            )
+    if not query_schema_mode:
+        raise AppConfigError(
+            "FABRIC_KG_QUERY_SCHEMA_MODE must be explicitly set to "
+            "schema1_compatibility or schema2_bounded."
+        )
     if query_schema_mode not in {
         "schema1_compatibility",
         "schema2_bounded",
@@ -164,11 +221,6 @@ def load_app_config() -> AppConfig:
                 f"{', '.join(missing)}. "
                 f"Set FABRIC_KG_ENVIRONMENT=local and FABRIC_KG_LOCAL_DEV=true "
                 f"to use explicit offline local-dev mode."
-            )
-        if query_schema_mode == "schema2_bounded" and not query_schema_path:
-            raise AppConfigError(
-                "FABRIC_KG_QUERY_SCHEMA_PATH is required when "
-                "FABRIC_KG_QUERY_SCHEMA_MODE=schema2_bounded."
             )
         if not preview_ack:
             raise AppConfigError(
@@ -205,6 +257,10 @@ def load_app_config() -> AppConfig:
         required_app_role=required_app_role,
         query_schema_mode=query_schema_mode,
         query_schema_path=query_schema_path,
+        query_schema_hash=query_schema_hash,
+        query_authority_hash=query_authority_hash,
+        domain_contract_hash=domain_contract_hash,
+        approved_max_hops=approved_max_hops,
     )
 
 
@@ -287,7 +343,10 @@ def build_runtime_dependencies(config: AppConfig):
     )
     query_schema = None
     if config.query_schema_mode == "schema2_bounded":
-        from fabric_kg_builder.semantic.schemas import PersistedQuerySchema
+        from fabric_kg_builder.semantic.schemas import (
+            PersistedQuerySchema,
+            compute_persisted_query_schema_hash,
+        )
 
         try:
             query_schema = PersistedQuerySchema.model_validate_json(
@@ -297,6 +356,52 @@ def build_runtime_dependencies(config: AppConfig):
             raise AppConfigError(
                 "Could not load sealed schema-2 persisted query schema."
             ) from exc
+        if (
+            query_schema.schema_mode != "schema2_bounded"
+            or query_schema.authority is None
+        ):
+            raise AppConfigError(
+                "FABRIC_KG_QUERY_SCHEMA_PATH must contain a sealed schema-2 "
+                "bounded query schema."
+            )
+        if (
+            query_schema.schema_hash
+            != compute_persisted_query_schema_hash(query_schema)
+        ):
+            raise AppConfigError(
+                "Packaged persisted query schema hash does not match its "
+                "contents."
+            )
+        authority = query_schema.authority
+        expected_authority = {
+            "query schema hash": (
+                query_schema.schema_hash,
+                config.query_schema_hash,
+            ),
+            "query authority hash": (
+                authority.authority_hash,
+                config.query_authority_hash,
+            ),
+            "domain contract hash": (
+                authority.domain_contract_hash,
+                config.domain_contract_hash,
+            ),
+            "approved max hops": (
+                authority.approved_max_hops,
+                config.approved_max_hops,
+            ),
+        }
+        mismatched = [
+            label
+            for label, (actual, expected) in expected_authority.items()
+            if actual != expected
+        ]
+        if mismatched:
+            raise AppConfigError(
+                "Configured schema-2 runtime authority differs from the "
+                "packaged persisted query schema: "
+                + ", ".join(mismatched)
+            )
     return kb_tool, visual_tool, FabricDataAgentAdapter(
         _client=graph_client,
         schema_mode=config.query_schema_mode,

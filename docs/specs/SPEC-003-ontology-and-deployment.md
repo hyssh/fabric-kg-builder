@@ -1723,6 +1723,13 @@ render, and only then invokes the Graph transport. Generated queries:
 Raw/model-authored GQL is disabled on schema-2 runtime and agent-tool surfaces.
 The low-level Graph client is transport-only. Existing raw-query behavior remains
 available only when the caller explicitly selects `schema1_compatibility`.
+Production app deployment has no default query mode: it must explicitly select
+`schema2_bounded` or `schema1_compatibility`. Schema-2 images package the sealed
+persisted query schema and Container Apps receives its path, schema hash,
+authority hash, domain-contract hash, and approved K as deployment parameters
+and environment variables. Startup recomputes and compares all bindings.
+Schema-1 compatibility must be selected explicitly and cannot carry a schema-2
+authority file.
 
 Data Agent and Foundry instructions/descriptors expose the approved K, plan IDs,
 authority hash, and abstention policy. An unsupported or over-K request must
@@ -1731,6 +1738,18 @@ increase K. Schema-2 query telemetry stores actual hop count, route, status,
 timing, row count, and plan/authority/schema hashes with sanitized error
 categories. It does not store GQL, filters, source content, credentials, remote
 error bodies, or raw sensitive parameters.
+
+Schema-2 competency/runtime contracts prohibit `data_agent_mcp` because that
+surface forwards a free-form question to an agent capable of authoring GQL.
+Live schema-2 Data Agent publication and its Foundry connection are disabled
+until Fabric exposes a plan-ID-only execution boundary; compile-time grounding
+artifacts remain reviewable but are not published as an MCP-capable agent.
+Only local approved-plan-ID execution is supported. The authenticated app request
+may include an `approved_plan_id`; local code resolves that ID to the sealed
+authority, renders the query, and executes it. Clients cannot submit GQL or an
+arbitrary structured plan. Graph-intent requests without an approved plan ID
+abstain. `/ready` requires a successful bounded Graph readiness query whenever a
+Graph dependency is configured.
 
 ## 13. Revision History
 

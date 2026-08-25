@@ -289,7 +289,7 @@ def build_persisted_agent_grounding(
     projection_receipt_hash: str,
     workspace_id: str,
     graph_model_id: str,
-    query_schema: PersistedQuerySchema | None = None,
+    query_schema: PersistedQuerySchema,
 ) -> PersistedAgentGrounding:
     """Compile complete source elements only after H3 persisted read-back."""
     if projection_receipt.semantic_model_manifest_hash != manifest.manifest_hash:
@@ -307,13 +307,47 @@ def build_persisted_agent_grounding(
             "AGENT_STALE_SCHEMA",
             "Agent semantic context was not compiled from the persisted manifest.",
         )
-    if semantic_context.get("schema_mode") == "schema2_bounded":
+    authoritative_mode = query_schema.schema_mode
+    if semantic_context.get("schema_mode") != authoritative_mode:
+        raise AgentPublicationError(
+            "AGENT_QUERY_MODE_DRIFT",
+            "Agent semantic context query mode differs from the sealed "
+            "persisted query schema.",
+        )
+    if (
+        semantic_context.get("persisted_query_schema_hash")
+        != query_schema.schema_hash
+    ):
+        raise AgentPublicationError(
+            "AGENT_QUERY_AUTHORITY_DRIFT",
+            "Agent semantic context query schema hash differs from the sealed "
+            "persisted query schema.",
+        )
+    if query_schema.schema_hash != compute_persisted_query_schema_hash(
+        query_schema
+    ):
+        raise AgentPublicationError(
+            "AGENT_QUERY_AUTHORITY_INVALID",
+            "Persisted query schema hash does not match its contents.",
+        )
+    if query_schema.manifest_hash != manifest.manifest_hash:
+        raise AgentPublicationError(
+            "AGENT_QUERY_AUTHORITY_DRIFT",
+            "Persisted query schema manifest differs from the semantic "
+            "manifest selected for Data Agent publication.",
+        )
+    if query_schema.semantic_crosswalk_hash and (
+        query_schema.semantic_crosswalk_hash
+        != _canonical_hash(crosswalk.model_dump(mode="json"))
+    ):
+        raise AgentPublicationError(
+            "AGENT_QUERY_AUTHORITY_DRIFT",
+            "Persisted query schema crosswalk differs from the semantic "
+            "crosswalk selected for Data Agent publication.",
+        )
+    if authoritative_mode == "schema2_bounded":
         if (
-            query_schema is None
-            or query_schema.schema_mode != "schema2_bounded"
-            or query_schema.authority is None
-            or query_schema.schema_hash
-            != compute_persisted_query_schema_hash(query_schema)
+            query_schema.authority is None
         ):
             raise AgentPublicationError(
                 "AGENT_QUERY_AUTHORITY_INVALID",
@@ -321,20 +355,6 @@ def build_persisted_agent_grounding(
                 "persisted query schema.",
             )
         authority = query_schema.authority
-        if query_schema.manifest_hash != manifest.manifest_hash:
-            raise AgentPublicationError(
-                "AGENT_QUERY_AUTHORITY_DRIFT",
-                "Persisted query schema manifest differs from the semantic "
-                "manifest selected for Data Agent publication.",
-            )
-        if query_schema.semantic_crosswalk_hash != _canonical_hash(
-            crosswalk.model_dump(mode="json")
-        ):
-            raise AgentPublicationError(
-                "AGENT_QUERY_AUTHORITY_DRIFT",
-                "Persisted query schema crosswalk differs from the semantic "
-                "crosswalk selected for Data Agent publication.",
-            )
         expected_query_context = {
             "domain_contract_hash": authority.domain_contract_hash,
             "reasoning_policy_hash": authority.reasoning_policy_hash,

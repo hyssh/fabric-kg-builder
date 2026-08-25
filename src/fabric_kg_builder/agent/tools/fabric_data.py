@@ -80,16 +80,39 @@ class FabricDataResult:
         """Convert rows to citation dicts for the normalized citation model."""
         citations = []
         for row in self.rows:
-            entity_id = row.get("entity_id") or row.get("id") or ""
-            entity_type = row.get("entity_type") or row.get("type") or ""
-            display_text = row.get("display_name") or str(entity_id)[:200]
-            citations.append({
-                "source_type": "ontology",
-                "source_id": "fabric-graph",
-                "entity_id": str(entity_id),
-                "entity_type": str(entity_type),
-                "display_text": str(display_text)[:500],
-            })
+            explicit_id = row.get("entity_id") or row.get("id")
+            id_fields = (
+                [("entity_id", explicit_id)]
+                if explicit_id not in {None, ""}
+                else [
+                    (key, value)
+                    for key, value in sorted(row.items())
+                    if key.endswith("_id")
+                    and "evidence" not in key
+                    and value not in {None, ""}
+                ]
+            )
+            for key, entity_id in id_fields:
+                prefix = key.removesuffix("_id")
+                display_text = (
+                    row.get(f"{prefix}_display")
+                    or row.get("display_name")
+                    or str(entity_id)
+                )
+                citations.append({
+                    "source_type": "ontology",
+                    "source_id": "fabric-graph",
+                    "entity_id": str(entity_id),
+                    "entity_type": str(
+                        row.get("entity_type")
+                        or row.get("type")
+                        or prefix
+                    ),
+                    "display_text": str(display_text)[:500],
+                    "metadata": {
+                        "approved_scalar_field": key,
+                    },
+                })
         return citations
 
 

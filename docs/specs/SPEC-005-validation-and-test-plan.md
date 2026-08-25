@@ -1240,6 +1240,10 @@ remain unchanged.
 | QRY-104 | physical query | GQL differs from deterministic structured-plan rendering, contains an extra hop, returns a whole node/edge, lacks a limit, or uses `LIMIT > 100` |
 | QRY-105 | agent boundary | A schema-2 Data Agent, Foundry agent, or Fabric tool exposes raw GQL or a plan outside the approved bounded set; unsupported/over-K requests do not abstain |
 | QRY-106 | telemetry | A query receipt omits actual hop count/route/status/timing/authority hashes or contains GQL, source content, secrets, raw parameters, or unsanitized remote errors |
+| QRY-107 | production app | Query mode is implicit, schema-2 authority is not packaged/configured, or configured hashes/K differ from the packaged persisted query schema |
+| QRY-108 | agent route | A schema-2 competency/runtime contract enables `data_agent_mcp`, publishes an MCP-capable Data Agent, creates a Foundry Data Agent connection, or forwards a free-form question to a model-authored Graph query surface |
+| QRY-109 | serving API | An unauthenticated request, arbitrary client plan/GQL, unknown plan ID, or Graph-intent request without an approved plan ID reaches Graph execution |
+| QRY-110 | readiness | `/ready` succeeds while a configured Graph dependency fails its bounded readiness plan |
 
 SEM-100 through SEM-104 consume the shared semantic projection receipt; gates
 must not independently reimplement filtering. A failed receipt leaves serving
@@ -1334,6 +1338,13 @@ live-smoke evidence without weakening these gates.
   publication receipts exposing only approved K/plans;
 - unsupported and over-K abstention without silent K increase; and
 - unchanged behavior under explicit `schema1_compatibility`.
+- production mode omission, schema/hash/K drift, and schema-2 authority packaging;
+- schema-2 `data_agent_mcp` compile/runtime rejection;
+- publication mode derived from the sealed query schema with stale context
+  rejection;
+- configured versus absent Graph readiness behavior; and
+- authenticated approved-plan-ID execution plus graph-intent abstention when no
+  approved ID is supplied.
 
 ### 15.2 Layer-5 deployment regression matrix
 

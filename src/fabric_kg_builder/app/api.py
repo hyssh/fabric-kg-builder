@@ -47,6 +47,7 @@ from fabric_kg_builder.agent.tools.fabric_data import (
     FabricDataAgentAdapter,
     FabricDataError,
 )
+from fabric_kg_builder.knowledge.routing import RouteCategory, classify_question
 from fabric_kg_builder.app.visual_search import VisualSearchError, VisualSearchTool
 
 try:
@@ -87,6 +88,23 @@ class RateLimiter:
         bucket.append(now)
         self._buckets[key] = bucket
         return True
+
+
+def _readiness_passes(
+    *,
+    live_mode: bool,
+    kb_ready: bool,
+    visual_ready: bool,
+    graph_required: bool,
+    graph_ready: bool,
+) -> bool:
+    if not live_mode:
+        return True
+    return (
+        kb_ready
+        and visual_ready
+        and (graph_ready if graph_required else True)
+    )
 
 
 def _redact_authorization(headers: dict[str, str]) -> dict[str, str]:
@@ -204,6 +222,7 @@ def create_app(
     )
     _limiter = rate_limiter or RateLimiter()
     _live_mode = require_downstreams
+    _graph_required = _graph.is_available
     if _live_mode and (not _kb.is_available or not _visual.is_available):
         raise RuntimeError(
             "[STARTUP FAILURE] Live mode requires configured Azure AI Search "
@@ -280,7 +299,13 @@ def create_app(
         kb_ready = bool(_readiness_cache["kb_ready"])
         visual_ready = bool(_readiness_cache["visual_ready"])
         graph_ready = bool(_readiness_cache["graph_ready"])
-        ready = (kb_ready and visual_ready) if _live_mode else True
+        ready = _readiness_passes(
+            live_mode=_live_mode,
+            kb_ready=kb_ready,
+            visual_ready=visual_ready,
+            graph_required=_graph_required,
+            graph_ready=graph_ready,
+        )
         return HealthResponse(
             status="ok" if ready else "degraded",
             version=version,
@@ -335,6 +360,7 @@ def create_app(
                 kb=_kb,
                 graph=_graph,
                 top_k=body.top_k,
+                approved_plan_id=body.approved_plan_id,
             )
         except (KnowledgeBaseError, FabricDataError, DownstreamServiceError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -516,6 +542,7 @@ def _answer_question(
     kb: KnowledgeBaseTool,
     graph: FabricDataAgentAdapter,
     top_k: int = 5,
+    approved_plan_id: str | None = None,
 ) -> tuple[str, str, list, bool]:
     """Offline/grounded answer builder.
 
@@ -555,29 +582,70 @@ def _answer_question(
     raw_citations: list[dict] = []
     route_type = "search"
     graph_rows: list[dict[str, Any]] = []
+    routing = classify_question(question)
+
+    if approved_plan_id:
+        graph_result = graph.execute_approved_plan(
+            approved_plan_id,
+            intent=question,
+        )
+        if graph_result.status == "error":
+            raise DownstreamServiceError(
+                "Fabric GraphModel approved-plan execution failed."
+            )
+        if graph_result.status == "unsupported":
+            return (
+                graph_result.error_message
+                or "The requested approved Graph plan is unavailable.",
+                ROUTE_UNSUPPORTED,
+                [],
+                True,
+            )
+        graph_rows = graph_result.rows
+        raw_citations.extend(graph_result.to_citation_dicts())
+        citations = normalize_citations(raw_citations)
+        if not graph_rows:
+            return (
+                f"Approved plan `{approved_plan_id}` returned no verified rows.",
+                "ontology",
+                citations,
+                False,
+            )
+        rendered_rows = [
+            ", ".join(
+                f"{key}={value}"
+                for key, value in sorted(row.items())
+                if value is not None and value != ""
+            )
+            for row in graph_rows[:5]
+        ]
+        return (
+            f"Approved plan `{approved_plan_id}` returned "
+            f"{len(graph_rows)} verified row(s): "
+            + " | ".join(rendered_rows),
+            "ontology",
+            citations,
+            False,
+        )
+
+    if (
+        graph.schema_mode == "schema2_bounded"
+        and routing.category != RouteCategory.SEARCH
+    ):
+        return (
+            "No approved bounded Graph plan is mapped to this graph-intent "
+            "request. Supply a sealed approved_plan_id or decompose the "
+            "question into approved bounded subquestions.",
+            ROUTE_UNSUPPORTED,
+            [],
+            True,
+        )
 
     kb_results = kb.retrieve(question, top_k=top_k)
     for r in kb_results:
         raw_citations.append(r.to_citation_dict())
 
-    graph_signals = (
-        "component",
-        "connected",
-        "graph",
-        "hierarchy",
-        "related",
-        "relationship",
-    )
-    if any(signal in q_lower for signal in graph_signals):
-        if graph.schema_mode == "schema2_bounded":
-            return (
-                "No approved bounded Graph plan is mapped to this free-form "
-                "request. Use an approved plan ID or decompose the question "
-                "into approved bounded subquestions.",
-                ROUTE_UNSUPPORTED,
-                [],
-                True,
-            )
+    if routing.graph_signals:
         route_type = "ontology"
         graph_result = graph.query_keyword(_graph_keyword(question))
         if graph_result.status == "error":

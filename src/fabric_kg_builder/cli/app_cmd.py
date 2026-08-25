@@ -480,6 +480,21 @@ Env secrets are NEVER baked into images or passed on the command line.
               help="Deploy already-published API and UI images without rebuilding them.")
 @click.option("--health-timeout", default=120, type=int,
               help="Seconds to wait for healthy revision (default: 120).")
+@click.option(
+    "--query-schema-mode",
+    required=True,
+    type=click.Choice(["schema1_compatibility", "schema2_bounded"]),
+    help="Explicit runtime query mode; no implicit compatibility fallback.",
+)
+@click.option(
+    "--query-schema-file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help=(
+        "Sealed persisted-query-schema.json. Required for schema2_bounded and "
+        "must be inside --build-context so the API image packages it."
+    ),
+)
 @click.pass_context
 def deploy_app_cmd(
     ctx: click.Context,
@@ -495,6 +510,8 @@ def deploy_app_cmd(
     build_context: str,
     skip_build: bool,
     health_timeout: int,
+    query_schema_mode: str,
+    query_schema_file: str | None,
     _runner: Callable | None = None,
 ) -> None:
     """Build + push + Bicep-deploy the reference app to Container Apps."""
@@ -508,6 +525,67 @@ def deploy_app_cmd(
         except ValueError as exc:
             raise click.ClickException("--run-id must be a valid UUID.") from exc
     base_name = f"fabric-kg-{run_token}" if run_token else "fabric-kg"
+    query_schema_container_path = ""
+    query_schema_hash = ""
+    query_authority_hash = ""
+    domain_contract_hash = ""
+    approved_max_hops: int | None = None
+    query_schema_source_path = ""
+    query_schema_bytes: bytes | None = None
+    if query_schema_mode == "schema2_bounded":
+        if not query_schema_file:
+            raise click.ClickException(
+                "--query-schema-file is required for schema2_bounded."
+            )
+        from fabric_kg_builder.semantic.schemas import (  # noqa: PLC0415
+            PersistedQuerySchema,
+            compute_persisted_query_schema_hash,
+        )
+
+        schema_path = Path(query_schema_file).resolve()
+        context_path = Path(build_context).resolve()
+        try:
+            relative_schema_path = schema_path.relative_to(context_path)
+        except ValueError as exc:
+            raise click.ClickException(
+                "--query-schema-file must be inside --build-context so it is "
+                "packaged into the immutable API image."
+            ) from exc
+        try:
+            query_schema = PersistedQuerySchema.model_validate_json(
+                schema_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(
+                f"Invalid persisted query schema: {exc}"
+            ) from exc
+        if (
+            query_schema.schema_mode != "schema2_bounded"
+            or query_schema.authority is None
+            or query_schema.schema_hash
+            != compute_persisted_query_schema_hash(query_schema)
+        ):
+            raise click.ClickException(
+                "schema2_bounded deployment requires a sealed bounded query "
+                "schema whose hash matches its contents."
+            )
+        query_schema_bytes = schema_path.read_bytes()
+        query_schema_source_path = (
+            "build/runtime-authority/persisted-query-schema.json"
+        )
+        query_schema_container_path = (
+            "/app/runtime-authority/persisted-query-schema.json"
+        )
+        query_schema_hash = query_schema.schema_hash
+        query_authority_hash = query_schema.authority.authority_hash
+        domain_contract_hash = query_schema.authority.domain_contract_hash
+        approved_max_hops = query_schema.authority.approved_max_hops
+    elif query_schema_file:
+        raise click.ClickException(
+            "--query-schema-file is not accepted in schema1_compatibility mode."
+        )
+    else:
+        query_schema_source_path = "apps/api/schema1-compatibility.json"
 
     try:
         metadata = load_agent_metadata(
@@ -599,6 +677,11 @@ def deploy_app_cmd(
         infra_outputs,
         "identityPrincipalId",
     )
+    acr_resource_id = _env_or_output(
+        "FABRIC_KG_ACR_RESOURCE_ID",
+        infra_outputs,
+        "containerRegistryId",
+    )
     create_identity = _is_true_env("FABRIC_KG_APP_CREATE_MANAGED_IDENTITY")
     identity_name = os.environ.get(
         "FABRIC_KG_APP_MANAGED_IDENTITY_NAME", f"fabric-kg-{env}-app-id"
@@ -634,6 +717,14 @@ def deploy_app_cmd(
         f"graph={graph_model_id or '[missing]'}"
     )
     click.echo(
+        f"  Query mode : {query_schema_mode}"
+        + (
+            f" / schema={query_schema_hash} / authority={query_authority_hash}"
+            if query_schema_mode == "schema2_bounded"
+            else ""
+        )
+    )
+    click.echo(
         "  Identity   : "
         + (f"create {identity_name}" if create_identity else (identity_resource_id or "[missing]"))
     )
@@ -646,6 +737,20 @@ def deploy_app_cmd(
         )
         click.echo("\ndeploy-app: dry-run plan complete. No images built, no deployment performed.")
         return
+    if query_schema_mode == "schema2_bounded" and skip_build:
+        raise click.ClickException(
+            "--skip-build is prohibited for schema2_bounded because a prebuilt "
+            "image cannot prove it contains the selected sealed query authority."
+        )
+    if query_schema_bytes is not None:
+        staged_schema = (
+            Path(build_context).resolve()
+            / "build"
+            / "runtime-authority"
+            / "persisted-query-schema.json"
+        )
+        staged_schema.parent.mkdir(parents=True, exist_ok=True)
+        staged_schema.write_bytes(query_schema_bytes)
 
     required_runtime = {
         "FABRIC_KG_TENANT_ID or AZURE_TENANT_ID": tenant_id,
@@ -660,6 +765,7 @@ def deploy_app_cmd(
         "FABRIC_KG_SEARCH_SERVICE_RESOURCE_ID": search_resource_id,
         "FABRIC_KG_FABRIC_WORKSPACE_ID or infra output fabricWorkspaceId": fabric_workspace_id,
         "FABRIC_KG_GRAPH_MODEL_ID or infra output fabricGraphModelId": graph_model_id,
+        "Azure Container Registry resource ID": acr_resource_id,
     }
     if not create_identity:
         required_runtime.update(
@@ -669,6 +775,16 @@ def deploy_app_cmd(
                 "FABRIC_KG_MANAGED_IDENTITY_PRINCIPAL_ID or infra output identityPrincipalId": identity_principal_id,
             }
         )
+    elif fabric_workspace_id and graph_model_id:
+        click.echo(
+            "Error: deploy-app cannot create a new runtime identity for a Graph "
+            "deployment because Fabric workspace access must be granted before "
+            "the revision starts. Provision the identity first, grant Fabric "
+            "Viewer plus downstream roles, and deploy with its resource/client/"
+            "principal IDs.",
+            err=True,
+        )
+        sys.exit(1)
     missing = [name for name, value in required_runtime.items() if not value]
     if missing:
         click.echo(
@@ -699,6 +815,14 @@ def deploy_app_cmd(
 
     # ── Step 1: Build immutable images ────────────────────────────────────────
     if cloud_build:
+        schema_build_args = (
+            [
+                "--build-arg",
+                f"FABRIC_KG_QUERY_SCHEMA_SOURCE={query_schema_source_path}",
+            ]
+            if query_schema_source_path
+            else []
+        )
         build_cmds = [
             (
                 api_image,
@@ -707,6 +831,7 @@ def deploy_app_cmd(
                     "--registry", acr_name,
                     "--image", f"{acr_repo}/api:{tag}",
                     "--file", "apps/api/Dockerfile",
+                    *schema_build_args,
                     build_context,
                 ],
             ),
@@ -722,9 +847,18 @@ def deploy_app_cmd(
             ),
         ]
     else:
+        schema_build_args = (
+            [
+                "--build-arg",
+                f"FABRIC_KG_QUERY_SCHEMA_SOURCE={query_schema_source_path}",
+            ]
+            if query_schema_source_path
+            else []
+        )
         build_cmds = [
             (api_image, ["docker", "build", "--platform", "linux/amd64",
-                         "-t", api_image, "-f", "apps/api/Dockerfile", build_context]),
+                         "-t", api_image, "-f", "apps/api/Dockerfile",
+                         *schema_build_args, build_context]),
             (ui_image,  ["docker", "build", "--platform", "linux/amd64",
                          "-t", ui_image, "-f", "apps/chainlit/Dockerfile", build_context]),
         ]
@@ -777,6 +911,8 @@ def deploy_app_cmd(
         "--parameters",
         f"imageTag={tag}",
         f"acrLoginServer={acr_server}",
+        f"acrName={acr_name}",
+        f"acrResourceId={acr_resource_id}",
         f"acrRepository={acr_repo}",
         f"environment={env}",
         f"baseName={base_name}",
@@ -795,6 +931,12 @@ def deploy_app_cmd(
         f"searchServiceResourceId={search_resource_id}",
         f"fabricWorkspaceId={fabric_workspace_id}",
         f"graphModelId={graph_model_id}",
+        f"querySchemaMode={query_schema_mode}",
+        f"querySchemaPath={query_schema_container_path}",
+        f"querySchemaHash={query_schema_hash}",
+        f"queryAuthorityHash={query_authority_hash}",
+        f"domainContractHash={domain_contract_hash}",
+        f"approvedMaxHops={approved_max_hops or 0}",
         "graphPreviewAcknowledged=true",
         f"createManagedIdentity={str(create_identity).lower()}",
         f"managedIdentityName={identity_name}",
@@ -900,6 +1042,12 @@ def deploy_app_cmd(
             "api_image": api_image,
             "ui_image": ui_image,
             "outputs": deployment_outputs,
+            "query_schema_mode": query_schema_mode,
+            "query_schema_path": query_schema_container_path,
+            "query_schema_hash": query_schema_hash,
+            "query_authority_hash": query_authority_hash,
+            "domain_contract_hash": domain_contract_hash,
+            "approved_max_hops": approved_max_hops,
         }
         target = Path(receipt_path)
         target.parent.mkdir(parents=True, exist_ok=True)

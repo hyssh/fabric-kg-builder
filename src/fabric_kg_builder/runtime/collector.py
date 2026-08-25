@@ -900,6 +900,25 @@ class RuntimeEvidenceCollector:
                     "Deployment receipt bounded query authority differs from "
                     f"the competency contract: {mismatched}."
                 )
+            if config.data_agent_mcp is not None:
+                raise RuntimeCollectionError(
+                    "Schema-2 runtime disables data_agent_mcp because it accepts "
+                    "free-form questions. Execute sealed direct Graph plan IDs "
+                    "through the local renderer instead."
+                )
+            invalid_mcp_cases = [
+                case.id
+                for case in contract.cases
+                if (
+                    case.routes.data_agent_mcp != "not_expected"
+                    or case.probes.data_agent_mcp is not None
+                )
+            ]
+            if invalid_mcp_cases:
+                raise RuntimeCollectionError(
+                    "Schema-2 competency cases expose prohibited "
+                    f"data_agent_mcp routes: {invalid_mcp_cases}."
+                )
         self._graph = graph_executor
         self._search = search_executor
         self._mcp = mcp_executor

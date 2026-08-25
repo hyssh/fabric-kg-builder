@@ -226,6 +226,21 @@ class CompetencyContract(_StrictModel):
                     "Schema-2 competency authority fields differ from the "
                     "persisted query schema."
                 )
+            schema2_mcp_cases = [
+                case.id
+                for case in self.cases
+                if (
+                    case.routes.data_agent_mcp != "not_expected"
+                    or case.probes.data_agent_mcp is not None
+                )
+            ]
+            if schema2_mcp_cases:
+                raise ValueError(
+                    "Schema-2 competency contracts cannot expose "
+                    "data_agent_mcp because it forwards free-form questions to "
+                    "model-authored GQL. Use direct_graph approved plan IDs "
+                    f"instead: {schema2_mcp_cases}."
+                )
         return self
 
 

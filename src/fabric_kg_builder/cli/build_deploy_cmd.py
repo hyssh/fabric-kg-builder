@@ -811,7 +811,10 @@ def _update_grounding_metadata(
     connections = env_cfg.setdefault("connections", {})
     if search_connection_id:
         connections["search"] = search_connection_id
-    connections["fabricDataAgent"] = data_agent_connection_id
+    if data_agent_connection_id:
+        connections["fabricDataAgent"] = data_agent_connection_id
+    else:
+        connections.pop("fabricDataAgent", None)
     connections["knowledgeBase"] = knowledge_connection_id
     knowledge = env_cfg.setdefault("knowledge", {})
     knowledge["searchIndexName"] = search_index_name
@@ -1312,6 +1315,80 @@ def _deploy_knowledge(
         )
     )
 
+    if query_schema.schema_mode == "schema2_bounded":
+        account_name = str(
+            outputs.get("foundryAccountName")
+            or str(outputs.get("foundryAccountId", "")).rstrip("/").rsplit("/", 1)[-1]
+        )
+        project_name = str(
+            outputs.get("foundryProjectName")
+            or manifest.resources.foundry.project_name
+        )
+        connection_client = FoundryProjectConnectionClient(
+            subscription_id=manifest.azure.subscription_id,
+            resource_group=str(manifest.azure.resource_group.name or ""),
+            account_name=account_name,
+            project_name=project_name,
+            credential=credential,
+        )
+        kb_mcp_endpoint = (
+            f"{search_endpoint}/knowledgebases/{kb_name}/mcp"
+            "?api-version=2025-11-01-preview"
+        )
+        kb_connection = connection_client.upsert_remote_tool(
+            name=f"fkg-{run_token}-knowledge-mcp",
+            target=kb_mcp_endpoint,
+            audience="https://search.azure.com/",
+        )
+        search_connection_id = str(
+            outputs.get("foundrySearchConnectionId") or ""
+        )
+        if require_foundry_search_connection and not search_connection_id:
+            raise BuildDeployError(
+                "Foundry Azure AI Search project connection ID is missing."
+            )
+        _update_grounding_metadata(
+            metadata_path=metadata_path,
+            environment=environment,
+            search_connection_id=search_connection_id,
+            search_index_name=search_index_name,
+            data_agent_connection_id="",
+            knowledge_connection_id=kb_connection.resource_id,
+            knowledge_base_name=kb_name,
+            knowledge_mcp_endpoint=kb_mcp_endpoint,
+        )
+        click.echo(
+            "[build-deploy] Schema-2 Data Agent publication: DISABLED. "
+            "Graph execution is available only through the authenticated local "
+            "approved-plan-ID endpoint."
+        )
+        return {
+            "knowledge_source_name": source_result.name,
+            "knowledge_source_created": source_result.created,
+            "knowledge_base_name": kb_result.name,
+            "knowledge_base_created": kb_result.created,
+            "knowledge_base_id": (
+                f"{search_endpoint}/knowledgebases/{kb_name}"
+            ),
+            "data_agent_id": None,
+            "data_agent_published": False,
+            "fabric_data_agent_connection_id": None,
+            "knowledge_connection_id": kb_connection.resource_id,
+            "knowledge_mcp_endpoint": kb_mcp_endpoint,
+            "semantic_contract_hash": (
+                loaded_semantic.manifest.semantic_contract_hash
+            ),
+            "semantic_model_manifest_hash": (
+                loaded_semantic.manifest.manifest_hash
+            ),
+            "query_schema_hash": query_schema.schema_hash,
+            "query_authority_hash": (
+                query_schema.authority.authority_hash
+                if query_schema.authority is not None
+                else None
+            ),
+        }
+
     fabric_token = credential.get_token(
         "https://api.fabric.microsoft.com/.default"
     ).token
@@ -1347,7 +1424,11 @@ def _deploy_knowledge(
             description_chars=_bd_description_chars,
             competency_examples=_bd_example_receipts,
         )
-        if _bd_competency_contract_exists and _bd_example_receipts:
+        if (
+            query_schema.schema_mode == "schema1_compatibility"
+            and _bd_competency_contract_exists
+            and _bd_example_receipts
+        ):
             from fabric_kg_builder.runtime.contract import CompetencyCase
             from fabric_kg_builder.runtime.executors import DataAgentMcpExecutor
 
@@ -1817,35 +1898,43 @@ def _build_resource_ledger(
         .get("details", {})
     )
     if knowledge:
-        resources.extend(
-            [
-                _ledger_record(
-                    kind="foundry_knowledge_source",
-                    resource_id=(
-                        f"{search_endpoint}/knowledgeSources/"
-                        f"{knowledge['knowledge_source_name']}"
-                    ),
-                    display_name=str(knowledge["knowledge_source_name"]),
-                    adoption_mode="create",
-                    run_id=run_id,
+        resources.extend([
+            _ledger_record(
+                kind="foundry_knowledge_source",
+                resource_id=(
+                    f"{search_endpoint}/knowledgeSources/"
+                    f"{knowledge['knowledge_source_name']}"
                 ),
-                _ledger_record(
-                    kind="foundry_knowledge_base",
-                    resource_id=str(knowledge["knowledge_base_id"]),
-                    display_name=str(knowledge["knowledge_base_name"]),
-                    adoption_mode="create",
-                    run_id=run_id,
-                ),
+                display_name=str(knowledge["knowledge_source_name"]),
+                adoption_mode="create",
+                run_id=run_id,
+            ),
+            _ledger_record(
+                kind="foundry_knowledge_base",
+                resource_id=str(knowledge["knowledge_base_id"]),
+                display_name=str(knowledge["knowledge_base_name"]),
+                adoption_mode="create",
+                run_id=run_id,
+            ),
+        ])
+        if knowledge.get("data_agent_id"):
+            resources.append(
                 _ledger_record(
                     kind="fabric_data_agent",
                     resource_id=str(knowledge["data_agent_id"]),
-                    display_name=str(knowledge["data_agent_name"]),
+                    display_name=str(
+                        knowledge.get("data_agent_name")
+                        or knowledge["data_agent_id"]
+                    ),
                     adoption_mode=str(
                         knowledge.get("data_agent_target_mode")
                         or "create"
                     ),
                     run_id=run_id,
-                ),
+                )
+            )
+        if knowledge.get("fabric_data_agent_connection_id"):
+            resources.append(
                 _ledger_record(
                     kind="foundry_project_connection",
                     resource_id=str(
@@ -1856,7 +1945,10 @@ def _build_resource_ledger(
                     ).rstrip("/").rsplit("/", 1)[-1],
                     adoption_mode="create",
                     run_id=run_id,
-                ),
+                )
+            )
+        if knowledge.get("knowledge_connection_id"):
+            resources.append(
                 _ledger_record(
                     kind="foundry_project_connection",
                     resource_id=str(knowledge["knowledge_connection_id"]),
@@ -1865,9 +1957,8 @@ def _build_resource_ledger(
                     ).rstrip("/").rsplit("/", 1)[-1],
                     adoption_mode="create",
                     run_id=run_id,
-                ),
-            ]
-        )
+                )
+            )
 
     agent = (
         state.data.get("stages", {})
@@ -3404,6 +3495,55 @@ def build_deploy_cmd(
         )
 
     if deploy_app:
+        from fabric_kg_builder.semantic.schemas import (  # noqa: PLC0415
+            PersistedQuerySchema,
+            compute_persisted_query_schema_hash,
+        )
+
+        source_query_schema_path = (
+            paths["agents"] / "persisted-query-schema.json"
+        )
+        try:
+            app_query_schema = PersistedQuerySchema.model_validate_json(
+                source_query_schema_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            raise BuildDeployError(
+                f"Could not load app query authority: {exc}"
+            ) from exc
+        if (
+            app_query_schema.schema_hash
+            != compute_persisted_query_schema_hash(app_query_schema)
+        ):
+            raise BuildDeployError(
+                "App persisted query schema hash differs from its contents."
+            )
+        expected_query_mode = (
+            "schema2_bounded"
+            if str(getattr(domain, "schema_version", "")) == "2.0"
+            else "schema1_compatibility"
+        )
+        if app_query_schema.schema_mode != expected_query_mode:
+            raise BuildDeployError(
+                "Approved domain schema mode differs from the sealed persisted "
+                "query schema; refusing a compatibility downgrade."
+            )
+        staged_query_schema_path: Path | None = None
+        if app_query_schema.schema_mode == "schema2_bounded":
+            if app_query_schema.authority is None:
+                raise BuildDeployError(
+                    "Schema-2 app deployment requires bounded query authority."
+                )
+            staged_query_schema_path = (
+                Path.cwd()
+                / "build"
+                / "runtime-authority"
+                / "persisted-query-schema.json"
+            )
+            staged_query_schema_path.parent.mkdir(parents=True, exist_ok=True)
+            staged_query_schema_path.write_bytes(
+                source_query_schema_path.read_bytes()
+            )
         state.execute(
             "fabric_runtime_access",
             lambda: _ensure_fabric_runtime_access(
@@ -3421,24 +3561,36 @@ def build_deploy_cmd(
             "FABRIC_KG_AUDIENCE": os.environ.get("FABRIC_KG_AUDIENCE", ""),
             "FABRIC_KG_GRAPH_PREVIEW_ACKNOWLEDGED": "true",
             "FABRIC_KG_DOWNSTREAM_ACCESS_CONFIRMED": "true",
+            "FABRIC_KG_QUERY_SCHEMA_MODE": (
+                app_query_schema.schema_mode
+            ),
         }
+        deploy_app_args = [
+            "app",
+            "deploy-app",
+            "--env",
+            env,
+            "--run-id",
+            effective_run_id,
+            "--metadata",
+            str(paths["metadata"]),
+            "--registry",
+            str(paths["registry"]),
+            "--out",
+            str(paths["release"] / "app-deployment.json"),
+            "--query-schema-mode",
+            app_env["FABRIC_KG_QUERY_SCHEMA_MODE"],
+        ]
+        if app_env["FABRIC_KG_QUERY_SCHEMA_MODE"] == "schema2_bounded":
+            assert staged_query_schema_path is not None
+            deploy_app_args.extend([
+                "--query-schema-file",
+                str(staged_query_schema_path),
+            ])
         state.execute(
             "deploy_app",
             lambda: _invoke_cli(
-                [
-                    "app",
-                    "deploy-app",
-                    "--env",
-                    env,
-                    "--run-id",
-                    effective_run_id,
-                    "--metadata",
-                    str(paths["metadata"]),
-                    "--registry",
-                    str(paths["registry"]),
-                    "--out",
-                    str(paths["release"] / "app-deployment.json"),
-                ],
+                deploy_app_args,
                 config_path=config_path,
                 environment=env,
                 extra_env=app_env,

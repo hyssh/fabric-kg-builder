@@ -2924,6 +2924,12 @@ def deploy_data_agent_cmd(
                 encoding="utf-8"
             )
         )
+        if query_schema.schema_mode == "schema2_bounded":
+            raise click.ClickException(
+                "Schema-2 Data Agent publication is disabled because its MCP "
+                "endpoint accepts free-form questions and model-authored GQL. "
+                "Use the authenticated approved-plan-ID serving endpoint."
+            )
         grounding = build_persisted_agent_grounding(
             manifest=loaded.manifest,
             crosswalk=loaded.crosswalk,
@@ -3225,7 +3231,11 @@ def deploy_data_agent_cmd(
             description_chars=_da_description_chars,
             competency_examples=_example_receipts,
         )
-        if _competency_contract_exists and _example_receipts:
+        if (
+            query_schema.schema_mode == "schema1_compatibility"
+            and _competency_contract_exists
+            and _example_receipts
+        ):
             from fabric_kg_builder.runtime.contract import CompetencyCase  # noqa: PLC0415
             from fabric_kg_builder.runtime.executors import DataAgentMcpExecutor  # noqa: PLC0415
 

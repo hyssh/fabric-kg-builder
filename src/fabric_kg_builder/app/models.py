@@ -24,6 +24,16 @@ class ChatRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20, description="Max KB results per query.")
     include_citations: bool = Field(default=True)
     include_lineage: bool = Field(default=False)
+    approved_plan_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^cq:[a-z0-9][a-z0-9._-]*$",
+        description=(
+            "Sealed schema-2 approved plan ID. Clients cannot submit arbitrary "
+            "structured plans or GQL."
+        ),
+    )
 
     @field_validator("question")
     @classmethod

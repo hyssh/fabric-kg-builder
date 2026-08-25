@@ -8,6 +8,16 @@ import pytest
 from pydantic import ValidationError
 
 from fabric_kg_builder.agent.tools.fabric_data import FabricDataAgentAdapter
+from fabric_kg_builder.app.api import (
+    _answer_question,
+    _readiness_passes,
+    create_app,
+)
+from fabric_kg_builder.app.auth import AuthError, InboundAuthVerifier
+from fabric_kg_builder.app.config import AppConfigError, load_app_config
+from fabric_kg_builder.app.models import ChatRequest
+from fabric_kg_builder.cli.app_cmd import deploy_app_cmd
+from click.testing import CliRunner
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.domain.service import compute_contract_hash
 from fabric_kg_builder.runtime.contract import (
@@ -672,7 +682,7 @@ def test_competency_compilation_binds_authority_and_renders_query(
             "routes": {
                 "direct_graph": "required",
                 "search": "optional",
-                "data_agent_mcp": "optional",
+                "data_agent_mcp": "not_expected",
                 "composed": "optional",
             },
             "probes": {"direct_graph": {}},
@@ -705,3 +715,178 @@ def test_competency_compilation_binds_authority_and_renders_query(
         schema,
     )
     assert probe.query_hash
+
+
+def test_schema2_competency_rejects_free_form_data_agent_mcp(
+    tmp_path,
+) -> None:
+    schema = _query_schema(3)
+    suite = tmp_path / "competency.json"
+    suite.write_text(json.dumps({
+        "schema_version": "1.0",
+        "cases": [{
+            "id": "cq:q1",
+            "question": "Which approved entities answer question one?",
+            "expected": {
+                "entity_types": ["entity-type:t0", "entity-type:t1"],
+                "relationship_types": [],
+                "answer_concepts": ["entity"],
+            },
+            "routes": {
+                "direct_graph": "required",
+                "search": "optional",
+                "data_agent_mcp": "optional",
+                "composed": "optional",
+            },
+            "probes": {
+                "direct_graph": {},
+                "data_agent_mcp": {},
+            },
+        }],
+    }), encoding="utf-8")
+    with pytest.raises(
+        Exception,
+        match="cannot expose data_agent_mcp",
+    ):
+        compile_competency_contract(
+            suite,
+            contract_hash="sha256:" + "a" * 64,
+            semantic_context={
+                "entity_types": [
+                    {"semantic_id": "entity-type:t0"},
+                    {"semantic_id": "entity-type:t1"},
+                ],
+                "relationship_types": [{
+                    "semantic_id": "relationship-type:r1",
+                    "direction": "source_to_target",
+                }],
+            },
+            query_schema=schema,
+        )
+
+
+class _EmptyKnowledgeBase:
+    def retrieve(self, question: str, top_k: int = 5):
+        return []
+
+
+def test_authenticated_chat_model_accepts_only_sealed_plan_id_shape() -> None:
+    request = ChatRequest(
+        question="Run the approved graph question.",
+        approved_plan_id="cq:q1",
+    )
+    assert request.approved_plan_id == "cq:q1"
+    with pytest.raises(ValidationError):
+        ChatRequest(
+            question="Run arbitrary plan.",
+            approved_plan_id="MATCH (n) RETURN n",
+        )
+
+
+def test_approved_plan_serving_executes_locally_and_graph_intent_abstains() -> None:
+    client = _GraphClient()
+    adapter = FabricDataAgentAdapter(
+        _client=client,
+        schema_mode="schema2_bounded",
+        query_schema=_query_schema(3),
+    )
+    answer, route, citations, refused = _answer_question(
+        question="Run approved relationship lookup.",
+        kb=_EmptyKnowledgeBase(),
+        graph=adapter,
+        approved_plan_id="cq:q1",
+    )
+    assert route == "ontology"
+    assert refused is False
+    assert "Approved plan `cq:q1`" in answer
+    assert client.queries
+    assert citations
+
+    client.queries.clear()
+    answer, route, citations, refused = _answer_question(
+        question="Which suppliers feed Plant A?",
+        kb=_EmptyKnowledgeBase(),
+        graph=adapter,
+    )
+    assert route == "unsupported"
+    assert refused is True
+    assert "approved bounded Graph plan" in answer
+    assert client.queries == []
+    assert citations == []
+
+
+def test_readiness_requires_configured_graph_only() -> None:
+    assert not _readiness_passes(
+        live_mode=True,
+        kb_ready=True,
+        visual_ready=True,
+        graph_required=True,
+        graph_ready=False,
+    )
+    assert _readiness_passes(
+        live_mode=True,
+        kb_ready=True,
+        visual_ready=True,
+        graph_required=False,
+        graph_ready=False,
+    )
+
+
+def test_app_config_requires_explicit_query_mode(monkeypatch) -> None:
+    monkeypatch.setenv("FABRIC_KG_ENVIRONMENT", "local")
+    monkeypatch.setenv("FABRIC_KG_LOCAL_DEV", "true")
+    monkeypatch.delenv("FABRIC_KG_QUERY_SCHEMA_MODE", raising=False)
+    with pytest.raises(AppConfigError, match="explicitly set"):
+        load_app_config()
+    monkeypatch.setenv(
+        "FABRIC_KG_QUERY_SCHEMA_MODE",
+        "schema1_compatibility",
+    )
+    assert load_app_config().query_schema_mode == "schema1_compatibility"
+
+
+def test_deploy_app_requires_explicit_query_mode() -> None:
+    result = CliRunner().invoke(
+        deploy_app_cmd,
+        ["--dry-run"],
+    )
+    assert result.exit_code != 0
+    assert "--query-schema-mode" in result.output
+
+
+class _HeaderVerifier(InboundAuthVerifier):
+    def verify(self, authorization_header: str | None):
+        if authorization_header != "Bearer approved":
+            raise AuthError("Authentication required.")
+        return {"sub": "approved-user"}
+
+
+def test_approved_plan_serving_path_is_authenticated() -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    graph_client = _GraphClient()
+    app = create_app(
+        auth_verifier=_HeaderVerifier(),
+        kb_tool=_EmptyKnowledgeBase(),
+        graph_adapter=FabricDataAgentAdapter(
+            _client=graph_client,
+            schema_mode="schema2_bounded",
+            query_schema=_query_schema(3),
+        ),
+        _allow_all_override=True,
+    )
+    client = TestClient(app)
+    body = {
+        "question": "Run approved graph plan.",
+        "approved_plan_id": "cq:q1",
+    }
+    assert client.post("/chat", json=body).status_code == 401
+    response = client.post(
+        "/chat",
+        json=body,
+        headers={"Authorization": "Bearer approved"},
+    )
+    assert response.status_code == 200
+    assert response.json()["route_type"] == "ontology"
+    assert graph_client.queries
