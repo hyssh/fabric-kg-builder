@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import inspect
 import json
-import tomllib
 from pathlib import Path
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from fabric_kg_builder import __version__
 from fabric_kg_builder.app.api import create_app

@@ -1043,6 +1043,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 ui = [
     { name = "chainlit" },
@@ -1082,6 +1083,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.31" },
     { name = "tiktoken", specifier = ">=0.7" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2.0" },
     { name = "tzdata", marker = "sys_platform == 'win32'", specifier = ">=2024.1" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'app'", specifier = ">=0.29" },
     { name = "xlrd", specifier = ">=2.0.1" },

@@ -39,6 +39,7 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.0",
     "pytest-timeout>=2.3",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 agent = [
     "azure-ai-projects>=2.3.0",
