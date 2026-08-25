@@ -1,4 +1,4 @@
-# SPEC-006: Cross-Layer Contracts (C0.Core)
+# SPEC-006: Cross-Layer Contracts (C0.Core and C0.Extraction)
 
 **Status:** Approved foundation
 **Version:** 1.0.0
@@ -8,8 +8,9 @@
 
 ## 1. Scope
 
-C0.Core is the shared contract, specification, schema, fixture, and hashing
-foundation required before L1-L3. It is additive and contains no proposal UX,
+C0.Core and the additive C0.Extraction carriers are the shared contract,
+specification, schema, fixture, and hashing foundation required before L1-L3.
+They contain no proposal UX,
 LLM request, extraction activation, evidence pipeline integration, canonical
 Parquet rewrite, publication, deployment, runtime query, citation, answer, or
 live Fabric behavior.
@@ -86,6 +87,9 @@ All registered artifacts use contract version `1.0.0`.
 | nested primitive | `ImmutableSourceLocator` | Immutable typed locator, version `1.0` |
 | `c0.source_unit` | `SourceUnit` | Exact source text and partition identity |
 | `c0.evidence_span` | `EvidenceSpan` | Local verifier-minted exact span |
+| `c0.extraction_candidate_batch` | `ExtractionCandidateBatch` | L2 candidate and C0.Core accounting carrier |
+| `c0.required_member_set_proposal` | `RequiredMemberSetProposal` | L2 proposed scope-membership carrier |
+| `c0.required_member_manifest` | `RequiredMemberManifest` | L3 deterministic scope-membership seal |
 | `c0.candidate_lifecycle_record` | `CandidateLifecycleRecord` | Append-only state event |
 | `c0.candidate_accounting_disposition` | `CandidateAccountingDisposition` | One input disposition |
 | `c0.canonical_entity_assertion` | `CanonicalEntityAssertion` | Typed `EntityRow` reference |
@@ -144,6 +148,42 @@ proves:
 5. locator character offsets match the span.
 
 Model-authored evidence IDs are never accepted as verified evidence.
+
+## 6A. C0.Extraction carriers
+
+C0.Extraction registers exactly three strict `1.0.0` cross-layer carriers.
+`CompletenessRequirementV2`, hierarchy and ancestor closure, abstract and
+identity-root rules, key policy, relationship policy, N/K, and approval remain
+exclusively owned by L1 `DomainContractV2`. C0 does not define or register a
+`CompletenessRequirement` or `HierarchyIdentity` contract.
+
+`ExtractionCandidateBatch` is emitted by L2. It binds the source-corpus and
+source-unit manifest IDs/hashes to the sealed domain contract, completeness
+requirement, hierarchy, and identity-policy hashes. Candidate references retain
+the C0.Core candidate ID/version/kind, semantic type, lifecycle record, and
+`EvidenceSpan` IDs. Its embedded `CandidateAccountingDisposition` values retain
+C0.Core's mutually exclusive retained/deduplicated accounting. Candidate counts,
+the retained ID-set hash, and the batch hash reconcile deterministically.
+
+`RequiredMemberSetProposal` is emitted by L2. It carries the batch ID/hash,
+sealed authority references, aggregate/scope canonical ID, membership semantic
+relationship ID, and ordered members. Each member carries only a canonical ID,
+semantic type ID, domain-authored role ID, order, cardinality, originating
+candidate ID, and supporting C0 `EvidenceSpan` IDs. Cardinality is carried
+losslessly as a non-negative minimum and an optional maximum; C0 does not
+select those bounds. Production schemas contain
+no domain names, predicates, or fixed member counts.
+
+`RequiredMemberManifest` is sealed locally and deterministically by L3. It must
+repeat the proposal's batch, authority, scope, relationship, and ordered member
+content exactly. Its `authoritative_collection_hash` hashes that content with
+all sealed authority references; its semantic manifest hash excludes only the
+operational seal timestamp. It is the sole cross-layer
+completeness/scope-membership artifact consumed by L4-L6.
+
+These contracts prove reference and hash equality only. They cannot broaden,
+narrow, infer, or reinterpret L1 policy, and they do not activate extraction or
+validation feature behavior.
 
 ## 7. Candidate lifecycle and accounting
 
@@ -261,6 +301,11 @@ The C0.Core gate includes:
 - strict unknown field/type/version rejection;
 - canonical JSON and golden SHA verification;
 - JSON/YAML round trips and generated schema registry hashes;
+- exact C0.Extraction registry/version and sealed authority equality;
+- C0.Core lifecycle, accounting, evidence, manifest, and receipt compatibility;
+- deterministic candidate ID-set and authoritative member-collection hashes;
+- duplicate/missing member rejection and semantic order/cardinality retention;
+- multiple-domain fixtures with domain-neutral production schemas;
 - all allowed and forbidden lifecycle transitions;
 - exhaustive Unicode code-point span/quote/hash ranges;
 - mutually exclusive candidate accounting;
