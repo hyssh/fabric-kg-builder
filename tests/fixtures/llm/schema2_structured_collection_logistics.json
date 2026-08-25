@@ -1,0 +1,10 @@
+{
+  "domain": "logistics",
+  "requirement_id": "completeness-requirement:logistics.route-stops",
+  "aggregate_type_id": "semantic-type:logistics.route",
+  "member_type_id": "semantic-type:logistics.stop",
+  "membership_relationship_type_id": "relationship-type:logistics.has-stop",
+  "member_role_id": "role:logistics.stop",
+  "ordering": "ordered",
+  "expected_count": null
+}

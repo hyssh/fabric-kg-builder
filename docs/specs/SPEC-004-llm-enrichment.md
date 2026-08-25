@@ -18,6 +18,7 @@
 | 2026-06-24T21:46:59.576-07:00 | McManus | Document Intelligence table approach (coordinator-tables-via-docintel.md, verified 2026-06-24): §7.3 Table Chunking rewritten — tables extracted by DI Layout (outputContentFormat=markdown), not LLM; table_row no longer produced by enrichment pipeline; §6.2 system prompt extended to ban table_row/table_cell emission; §8.6 added — DI Layout table extraction pipeline, HTML artifact flow (table_n.html), MS Learn citations (prebuilt/layout + RAG semantic chunking), validation proof (Surface PDF → 2 table_html chunks), reference implementations. |
 | 2026-08-23 | Copilot | Added schema-2.0 closed-vocabulary, exact-evidence, subtype, lifecycle, and shared-K contracts. |
 | 2026-08-24 | Copilot | Clarified that C0.Core contract references are owned by SPEC-006 and do not activate L2 extraction or L3 evidence validation. |
+| 2026-08-25 | Copilot | Activated isolated L2 schema-constrained extraction after approved L1; separated proposed source anchors and candidate accounting from L3 evidence verification and terminal validation. |
 
 ---
 
@@ -1526,41 +1527,52 @@ This spec defines Phase 1 output contract, Phase 2 request body, grounded-answer
 
 ### 12.12 Schema-2.0 Extraction Contract
 
-Schema-2.0 enrichment receives only the approved entity IDs, relationship IDs,
-endpoint types, direction, subtype hierarchy, evidence policy, and sealed K.
-Unknown predicates remain discovery candidates and cannot enter the canonical
-authoritative lane without a new domain approval.
+L2 starts only from an intact succeeded L1 receipt, its complete
+`SourceCorpusManifest`, approved `DomainContractV2` and
+`DomainApprovalContext`, and exact domain, hierarchy, identity-policy, and
+completeness hashes. The bounded L1 design sample remains prompt context only.
+L2 rematerializes every eligible source unit from the complete corpus and
+records one explicit disposition for every corpus entry, including excluded or
+blocked inventory entries.
 
-The proposal authority feeding enrichment requires source evidence for extracted
-entity types and relationship types. An entity may omit source evidence only
-when explicitly approved as `business_defined`. A relationship may omit source
-evidence only when its nonempty `governance_rule` records the reviewed business
-or governance justification. A competency-question reference alone is not
-evidence.
+The prompt vocabulary is closed over approved entity types, relationship types,
+predicates, properties, hierarchy, identity policy, completeness requirements,
+N, and K. Unknown observations produce audit/discovery reasons and
+`DOMAIN_REREVIEW_REQUESTED`; they never mutate those authorities. Stable entity
+identity is derived from the approved hierarchy-root identity policy, independent
+of classification. Relationship identity uses the approved predicate and stable
+endpoint IDs. Classification is a separate immutable candidate version.
 
-For each relationship candidate the model proposes a runner-known text-unit ID,
-`span_start`, `span_end`, and `quote`. Local code verifies:
+Model output contains proposed observations and untrusted SourceUnit-relative
+anchors only. L2 may seal `ExtractionCandidateBatch@1.0.0`,
+`RequiredMemberSetProposal@1.1.0`, proposed canonical references, mutually
+exclusive retained/deduplicated accounting, and initial append-only
+`None -> proposed` lifecycle events. Every input candidate receives exactly one
+accounting disposition. Audit reason metrics are separate from accounting reason
+codes.
 
-1. source and target occurrences exist;
-2. predicate and direction are approved;
-3. endpoint types are compatible through cycle-safe transitive subtype closure,
-   unless the endpoint policy is exact;
-4. offsets are in range and the quote is nonempty;
-5. `source_text[span_start:span_end] == quote`;
-6. source locator and content hash match one source unit; and
-7. a deterministic evidence ID is minted only after all checks pass.
+L2 does **not** verify or mint `EvidenceSpan`, assert candidates, resolve
+terminal endpoints or subtypes, create a `RequiredMemberManifest`, write serving
+tables, or activate schema-2 product CLI behavior. Those trust-making checks are
+reserved for L3 or later stages. A model-authored evidence ID is retained only
+as untrusted proposal data.
 
-An asserted candidate without verified evidence is invalid before checkpoint
-success. Missing evidence yields `unresolved`; vocabulary, endpoint, direction,
-or span failures yield `rejected`; unsupported predicates yield `discovery`.
-All non-serving candidates retain stable audit reasons.
+The approved `max_relations_per_work_unit` is semantic policy. An over-budget
+response is discarded and deterministically split at structural boundaries with
+stable child IDs; candidates are never truncated. Successful leaf artifacts are
+immutable and reusable by exact authority fingerprint. Corrupt or missing leaves
+are rerun individually, while successful remote work is not repeated.
 
-`max_relations_per_work_unit` defaults to 25. Overflow splits the source unit
-deterministically with overlap and stable child IDs; truncation is forbidden.
-
-The approved K is the same value used by domain question paths, extraction path
-validation, and Graph query planning. Extraction may use fewer hops but cannot
-raise or replace K.
+Structured fact-set proposals are domain-neutral and consume only sealed
+`CompletenessRequirementV2`. L2 may propose observed aggregate, member,
+membership, role, order, and cardinality references, but may not invent an
+unspecified count, order, role, or adjacency rule. The C0 1.1 proposal carries
+the exact nullable expected/minimum/maximum bounds, approved role IDs, and
+ordered/unordered policy. Role and order remain null when absent; unordered
+members canonicalize by stable member ID, and ordered members require observed
+approved unique contiguous positions. L2 diagnostics may reference the complete
+proposal but do not redefine its policy. L3 alone validates and seals those
+facts as `RequiredMemberManifest@1.1.0`.
 
 ---
 

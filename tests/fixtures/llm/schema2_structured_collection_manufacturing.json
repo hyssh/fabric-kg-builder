@@ -1,0 +1,10 @@
+{
+  "domain": "manufacturing",
+  "requirement_id": "completeness-requirement:manufacturing.components",
+  "aggregate_type_id": "semantic-type:manufacturing.assembly",
+  "member_type_id": "semantic-type:manufacturing.component",
+  "membership_relationship_type_id": "relationship-type:manufacturing.contains",
+  "member_role_id": "role:manufacturing.component",
+  "ordering": "unordered",
+  "expected_count": null
+}

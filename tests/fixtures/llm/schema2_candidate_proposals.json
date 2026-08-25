@@ -1,0 +1,48 @@
+{
+  "candidates": [
+    {
+      "candidate_kind": "entity",
+      "local_id": "facility-a",
+      "observed_type": "Facility",
+      "label": "Facility A",
+      "aliases": ["Site A"],
+      "identity_key": {"facility_id": "facility-a"},
+      "stable_source_identity": null,
+      "anchors": []
+    },
+    {
+      "candidate_kind": "entity",
+      "local_id": "equipment-1",
+      "observed_type": "Equipment",
+      "label": "Pump 1",
+      "aliases": [],
+      "identity_key": {"equipment_id": "pump-1"},
+      "stable_source_identity": null,
+      "anchors": []
+    },
+    {
+      "candidate_kind": "relationship",
+      "source_local_id": "facility-a",
+      "target_local_id": "equipment-1",
+      "observed_predicate": "contains",
+      "direction": "source_to_target",
+      "governed_context": "approved maintenance context",
+      "anchor": {
+        "span_start": 0,
+        "span_end": 36,
+        "quote": "Facility A contains Pump 1 in service.",
+        "model_authored_evidence_id": "model-evidence-must-not-be-trusted"
+      }
+    },
+    {
+      "candidate_kind": "entity",
+      "local_id": "unknown-1",
+      "observed_type": "InventedMachineKind",
+      "label": "Observed Thing",
+      "aliases": [],
+      "identity_key": {},
+      "stable_source_identity": "observed-thing-1",
+      "anchors": []
+    }
+  ]
+}
