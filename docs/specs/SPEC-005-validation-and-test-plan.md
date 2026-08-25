@@ -15,6 +15,7 @@
 | 4 | 2026-08-23 | Copilot | Added schema-2.0 DOM, EXT, SEM, DEP, and QRY gates and compatibility test requirements. |
 | 5 | 2026-08-24 | Copilot | Added the C0.Core contract gate and corrected shared-contract ownership references to SPEC-006; no higher-layer feature gate is activated. |
 | 6 | 2026-08-25 | Copilot | Activated the L1 domain-design/approval test gate from SPEC-007; schema-2 downstream behavior remains fail-closed. |
+| 7 | 2026-08-25 | Copilot | Added the isolated L2 schema-constrained extraction test gate; L3 evidence validation, serving, publication, and schema-2 CLI activation remain excluded. |
 
 ---
 
@@ -1225,9 +1226,13 @@ remain unchanged.
 | DOM-105 | domain validation | K differs from the maximum shortest covered path on the question-scoped relationship graph, exceeds 4, or K=4 lacks cited rationale |
 | DOM-106 | domain validation | Type IDs, predicates, endpoint signatures, per-hop endpoints, or traversal direction are ambiguous or invalid |
 | EXT-101 | enrichment | A canonical type or predicate is outside the approved closed vocabulary |
-| EXT-102 | enrichment | An asserted relationship lacks a locally verified exact evidence span |
-| EXT-103 | enrichment | Endpoint validation is not transitive, deterministic, or compliant with exact-only policy |
+| EXT-102 | L3 validation (reserved) | An asserted relationship lacks a locally verified exact evidence span |
+| EXT-103 | L3 validation (reserved) | Endpoint validation is not transitive, deterministic, or compliant with exact-only policy |
 | EXT-104 | enrichment | Work-unit overflow truncates candidates instead of deterministic splitting |
+| EXT-105 | enrichment | L2 consumes a missing, non-succeeded, stale, or hash-inconsistent L1 handoff |
+| EXT-106 | enrichment | Any complete-corpus entry lacks a materialized, explicitly-empty, excluded, or blocked disposition |
+| EXT-107 | enrichment | An input candidate lacks exactly one retained/deduplicated accounting disposition |
+| EXT-108 | enrichment | L2 mints verified evidence, emits an asserted state, or activates L3/L4 output |
 | SEM-100 | compile-data | `semantic_entities` contains a non-asserted, unapproved, stale-hash, or unevidenced extracted row |
 | SEM-101 | compile-data | `semantic_relationships` contains a state other than asserted |
 | SEM-102 | compile-data | A semantic relationship lacks a valid evidence FK |
@@ -1270,3 +1275,33 @@ These tests validate contract shapes and invariants only. Later layers add
 subtype-validation integration, materialization, query execution, isolated
 installation, approved numeric performance policies, and live-smoke evidence
 without weakening the C0 gate.
+
+### 15.3 L2 schema-constrained extraction gate
+
+The L2 merge gate runs offline and covers:
+
+- intact succeeded L1 receipt and exact domain, hierarchy, identity-policy,
+  completeness, complete-corpus, SourceUnit-manifest, prompt, model, extractor,
+  and C0 carrier bindings;
+- complete corpus rather than bounded design-sample extraction, with one
+  disposition for every corpus entry and every eligible SourceUnit assigned;
+- strict whole-response parsing, closed approved vocabulary, unknown-observation
+  audit/rereview behavior, and no authority mutation;
+- type-independent entity identity, classification versions, predicate/endpoint
+  relationship identity, and deterministic cross-leaf deduplication;
+- one mutually exclusive accounting disposition per input, separate non-additive
+  audit reasons, and initial proposed-only lifecycle records;
+- deterministic structural splitting, atomic overflow failure, bounded
+  batch/concurrency scheduling, immutable leaf checkpoint reuse, and corrupt-leaf
+  rerun without repeated successful remote work;
+- manufacturing, clinical, and logistics structured fact-set fixtures proving
+  domain-neutral use of sealed completeness roles/order/cardinality;
+- proposed anchors without EvidenceSpan minting, asserted state, endpoint/subtype
+  terminal validation, required-member sealing, serving, publication, or Graph
+  activation;
+- dry-run behavior with zero remote calls and writes, no schema-2 product CLI
+  activation, and unchanged schema-1 tests.
+
+No numeric latency, throughput, memory, retry, or cache threshold is introduced
+by this gate. The approved maximum relationship-candidate count is semantic
+policy rather than a performance target.
