@@ -677,6 +677,51 @@ sealed semantic source table. Deployment must use the same projection and
 validation implementation and must compare the exact expected counts and hashes
 before mutation and after persisted read-back.
 
+#### 6.3.4 L4 audit and serving projection
+
+The local L4 projection consumes only an intact succeeded L3 receipt and its
+sealed authority chain. It writes one complete `audit_candidates` row per input
+candidate disposition, including deduplicated-input targets, and enforces both
+accounting equations in §6.3.1. Reason metrics remain independent diagnostics
+and are not summed as lifecycle buckets.
+
+The schema-2 serving projection consists of these deterministic Arrow/Parquet
+tables:
+
+- `semantic_asserted_entities`;
+- `semantic_entity_type_assertions`;
+- `semantic_asserted_relationships`;
+- `semantic_asserted_properties`;
+- `semantic_required_member_manifests`; and
+- `semantic_required_members`.
+
+Only asserted rows enter the first four tables. Entity IDs and relationship IDs
+remain type-independent; reclassification changes type-assertion rows rather
+than node or edge identity. The most-specific asserted type and all of its
+sealed ancestors are explicit. Relationship rows require served endpoints,
+verified evidence, approved direction and endpoint policy, and exact hierarchy,
+identity-policy, Domain, and semantic-contract hashes.
+
+`semantic_required_member_manifests` and `semantic_required_members` form the
+normalized physical projection of `RequiredMemberManifest@1.1.0`, the sole
+completeness and membership authority. The manifest table preserves one
+authority row even when the approved collection has zero members. L4 copies the
+scope, membership relationship, ordered member tuple, role, candidate
+reference, member hash, cardinality, collection hash, and source-manifest
+references. It does not infer members or recompute an independent collection
+hash. Exact member IDs, types, roles, order, candidate references, member
+hashes, bounds, required roles, collection hashes, and source hashes must match
+before L4 can succeed.
+
+L4 publishes an `ArtifactManifest`, `StageResourceMetrics`, succeeded
+`StageReceipt`, and local Parquet `ProjectionEquivalence` proofs with exact
+counts, canonical ID sets, and row fingerprints. Every Parquet table is read
+back once and compared with its logical rows before success. Reuse is valid only
+when every declared file is present and byte-identical and no extra file exists;
+corruption causes deterministic local regeneration. A per-fingerprint local
+file lock serializes the intactness check and atomic publication for concurrent
+writers.
+
 ### 6.4 Column-to-Field Mapping Conventions
 
 | Column name pattern | Maps to entity/field | Notes |

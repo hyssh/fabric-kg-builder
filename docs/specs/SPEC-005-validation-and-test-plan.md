@@ -19,6 +19,7 @@
 | 8 | 2026-08-25 | Copilot | Added the isolated L3 evidence-validation test gate (§15.4), activated EXT-102/EXT-103, and registered EXT-109–EXT-112; serving, publication, and schema-2 CLI activation remain excluded. |
 | 9 | 2026-08-25 | Copilot | Hardened the L3 gate for fail-closed carrier limits (direction, property owner/value, identity witness, design-evidence counts), leaf-checkpoint integrity, lifecycle cross-checking, collection-carrier partitioning, and fingerprint-scoped rerun; registered EXT-113 and EXT-114. |
 | 10 | 2026-08-25 | Copilot | Required exact collection-policy binding to the sealed `CompletenessRequirementV2`, full leaf re-derivation for every candidate kind against interrupted-run forgery, and leaf fingerprints bound to the complete canonical `SourceUnit` artifact; registered EXT-115 and EXT-116. |
+| 11 | 2026-08-26 | Copilot | Added the isolated local L4 audit and asserted-only serving projection gate (§15.5); L5 deployment/publication, runtime, and schema-2 CLI activation remain excluded. |
 
 ---
 
@@ -1495,4 +1496,49 @@ PYTHONPATH=src uv run --offline --no-project pytest -q \
   tests/unit/test_graph_occurrence.py \
   tests/unit/test_lineage_common.py \
   tests/unit/test_schemas.py
+```
+
+### 15.5 L4 audit and serving projection gate
+
+The L4 merge gate is local-only and covers:
+
+- intact succeeded L3 receipt, output manifest, resource metrics, exact accepted
+  versions, leaf artifacts, lifecycle transitions, evidence spans, sealed
+  hierarchy/identity/completeness hashes, and every
+  `RequiredMemberManifest@1.1.0`;
+- complete input-to-retained-or-deduplicated mapping and exact reconciliation of
+  `input = retained + deduplicated` and `retained = sum(lifecycle states)`,
+  including asserted, discovery, unresolved, rejected, and unsupported states;
+- non-additive reason-code metrics that do not alter the accounting partition;
+- asserted-only serving membership, with discovery, unresolved, rejected,
+  unsupported, and raw canonical fallback excluded;
+- stable type-independent entity and relationship IDs, one entity row across
+  reclassification, and explicit most-specific plus ancestor type assertions;
+- verified extraction evidence, recomputed identity witnesses, approved
+  governance policy, resolved served endpoints, deterministic inheritance
+  paths, and exact hierarchy, identity-policy, Domain, and semantic hashes;
+- exact physical projection of required members by copying the C0 manifest
+  fields, with mutation tests for member IDs/types, tuple order, role, ordinal,
+  candidate reference, member hash, cardinality, required roles, collection
+  hash, and source-manifest hashes, plus a manifest-authority row that preserves
+  valid zero-member collections;
+- deterministic Arrow schemas and Parquet bytes, artifact counts, canonical ID
+  set hashes, row fingerprints, local Parquet `ProjectionEquivalence`, and no
+  success with a missing, corrupt, partial, or extra file;
+- fingerprinted reuse bound to the L3 receipt, authority hashes, accepted
+  contract versions, projection-code version, and physical schema hashes;
+- per-fingerprint interprocess locking across resume validation and atomic
+  publication, including concurrent same-fingerprint writer coverage;
+- zero remote, model, Fabric, Graph, Search, or deployment calls, unchanged
+  schema-1 source resolution, no schema-2 CLI activation, and fail-closed
+  product readiness until an L5 persisted publication receipt exists.
+
+Validation command:
+
+```text
+PYTHONPATH=src pytest -q \
+  tests/unit/test_schema2_projection_stage.py \
+  tests/unit/test_schema2_validation_stage.py \
+  tests/contract/test_c0_core_contracts.py \
+  tests/contract/test_c0_extraction_contracts.py
 ```
