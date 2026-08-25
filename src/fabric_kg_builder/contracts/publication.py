@@ -78,6 +78,15 @@ def _sorted_text(value: object, *, field_name: str) -> object:
     return value
 
 
+def _sorted_text_strict(value: object, *, field_name: str) -> object:
+    if isinstance(value, (list, tuple)):
+        normalized = sorted_unique(value, field_name=field_name)
+        if len(normalized) != len(value):
+            raise ValueError(f"{field_name} must not contain duplicate values")
+        return normalized
+    return value
+
+
 def _require_unique(
     values: list[tuple[str, str]],
     *,
@@ -512,6 +521,646 @@ class PublicationCrosswalk(ContractModel):
                 )
                 for _, mapping in all_properties
                 if mapping.data_agent_selected_property_id is not None
+            ],
+            namespace="Data Agent selected property",
+        )
+
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"crosswalk_hash"})
+        )
+        if self.crosswalk_hash != expected:
+            raise ValueError("crosswalk_hash does not match publication crosswalk")
+        return self
+
+    def validate_upstream_authority(
+        self,
+        *,
+        hierarchy_hash: str,
+        identity_policy_hash: str,
+        stable_id_lock_hash: str,
+        source_projection_hash: str,
+    ) -> None:
+        checks = (
+            ("hierarchy", self.hierarchy_hash, hierarchy_hash),
+            ("identity policy", self.identity_policy_hash, identity_policy_hash),
+            ("stable ID lock", self.stable_id_lock_hash, stable_id_lock_hash),
+            ("source projection", self.source_projection_hash, source_projection_hash),
+        )
+        for name, sealed, authoritative in checks:
+            if sealed != authoritative:
+                raise ValueError(f"stale {name} hash")
+
+
+class PublicationCrosswalkIdentityV1_1(CanonicalIdentityEnvelope):
+    """Versioned identity for the additive publication crosswalk successor."""
+
+    contract_kind: Literal["c0.publication_crosswalk"] = "c0.publication_crosswalk"
+    contract_version: Literal["1.1.0"] = "1.1.0"
+
+
+class SemanticPropertyOwnershipMappingV1_1(ContractModel):
+    """The single semantic mapping authority for one canonical property."""
+
+    canonical_property_id: RequiredText
+    owner_semantic_type_id: RequiredText
+    data_type: RequiredText
+    value_semantics_id: RequiredText
+    ontology_bigint_id: OntologyBigInt
+    graph_property: RequiredText
+    data_agent_selected_property_id: RequiredText | None = None
+
+    @field_validator(
+        "canonical_property_id",
+        "owner_semantic_type_id",
+        "data_type",
+        "value_semantics_id",
+        "graph_property",
+        "data_agent_selected_property_id",
+    )
+    @classmethod
+    def _reject_secrets(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            return None
+        return _secret_free(value, field_name=info.field_name)
+
+
+class InheritedPropertyReferenceV1_1(ContractModel):
+    """Explicit reference to a globally owned canonical property."""
+
+    canonical_property_id: RequiredText
+    owner_semantic_type_id: RequiredText
+    data_type: RequiredText
+    value_semantics_id: RequiredText
+
+    @field_validator(
+        "canonical_property_id",
+        "owner_semantic_type_id",
+        "data_type",
+        "value_semantics_id",
+    )
+    @classmethod
+    def _reject_secrets(cls, value: str, info: Any) -> str:
+        return _secret_free(value, field_name=info.field_name)
+
+
+class PhysicalPropertyBindingV1_1(ContractModel):
+    """One type-local materialization of a canonical semantic property."""
+
+    canonical_property_id: RequiredText
+    owner_semantic_type_id: RequiredText
+    data_type: RequiredText
+    value_semantics_id: RequiredText
+    physical_column_id: RequiredText
+    search_index_field: RequiredText
+    search_filter_field: RequiredText | None = None
+    search_vector_field: RequiredText | None = None
+
+    @field_validator(
+        "canonical_property_id",
+        "owner_semantic_type_id",
+        "data_type",
+        "value_semantics_id",
+        "physical_column_id",
+        "search_index_field",
+        "search_filter_field",
+        "search_vector_field",
+    )
+    @classmethod
+    def _reject_secrets(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            return None
+        return _secret_free(value, field_name=info.field_name)
+
+
+class PhysicalSurrogateKeyBindingV1_1(ContractModel):
+    """Explicit non-semantic local key that can never stand for a canonical ID."""
+
+    surrogate_key_id: RequiredText
+    physical_column_id: RequiredText
+    data_type: RequiredText
+    purpose: Literal["physical_row_identity", "physical_join_key"]
+
+    @field_validator("surrogate_key_id", "physical_column_id", "data_type")
+    @classmethod
+    def _reject_secrets(cls, value: str, info: Any) -> str:
+        return _secret_free(value, field_name=info.field_name)
+
+
+class SemanticTypeProjectionMappingV1_1(ContractModel):
+    """Type mapping with separate semantic references and physical bindings."""
+
+    canonical_semantic_type_id: RequiredText
+    canonical_parent_semantic_type_id: RequiredText | None = None
+    physical_table_id: RequiredText
+    ontology_bigint_id: OntologyBigInt
+    graph_label: RequiredText
+    graph_aliases: tuple[str, ...] = ()
+    locally_owned_canonical_property_ids: tuple[str, ...]
+    inherited_property_references: tuple[InheritedPropertyReferenceV1_1, ...] = ()
+    canonical_instance_key_property_ids: tuple[str, ...]
+    physical_property_bindings: tuple[PhysicalPropertyBindingV1_1, ...]
+    physical_surrogate_key_bindings: tuple[PhysicalSurrogateKeyBindingV1_1, ...] = ()
+
+    @field_validator(
+        "graph_aliases",
+        "locally_owned_canonical_property_ids",
+        "canonical_instance_key_property_ids",
+        mode="before",
+    )
+    @classmethod
+    def _sets(cls, value: object, info: Any) -> object:
+        return _sorted_text_strict(value, field_name=info.field_name)
+
+    @field_validator(
+        "canonical_semantic_type_id",
+        "canonical_parent_semantic_type_id",
+        "physical_table_id",
+        "graph_label",
+    )
+    @classmethod
+    def _reject_secrets(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            return None
+        return _secret_free(value, field_name=info.field_name)
+
+    @field_validator(
+        "inherited_property_references",
+        "physical_property_bindings",
+        mode="before",
+    )
+    @classmethod
+    def _sort_canonical_bindings(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.canonical_property_id
+                        if hasattr(item, "canonical_property_id")
+                        else str(item.get("canonical_property_id", ""))
+                    ),
+                )
+            )
+        return value
+
+    @field_validator("physical_surrogate_key_bindings", mode="before")
+    @classmethod
+    def _sort_surrogates(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.surrogate_key_id
+                        if isinstance(item, PhysicalSurrogateKeyBindingV1_1)
+                        else str(item.get("surrogate_key_id", ""))
+                    ),
+                )
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _local_invariants(self) -> "SemanticTypeProjectionMappingV1_1":
+        inherited_ids = [
+            item.canonical_property_id for item in self.inherited_property_references
+        ]
+        if len(set(inherited_ids)) != len(inherited_ids):
+            raise ValueError("inherited canonical property references must be unique")
+        overlap = set(self.locally_owned_canonical_property_ids).intersection(
+            inherited_ids
+        )
+        if overlap:
+            raise ValueError("canonical properties cannot be both local and inherited")
+        effective_ids = set(self.locally_owned_canonical_property_ids).union(
+            inherited_ids
+        )
+        if not effective_ids:
+            raise ValueError("each semantic type requires effective canonical properties")
+        if not self.canonical_instance_key_property_ids:
+            raise ValueError("each semantic type requires canonical instance key fields")
+        if not set(self.canonical_instance_key_property_ids).issubset(effective_ids):
+            raise ValueError("canonical instance keys must be effective canonical properties")
+        binding_ids = [
+            item.canonical_property_id for item in self.physical_property_bindings
+        ]
+        if len(set(binding_ids)) != len(binding_ids):
+            raise ValueError("physical canonical property bindings must be unique")
+        if set(binding_ids) != effective_ids:
+            raise ValueError(
+                "physical property bindings must exactly materialize effective properties"
+            )
+        physical_columns = [
+            item.physical_column_id for item in self.physical_property_bindings
+        ] + [
+            item.physical_column_id
+            for item in self.physical_surrogate_key_bindings
+        ]
+        if len(set(physical_columns)) != len(physical_columns):
+            raise ValueError("type-local physical columns must be unique")
+        surrogate_ids = [
+            item.surrogate_key_id for item in self.physical_surrogate_key_bindings
+        ]
+        if len(set(surrogate_ids)) != len(surrogate_ids):
+            raise ValueError("physical surrogate key IDs must be unique")
+        if set(surrogate_ids).intersection(effective_ids):
+            raise ValueError("physical surrogate keys cannot use canonical property IDs")
+        _require_unique(
+            [
+                (physical_id, item.canonical_property_id)
+                for item in self.physical_property_bindings
+                for physical_id in (
+                    item.search_index_field,
+                    item.search_filter_field,
+                    item.search_vector_field,
+                )
+                if physical_id is not None
+            ],
+            namespace="type-local search field",
+        )
+        return self
+
+
+class EndpointPhysicalKeyBindingV1_1(ContractModel):
+    """Relationship-local physical materialization of one canonical endpoint key."""
+
+    canonical_property_id: RequiredText
+    physical_column_id: RequiredText
+
+    @field_validator("canonical_property_id", "physical_column_id")
+    @classmethod
+    def _reject_secrets(cls, value: str, info: Any) -> str:
+        return _secret_free(value, field_name=info.field_name)
+
+
+class RelationshipProjectionMappingV1_1(ContractModel):
+    """Relationship mapping with separate canonical and physical endpoint keys."""
+
+    canonical_semantic_relationship_id: RequiredText
+    source_semantic_type_id: RequiredText
+    target_semantic_type_id: RequiredText
+    physical_table_id: RequiredText
+    ontology_bigint_id: OntologyBigInt
+    graph_label: RequiredText
+    graph_aliases: tuple[str, ...] = ()
+    source_canonical_key_property_ids: tuple[str, ...]
+    target_canonical_key_property_ids: tuple[str, ...]
+    source_key_bindings: tuple[EndpointPhysicalKeyBindingV1_1, ...]
+    target_key_bindings: tuple[EndpointPhysicalKeyBindingV1_1, ...]
+    search_index_field: RequiredText | None = None
+
+    @field_validator(
+        "graph_aliases",
+        "source_canonical_key_property_ids",
+        "target_canonical_key_property_ids",
+        mode="before",
+    )
+    @classmethod
+    def _sets(cls, value: object, info: Any) -> object:
+        return _sorted_text_strict(value, field_name=info.field_name)
+
+    @field_validator(
+        "canonical_semantic_relationship_id",
+        "source_semantic_type_id",
+        "target_semantic_type_id",
+        "physical_table_id",
+        "graph_label",
+        "search_index_field",
+    )
+    @classmethod
+    def _reject_secrets(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            return None
+        return _secret_free(value, field_name=info.field_name)
+
+    @field_validator("source_key_bindings", "target_key_bindings", mode="before")
+    @classmethod
+    def _sort_bindings(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.canonical_property_id
+                        if isinstance(item, EndpointPhysicalKeyBindingV1_1)
+                        else str(item.get("canonical_property_id", ""))
+                    ),
+                )
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _local_invariants(self) -> "RelationshipProjectionMappingV1_1":
+        for side in ("source", "target"):
+            canonical_ids = getattr(self, f"{side}_canonical_key_property_ids")
+            bindings = getattr(self, f"{side}_key_bindings")
+            if not canonical_ids:
+                raise ValueError(f"{side} canonical endpoint keys must not be empty")
+            binding_ids = [item.canonical_property_id for item in bindings]
+            if len(set(binding_ids)) != len(binding_ids):
+                raise ValueError(f"{side} endpoint canonical bindings must be unique")
+            if set(binding_ids) != set(canonical_ids):
+                raise ValueError(
+                    f"{side} physical endpoint bindings must exactly resolve canonical keys"
+                )
+            physical_ids = [item.physical_column_id for item in bindings]
+            if len(set(physical_ids)) != len(physical_ids):
+                raise ValueError(f"{side} endpoint physical columns must be unique")
+        all_columns = [
+            item.physical_column_id
+            for item in (*self.source_key_bindings, *self.target_key_bindings)
+        ]
+        if len(set(all_columns)) != len(all_columns):
+            raise ValueError("relationship endpoint physical columns must be unique")
+        return self
+
+
+class PublicationCrosswalkV1_1(ContractModel):
+    """Successor crosswalk separating semantic ownership from materialization."""
+
+    identity: PublicationCrosswalkIdentityV1_1
+    publication_crosswalk_id: RequiredText
+    authority: PublicationAuthorityReferences
+    semantic_contract_hash: Sha256
+    stable_id_lock_id: RequiredText
+    stable_id_lock_hash: Sha256
+    hierarchy_hash: Sha256
+    identity_policy_hash: Sha256
+    source_projection_id: RequiredText
+    source_projection_hash: Sha256
+    semantic_property_ownership_mappings: tuple[
+        SemanticPropertyOwnershipMappingV1_1, ...
+    ]
+    semantic_type_mappings: tuple[SemanticTypeProjectionMappingV1_1, ...]
+    relationship_mappings: tuple[RelationshipProjectionMappingV1_1, ...]
+    crosswalk_hash: Sha256
+
+    @field_validator("semantic_property_ownership_mappings", mode="before")
+    @classmethod
+    def _sort_ownership(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.canonical_property_id
+                        if isinstance(item, SemanticPropertyOwnershipMappingV1_1)
+                        else str(item.get("canonical_property_id", ""))
+                    ),
+                )
+            )
+        return value
+
+    @field_validator("semantic_type_mappings", mode="before")
+    @classmethod
+    def _sort_types(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.canonical_semantic_type_id
+                        if isinstance(item, SemanticTypeProjectionMappingV1_1)
+                        else str(item.get("canonical_semantic_type_id", ""))
+                    ),
+                )
+            )
+        return value
+
+    @field_validator("relationship_mappings", mode="before")
+    @classmethod
+    def _sort_relationships(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                sorted(
+                    value,
+                    key=lambda item: (
+                        item.canonical_semantic_relationship_id
+                        if isinstance(item, RelationshipProjectionMappingV1_1)
+                        else str(item.get("canonical_semantic_relationship_id", ""))
+                    ),
+                )
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _invariants(self) -> "PublicationCrosswalkV1_1":
+        _reject_secrets_in(self)
+        if self.identity.semantic_contract_hash != self.semantic_contract_hash:
+            raise ValueError("semantic contract hash differs from identity authority")
+
+        type_ids = [item.canonical_semantic_type_id for item in self.semantic_type_mappings]
+        if len(set(type_ids)) != len(type_ids):
+            raise ValueError("canonical semantic type mappings must be unique")
+        type_by_id = {
+            item.canonical_semantic_type_id: item
+            for item in self.semantic_type_mappings
+        }
+        parent_by_type = {
+            item.canonical_semantic_type_id: item.canonical_parent_semantic_type_id
+            for item in self.semantic_type_mappings
+        }
+        for type_id, parent_id in parent_by_type.items():
+            if parent_id is not None and parent_id not in type_by_id:
+                raise ValueError("canonical parent semantic type does not resolve")
+            seen = {type_id}
+            current = parent_id
+            while current is not None:
+                if current in seen:
+                    raise ValueError("canonical semantic type hierarchy must be acyclic")
+                seen.add(current)
+                current = parent_by_type[current]
+
+        ownership_ids = [
+            item.canonical_property_id
+            for item in self.semantic_property_ownership_mappings
+        ]
+        if len(set(ownership_ids)) != len(ownership_ids):
+            raise ValueError("each canonical property must have one semantic owner")
+        ownership_by_id = {
+            item.canonical_property_id: item
+            for item in self.semantic_property_ownership_mappings
+        }
+        for ownership in self.semantic_property_ownership_mappings:
+            if ownership.owner_semantic_type_id not in type_by_id:
+                raise ValueError("canonical property owner semantic type does not resolve")
+
+        claimed_local_ids: list[str] = []
+        all_surrogate_ids: list[str] = []
+        for type_mapping in self.semantic_type_mappings:
+            type_id = type_mapping.canonical_semantic_type_id
+            for canonical_id in type_mapping.locally_owned_canonical_property_ids:
+                ownership = ownership_by_id.get(canonical_id)
+                if ownership is None:
+                    raise ValueError("locally owned canonical property does not resolve")
+                if ownership.owner_semantic_type_id != type_id:
+                    raise ValueError("local canonical property claim shadows its semantic owner")
+                claimed_local_ids.append(canonical_id)
+            for reference in type_mapping.inherited_property_references:
+                ownership = ownership_by_id.get(reference.canonical_property_id)
+                if ownership is None:
+                    raise ValueError("inherited canonical property does not resolve")
+                if ownership.owner_semantic_type_id == type_id:
+                    raise ValueError("a type cannot inherit its own canonical property")
+                expected = (
+                    ownership.owner_semantic_type_id,
+                    ownership.data_type,
+                    ownership.value_semantics_id,
+                )
+                actual = (
+                    reference.owner_semantic_type_id,
+                    reference.data_type,
+                    reference.value_semantics_id,
+                )
+                if actual != expected:
+                    raise ValueError(
+                        "inherited property owner or value semantics differ from authority"
+                    )
+            effective_ids = set(
+                type_mapping.locally_owned_canonical_property_ids
+            ).union(
+                item.canonical_property_id
+                for item in type_mapping.inherited_property_references
+            )
+            for binding in type_mapping.physical_property_bindings:
+                ownership = ownership_by_id.get(binding.canonical_property_id)
+                if ownership is None or binding.canonical_property_id not in effective_ids:
+                    raise ValueError("physical property binding does not resolve locally")
+                expected = (
+                    ownership.owner_semantic_type_id,
+                    ownership.data_type,
+                    ownership.value_semantics_id,
+                )
+                actual = (
+                    binding.owner_semantic_type_id,
+                    binding.data_type,
+                    binding.value_semantics_id,
+                )
+                if actual != expected:
+                    raise ValueError(
+                        "physical binding shadows canonical owner or value semantics"
+                    )
+            all_surrogate_ids.extend(
+                item.surrogate_key_id
+                for item in type_mapping.physical_surrogate_key_bindings
+            )
+        if len(set(claimed_local_ids)) != len(claimed_local_ids):
+            raise ValueError("canonical property ownership claims must be globally unique")
+        if set(claimed_local_ids) != set(ownership_by_id):
+            raise ValueError(
+                "every canonical property ownership mapping must have one local owner claim"
+            )
+        if len(set(all_surrogate_ids)) != len(all_surrogate_ids):
+            raise ValueError("physical surrogate key IDs must be globally unique")
+        if set(all_surrogate_ids).intersection(ownership_by_id):
+            raise ValueError("physical surrogate keys cannot be canonical properties")
+
+        relationship_ids = [
+            item.canonical_semantic_relationship_id
+            for item in self.relationship_mappings
+        ]
+        if len(set(relationship_ids)) != len(relationship_ids):
+            raise ValueError("canonical relationship mappings must be unique")
+        canonical_namespaces = (
+            ("semantic type", set(type_ids)),
+            ("semantic property", set(ownership_ids)),
+            ("semantic relationship", set(relationship_ids)),
+        )
+        for index, (left_name, left_ids) in enumerate(canonical_namespaces):
+            for right_name, right_ids in canonical_namespaces[index + 1 :]:
+                if left_ids.intersection(right_ids):
+                    raise ValueError(
+                        f"{left_name} and {right_name} canonical IDs must be disjoint"
+                    )
+        if set(all_surrogate_ids).intersection(
+            set(type_ids).union(ownership_ids, relationship_ids)
+        ):
+            raise ValueError("physical surrogate keys cannot use canonical IDs")
+        for relationship in self.relationship_mappings:
+            source = type_by_id.get(relationship.source_semantic_type_id)
+            target = type_by_id.get(relationship.target_semantic_type_id)
+            if source is None:
+                raise ValueError("relationship source semantic type does not resolve")
+            if target is None:
+                raise ValueError("relationship target semantic type does not resolve")
+            if set(relationship.source_canonical_key_property_ids) != set(
+                source.canonical_instance_key_property_ids
+            ):
+                raise ValueError(
+                    "relationship source canonical keys must equal selected type keys"
+                )
+            if set(relationship.target_canonical_key_property_ids) != set(
+                target.canonical_instance_key_property_ids
+            ):
+                raise ValueError(
+                    "relationship target canonical keys must equal selected type keys"
+                )
+
+        _require_unique(
+            [
+                (
+                    item.physical_table_id,
+                    f"type:{item.canonical_semantic_type_id}",
+                )
+                for item in self.semantic_type_mappings
+            ]
+            + [
+                (
+                    item.physical_table_id,
+                    f"relationship:{item.canonical_semantic_relationship_id}",
+                )
+                for item in self.relationship_mappings
+            ],
+            namespace="physical table",
+        )
+        _require_unique(
+            [
+                (
+                    str(item.ontology_bigint_id),
+                    f"type:{item.canonical_semantic_type_id}",
+                )
+                for item in self.semantic_type_mappings
+            ]
+            + [
+                (
+                    str(item.ontology_bigint_id),
+                    f"property:{item.canonical_property_id}",
+                )
+                for item in self.semantic_property_ownership_mappings
+            ]
+            + [
+                (
+                    str(item.ontology_bigint_id),
+                    f"relationship:{item.canonical_semantic_relationship_id}",
+                )
+                for item in self.relationship_mappings
+            ],
+            namespace="ontology BigInt",
+        )
+        _require_unique(
+            [
+                (label, f"type:{item.canonical_semantic_type_id}")
+                for item in self.semantic_type_mappings
+                for label in (item.graph_label, *item.graph_aliases)
+            ]
+            + [
+                (item.graph_property, f"property:{item.canonical_property_id}")
+                for item in self.semantic_property_ownership_mappings
+            ]
+            + [
+                (label, f"relationship:{item.canonical_semantic_relationship_id}")
+                for item in self.relationship_mappings
+                for label in (item.graph_label, *item.graph_aliases)
+            ],
+            namespace="graph name",
+        )
+        _require_unique(
+            [
+                (
+                    item.data_agent_selected_property_id,
+                    f"property:{item.canonical_property_id}",
+                )
+                for item in self.semantic_property_ownership_mappings
+                if item.data_agent_selected_property_id is not None
             ],
             namespace="Data Agent selected property",
         )

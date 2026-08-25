@@ -1,0 +1,325 @@
+{
+  "identity": {
+    "contract_kind": "c0.publication_crosswalk",
+    "contract_version": "1.1.0",
+    "project_id": "project:generic",
+    "asset_id": null,
+    "asset_version_id": null,
+    "run_id": "run:publication-contract-1-1",
+    "source_file_id": null,
+    "source_unit_id": null,
+    "content_hash": null,
+    "domain_schema_version": "2.0",
+    "domain_contract_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "semantic_contract_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "canonical_schema_version": "2.0",
+    "prompt_version": null,
+    "prompt_hash": null,
+    "model_version": null,
+    "model_hash": null,
+    "extractor_name": null,
+    "extractor_version": null,
+    "parent_artifact_ids": [
+      "artifact:asserted"
+    ],
+    "parent_record_ids": [],
+    "immutable_locator": null
+  },
+  "publication_crosswalk_id": "publication-crosswalk:generic-inheritance",
+  "authority": {
+    "required_member_manifest_id": "manifest:generic",
+    "required_member_manifest_contract_version": "1.1.0",
+    "required_member_manifest_schema_hash": "e33003e128746f09c77ba44b4b4802510eadbdf000eb60430f16a4d2654a3c4c",
+    "required_member_manifest_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "authoritative_collection_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_artifact_manifest_id": "artifact-manifest:asserted",
+    "source_artifact_manifest_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "semantic_contract_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "stable_id_lock_id": "stable-id-lock:generic",
+  "stable_id_lock_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "hierarchy_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "identity_policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_projection_id": "semantic-serving-projection:generic",
+  "source_projection_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "semantic_property_ownership_mappings": [
+    {
+      "canonical_property_id": "property:intermediate:code",
+      "owner_semantic_type_id": "semantic-type:intermediate",
+      "data_type": "string",
+      "value_semantics_id": "value-semantics:code",
+      "ontology_bigint_id": 2001,
+      "graph_property": "graph-property:code",
+      "data_agent_selected_property_id": "data-agent-property:code"
+    },
+    {
+      "canonical_property_id": "property:leaf:value",
+      "owner_semantic_type_id": "semantic-type:leaf",
+      "data_type": "string",
+      "value_semantics_id": "value-semantics:value",
+      "ontology_bigint_id": 2002,
+      "graph_property": "graph-property:value",
+      "data_agent_selected_property_id": "data-agent-property:value"
+    },
+    {
+      "canonical_property_id": "property:root:id",
+      "owner_semantic_type_id": "semantic-type:root",
+      "data_type": "string",
+      "value_semantics_id": "value-semantics:id",
+      "ontology_bigint_id": 2003,
+      "graph_property": "graph-property:id",
+      "data_agent_selected_property_id": "data-agent-property:id"
+    },
+    {
+      "canonical_property_id": "property:root:name",
+      "owner_semantic_type_id": "semantic-type:root",
+      "data_type": "string",
+      "value_semantics_id": "value-semantics:name",
+      "ontology_bigint_id": 2004,
+      "graph_property": "graph-property:name",
+      "data_agent_selected_property_id": "data-agent-property:name"
+    },
+    {
+      "canonical_property_id": "property:root:partition",
+      "owner_semantic_type_id": "semantic-type:root",
+      "data_type": "string",
+      "value_semantics_id": "value-semantics:partition",
+      "ontology_bigint_id": 2005,
+      "graph_property": "graph-property:partition",
+      "data_agent_selected_property_id": "data-agent-property:partition"
+    }
+  ],
+  "semantic_type_mappings": [
+    {
+      "canonical_semantic_type_id": "semantic-type:intermediate",
+      "canonical_parent_semantic_type_id": "semantic-type:root",
+      "physical_table_id": "table:intermediate",
+      "ontology_bigint_id": 1002,
+      "graph_label": "GraphIntermediate",
+      "graph_aliases": [
+        "AliasIntermediate"
+      ],
+      "locally_owned_canonical_property_ids": [
+        "property:intermediate:code"
+      ],
+      "inherited_property_references": [
+        {
+          "canonical_property_id": "property:root:id",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:id"
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:partition"
+        }
+      ],
+      "canonical_instance_key_property_ids": [
+        "property:root:id",
+        "property:root:partition"
+      ],
+      "physical_property_bindings": [
+        {
+          "canonical_property_id": "property:intermediate:code",
+          "owner_semantic_type_id": "semantic-type:intermediate",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:code",
+          "physical_column_id": "column:intermediate-code",
+          "search_index_field": "search-field:intermediate-code",
+          "search_filter_field": null,
+          "search_vector_field": "search-vector:intermediate-code"
+        },
+        {
+          "canonical_property_id": "property:root:id",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:id",
+          "physical_column_id": "column:intermediate-id",
+          "search_index_field": "search-field:intermediate-id",
+          "search_filter_field": "search-field:intermediate-id",
+          "search_vector_field": null
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:partition",
+          "physical_column_id": "column:intermediate-partition",
+          "search_index_field": "search-field:intermediate-partition",
+          "search_filter_field": "search-field:intermediate-partition",
+          "search_vector_field": null
+        }
+      ],
+      "physical_surrogate_key_bindings": []
+    },
+    {
+      "canonical_semantic_type_id": "semantic-type:leaf",
+      "canonical_parent_semantic_type_id": "semantic-type:intermediate",
+      "physical_table_id": "table:leaf",
+      "ontology_bigint_id": 1003,
+      "graph_label": "GraphLeaf",
+      "graph_aliases": [
+        "AliasLeaf"
+      ],
+      "locally_owned_canonical_property_ids": [
+        "property:leaf:value"
+      ],
+      "inherited_property_references": [
+        {
+          "canonical_property_id": "property:root:id",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:id"
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:partition"
+        }
+      ],
+      "canonical_instance_key_property_ids": [
+        "property:root:id",
+        "property:root:partition"
+      ],
+      "physical_property_bindings": [
+        {
+          "canonical_property_id": "property:leaf:value",
+          "owner_semantic_type_id": "semantic-type:leaf",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:value",
+          "physical_column_id": "column:leaf-value",
+          "search_index_field": "search-field:leaf-value",
+          "search_filter_field": null,
+          "search_vector_field": "search-vector:leaf-value"
+        },
+        {
+          "canonical_property_id": "property:root:id",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:id",
+          "physical_column_id": "column:leaf-id",
+          "search_index_field": "search-field:leaf-id",
+          "search_filter_field": "search-field:leaf-id",
+          "search_vector_field": null
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:partition",
+          "physical_column_id": "column:leaf-partition",
+          "search_index_field": "search-field:leaf-partition",
+          "search_filter_field": "search-field:leaf-partition",
+          "search_vector_field": null
+        }
+      ],
+      "physical_surrogate_key_bindings": [
+        {
+          "surrogate_key_id": "surrogate:leaf-row-id",
+          "physical_column_id": "column:leaf-row-id",
+          "data_type": "integer",
+          "purpose": "physical_row_identity"
+        }
+      ]
+    },
+    {
+      "canonical_semantic_type_id": "semantic-type:root",
+      "canonical_parent_semantic_type_id": null,
+      "physical_table_id": "table:root",
+      "ontology_bigint_id": 1001,
+      "graph_label": "GraphRoot",
+      "graph_aliases": [
+        "AliasRoot"
+      ],
+      "locally_owned_canonical_property_ids": [
+        "property:root:id",
+        "property:root:name",
+        "property:root:partition"
+      ],
+      "inherited_property_references": [],
+      "canonical_instance_key_property_ids": [
+        "property:root:id",
+        "property:root:partition"
+      ],
+      "physical_property_bindings": [
+        {
+          "canonical_property_id": "property:root:id",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:id",
+          "physical_column_id": "column:root-id",
+          "search_index_field": "search-field:root-id",
+          "search_filter_field": "search-field:root-id",
+          "search_vector_field": null
+        },
+        {
+          "canonical_property_id": "property:root:name",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:name",
+          "physical_column_id": "column:root-name",
+          "search_index_field": "search-field:root-name",
+          "search_filter_field": null,
+          "search_vector_field": "search-vector:root-name"
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "owner_semantic_type_id": "semantic-type:root",
+          "data_type": "string",
+          "value_semantics_id": "value-semantics:partition",
+          "physical_column_id": "column:root-partition",
+          "search_index_field": "search-field:root-partition",
+          "search_filter_field": "search-field:root-partition",
+          "search_vector_field": null
+        }
+      ],
+      "physical_surrogate_key_bindings": []
+    }
+  ],
+  "relationship_mappings": [
+    {
+      "canonical_semantic_relationship_id": "relationship:root-to-leaf",
+      "source_semantic_type_id": "semantic-type:root",
+      "target_semantic_type_id": "semantic-type:leaf",
+      "physical_table_id": "table:root-leaf",
+      "ontology_bigint_id": 3001,
+      "graph_label": "ROOT_TO_LEAF",
+      "graph_aliases": [
+        "ROOT_LEAF"
+      ],
+      "source_canonical_key_property_ids": [
+        "property:root:id",
+        "property:root:partition"
+      ],
+      "target_canonical_key_property_ids": [
+        "property:root:id",
+        "property:root:partition"
+      ],
+      "source_key_bindings": [
+        {
+          "canonical_property_id": "property:root:id",
+          "physical_column_id": "column:source-id"
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "physical_column_id": "column:source-partition"
+        }
+      ],
+      "target_key_bindings": [
+        {
+          "canonical_property_id": "property:root:id",
+          "physical_column_id": "column:target-id"
+        },
+        {
+          "canonical_property_id": "property:root:partition",
+          "physical_column_id": "column:target-partition"
+        }
+      ],
+      "search_index_field": "search-field:root-leaf"
+    }
+  ],
+  "crosswalk_hash": "3adf7c7c74d3f7f5c777de4501392f9b23197733415319f26da2a7ebf581a8b6"
+}

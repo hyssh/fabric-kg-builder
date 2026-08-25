@@ -405,7 +405,7 @@ def governed_asset(
 
 
 @pytest.mark.contract
-def test_exactly_four_publish_contracts_are_registered_at_1_0_0() -> None:
+def test_four_publish_kinds_retain_1_0_with_additive_crosswalk_successor() -> None:
     expected = {
         "c0.publication_crosswalk": PublicationCrosswalk,
         "c0.projection_equivalence": ProjectionEquivalence,
@@ -414,8 +414,9 @@ def test_exactly_four_publish_contracts_are_registered_at_1_0_0() -> None:
     }
     for kind, model in expected.items():
         assert negotiate_contract(kind, "1.0.0") is model
-        with pytest.raises(ValueError, match="not registered"):
-            negotiate_contract(kind, "1.1.0")
+        if kind != "c0.publication_crosswalk":
+            with pytest.raises(ValueError, match="not registered"):
+                negotiate_contract(kind, "1.1.0")
     assert {
         kind
         for kind in (
