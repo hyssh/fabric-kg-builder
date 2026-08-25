@@ -1764,6 +1764,11 @@ Deterministic routing abstains only when explicit Graph signals are present.
 Explicit Search signals and unclassified factual questions remain Search-safe
 fallbacks. A true mixed request contains both Search and Graph signals and
 therefore abstains without an approved plan ID.
+Terms such as cost, price, and availability are not global refusal signals:
+without structural Graph intent they remain Search-safe factual queries.
+Unsupported-type rejection applies only after deterministic Graph/Mixed intent
+is established, so an unsupported Graph path cannot fall through to Search and
+bypass bounded authority.
 
 ## 13. Revision History
 

@@ -635,15 +635,6 @@ def _answer_question(
             True,
         )
 
-    # Unsupported check
-    if graph.is_unsupported_query_type(q_lower):
-        return (
-            "This information is not available in the knowledge base.",
-            ROUTE_UNSUPPORTED,
-            [],
-            True,
-        )
-
     raw_citations: list[dict] = []
     route_type = "search"
     graph_rows: list[dict[str, Any]] = []
@@ -701,10 +692,31 @@ def _answer_question(
         and bool(routing.graph_signals)
         and not routing.explicit_search_request
     ):
+        if graph.is_unsupported_query_type(q_lower):
+            return (
+                "The requested Graph path is not supported by the approved "
+                "bounded Graph authority.",
+                ROUTE_UNSUPPORTED,
+                [],
+                True,
+            )
         return (
             "No approved bounded Graph plan is mapped to this graph-intent "
             "request. Supply a sealed approved_plan_id or decompose the "
             "question into approved bounded subquestions.",
+            ROUTE_UNSUPPORTED,
+            [],
+            True,
+        )
+
+    if (
+        graph.schema_mode == "schema1_compatibility"
+        and bool(routing.graph_signals)
+        and not routing.explicit_search_request
+        and graph.is_unsupported_query_type(q_lower)
+    ):
+        return (
+            "This Graph query type is not supported.",
             ROUTE_UNSUPPORTED,
             [],
             True,

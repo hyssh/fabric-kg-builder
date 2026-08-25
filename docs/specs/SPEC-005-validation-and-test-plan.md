@@ -1352,6 +1352,9 @@ live-smoke evidence without weakening these gates.
   content leakage; and
 - ordinary factual and explicit Search questions use Search, true Graph questions
   abstain, and true Mixed questions abstain without an approved plan ID.
+- cost/price/availability factual questions invoke Search when they contain no
+  Graph signals, while unsupported explicit Graph paths abstain and never fall
+  through to Search.
 
 ### 15.2 Layer-5 deployment regression matrix
 
