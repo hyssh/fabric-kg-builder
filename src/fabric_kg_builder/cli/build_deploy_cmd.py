@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -40,25 +41,61 @@ _FINGERPRINT_SCHEMA = "fabric-kg-stage-input/1.0"
 _LEDGER_SCHEMA = "fabric-kg-resource-ledger/1.0"
 _MUTATION_AUTHORITY_SCHEMA = "fabric-kg-mutation-authority/1.0"
 _NON_AUTHORITY_PLACEHOLDER = "[REDACTED_NON_AUTHORITY]"
-_NON_AUTHORITY_KEY_PARTS = frozenset({
-    "apikey",
-    "api_key",
+_NON_AUTHORITY_EXACT_KEYS = frozenset({
     "authorization",
     "body",
+    "certificate",
     "connectionstring",
-    "connection_string",
     "content",
     "credential",
-    "document_text",
     "key",
-    "ocr_text",
     "password",
-    "raw_text",
+    "privatematerial",
     "sas",
     "secret",
-    "source_text",
     "text",
     "token",
+})
+_NON_AUTHORITY_KEY_SUFFIXES = frozenset({
+    "accountkey",
+    "accesstoken",
+    "adminkey",
+    "apikey",
+    "authorization",
+    "certificate",
+    "certificatedata",
+    "certificatematerial",
+    "clientsecret",
+    "connectionstring",
+    "credential",
+    "idtoken",
+    "masterkey",
+    "password",
+    "privatekey",
+    "privatematerial",
+    "refreshtoken",
+    "sastoken",
+    "secret",
+    "sharedaccesskey",
+    "signingkey",
+    "storageaccountkey",
+    "subscriptionkey",
+    "token",
+})
+_NON_AUTHORITY_SOURCE_SUFFIXES = frozenset({
+    "body",
+    "bodytext",
+    "chunktext",
+    "content",
+    "documenttext",
+    "elementcontent",
+    "extractedtext",
+    "ocrtext",
+    "pagetext",
+    "rawtext",
+    "sectiontext",
+    "sourcetext",
+    "text",
 })
 
 _STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
@@ -207,18 +244,36 @@ def _canonical_json_hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_authority_key(field_name: str) -> str:
+    """Normalize camel/Pascal/separator key variants for security checks."""
+    separated = re.sub(
+        r"([A-Z]+)([A-Z][a-z])",
+        r"\1_\2",
+        str(field_name),
+    )
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
+    return "".join(re.findall(r"[A-Za-z0-9]+", separated)).lower()
+
+
+def _is_non_authority_key(field_name: str) -> bool:
+    canonical = _canonical_authority_key(field_name)
+    return (
+        canonical in _NON_AUTHORITY_EXACT_KEYS
+        or any(
+            canonical.endswith(suffix)
+            for suffix in (
+                _NON_AUTHORITY_KEY_SUFFIXES
+                | _NON_AUTHORITY_SOURCE_SUFFIXES
+            )
+        )
+    )
+
+
 def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
     """Remove source/auth material while preserving mutation authority."""
     from fabric_kg_builder.release.redact import looks_like_secret
 
-    normalized_field = field_name.lower().replace("-", "_")
-    compact_field = normalized_field.replace("_", "")
-    if any(
-        part == normalized_field
-        or part.replace("_", "") == compact_field
-        or normalized_field.endswith(f"_{part}")
-        for part in _NON_AUTHORITY_KEY_PARTS
-    ):
+    if field_name and _is_non_authority_key(field_name):
         return _NON_AUTHORITY_PLACEHOLDER
     if isinstance(value, dict):
         return {
@@ -252,10 +307,11 @@ def _load_authority_document(path: Path | None) -> Any:
         payload = yaml.safe_load(raw)
     else:
         payload = json.loads(raw)
+    safe_payload = _secret_free_authority(payload)
     return {
         "path": str(path.resolve()),
-        "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
-        "value": payload,
+        "sha256": _canonical_json_hash(safe_payload),
+        "value": safe_payload,
     }
 
 

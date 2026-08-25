@@ -24,6 +24,9 @@ _input_fingerprint = _MODULE._input_fingerprint
 _STAGE_DEPENDENCIES = _MODULE._STAGE_DEPENDENCIES
 _approve_schema2_live_plan = _MODULE._approve_schema2_live_plan
 _build_resolved_mutation_snapshot = _MODULE._build_resolved_mutation_snapshot
+_canonical_authority_key = _MODULE._canonical_authority_key
+_load_authority_document = _MODULE._load_authority_document
+_secret_free_authority = _MODULE._secret_free_authority
 BuildDeployError = _MODULE.BuildDeployError
 
 
@@ -726,6 +729,118 @@ def test_resolved_mutation_authority_excludes_secrets_and_source_content() -> No
     assert "123-45-6789" not in serialized
     assert "sig=credential-value" not in serialized
     assert "[REDACTED_NON_AUTHORITY]" in serialized
+
+
+def test_authority_key_normalization_covers_case_and_separators() -> None:
+    assert _canonical_authority_key("clientSecret") == "clientsecret"
+    assert _canonical_authority_key("ClientSecret") == "clientsecret"
+    assert _canonical_authority_key("CLIENT_SECRET") == "clientsecret"
+    assert _canonical_authority_key("client-secret") == "clientsecret"
+    assert _canonical_authority_key("client.secret") == "clientsecret"
+
+
+def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
+    tmp_path: Path,
+) -> None:
+    credential_keys = (
+        "clientSecret",
+        "Client-Secret",
+        "primary_client_secret",
+        "accessToken",
+        "oauth-access-token",
+        "refresh_token",
+        "IDToken",
+        "storageAccountKey",
+        "Storage-Account-Key",
+        "account_key",
+        "apiKey",
+        "sas-token",
+        "connectionString",
+        "database-connection-string",
+        "password",
+        "serviceCredential",
+        "Authorization",
+        "privateKey",
+        "shared_access_key",
+        "signingKey",
+        "clientCertificate",
+        "certificateData",
+        "privateMaterial",
+    )
+    opaque_values = {
+        key: f"opaque-value-{index:02d}"
+        for index, key in enumerate(credential_keys)
+    }
+    authority = {
+        "endpoint": "https://service.example.test",
+        "resourceId": "/subscriptions/sub/resourceGroups/rg/resources/item",
+        "nested": [
+            {"safeName": "resource-name", **opaque_values},
+            {
+                "deeper": {
+                    "endpoint": "https://nested.example.test",
+                    "secondarySigningKey": "opaque-signing-material",
+                }
+            },
+        ],
+    }
+
+    sanitized = _secret_free_authority(authority)
+    snapshot, snapshot_hash = _mutation_authority(
+        imported_outputs={"value": authority},
+    )
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    state.data["resolved_mutation_authority"] = snapshot
+    state.data["resolved_mutation_authority_hash"] = snapshot_hash
+    state.save()
+    persisted = (tmp_path / "state.json").read_text(encoding="utf-8")
+
+    for secret in (*opaque_values.values(), "opaque-signing-material"):
+        assert secret not in str(sanitized)
+        assert secret not in str(snapshot)
+        assert secret not in persisted
+    assert sanitized["endpoint"] == "https://service.example.test"
+    assert sanitized["resourceId"].endswith("/resources/item")
+    assert sanitized["nested"][0]["safeName"] == "resource-name"
+    assert set(snapshot_hash) <= set("sha256:0123456789abcdef")
+
+
+def test_authority_document_hash_ignores_redacted_credential_changes(
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    first_path.write_text(
+        '{"endpoint":"https://safe.example","clientSecret":"opaque-one"}',
+        encoding="utf-8",
+    )
+    second_path.write_text(
+        '{"endpoint":"https://safe.example","clientSecret":"opaque-two"}',
+        encoding="utf-8",
+    )
+
+    first = _load_authority_document(first_path)
+    second = _load_authority_document(second_path)
+    first_snapshot, first_hash = _mutation_authority(
+        imported_outputs=first,
+    )
+    second_snapshot, second_hash = _mutation_authority(
+        imported_outputs={
+            **second,
+            "path": first["path"],
+        },
+    )
+
+    assert first["sha256"] == second["sha256"]
+    assert first["value"] == second["value"]
+    assert first_hash == second_hash
+    assert "opaque-one" not in str(first_snapshot)
+    assert "opaque-two" not in str(second_snapshot)
 
 
 def test_approved_snapshot_retry_is_unchanged_after_partial_failure(
