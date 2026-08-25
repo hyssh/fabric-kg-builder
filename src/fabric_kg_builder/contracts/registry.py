@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
 
 from .assertions import (
     CanonicalEntityAssertion,
@@ -23,11 +22,13 @@ from .base import (
     canonical_sha256,
     contract_major,
 )
-from .evidence import EvidenceSpan, SourceUnit
+from .evidence import EvidenceSpan, EvidenceSpanV1_1, SourceUnit
 from .extraction import (
     ExtractionCandidateBatch,
     RequiredMemberManifest,
+    RequiredMemberManifestV1_1,
     RequiredMemberSetProposal,
+    RequiredMemberSetProposalV1_1,
 )
 from .identity import StandaloneCanonicalIdentityEnvelope
 from .lifecycle import CandidateAccountingDisposition, CandidateLifecycleRecord
@@ -56,13 +57,25 @@ REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
 SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
     kind: (CONTRACT_VERSION,) for kind in REGISTERED_CONTRACTS
 }
+SUPPORTED_VERSIONS["c0.evidence_span"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.required_member_set_proposal"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.required_member_manifest"] = ("1.0.0", "1.1.0")
+
+REGISTERED_CONTRACT_VERSIONS: dict[tuple[str, str], type[ContractModel]] = {
+    (kind, CONTRACT_VERSION): model for kind, model in REGISTERED_CONTRACTS.items()
+}
+REGISTERED_CONTRACT_VERSIONS[("c0.evidence_span", "1.1.0")] = EvidenceSpanV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.required_member_set_proposal", "1.1.0")
+] = RequiredMemberSetProposalV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.required_member_manifest", "1.1.0")
+] = RequiredMemberManifestV1_1
 
 
 def negotiate_contract(kind: str, version: str) -> type[ContractModel]:
-    try:
-        model = REGISTERED_CONTRACTS[kind]
-    except KeyError as exc:
-        raise UnknownContractKindError(f"unregistered contract kind: {kind}") from exc
+    if kind not in REGISTERED_CONTRACTS:
+        raise UnknownContractKindError(f"unregistered contract kind: {kind}")
     supported = SUPPORTED_VERSIONS[kind]
     requested_major = contract_major(version)
     supported_majors = {contract_major(item) for item in supported}
@@ -74,7 +87,7 @@ def negotiate_contract(kind: str, version: str) -> type[ContractModel]:
         raise ValueError(
             f"{kind} version {version} is not registered; supported versions: {supported}"
         )
-    return model
+    return REGISTERED_CONTRACT_VERSIONS[(kind, version)]
 
 
 def parse_contract(payload: str | bytes | dict[str, Any]) -> ContractModel:
@@ -96,28 +109,38 @@ def parse_contract(payload: str | bytes | dict[str, Any]) -> ContractModel:
     return model.model_validate_json(canonical_json(raw))
 
 
-def schema_catalog() -> dict[str, dict[str, Any]]:
-    catalog: dict[str, dict[str, Any]] = {}
-    for kind, model in sorted(REGISTERED_CONTRACTS.items()):
+def schema_catalog() -> dict[tuple[str, str], dict[str, Any]]:
+    catalog: dict[tuple[str, str], dict[str, Any]] = {}
+    for (kind, version), model in sorted(REGISTERED_CONTRACT_VERSIONS.items()):
         schema = model.model_json_schema()
         if kind == "c0.identity":
             identity_schema = schema
         else:
-            identity_schema = schema["$defs"]["CanonicalIdentityEnvelope"]
+            identity_schema = next(
+                definition
+                for name, definition in schema["$defs"].items()
+                if name
+                in {
+                    "CanonicalIdentityEnvelope",
+                    "EvidenceIdentityV1_1",
+                    "RequiredMemberManifestIdentityV1_1",
+                    "RequiredMemberSetProposalIdentityV1_1",
+                }
+            )
         identity_schema["properties"]["contract_kind"] = {
             "const": kind,
             "title": "Contract Kind",
             "type": "string",
         }
         identity_schema["properties"]["contract_version"] = {
-            "const": CONTRACT_VERSION,
-            "default": CONTRACT_VERSION,
+            "const": version,
+            "default": version,
             "title": "Contract Version",
             "type": "string",
         }
-        catalog[kind] = {
+        catalog[(kind, version)] = {
             "contract_kind": kind,
-            "contract_version": CONTRACT_VERSION,
+            "contract_version": version,
             "schema": schema,
         }
     return catalog
@@ -126,21 +149,23 @@ def schema_catalog() -> dict[str, dict[str, Any]]:
 def write_registered_schemas(output_dir: Path) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
-    for kind, entry in schema_catalog().items():
-        filename = f"{kind.replace('.', '-')}-{CONTRACT_VERSION}.schema.json"
+    for (kind, version), entry in schema_catalog().items():
+        filename = f"{kind.replace('.', '-')}-{version}.schema.json"
         content = canonical_json(entry)
         (output_dir / filename).write_text(content + "\n", encoding="utf-8")
-        hashes[kind] = canonical_sha256(entry)
+        hashes[f"{kind}@{version}"] = canonical_sha256(entry)
+        if version == CONTRACT_VERSION:
+            hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": CONTRACT_VERSION,
+        "registry_version": "1.2.0",
         "schemas": [
             {
                 "contract_kind": kind,
-                "contract_version": CONTRACT_VERSION,
-                "schema_hash": hashes[kind],
-                "path": f"{kind.replace('.', '-')}-{CONTRACT_VERSION}.schema.json",
+                "contract_version": version,
+                "schema_hash": hashes[f"{kind}@{version}"],
+                "path": f"{kind.replace('.', '-')}-{version}.schema.json",
             }
-            for kind in sorted(hashes)
+            for kind, version in sorted(REGISTERED_CONTRACT_VERSIONS)
         ],
     }
     (output_dir / "registry.json").write_text(

@@ -1,7 +1,7 @@
 # SPEC-006: Cross-Layer Contracts (C0.Core and C0.Extraction)
 
 **Status:** Approved foundation
-**Version:** 1.0.0
+**Version:** 1.2.0
 **Date:** 2026-08-24
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
@@ -79,17 +79,23 @@ are Unicode code-point offsets against that exact text.
 
 ## 4. Registered C0.Core contracts
 
-All registered artifacts use contract version `1.0.0`.
+All registered artifacts retain contract version `1.0.0`. Additive
+`c0.evidence_span@1.1.0`, `c0.required_member_set_proposal@1.1.0`, and
+`c0.required_member_manifest@1.1.0` readers coexist with exact `1.0.0`
+readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 
 | `contract_kind` | Model | Contract-specific authority |
 |---|---|---|
 | `c0.identity` | `CanonicalIdentityEnvelope` | Cross-layer references; no generic `record_id` |
 | nested primitive | `ImmutableSourceLocator` | Immutable typed locator, version `1.0` |
 | `c0.source_unit` | `SourceUnit` | Exact source text and partition identity |
-| `c0.evidence_span` | `EvidenceSpan` | Local verifier-minted exact span |
+| `c0.evidence_span@1.0.0` | `EvidenceSpan` | Legacy local verifier-minted exact span |
+| `c0.evidence_span@1.1.0` | `EvidenceSpanV1_1` | Purpose-bound local verifier-minted exact span |
 | `c0.extraction_candidate_batch` | `ExtractionCandidateBatch` | L2 candidate and C0.Core accounting carrier |
-| `c0.required_member_set_proposal` | `RequiredMemberSetProposal` | L2 proposed scope-membership carrier |
-| `c0.required_member_manifest` | `RequiredMemberManifest` | L3 deterministic scope-membership seal |
+| `c0.required_member_set_proposal@1.0.0` | `RequiredMemberSetProposal` | Legacy L2 ordered, role-bearing scope-membership carrier |
+| `c0.required_member_set_proposal@1.1.0` | `RequiredMemberSetProposalV1_1` | Policy-faithful L2 scope-membership carrier |
+| `c0.required_member_manifest@1.0.0` | `RequiredMemberManifest` | Legacy L3 deterministic scope-membership seal |
+| `c0.required_member_manifest@1.1.0` | `RequiredMemberManifestV1_1` | Policy-faithful L3 deterministic scope-membership seal |
 | `c0.candidate_lifecycle_record` | `CandidateLifecycleRecord` | Append-only state event |
 | `c0.candidate_accounting_disposition` | `CandidateAccountingDisposition` | One input disposition |
 | `c0.canonical_entity_assertion` | `CanonicalEntityAssertion` | Typed `EntityRow` reference |
@@ -149,9 +155,26 @@ proves:
 
 Model-authored evidence IDs are never accepted as verified evidence.
 
+EvidenceSpan `1.1.0` adds required `purpose` with the exact values
+`domain_design|extraction_assertion` and required
+`verifier_purpose_version`. Both fields participate in canonical JSON,
+canonical hashes, and the deterministic evidence ID seed. All exact quote,
+Unicode-codepoint, source-unit, source-file, asset-version, source-text hash,
+and immutable-locator invariants remain unchanged.
+
+The only `1.0.0 -> 1.1.0` adapter accepts an explicit trusted, intact
+`l1.design_sample_manifest@1.0.0` context and the exact source unit. It emits
+only `domain_design` when the legacy span is manifest-listed and uses the
+standard verifier name
+`fabric-kg.local-evidence-verifier/domain_design`. Missing or ambiguous proof
+fails with `C0_EVIDENCE_PURPOSE_AMBIGUOUS`; adaptation to
+`extraction_assertion` is prohibited. Existing `1.0.0` artifacts are read
+without reinterpretation or hash changes, and no bulk migration is defined.
+
 ## 6A. C0.Extraction carriers
 
-C0.Extraction registers exactly three strict `1.0.0` cross-layer carriers.
+C0.Extraction registers one strict `1.0.0` candidate batch and both `1.0.0`
+and `1.1.0` versions of its member proposal and manifest.
 `CompletenessRequirementV2`, hierarchy and ancestor closure, abstract and
 identity-root rules, key policy, relationship policy, N/K, and approval remain
 exclusively owned by L1 `DomainContractV2`. C0 does not define or register a
@@ -165,7 +188,7 @@ the C0.Core candidate ID/version/kind, semantic type, lifecycle record, and
 C0.Core's mutually exclusive retained/deduplicated accounting. Candidate counts,
 the retained ID-set hash, and the batch hash reconcile deterministically.
 
-`RequiredMemberSetProposal` is emitted by L2. It carries the batch ID/hash,
+Legacy `RequiredMemberSetProposal@1.0.0` is emitted by L2. It carries the batch ID/hash,
 sealed authority references, aggregate/scope canonical ID, membership semantic
 relationship ID, and ordered members. Each member carries only a canonical ID,
 semantic type ID, domain-authored role ID, order, cardinality, originating
@@ -174,16 +197,91 @@ losslessly as a non-negative minimum and an optional maximum; C0 does not
 select those bounds. Production schemas contain
 no domain names, predicates, or fixed member counts.
 
-`RequiredMemberManifest` is sealed locally and deterministically by L3. It must
+That legacy shape is readable without reinterpretation, and its canonical
+JSON and hashes remain unchanged. It is not suitable for roleless or unordered
+Domain policies because it requires a role and ordinal per member and repeats
+collection cardinality on every member.
+
+`RequiredMemberSetProposal@1.1.0` corrects the carrier additively:
+
+- every member retains only canonical member ID, semantic type ID, originating
+  candidate ID, supporting evidence-span IDs, optional approved role ID,
+  optional carrier order, and a deterministic `member_hash`;
+- `ordering_policy` repeats the sealed Domain ordering mode and exact ordinal
+  property, integer value type, direction, uniqueness, and contiguity metadata;
+- unordered collections declare no ordinal metadata, every `member_order` is
+  null, and members canonicalize by stable `member_canonical_id`;
+- ordered collections use the strict domain-neutral
+  `zero_based_contiguous` carrier encoding. The sealed Domain policy must state
+  unique and contiguous ordinals. Every member has one unique position and the
+  stored positions are exactly `0..n-1`; missing, duplicate, or gapped positions
+  fail closed;
+- `required_role_ids` is the sorted set copied from Domain authority. An empty
+  set requires null member roles. A non-empty set requires every member role to
+  be an approved ID and every required role to be represented. Sentinel roles
+  such as `role:unspecified` are prohibited;
+- optional `expected_cardinality`, `minimum_cardinality`, and
+  `maximum_cardinality` carry exact collection-level Domain values. Null means
+  Domain declared no value; C0 never defaults or infers one. Minimum cannot
+  exceed maximum, and expected must lie inside declared bounds; and
+- `member_set_hash`, optional `ordered_member_tuple_hash`, and
+  `authoritative_collection_hash` are deterministic. The collection hash
+  includes source/domain/completeness/hierarchy/identity authority, scope,
+  membership relationship, ordering policy, cardinality, approved role IDs,
+  and canonical members.
+
+Ordering and roles are independent policy dimensions: an ordered collection
+may be roleless, and an unordered collection may carry approved roles. Presence
+of each member field must agree with its corresponding collection policy.
+
+`RequiredMemberManifest@1.1.0` is sealed locally and deterministically by L3. It
+must repeat the proposal ID/hash, batch, authority, scope, relationship,
+ordering policy, cardinality, required roles, members, and all collection hashes
+exactly. The local validator also requires the sealed member count to satisfy
+every declared exact/minimum/maximum bound. It cannot add, remove, reorder, or
+reinterpret proposal content. Diagnostics and unresolved reasons remain
+external lifecycle/validation records; the carrier does not invent an
+unresolved status. It is the sole cross-layer completeness/scope-membership
+artifact for a negotiated `1.1.0` path.
+
+Legacy `RequiredMemberManifest@1.0.0` is sealed locally and deterministically by L3. It must
 repeat the proposal's batch, authority, scope, relationship, and ordered member
 content exactly. Its `authoritative_collection_hash` hashes that content with
 all sealed authority references; its semantic manifest hash excludes only the
 operational seal timestamp. It is the sole cross-layer
-completeness/scope-membership artifact consumed by L4-L6.
+completeness/scope-membership artifact for a negotiated `1.0.0` path.
 
 These contracts prove reference and hash equality only. They cannot broaden,
 narrow, infer, or reinterpret L1 policy, and they do not activate extraction or
 validation feature behavior.
+
+The explicit `1.0.0 -> 1.1.0` adapter is fail-closed and is never invoked by
+parsing or version negotiation. It requires trusted policy context tied to the
+same domain, completeness requirement, hierarchy, and identity-policy hashes.
+Only an ordered, role-bearing legacy proposal with approved non-sentinel roles,
+contiguous zero-based order, identical repeated bounds, and no discarded
+expected-count information can adapt. Roleless, unordered, sentinel, defaulted,
+gapped, inconsistent, or otherwise ambiguous legacy content raises
+`C0_REQUIRED_MEMBER_1_0_AMBIGUOUS`. A legacy manifest adapts only after proving
+that it exactly sealed the safely adapted legacy proposal.
+
+L2 adoption of `1.1.0` requires it to:
+
+1. negotiate and emit `c0.required_member_set_proposal@1.1.0` explicitly;
+2. copy the sealed `CompletenessRequirementV2` ID/hash, hierarchy hash,
+   identity-policy hash, ordering metadata, role IDs, and exact optional
+   cardinality without defaults;
+3. emit null role/order for unsupported policy dimensions, never
+   `role:unspecified` or fabricated ordinals;
+4. normalize ordered positions only when Domain authority declares unique,
+   contiguous integer ordinals, and canonicalize unordered members by stable ID;
+5. compute every member, tuple, proposal, and collection hash through the C0
+   model factories; and
+6. keep incomplete/unresolved diagnostics in existing lifecycle or validation
+   records rather than encoding them in the proposal.
+
+No L2, L3, feature, enrichment, semantic, deployment, publication, or runtime
+behavior is activated by this C0 contract registration.
 
 ## 7. Candidate lifecycle and accounting
 
