@@ -369,14 +369,18 @@ def test_registry_contains_only_registered_c0_kinds() -> None:
         "c0.projection_equivalence",
         "c0.governed_asset_reference",
         "c0.access_policy",
+        "c0.query_budget",
+        "c0.ontology_scope_envelope",
+        "c0.resolved_ontology_scope",
+        "c0.resolved_retrieval_scope",
+        "c0.agentic_retrieval_request_context",
+        "c0.agentic_retrieval_coverage_receipt",
+        "c0.search_citation_envelope",
+        "c0.citation_presentation",
         "c0.artifact_manifest",
         "c0.stage_receipt",
         "c0.stage_resource_metrics",
     }
-    assert not any(
-        "citation" in kind or "query" in kind
-        for kind in REGISTERED_CONTRACTS
-    )
 
 
 @pytest.mark.contract
