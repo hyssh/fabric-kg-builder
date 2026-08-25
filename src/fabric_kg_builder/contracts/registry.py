@@ -33,6 +33,12 @@ from .extraction import (
 from .identity import StandaloneCanonicalIdentityEnvelope
 from .lifecycle import CandidateAccountingDisposition, CandidateLifecycleRecord
 from .projection import AuditProjection, SemanticServingProjection
+from .publication import (
+    AccessPolicy,
+    GovernedAssetReference,
+    ProjectionEquivalence,
+    PublicationCrosswalk,
+)
 from .receipts import ArtifactManifest, StageReceipt
 from .resources import StageResourceMetrics
 
@@ -50,6 +56,10 @@ REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
     "c0.canonical_property_assertion": CanonicalPropertyAssertion,
     "c0.audit_projection": AuditProjection,
     "c0.semantic_serving_projection": SemanticServingProjection,
+    "c0.publication_crosswalk": PublicationCrosswalk,
+    "c0.projection_equivalence": ProjectionEquivalence,
+    "c0.governed_asset_reference": GovernedAssetReference,
+    "c0.access_policy": AccessPolicy,
     "c0.artifact_manifest": ArtifactManifest,
     "c0.stage_receipt": StageReceipt,
     "c0.stage_resource_metrics": StageResourceMetrics,
@@ -157,7 +167,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.2.0",
+        "registry_version": "1.3.0",
         "schemas": [
             {
                 "contract_kind": kind,

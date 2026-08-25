@@ -1,19 +1,20 @@
-# SPEC-006: Cross-Layer Contracts (C0.Core and C0.Extraction)
+# SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, and C0.Publish)
 
 **Status:** Approved foundation
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Date:** 2026-08-24
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
 
 ## 1. Scope
 
-C0.Core and the additive C0.Extraction carriers are the shared contract,
-specification, schema, fixture, and hashing foundation required before L1-L3.
+C0.Core, the additive C0.Extraction carriers, and behavior-free C0.Publish
+proof/reference contracts are the shared contract, specification, schema,
+fixture, and hashing foundation used across L1-L5.
 They contain no proposal UX,
 LLM request, extraction activation, evidence pipeline integration, canonical
-Parquet rewrite, publication, deployment, runtime query, citation, answer, or
-live Fabric behavior.
+Parquet rewrite, publication/deployment operation, runtime query, citation,
+answer, or live Fabric behavior.
 
 Stable layer vocabulary:
 
@@ -29,9 +30,9 @@ Stable layer vocabulary:
 | L6 | Runtime |
 | L7 | Acceptance |
 
-C0.Publish crosswalk/equivalence/governed-asset details and C0.Runtime
-query/citation/answer contracts are explicitly deferred additive slices. They
-are not registered by C0.Core.
+C0.Publish registers only crosswalk, equivalence, governed-asset reference, and
+access-policy contracts. C0.Runtime query/citation/answer contracts remain an
+explicitly deferred additive slice.
 
 ## 2. Existing authorities and ownership
 
@@ -103,6 +104,10 @@ readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 | `c0.canonical_property_assertion` | `CanonicalPropertyAssertion` | Typed `PropertyObservationRow` reference |
 | `c0.audit_projection` | `AuditProjection` | Complete accounting header |
 | `c0.semantic_serving_projection` | `SemanticServingProjection` | Exact asserted subset header |
+| `c0.publication_crosswalk` | `PublicationCrosswalk` | Canonical-to-physical mapping proof |
+| `c0.projection_equivalence` | `ProjectionEquivalence` | Expected/compiled/deployed/read-back equality proof |
+| `c0.governed_asset_reference` | `GovernedAssetReference` | Generic immutable delivery-asset reference |
+| `c0.access_policy` | `AccessPolicy` | Credential-free authorization and retention policy |
 | `c0.artifact_manifest` | `ArtifactManifest` | Sorted artifact entries and totals |
 | `c0.stage_receipt` | `StageReceipt` | Immutable stage outcome |
 | `c0.stage_resource_metrics` | `StageResourceMetrics` | Future-measurement counters |
@@ -354,7 +359,57 @@ canonical table name or count-only comparison is not a serving fallback.
 C0.Core defines and tests these headers but does not rewrite canonical Parquet
 or activate L4 projection behavior.
 
-## 10. Manifests, receipts, and resource evidence
+## 10. C0.Publish contracts
+
+C0.Publish registers exactly four strict, frozen `1.0.0` contracts. They are
+proof and reference schemas only; they do not compile, deploy, read back, sign,
+authorize, retrieve, or log a remote resource.
+
+`PublicationCrosswalk` maps upstream-owned canonical semantic type, property,
+relationship, hierarchy, and instance-key IDs to physical table/column IDs,
+Ontology BigInt IDs, Graph labels/aliases/properties, Search
+index/filter/vector fields, and Data Agent selected-property IDs. It seals the
+stable-ID lock, hierarchy, identity-policy, semantic-contract, and source
+projection hashes. Canonical IDs and physical namespace IDs are unique, and
+relationship endpoint key mappings must equal the canonical instance keys of
+their referenced types. The contract rejects physical ID reuse or collision;
+it never creates hierarchy, identity, or projection authority.
+
+The crosswalk references, without copying or recomputing membership:
+
+- `RequiredMemberManifest@1.1.0` ID, exact contract version/schema hash,
+  manifest hash, and `authoritative_collection_hash`; and
+- source `ArtifactManifest` ID/hash.
+
+`RequiredMemberManifest@1.1.0` remains the sole completeness and collection
+membership artifact. C0.Publish defines no structured-scope manifest,
+completeness requirement, member list, member inference, or competing
+blob/table/visual-specific publication schema.
+
+`ProjectionEquivalence` supports exactly `parquet`, `semantic_model`,
+`ontology`, `graph`, and `search`. It records expected, compiled, deployed, and
+read-back counts, canonical ID-set hashes, and the applicable row, definition,
+or index fingerprint, together with missing/extra canonical IDs and exact
+source projection, crosswalk, member-manifest, authoritative-collection, and
+source-artifact hashes. `equivalent=true` is valid only when all four
+observations are exactly equal and both difference sets are empty. The schema
+is proof evidence and performs no remote operation.
+
+`GovernedAssetReference` is one generic, domain-neutral delivery-asset
+reference with approved kinds `original`, `visual`, `table`, `derived`, and
+`other`. It binds immutable source-file, asset, asset-version, locator,
+content-hash, versioned credential-free storage coordinates, an `AccessPolicy`
+ID/hash, and either no URL access or authorized on-demand short-lived URL
+issuance. Text citations remain valid without a governed asset reference.
+
+`AccessPolicy` carries principal ACL scopes; allowed `metadata`, `content`, and
+`short_lived_url` operations; sensitivity; retention; legal-hold state; and an
+authorization-resource ID. Its policy hash is deterministic. SAS parameters,
+bearer tokens, secrets, credentials, and durable signed URLs are forbidden in
+every C0.Publish contract and therefore never enter canonical hashes or
+contract-derived logs.
+
+## 11. Manifests, receipts, and resource evidence
 
 `ArtifactManifest.entries` are sorted by artifact ID and unique. Total row and
 byte counts reconcile with entries, then seal into `manifest_hash`.
@@ -381,7 +436,7 @@ deferred pending baseline capture and approval. Confirmed integrity ceilings
 such as evidence completeness, no lifecycle loss, no N+1 design, and count/hash
 identity may be named as hard dimensions.
 
-## 11. Registry and compatibility
+## 12. Registry and compatibility
 
 The registry maps each kind to one model and exact supported versions. Readers
 reject unknown kinds, unknown majors, and unregistered minor/patch versions.
@@ -389,12 +444,11 @@ Schema 1.x domain behavior remains unchanged. Domain schema 2.0 is
 new-project-only. There is no implicit migration, dual write, automatic
 feature activation, or reuse of schema-1 approval artifacts.
 
-Compatible additive C0.Publish and C0.Runtime contracts will register later
-under the same owner. A required field, changed meaning/type, changed ID/hash
-seed, tightened accepted value set, lifecycle transition change, or serving enum
-addition requires a new major.
+C0.Runtime contracts may register later under the same owner. A required field,
+changed meaning/type, changed ID/hash seed, tightened accepted value set,
+lifecycle transition change, or serving enum addition requires a new major.
 
-## 12. Contract gate
+## 13. Contract gate
 
 The C0.Core gate includes:
 
@@ -410,6 +464,17 @@ The C0.Core gate includes:
 - exhaustive Unicode code-point span/quote/hash ranges;
 - mutually exclusive candidate accounting;
 - asserted-only serving set equality;
+- publication key/physical-ID collision and reuse rejection;
+- exact crosswalk hierarchy, identity-policy, stable-ID-lock, and projection
+  hash authority;
+- exact `RequiredMemberManifest@1.1.0` ID/version/schema-hash/manifest-hash and
+  authoritative-collection references without membership recomputation;
+- projection count, canonical ID-set, row/definition/index fingerprint, and
+  missing/extra equivalence proof;
+- generic multi-kind asset references, policy authorization, and text citations
+  without asset references;
+- deterministic access-policy/asset/crosswalk/equivalence hashes and
+  credential, SAS, bearer-token, secret, and durable-URL rejection;
 - manifest totals and receipt skip preconditions;
 - secret/token/path rejection;
 - domain hash, `CommonLineageRow`, source locator, canonical row ID/hash,
