@@ -227,7 +227,9 @@ def _default_token_provider() -> str:
         sys.exit(6)
 
     try:
-        cred = DefaultAzureCredential()
+        from fabric_kg_builder.azure_identity import default_azure_credential
+
+        cred = default_azure_credential()
         token = cred.get_token(_FABRIC_TOKEN_SCOPE).token
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -1093,4 +1095,3 @@ def read_graph_counts(
         "edges_by_type": edges_by_type,
         "note": note,
     }
-

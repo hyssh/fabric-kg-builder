@@ -640,7 +640,9 @@ def deploy_lakehouse_cmd(
             OneLakeDeltaClient,
         )
 
-        credential = DefaultAzureCredential()
+        from fabric_kg_builder.azure_identity import default_azure_credential
+
+        credential = default_azure_credential()
         storage_options = {
             "bearer_token": credential.get_token(
                 "https://storage.azure.com/.default"
@@ -2613,7 +2615,9 @@ def deploy_graph_cmd(
 
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    credential = DefaultAzureCredential()
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    credential = default_azure_credential()
     if replace:
         click.echo(
             f"[deploy-graph] deleting configured GraphModel {graph_model_id} ..."
@@ -2963,7 +2967,12 @@ def deploy_data_agent_cmd(
         if not dry_run:
             from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-            credential = credential or DefaultAzureCredential()
+            if credential is None:
+                from fabric_kg_builder.azure_identity import (
+                    default_azure_credential,
+                )
+
+                credential = default_azure_credential()
             _graph_client = GraphModelGQLClient(
                 token_provider=lambda: credential.get_token(
                     "https://api.fabric.microsoft.com/.default"
@@ -3200,7 +3209,10 @@ def deploy_data_agent_cmd(
 
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    credential = credential or DefaultAzureCredential()
+    if credential is None:
+        from fabric_kg_builder.azure_identity import default_azure_credential
+
+        credential = default_azure_credential()
     client = FabricDataAgentClient(
         workspace_id=workspace_id,
         transport=RequestsTransport(),
@@ -3959,7 +3971,11 @@ def deploy_serving_cmd(
         # Live path: obtain real token and build live transport
         try:
             from azure.identity import DefaultAzureCredential  # type: ignore[import]
-            credential = DefaultAzureCredential()
+            from fabric_kg_builder.azure_identity import (
+                default_azure_credential,
+            )
+
+            credential = default_azure_credential()
             search_token_provider = lambda: credential.get_token(
                 "https://search.azure.com/.default"
             ).token

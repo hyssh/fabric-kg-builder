@@ -129,6 +129,8 @@ def attach_vectors(
         return docs
 
     # Live path — lazy import to avoid hard deps in offline environments.
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
     if ".services.ai.azure.com" in _endpoint:
         try:
             from azure.ai.projects import AIProjectClient  # type: ignore[import]
@@ -143,7 +145,7 @@ def attach_vectors(
         )
         project = AIProjectClient(
             endpoint=project_endpoint,
-            credential=DefaultAzureCredential(),
+            credential=default_azure_credential(),
         )
         aoai = project.get_openai_client()
         return _attach_live_vectors(
@@ -177,7 +179,7 @@ def attach_vectors(
         )
     else:
         token_provider = get_bearer_token_provider(
-            DefaultAzureCredential(),
+            default_azure_credential(),
             "https://cognitiveservices.azure.com/.default",
         )
         aoai = AzureOpenAI(

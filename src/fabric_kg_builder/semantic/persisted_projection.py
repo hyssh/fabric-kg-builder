@@ -770,7 +770,11 @@ def materialize_semantic_tables(
         if token_provider is None:
             from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-            credential = DefaultAzureCredential()
+            from fabric_kg_builder.azure_identity import (
+                default_azure_credential,
+            )
+
+            credential = default_azure_credential()
             token_provider = lambda: credential.get_token(
                 "https://storage.azure.com/.default"
             ).token

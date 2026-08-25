@@ -407,7 +407,9 @@ class KnowledgeBaseRetriever:
             return SearchAuth(token=self._token, obo_token=self._obo_token)
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
         from .models import _SEARCH_TOKEN_SCOPE  # noqa: PLC0415
-        cred = DefaultAzureCredential()
+        from fabric_kg_builder.azure_identity import default_azure_credential
+
+        cred = default_azure_credential()
         self._token = cred.get_token(_SEARCH_TOKEN_SCOPE).token
         return SearchAuth(token=self._token, obo_token=self._obo_token)
 

@@ -70,7 +70,9 @@ def _default_search_token_provider() -> str:
     """Return an Azure AI Search data-plane token."""
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    return DefaultAzureCredential().get_token(
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    return default_azure_credential().get_token(
         "https://search.azure.com/.default"
     ).token
 

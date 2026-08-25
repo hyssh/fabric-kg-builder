@@ -205,7 +205,9 @@ printf '%s\n' \
   '{"fabricWorkspaceId":"fixture-workspace","fabricLakehouseId":"fixture-lakehouse"}' \
   > "$WORK/fixture-outputs.json"
 RUN_ID="02400000-0000-4000-8000-000000000024"
-env -u PYTHONPATH "$FABRIC_KG" \
+env -u PYTHONPATH \
+  AZURE_TENANT_ID="00000000-0000-4000-8000-000000000024" \
+  "$FABRIC_KG" \
   --config "$ROOT/fabric-kg.yaml" \
   build-deploy \
   --input "$ROOT/tests/fixtures/csv/sample.csv" \
@@ -218,6 +220,7 @@ env -u PYTHONPATH "$FABRIC_KG" \
   --semantic-vocabulary "$ROOT/ontology/vocabulary.yaml" \
   --semantic-ids-lock "$ROOT/ontology/ids.lock.json" \
   --no-provision \
+  --no-deploy-serving \
   --infra-outputs "$WORK/fixture-outputs.json" \
   --dry-run
 

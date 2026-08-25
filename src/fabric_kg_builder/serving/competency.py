@@ -67,7 +67,9 @@ def _default_onelake_token_provider() -> str:
     """Return a storage-scoped token for OneLake."""
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    return DefaultAzureCredential().get_token(
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    return default_azure_credential().get_token(
         "https://storage.azure.com/.default"
     ).token
 

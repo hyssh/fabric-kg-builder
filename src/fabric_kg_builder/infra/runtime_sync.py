@@ -12,6 +12,7 @@ import yaml
 
 from .schema import InfraManifest
 from .schema import ResourceMode
+from .apply import canonicalize_https_endpoint
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -66,6 +67,13 @@ def sync_runtime_configuration(
     agent_metadata_path: Path,
 ) -> dict[str, str]:
     """Write non-secret Azure/Fabric outputs to both runtime configuration files."""
+    outputs = dict(outputs)
+    for key, value in list(outputs.items()):
+        if key.lower().endswith("endpoint") and value not in (None, ""):
+            outputs[key] = canonicalize_https_endpoint(
+                value,
+                authority=key,
+            )
     required_connected_outputs: list[tuple[str, tuple[str, ...]]] = []
     if manifest.resources.storage.mode == ResourceMode.CONNECT:
         required_connected_outputs.append(("storage", ("blobEndpoint",)))
@@ -87,6 +95,10 @@ def sync_runtime_configuration(
     if manifest.resources.search.mode == ResourceMode.CONNECT:
         required_connected_outputs.append(("search", ("searchEndpoint",)))
     if manifest.resources.container_registry.mode == ResourceMode.CONNECT:
+        required_connected_outputs.append(
+            ("container_registry", ("containerRegistryLoginServer",))
+        )
+    elif manifest.features.reference_app:
         required_connected_outputs.append(
             ("container_registry", ("containerRegistryLoginServer",))
         )
@@ -216,13 +228,10 @@ def sync_runtime_configuration(
 
     acr = env_config.setdefault("acr", {})
     login_server = outputs.get("containerRegistryLoginServer")
-    if manifest.resources.container_registry.mode != ResourceMode.CONNECT:
-        login_server = (
-            login_server
-            or os.environ.get("ACR_LOGIN_SERVER")
-            or acr.get("loginServer")
-        )
-    _set_if_present(acr, "loginServer", login_server)
+    if login_server:
+        acr["loginServer"] = login_server
+    else:
+        acr.pop("loginServer", None)
     acr.setdefault("repository", "fabric-kg")
 
     deployments = env_config.setdefault("deployments", {})

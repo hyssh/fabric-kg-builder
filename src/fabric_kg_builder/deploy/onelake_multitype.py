@@ -45,7 +45,9 @@ _EDGE_BIND_COLS = ["source_entity_id", "target_entity_id"]
 def _default_token_provider() -> str:
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    cred = DefaultAzureCredential()
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    cred = default_azure_credential()
     return cred.get_token("https://storage.azure.com/.default").token
 
 

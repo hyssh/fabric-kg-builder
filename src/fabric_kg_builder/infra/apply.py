@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from fabric_kg_builder.release.redact import canonicalize_https_authority
+
 from .runner import CommandRunner, CommandError
 from .schema import (
     InfraManifest,
@@ -93,6 +95,12 @@ def save_outputs(outputs: dict, build_root: Path, environment: str) -> Path:
         k: v for k, v in outputs.items()
         if not any(s in k.lower() for s in _secret_keys)
     }
+    for key, value in list(safe_outputs.items()):
+        if key.lower().endswith("endpoint") and value not in (None, ""):
+            safe_outputs[key] = canonicalize_https_endpoint(
+                value,
+                authority=key,
+            )
     path = _outputs_path(build_root, environment)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -661,18 +669,25 @@ def _required_https_endpoint(
             f"Connected resource '{resource_id}' is missing the required HTTPS "
             f"endpoint at '{property_path}'."
         )
-    endpoint = value.strip()
-    parsed = urlsplit(endpoint)
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or any(character.isspace() for character in endpoint)
-    ):
+    try:
+        return canonicalize_https_endpoint(
+            value,
+            authority=f"{resource_id}:{property_path}",
+        )
+    except ValueError as exc:
         raise ValueError(
             f"Connected resource '{resource_id}' has a malformed HTTPS endpoint "
             f"at '{property_path}': {value!r}."
+        ) from exc
+
+
+def canonicalize_https_endpoint(value: Any, *, authority: str) -> str:
+    """Return one canonical query-free HTTPS endpoint or fail closed."""
+    endpoint = canonicalize_https_authority(value)
+    if endpoint is None:
+        raise ValueError(
+            f"{authority} must be absolute HTTPS without userinfo, query, "
+            "fragment, credential material, whitespace, or control characters."
         )
     return endpoint
 
@@ -1445,23 +1460,29 @@ def apply_plan(
             "did not complete successfully."
         )
 
-    # --- Persist state ---
-    final_status = "succeeded" if not errors else "failed"
-    state = state.model_copy(update={"last_operation_status": final_status})
-
     state_path: Optional[Path] = None
     outputs_path: Optional[Path] = None
 
-    # Always persist state (even on failure — records partial progress for retry).
-    state_path = save_state(state, build_root)
     # Fabric item IDs are discovered after ARM/Bicep output collection. Merge
     # durable state outputs so runtime sync receives Azure and Fabric values in
     # one apply receipt.
     flat_outputs.update(state.outputs)
     if flat_outputs:
-        outputs_path = save_outputs(
-            flat_outputs, build_root, manifest.environment
-        )
+        try:
+            outputs_path = save_outputs(
+                flat_outputs, build_root, manifest.environment
+            )
+        except ValueError as exc:
+            failed += 1
+            errors.append(f"Infrastructure outputs: {exc}")
+            _outputs_path(build_root, manifest.environment).unlink(
+                missing_ok=True
+            )
+
+    # Always persist state (even on failure — records partial progress for retry).
+    final_status = "succeeded" if not errors else "failed"
+    state = state.model_copy(update={"last_operation_status": final_status})
+    state_path = save_state(state, build_root)
 
     return ApplyStatus(
         operation_id=operation_id,

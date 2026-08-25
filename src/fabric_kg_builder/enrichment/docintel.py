@@ -250,7 +250,11 @@ class DocIntelClient:
             credential: Any = AzureKeyCredential(api_key)
         else:
             from azure.identity import DefaultAzureCredential  # type: ignore[import]
-            credential = DefaultAzureCredential()
+            from fabric_kg_builder.azure_identity import (
+                default_azure_credential,
+            )
+
+            credential = default_azure_credential()
 
         return DocumentIntelligenceClient(
             endpoint=config.endpoint,

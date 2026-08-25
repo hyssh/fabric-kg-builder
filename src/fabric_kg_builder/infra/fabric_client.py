@@ -95,9 +95,11 @@ class DefaultAzureCredentialFabricTransport:
         session: Any | None = None,
     ) -> None:
         if credential is None:
-            from azure.identity import DefaultAzureCredential
+            from fabric_kg_builder.azure_identity import (
+                default_azure_credential,
+            )
 
-            credential = DefaultAzureCredential()
+            credential = default_azure_credential()
         if session is None:
             import requests
 

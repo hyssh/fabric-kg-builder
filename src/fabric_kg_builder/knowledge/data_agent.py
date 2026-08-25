@@ -1856,7 +1856,9 @@ class FabricDataAgentClient:
             return self._token
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
 
-        cred = DefaultAzureCredential()
+        from fabric_kg_builder.azure_identity import default_azure_credential
+
+        cred = default_azure_credential()
         self._token = cred.get_token(_FABRIC_TOKEN_SCOPE).token
         return self._token
 

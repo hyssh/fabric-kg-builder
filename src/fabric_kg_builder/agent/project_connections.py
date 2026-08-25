@@ -59,7 +59,11 @@ class FoundryProjectConnectionClient:
         if self._credential is None:
             from azure.identity import DefaultAzureCredential
 
-            self._credential = DefaultAzureCredential()
+            from fabric_kg_builder.azure_identity import (
+                default_azure_credential,
+            )
+
+            self._credential = default_azure_credential()
         if self._request is None:
             import requests
 

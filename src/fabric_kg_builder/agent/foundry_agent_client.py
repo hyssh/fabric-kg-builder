@@ -555,7 +555,9 @@ def build_client_from_metadata(
 
     try:
         from azure.identity import DefaultAzureCredential  # type: ignore[import]
-        credential = DefaultAzureCredential()
+        from fabric_kg_builder.azure_identity import default_azure_credential
+
+        credential = default_azure_credential()
     except ImportError as exc:
         raise FoundryClientError(
             "azure-identity is required for live agent deployment.\n"

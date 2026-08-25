@@ -306,7 +306,9 @@ def _default_token_provider() -> str:
     """Obtain a bearer token for the Search service via DefaultAzureCredential."""
     from azure.identity import DefaultAzureCredential  # noqa: PLC0415
 
-    cred = DefaultAzureCredential()
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    cred = default_azure_credential()
     return cred.get_token(_SEARCH_TOKEN_SCOPE).token
 
 def discover_capabilities(

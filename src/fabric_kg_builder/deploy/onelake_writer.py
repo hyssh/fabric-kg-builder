@@ -170,7 +170,9 @@ def _default_token_provider() -> str:
     """Obtain a Bearer token for OneLake using DefaultAzureCredential."""
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    cred = DefaultAzureCredential()
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    cred = default_azure_credential()
     return cred.get_token("https://storage.azure.com/.default").token
 
 

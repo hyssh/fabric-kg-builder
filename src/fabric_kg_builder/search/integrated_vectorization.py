@@ -138,6 +138,10 @@ def stage_source_documents(
     if not blob_name:
         raise ValueError("integrated_vectorization.source_path must not be empty.")
     if blob_service_client is None:
+        from fabric_kg_builder.azure_identity import (
+            default_azure_credential,
+        )
+
         try:
             from azure.identity import DefaultAzureCredential  # type: ignore[import]
             from azure.storage.blob import BlobServiceClient  # type: ignore[import]
@@ -157,7 +161,7 @@ def stage_source_documents(
             account_url = f"https://{resource_id.rsplit('/', 1)[-1]}.blob.core.windows.net"
         blob_service_client = BlobServiceClient(
             account_url=account_url,
-            credential=DefaultAzureCredential(),
+            credential=default_azure_credential(),
         )
 
     payload = json.dumps(

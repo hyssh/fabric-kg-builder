@@ -1732,7 +1732,13 @@ def build_live_collector(
             "target IDs and deployed instruction hashes are independently "
             "verified."
         )
-    cred = credential or DefaultAzureCredential()
+    if credential is None:
+        from fabric_kg_builder.azure_identity import (
+            default_azure_credential,
+        )
+
+        credential = default_azure_credential()
+    cred = credential
 
     def token_provider(scope: str) -> Callable[[], str]:
         return lambda: cred.get_token(scope).token

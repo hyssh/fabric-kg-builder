@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fabric_kg_builder.infra.apply import (
     _arm_authority_record,
     apply_plan,
@@ -9,6 +11,7 @@ from fabric_kg_builder.infra.apply import (
     save_outputs,
 )
 from fabric_kg_builder.infra.runner import FakeCommandRunner
+from fabric_kg_builder.infra.runtime_sync import sync_runtime_configuration
 from fabric_kg_builder.infra.schema import (
     InfraManifest,
     InfraPlan,
@@ -151,7 +154,9 @@ def test_connected_arm_endpoints_are_persisted_without_host_synthesis(tmp_path):
         {
             "name": "search-existing",
             "properties": {
-                "endpoint": "https://search-authoritative.example.test"
+                "endpoint": (
+                    "https://SEARCH-AUTHORITATIVE.EXAMPLE.TEST/api"
+                )
             },
         },
     )
@@ -200,8 +205,19 @@ def test_connected_arm_endpoints_are_persisted_without_host_synthesis(tmp_path):
     )
     assert (
         outputs["searchEndpoint"]
-        == "https://search-authoritative.example.test"
+        == "https://search-authoritative.example.test/api"
     )
+    fabric_environment = tmp_path / "runtime.json"
+    sync_runtime_configuration(
+        environment="dev",
+        manifest=manifest,
+        outputs=outputs,
+        fabric_environment_path=fabric_environment,
+        agent_metadata_path=tmp_path / "metadata.yaml",
+    )
+    assert json.loads(fabric_environment.read_text(encoding="utf-8"))[
+        "ai_search"
+    ]["endpoint"] == outputs["searchEndpoint"]
 
 
 def test_connected_resource_missing_endpoint_fails_with_id_and_property_path(
@@ -264,6 +280,55 @@ def test_connected_resource_rejects_non_https_arm_endpoint(tmp_path):
     assert resource_id in status.errors[0]
     assert "properties.endpoint" in status.errors[0]
     assert "malformed HTTPS endpoint" in status.errors[0]
+
+
+def test_connected_resource_rejects_endpoint_query_and_fragment(tmp_path):
+    manifest = _connected_manifest()
+    resource_id = _resource_id(
+        "Microsoft.Search/searchServices", "search-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        resource_id,
+        {
+            "name": "search-existing",
+            "properties": {
+                "endpoint": (
+                    "https://search.example.test/path?sig=opaque#fragment"
+                )
+            },
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            _adopt_item(
+                "Microsoft.Search/searchServices", "search-existing"
+            )
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert not status.succeeded
+    assert "malformed HTTPS endpoint" in status.errors[0]
+    assert "searchEndpoint" not in load_outputs(tmp_path, "dev")
+
+
+def test_save_outputs_rejects_query_endpoint_before_persistence(tmp_path):
+    with pytest.raises(ValueError, match="without userinfo, query"):
+        save_outputs(
+            {
+                "searchEndpoint": (
+                    "https://search.example.test/path?sig=opaque"
+                )
+            },
+            tmp_path,
+            "dev",
+        )
+
+    assert not (tmp_path / "infra" / "dev" / "outputs.json").exists()
 
 
 def test_connected_foundry_project_never_synthesizes_missing_endpoint(

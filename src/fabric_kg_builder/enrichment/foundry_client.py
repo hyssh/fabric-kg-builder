@@ -91,7 +91,9 @@ class FoundryClient:
 
             from azure.identity import DefaultAzureCredential, get_bearer_token_provider
             from openai import AzureOpenAI
-            tp = get_bearer_token_provider(DefaultAzureCredential(),
+            from fabric_kg_builder.azure_identity import default_azure_credential
+
+            tp = get_bearer_token_provider(default_azure_credential(),
                                            "https://cognitiveservices.azure.com/.default")
             client = AzureOpenAI(azure_endpoint=..., azure_ad_token_provider=tp,
                                  api_version=...)
@@ -126,9 +128,10 @@ class FoundryClient:
             )
 
         from azure.identity import DefaultAzureCredential, get_bearer_token_provider  # type: ignore[import]
+        from fabric_kg_builder.azure_identity import default_azure_credential
 
         token_provider = get_bearer_token_provider(
-            DefaultAzureCredential(),
+            default_azure_credential(),
             "https://cognitiveservices.azure.com/.default",
         )
         return AzureOpenAI(

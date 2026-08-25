@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
+
+from fabric_kg_builder.infra.runner import FakeCommandRunner
+from fabric_kg_builder.infra.schema import InfraManifest
 
 _MODULE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -23,10 +27,19 @@ _RunState = _MODULE._RunState
 _input_fingerprint = _MODULE._input_fingerprint
 _STAGE_DEPENDENCIES = _MODULE._STAGE_DEPENDENCIES
 _approve_schema2_live_plan = _MODULE._approve_schema2_live_plan
+_AuthorityBoundCredential = _MODULE._AuthorityBoundCredential
 _build_resolved_mutation_snapshot = _MODULE._build_resolved_mutation_snapshot
 _canonical_authority_key = _MODULE._canonical_authority_key
 _canonical_json_hash = _MODULE._canonical_json_hash
 _load_authority_document = _MODULE._load_authority_document
+_load_deployment_authority = _MODULE._load_deployment_authority
+_identity_authority_environment = _MODULE._identity_authority_environment
+_infrastructure_authority_source = _MODULE._infrastructure_authority_source
+_load_infrastructure_outputs_authority = (
+    _MODULE._load_infrastructure_outputs_authority
+)
+_resolve_live_identity_authority = _MODULE._resolve_live_identity_authority
+_runtime_environment = _MODULE._runtime_environment
 _secret_free_authority = _MODULE._secret_free_authority
 BuildDeployError = _MODULE.BuildDeployError
 
@@ -66,6 +79,13 @@ def _mutation_authority(
         },
         "enabled_stages": ["deploy_lakehouse", "deploy_serving"],
         "behavior_flags": {"deploy_serving": True, "provision": False},
+        "identity_authority": {
+            "tenant_id": "00000000-0000-4000-8000-000000000001",
+            "audiences": {
+                "fabric": "https://api.fabric.microsoft.com/.default",
+                "search": "https://search.azure.com/.default",
+            },
+        },
         "package_version": "0.2.4",
         "implementation_fingerprint": "sha256:" + "d" * 64,
     }
@@ -700,6 +720,16 @@ def test_new_dry_run_can_review_contract_change_after_recorded_baseline(
             {"value": {"top_k": 5, "relationship_types": ["related_to"]}},
         ),
         ("implementation_fingerprint", "sha256:" + "e" * 64),
+        (
+            "identity_authority",
+            {
+                "tenant_id": "00000000-0000-4000-8000-000000000002",
+                "audiences": {
+                    "fabric": "https://api.fabric.microsoft.com/.default",
+                    "search": "https://search.azure.com/.default",
+                },
+            },
+        ),
     ],
 )
 def test_resolved_mutation_authority_detects_required_drift(
@@ -711,15 +741,96 @@ def test_resolved_mutation_authority_detects_required_drift(
     assert changed_hash != baseline_hash
 
 
+def test_strict_snapshot_keeps_required_named_mutation_authority() -> None:
+    snapshot, _ = _mutation_authority()
+
+    infrastructure = snapshot["infrastructure"]
+    assert infrastructure["manifest"]["azure"]["subscription_id"] == "sub-1"
+    assert infrastructure["manifest"]["fabric"]["workspace"]["item_id"] == (
+        "workspace-1"
+    )
+    assert infrastructure["plan"]["items"][0] == {
+        "action": "adopt",
+        "resource_name": "search-1",
+    }
+    assert infrastructure["imported_outputs"]["value"][
+        "searchEndpoint"
+    ] == "https://search.example.test"
+    assert snapshot["pipeline"]["identity_authority"]["tenant_id"].endswith(
+        "0001"
+    )
+    assert snapshot["pipeline"]["identity_authority"]["audiences"][
+        "fabric"
+    ].endswith("/.default")
+
+
+def test_strict_snapshot_preserves_complete_typed_manifest_and_outputs() -> None:
+    manifest = InfraManifest.model_validate({
+        "environment": "dev",
+        "azure": {
+            "subscription_id": "00000000-0000-4000-8000-000000000001",
+            "resource_group": {"mode": "connect", "name": "rg-authority"},
+        },
+        "resources": {
+            "storage": {
+                "mode": "connect",
+                "name": "storageauthority",
+                "container": "kg-authority",
+            },
+            "search": {
+                "mode": "connect",
+                "name": "search-authority",
+            },
+        },
+        "fabric": {
+            "workspace": {
+                "mode": "connect",
+                "item_id": "00000000-0000-4000-8000-000000000002",
+            },
+            "lakehouse": {
+                "mode": "connect",
+                "item_id": "00000000-0000-4000-8000-000000000003",
+            },
+        },
+    })
+    snapshot, _ = _mutation_authority(
+        infrastructure_manifest=manifest.model_dump(mode="json"),
+        imported_outputs={
+            "value": {
+                "containerName": "kg-authority",
+                "fabricWorkspaceId": (
+                    "00000000-0000-4000-8000-000000000002"
+                ),
+                "fabricLakehouseId": (
+                    "00000000-0000-4000-8000-000000000003"
+                ),
+                "searchEndpoint": "https://search-authority.example.test",
+            }
+        },
+    )
+
+    saved_manifest = snapshot["infrastructure"]["manifest"]
+    assert saved_manifest["resources"]["storage"]["container"] == (
+        "kg-authority"
+    )
+    assert saved_manifest["resources"]["search"]["name"] == (
+        "search-authority"
+    )
+    assert saved_manifest["fabric"]["workspace"]["item_id"].endswith(
+        "0002"
+    )
+    imported = snapshot["infrastructure"]["imported_outputs"]["value"]
+    assert imported["containerName"] == "kg-authority"
+    assert imported["fabricLakehouseId"].endswith("0003")
+
+
 def test_resolved_mutation_authority_excludes_secrets_and_source_content() -> None:
     snapshot, _ = _mutation_authority(
         imported_outputs={
             "value": {
                 "token": "unlabeled credential " + "A" * 32,
                 "source_text": "Customer Jane jane@example.test 123-45-6789",
-                "searchEndpoint": (
-                    "https://search.example.test?sig=credential-value"
-                ),
+                "searchEndpoint": "https://search.example.test",
             }
         }
     )
@@ -728,8 +839,9 @@ def test_resolved_mutation_authority_excludes_secrets_and_source_content() -> No
     assert "Customer Jane" not in serialized
     assert "jane@example.test" not in serialized
     assert "123-45-6789" not in serialized
-    assert "sig=credential-value" not in serialized
-    assert "[REDACTED_NON_AUTHORITY]" in serialized
+    imported = snapshot["infrastructure"]["imported_outputs"]["value"]
+    assert "token" not in imported
+    assert "source_text" not in imported
 
 
 def test_authority_key_normalization_covers_case_and_separators() -> None:
@@ -738,6 +850,338 @@ def test_authority_key_normalization_covers_case_and_separators() -> None:
     assert _canonical_authority_key("CLIENT_SECRET") == "clientsecret"
     assert _canonical_authority_key("client-secret") == "clientsecret"
     assert _canonical_authority_key("client.secret") == "clientsecret"
+
+
+def test_live_identity_authority_binds_tenant_and_app_audience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FABRIC_KG_TENANT_ID", raising=False)
+    monkeypatch.delenv("FABRIC_KG_API_SCOPE", raising=False)
+    monkeypatch.setenv(
+        "AZURE_TENANT_ID",
+        "00000000-0000-4000-8000-0000000000AA",
+    )
+    monkeypatch.setenv(
+        "FABRIC_KG_AUDIENCE",
+        "api://00000000-0000-4000-8000-0000000000BB",
+    )
+
+    authority = _resolve_live_identity_authority({
+        "provision": True,
+        "deploy_serving": True,
+        "deploy_knowledge": True,
+        "deploy_agent": True,
+        "deploy_app": True,
+    })
+
+    assert authority["tenant_id"] == (
+        "00000000-0000-4000-8000-0000000000aa"
+    )
+    assert authority["audiences"]["application"] == (
+        "api://00000000-0000-4000-8000-0000000000bb"
+    )
+    assert authority["audiences"]["application_scope"] == (
+        "api://00000000-0000-4000-8000-0000000000bb/.default"
+    )
+    assert authority["audiences"]["azure_management"].endswith(
+        "/.default"
+    )
+    assert authority["audiences"]["fabric"].endswith("/.default")
+    assert authority["audiences"]["foundry_ai"] == (
+        "https://ai.azure.com/.default"
+    )
+    assert authority["audiences"]["storage"].endswith("/.default")
+    assert authority["audiences"]["search"].endswith("/.default")
+    snapshot, _ = _mutation_authority(identity_authority=authority)
+    assert snapshot["pipeline"]["identity_authority"]["audiences"][
+        "foundry_ai"
+    ] == "https://ai.azure.com/.default"
+
+
+def test_live_identity_authority_rejects_invalid_tenant_or_audience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FABRIC_KG_TENANT_ID", raising=False)
+    monkeypatch.delenv("FABRIC_KG_API_SCOPE", raising=False)
+    monkeypatch.setenv("AZURE_TENANT_ID", "not-a-guid")
+    with pytest.raises(BuildDeployError, match="GUID tenant ID"):
+        _resolve_live_identity_authority({"deploy_serving": True})
+
+    monkeypatch.setenv(
+        "AZURE_TENANT_ID",
+        "00000000-0000-4000-8000-000000000001",
+    )
+    monkeypatch.setenv(
+        "FABRIC_KG_AUDIENCE",
+        "https://app.example.test/audience?sig=opaque",
+    )
+    with pytest.raises(BuildDeployError, match="FABRIC_KG_AUDIENCE"):
+        _resolve_live_identity_authority({"deploy_app": True})
+
+    monkeypatch.setenv(
+        "FABRIC_KG_AUDIENCE",
+        "api://00000000-0000-4000-8000-000000000002",
+    )
+    monkeypatch.setenv(
+        "FABRIC_KG_API_SCOPE",
+        "https://management.azure.com/.default",
+    )
+    with pytest.raises(BuildDeployError, match="must equal"):
+        _resolve_live_identity_authority({"deploy_app": True})
+
+
+def test_live_identity_authority_rejects_tenant_ambiguity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "FABRIC_KG_TENANT_ID",
+        "00000000-0000-4000-8000-000000000001",
+    )
+    monkeypatch.setenv(
+        "AZURE_TENANT_ID",
+        "00000000-0000-4000-8000-000000000002",
+    )
+
+    with pytest.raises(BuildDeployError, match="different tenants"):
+        _resolve_live_identity_authority({"deploy_serving": True})
+
+
+def test_live_identity_authority_uses_subscription_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FABRIC_KG_TENANT_ID", raising=False)
+    monkeypatch.setenv(
+        "AZURE_TENANT_ID",
+        "00000000-0000-4000-8000-000000000010",
+    )
+    runner = FakeCommandRunner()
+    runner.add_response(
+        [
+            "az",
+            "account",
+            "show",
+            "--subscription",
+            "subscription-1",
+            "--output",
+            "json",
+        ],
+        stdout=(
+            '{"id":"subscription-1",'
+            '"tenantId":"00000000-0000-4000-8000-000000000010"}'
+        ),
+    )
+
+    authority = _resolve_live_identity_authority(
+        {"deploy_serving": True},
+        subscription_id="subscription-1",
+        runner=runner,
+    )
+
+    assert authority["tenant_id"].endswith("0010")
+
+
+def test_bound_credential_enforces_approved_tenant_and_scope() -> None:
+    calls = []
+
+    class Credential:
+        def get_token(self, *scopes, **kwargs):
+            calls.append((scopes, kwargs))
+            return object()
+
+    authority = {
+        "tenant_id": "00000000-0000-4000-8000-000000000010",
+        "audiences": {
+            "fabric": "https://api.fabric.microsoft.com/.default",
+            "application": "api://app",
+        },
+    }
+    credential = _AuthorityBoundCredential(Credential(), authority)
+
+    credential.get_token("https://api.fabric.microsoft.com/.default")
+
+    assert calls[0][1]["tenant_id"] == authority["tenant_id"]
+    with pytest.raises(BuildDeployError, match="scope differs"):
+        credential.get_token("https://storage.azure.com/.default")
+    with pytest.raises(BuildDeployError, match="tenant differs"):
+        credential.get_token(
+            "https://api.fabric.microsoft.com/.default",
+            tenant_id="00000000-0000-4000-8000-000000000099",
+        )
+
+
+def test_identity_environment_seals_app_scope() -> None:
+    environment = _identity_authority_environment({
+        "tenant_id": "00000000-0000-4000-8000-000000000010",
+        "audiences": {
+            "fabric": "https://api.fabric.microsoft.com/.default",
+            "application": "api://approved-app",
+            "application_scope": "api://approved-app/.default",
+        },
+    })
+
+    assert environment == {
+        "AZURE_TENANT_ID": "00000000-0000-4000-8000-000000000010",
+        "FABRIC_KG_APPROVED_TENANT_ID": (
+            "00000000-0000-4000-8000-000000000010"
+        ),
+        "FABRIC_KG_APPROVED_TOKEN_SCOPES": (
+            '["api://approved-app/.default",'
+            '"https://api.fabric.microsoft.com/.default"]'
+        ),
+        "FABRIC_KG_TENANT_ID": (
+            "00000000-0000-4000-8000-000000000010"
+        ),
+        "FABRIC_KG_FABRIC_SCOPE": (
+            "https://api.fabric.microsoft.com/.default"
+        ),
+        "FABRIC_KG_AUDIENCE": "api://approved-app",
+        "FABRIC_KG_API_SCOPE": "api://approved-app/.default",
+    }
+
+
+def test_runtime_environment_overrides_ambient_deployment_targets(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(
+        outputs={
+            "searchEndpoint": "https://search.example.test",
+            "containerName": "approved-container",
+            "fabricWorkspaceId": "workspace-approved",
+            "identityPrincipalId": "principal-approved",
+        },
+        run_root=tmp_path,
+        environment="dev",
+        subscription_id="subscription-approved",
+        resource_group="resource-group-approved",
+    )
+
+    assert environment["AZURE_SUBSCRIPTION_ID"] == "subscription-approved"
+    assert environment["AZURE_RESOURCE_GROUP"] == "resource-group-approved"
+    assert environment["FABRIC_KG_SEARCH_ENDPOINT"] == (
+        "https://search.example.test"
+    )
+    assert environment["FABRIC_KG_BLOB_CONTAINER"] == "approved-container"
+    assert environment["FABRIC_KG_FABRIC_WORKSPACE_ID"] == (
+        "workspace-approved"
+    )
+    assert environment["FABRIC_KG_MANAGED_IDENTITY_PRINCIPAL_ID"] == (
+        "principal-approved"
+    )
+    assert environment["ACR_LOGIN_SERVER"] == ""
+    assert environment["FABRIC_KG_ACR_RESOURCE_ID"] == ""
+
+
+def test_live_identity_authority_rejects_subscription_tenant_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FABRIC_KG_TENANT_ID", raising=False)
+    monkeypatch.setenv(
+        "AZURE_TENANT_ID",
+        "00000000-0000-4000-8000-000000000010",
+    )
+    runner = FakeCommandRunner()
+    runner.add_response(
+        [
+            "az",
+            "account",
+            "show",
+            "--subscription",
+            "subscription-1",
+            "--output",
+            "json",
+        ],
+        stdout=(
+            '{"id":"subscription-1",'
+            '"tenantId":"00000000-0000-4000-8000-000000000011"}'
+        ),
+    )
+
+    with pytest.raises(BuildDeployError, match="subscription tenant"):
+        _resolve_live_identity_authority(
+            {"deploy_serving": True},
+            subscription_id="subscription-1",
+            runner=runner,
+        )
+
+
+def test_credential_containers_are_wholly_redacted_in_nested_lists() -> None:
+    sanitized = _secret_free_authority({
+        "details": [
+            {
+                "credentials": [
+                    {"primaryKey": "short-one"},
+                    {"secondary_key": "short-two"},
+                ],
+                "keys": {"secretAccessKey": "short-three"},
+                "auth": {"sharedKey": "short-four"},
+                "name": "safe-plan-name",
+            }
+        ]
+    })
+
+    details = sanitized["details"][0]
+    assert "credentials" not in details
+    assert "keys" not in details
+    assert "auth" not in details
+    assert details["name"] == "safe-plan-name"
+    serialized = str(sanitized)
+    for secret in ("short-one", "short-two", "short-three", "short-four"):
+        assert secret not in serialized
+
+
+def test_credential_containers_do_not_change_authority_hash() -> None:
+    baseline = _secret_free_authority({
+        "details": [{"name": "safe-plan-name"}],
+    })
+    with_credentials = _secret_free_authority({
+        "details": [
+            {
+                "name": "safe-plan-name",
+                "credentials": {"primaryKey": "short-one"},
+                "keys": [{"secondaryKey": "short-two"}],
+            }
+        ],
+    })
+
+    assert with_credentials == baseline
+    assert _canonical_json_hash(with_credentials) == (
+        _canonical_json_hash(baseline)
+    )
+
+
+def test_strict_authority_schema_preserves_only_named_safe_fields() -> None:
+    sanitized = _secret_free_authority({
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "audiences": {
+            "fabric": "https://api.fabric.microsoft.com/.default",
+            "application": "api://00000000-0000-4000-8000-000000000002",
+        },
+        "fabricWorkspaceId": "00000000-0000-4000-8000-000000000003",
+        "fabricLakehouseId": "00000000-0000-4000-8000-000000000004",
+        "itemId": "00000000-0000-4000-8000-000000000005",
+        "action": "adopt",
+        "resourceType": "Microsoft.Search/searchServices",
+        "resourceName": "search-safe",
+        "version": "0.2.4",
+        "sha256": "sha256:" + "a" * 64,
+        "count": 4,
+        "enabled": True,
+        "unknownMapping": {
+            "endpoint": "https://must-not-survive.example.test",
+        },
+    })
+
+    assert sanitized["tenantId"].endswith("0001")
+    assert sanitized["audiences"]["fabric"].endswith("/.default")
+    assert sanitized["fabricWorkspaceId"].endswith("0003")
+    assert sanitized["fabricLakehouseId"].endswith("0004")
+    assert sanitized["itemId"].endswith("0005")
+    assert sanitized["resourceName"] == "search-safe"
+    assert sanitized["sha256"] == "sha256:" + "a" * 64
+    assert sanitized["count"] == 4
+    assert sanitized["enabled"] is True
+    assert "unknownMapping" not in sanitized
+    assert "must-not-survive" not in str(sanitized)
 
 
 def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
@@ -798,10 +1242,10 @@ def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
             "/subscriptions/sub/resourceGroups/rg/providers/"
             "Microsoft.Example/resources/item"
         ),
-        "nested": [
-            {"safeName": "resource-name", **opaque_values},
+        "details": [
+            {"name": "resource-name", **opaque_values},
             {
-                "deeper": {
+                "outputs": {
                     "endpoint": "https://nested.example.test",
                     "secondarySigningKey": "opaque-signing-material",
                 }
@@ -832,7 +1276,7 @@ def test_opaque_credentials_are_recursively_excluded_from_snapshot_and_state(
     assert sanitized["resourceId"].endswith(
         "/Microsoft.Example/resources/item"
     )
-    assert sanitized["nested"][0]["safeName"] == "resource-name"
+    assert sanitized["details"][0]["name"] == "resource-name"
     assert set(snapshot_hash) <= set("sha256:0123456789abcdef")
 
 
@@ -856,10 +1300,7 @@ def test_authority_document_hash_ignores_redacted_credential_changes(
         imported_outputs=first,
     )
     second_snapshot, second_hash = _mutation_authority(
-        imported_outputs={
-            **second,
-            "path": first["path"],
-        },
+        imported_outputs=second,
     )
 
     assert first["sha256"] == second["sha256"]
@@ -867,6 +1308,149 @@ def test_authority_document_hash_ignores_redacted_credential_changes(
     assert first_hash == second_hash
     assert "opaque-one" not in str(first_snapshot)
     assert "opaque-two" not in str(second_snapshot)
+
+
+def test_run_local_outputs_must_match_external_authority(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external" / "outputs.json"
+    external.parent.mkdir()
+    external.write_text(
+        '{"searchEndpoint":"https://search-one.example.test"}',
+        encoding="utf-8",
+    )
+    run_root = tmp_path / "run"
+
+    selected, _ = _infrastructure_authority_source(
+        environment="dev",
+        run_root=run_root,
+        explicit_outputs_path=external,
+    )
+    assert selected == external.resolve()
+
+    run_outputs = run_root / "infra" / "dev" / "outputs.json"
+    run_outputs.parent.mkdir(parents=True)
+    run_outputs.write_bytes(external.read_bytes())
+    selected, _ = _infrastructure_authority_source(
+        environment="dev",
+        run_root=run_root,
+        explicit_outputs_path=external,
+    )
+    assert selected == run_outputs.resolve()
+
+    run_outputs.write_text(
+        '{"searchEndpoint":"https://search-two.example.test"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(BuildDeployError, match="Run-local"):
+        _infrastructure_authority_source(
+            environment="dev",
+            run_root=run_root,
+            explicit_outputs_path=external,
+        )
+
+
+def test_typed_infrastructure_outputs_preserve_model_targets_and_reject_unknown(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "outputs.json"
+    path.write_text(
+        json.dumps({
+            "chatDeploymentId": (
+                "/subscriptions/sub/resourceGroups/rg/providers/"
+                "Microsoft.CognitiveServices/accounts/account/"
+                "deployments/chat-one"
+            ),
+            "embeddingDeploymentId": (
+                "/subscriptions/sub/resourceGroups/rg/providers/"
+                "Microsoft.CognitiveServices/accounts/account/"
+                "deployments/embed-one"
+            ),
+            "chatModelName": "gpt-4.1",
+            "embeddingModelName": "text-embedding-3-large",
+        }),
+        encoding="utf-8",
+    )
+
+    first = _load_infrastructure_outputs_authority(path)
+    assert first is not None
+    assert first["value"]["chatModelName"] == "gpt-4.1"
+    assert first["value"]["embeddingDeploymentId"].endswith("embed-one")
+
+    path.write_text(
+        '{"unknownTarget":"must-fail"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(BuildDeployError, match="Unknown infrastructure"):
+        _load_infrastructure_outputs_authority(path)
+
+
+def test_deployment_authority_interpolates_and_preserves_all_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment.yaml"
+    path.write_text(
+        """
+workspace: ${FABRIC_WORKSPACE_ID}
+items:
+  ontology: {display_name: Ontology_A, prefix: ont, configured_id: ont-id}
+  lakehouse: {display_name: Lakehouse_A, prefix: lh, configured_id: lh-id}
+  semantic_model: {display_name: Model_A, prefix: sm, configured_id: sm-id}
+  graph_model: {display_name: Graph_A, prefix: gm, configured_id: gm-id}
+  data_agent: {display_name: Agent_A, prefix: da, configured_id: da-id}
+  search_index: {display_name: Search_A, prefix: si, configured_id: si-id}
+dependencies:
+  - item: data_agent
+    depends_on: [semantic_model, graph_model, search_index]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "workspace-one")
+
+    first = _load_deployment_authority(path)
+
+    assert first["value"]["workspace"] == "workspace-one"
+    assert first["value"]["items"]["semantic_model"]["prefix"] == "sm"
+    assert first["value"]["items"]["data_agent"]["configured_id"] == "da-id"
+    assert first["value"]["items"]["search_index"]["display_name"] == (
+        "Search_A"
+    )
+    assert first["value"]["dependencies"][0]["depends_on"] == [
+        "semantic_model",
+        "graph_model",
+        "search_index",
+    ]
+
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "workspace-two")
+    second = _load_deployment_authority(path)
+    assert first["sha256"] != second["sha256"]
+
+
+def test_deployment_authority_accepts_typed_empty_optional_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment.yaml"
+    path.write_text(
+        """
+workspace: workspace-one
+items:
+  ontology:
+    display_name: Ontology_A
+""",
+        encoding="utf-8",
+    )
+
+    authority = _load_deployment_authority(path)
+
+    assert authority["value"]["items"]["ontology"]["display_name"] == (
+        "Ontology_A"
+    )
+    assert authority["value"]["items"]["data_agent"] == {
+        "display_name": "",
+        "prefix": "",
+        "configured_id": "",
+    }
 
 
 def test_safe_endpoint_and_arm_id_bypass_generic_secret_scanning(
@@ -885,7 +1469,7 @@ def test_safe_endpoint_and_arm_id_bypass_generic_secret_scanning(
     sanitized = _secret_free_authority({
         "endpoint": (
             "https://Search-Service-With-A-Long-Name.Example.Test/"
-            "api/projects/release?sig=opaque-sas#fragment"
+            "api/projects/release"
         ),
         "resourceId": resource_id,
         "safeName": "ordinary-but-non-allowlisted",
@@ -896,7 +1480,7 @@ def test_safe_endpoint_and_arm_id_bypass_generic_secret_scanning(
         "api/projects/release"
     )
     assert sanitized["resourceId"] == resource_id
-    assert sanitized["safeName"] == "[REDACTED_NON_AUTHORITY]"
+    assert "safeName" not in sanitized
 
 
 @pytest.mark.parametrize(
@@ -905,6 +1489,10 @@ def test_safe_endpoint_and_arm_id_bypass_generic_secret_scanning(
         (
             "endpoint",
             "https://user:password@service.example.test/path",
+        ),
+        (
+            "endpoint",
+            "https://service.example.test/path?sig=opaque#fragment",
         ),
         ("endpoint", "http://service.example.test/path"),
         (
@@ -984,6 +1572,19 @@ def test_unsafe_endpoint_and_resource_authority_is_rejected(
     )
 
 
+def test_invalid_typed_endpoint_aborts_snapshot_construction() -> None:
+    with pytest.raises(BuildDeployError, match="invalid or unsafe"):
+        _mutation_authority(
+            imported_outputs={
+                "value": {
+                    "searchEndpoint": (
+                        "https://search.example.test/path?sig=opaque"
+                    )
+                }
+            },
+        )
+
+
 def test_distinct_long_endpoint_and_resource_ids_change_authority_hash() -> None:
     first = _secret_free_authority({
         "endpoint": "https://service-one-with-a-long-name.example.test/api",
@@ -1040,28 +1641,47 @@ def test_dynamic_arm_state_maps_preserve_distinct_resource_authority() -> None:
     assert first_hash != second_hash
 
 
+def test_foundry_search_connection_id_is_bound_to_authority_hash() -> None:
+    prefix = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/account/projects/project/"
+        "connections/"
+    )
+    first_id = prefix + "search-connection-one"
+    second_id = prefix + "search-connection-two"
+    first, first_hash = _mutation_authority(
+        imported_outputs={
+            "value": {
+                "foundrySearchConnectionId": first_id,
+                "foundrySearchConnectionName": "search-connection-one",
+            }
+        },
+    )
+    second, second_hash = _mutation_authority(
+        imported_outputs={
+            "value": {
+                "foundrySearchConnectionId": second_id,
+                "foundrySearchConnectionName": "search-connection-two",
+            }
+        },
+    )
+
+    assert first_id in str(first)
+    assert second_id in str(second)
+    assert first_hash != second_hash
+
+
 def test_secret_bearing_endpoint_path_never_enters_snapshot_state(
     tmp_path: Path,
 ) -> None:
     secret = "A" * 32
     endpoint = f"https://service.example.test/AccountKey={secret}"
-    snapshot, snapshot_hash = _mutation_authority(
-        imported_outputs={"value": {"searchEndpoint": endpoint}},
-    )
-    state = _RunState(
-        tmp_path / "state.json",
-        run_id="run-1",
-        environment="test",
-        resume=False,
-    )
-    state.data["resolved_mutation_authority"] = snapshot
-    state.data["resolved_mutation_authority_hash"] = snapshot_hash
-    state.save()
+    with pytest.raises(BuildDeployError, match="invalid or unsafe"):
+        _mutation_authority(
+            imported_outputs={"value": {"searchEndpoint": endpoint}},
+        )
 
-    persisted = (tmp_path / "state.json").read_text(encoding="utf-8")
-    assert endpoint not in str(snapshot)
-    assert secret not in persisted
-    assert "AccountKey" not in persisted
+    assert not (tmp_path / "state.json").exists()
 
 
 def test_approved_snapshot_retry_is_unchanged_after_partial_failure(
@@ -1134,6 +1754,47 @@ def test_approval_rejects_target_drift_without_auto_approving(
             mutation_authority_hash=drifted_hash,
         )
     assert "approved_mutation_authority_hash" not in state.data
+
+
+def test_approval_rejects_tenant_and_audience_drift(
+    tmp_path: Path,
+) -> None:
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    plan = "sha256:" + "a" * 64
+    baseline = "sha256:" + "b" * 64
+    authority, authority_hash = _mutation_authority()
+    drifted, drifted_hash = _mutation_authority(
+        identity_authority={
+            "tenant_id": "00000000-0000-4000-8000-000000000099",
+            "audiences": {
+                "fabric": "https://api.fabric.microsoft.com/.default",
+                "application": (
+                    "api://00000000-0000-4000-8000-000000000098"
+                ),
+            },
+        },
+    )
+    state.data.update({
+        "plan_fingerprint": plan,
+        "reviewed_semantic_baseline_fingerprint": baseline,
+        "resolved_mutation_authority": authority,
+        "resolved_mutation_authority_hash": authority_hash,
+    })
+    state.complete(dry_run=True)
+
+    with pytest.raises(BuildDeployError, match="authority drifted"):
+        _approve_schema2_live_plan(
+            state,
+            plan_fingerprint=plan,
+            managed_baseline_fingerprint=baseline,
+            mutation_authority_snapshot=drifted,
+            mutation_authority_hash=drifted_hash,
+        )
 
 
 def test_managed_baseline_write_does_not_invalidate_compatibility_stage(

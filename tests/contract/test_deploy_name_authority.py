@@ -789,6 +789,20 @@ class TestBuildDeployCmdThreadsManifestToAllSubcommands:
                     data_agent_item_id=None,
                     data_agent_display_name="cli-agent",  # conflicts with manifest "manifest-agent"
                     approve_data_agent_replace=False,
+                    identity_authority={
+                        "tenant_id": (
+                            "00000000-0000-4000-8000-000000000001"
+                        ),
+                        "audiences": {
+                            "fabric": (
+                                "https://api.fabric.microsoft.com/.default"
+                            ),
+                            "search": "https://search.azure.com/.default",
+                            "azure_management": (
+                                "https://management.azure.com/.default"
+                            ),
+                        },
+                    },
                     deploy_manifest_path=str(manifest_file),
                 )
 
@@ -852,6 +866,20 @@ class TestBuildDeployCmdThreadsManifestToAllSubcommands:
                     data_agent_item_id=None,
                     data_agent_display_name=None,  # no CLI arg — manifest is sole authority
                     approve_data_agent_replace=False,
+                    identity_authority={
+                        "tenant_id": (
+                            "00000000-0000-4000-8000-000000000001"
+                        ),
+                        "audiences": {
+                            "fabric": (
+                                "https://api.fabric.microsoft.com/.default"
+                            ),
+                            "search": "https://search.azure.com/.default",
+                            "azure_management": (
+                                "https://management.azure.com/.default"
+                            ),
+                        },
+                    },
                     deploy_manifest_path=str(manifest_file),
                 )
             except Exception:  # noqa: BLE001

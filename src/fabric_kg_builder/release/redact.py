@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 # Field names that contain source document content — always redacted.
 _SOURCE_CONTENT_FIELDS: frozenset[str] = frozenset(
@@ -135,6 +136,40 @@ _CATEGORY_DEFAULT_TYPE = {
     "cancellation": "CancelledError",
     "internal": "EnrichmentInternalError",
 }
+_CREDENTIAL_AUTHORITY_MARKERS = frozenset({
+    "accesskey",
+    "accesstoken",
+    "accountkey",
+    "adminkey",
+    "apikey",
+    "authorization",
+    "certificate",
+    "certificatedata",
+    "certificatematerial",
+    "clientsecret",
+    "connectionstring",
+    "credential",
+    "functionkey",
+    "hostkey",
+    "idtoken",
+    "masterkey",
+    "password",
+    "primarykey",
+    "privatekey",
+    "privatematerial",
+    "refreshtoken",
+    "sas",
+    "sastoken",
+    "secondarykey",
+    "secret",
+    "secretaccesskey",
+    "sharedaccesskey",
+    "sharedkey",
+    "signingkey",
+    "storageaccountkey",
+    "subscriptionkey",
+    "token",
+})
 
 
 def _looks_like_secret(value: str) -> bool:
@@ -162,6 +197,58 @@ def redact_secret_text(value: str) -> str:
     for pattern in _FREE_TEXT_SECRET_PATTERNS:
         redacted = pattern.sub(_REDACTED_PLACEHOLDER, redacted)
     return redacted
+
+
+def canonicalize_https_authority(value: Any) -> str | None:
+    """Canonicalize a safe HTTPS authority or return ``None``."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or any(
+        character.isspace() or ord(character) < 32
+        for character in candidate
+    ):
+        return None
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    decoded_path = parsed.path
+    for _ in range(8):
+        expanded = unquote(decoded_path)
+        if expanded == decoded_path:
+            break
+        decoded_path = expanded
+    else:
+        return None
+    if re.search(r"%[0-9A-Fa-f]{2}", decoded_path):
+        return None
+    canonical_path = "".join(
+        re.findall(r"[A-Za-z0-9]+", decoded_path)
+    ).lower()
+    if any(
+        marker in canonical_path
+        for marker in _CREDENTIAL_AUTHORITY_MARKERS
+    ):
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    endpoint = urlunsplit(("https", netloc, parsed.path, "", ""))
+    if redact_secret_text(endpoint) != endpoint:
+        return None
+    return endpoint
 
 
 def sanitize_exception_message(

@@ -207,7 +207,9 @@ def _get_token() -> str:
     """Obtain a Bearer token for Azure AI Search using DefaultAzureCredential."""
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    cred = DefaultAzureCredential()
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    cred = default_azure_credential()
     return cred.get_token("https://search.azure.com/.default").token
 
 

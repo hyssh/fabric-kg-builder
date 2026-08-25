@@ -303,9 +303,12 @@ def build_runtime_dependencies(config: AppConfig):
     )
     from fabric_kg_builder.agent.tools.kb_tool import KnowledgeBaseTool
     from fabric_kg_builder.app.visual_search import VisualSearchTool
+    from fabric_kg_builder.azure_identity import default_azure_credential
 
     credential = (
-        DefaultAzureCredential(exclude_managed_identity_credential=True)
+        default_azure_credential(
+            exclude_managed_identity_credential=True
+        )
         if config.local_live_mode
         else ManagedIdentityCredential(client_id=config.managed_identity_client_id)
     )

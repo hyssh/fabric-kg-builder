@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 import yaml
@@ -171,9 +171,54 @@ _ARM_RESOURCE_ID_KEYS = frozenset({
     "foundryaccountid",
     "foundryprojectid",
     "identityid",
+    "foundrysearchconnectionid",
     "resourceid",
     "searchserviceid",
     "storageaccountid",
+})
+_INFRA_OUTPUT_AUTHORITY_KEYS = frozenset({
+    "blobendpoint",
+    "chatdeploymentid",
+    "chatdeploymentname",
+    "chatmodelname",
+    "containername",
+    "containerregistryid",
+    "containerregistryloginserver",
+    "containerregistryname",
+    "documentintelligenceendpoint",
+    "documentintelligenceid",
+    "documentintelligencename",
+    "embeddingdeploymentid",
+    "embeddingdeploymentname",
+    "embeddingmodelname",
+    "embeddingmodelname",
+    "fabricgraphmodelguidance",
+    "fabricgraphmodelid",
+    "fabricgraphmodelstate",
+    "fabriclakehouseid",
+    "fabricontologyid",
+    "fabricworkspaceid",
+    "foundryaccountid",
+    "foundryaccountname",
+    "foundryendpoint",
+    "foundryopenaiendpoint",
+    "foundryprojectendpoint",
+    "foundryprojectid",
+    "foundryprojectname",
+    "foundrysearchconnectionid",
+    "foundrysearchconnectionname",
+    "identityclientid",
+    "identityid",
+    "identityname",
+    "identityprincipalid",
+    "searchendpoint",
+    "searchindexname",
+    "searchserviceid",
+    "searchservicename",
+    "searchindexname",
+    "storageaccountid",
+    "storageaccountname",
+    "visualindexname",
 })
 _ARM_RESOURCE_ID = re.compile(
     r"^/subscriptions/(?P<subscription>[^/?#\s]+)"
@@ -182,6 +227,300 @@ _ARM_RESOURCE_ID = re.compile(
     r"(?P<resources>(?:/[^/?#\s]+/[^/?#\s]+)+)/?$",
     re.IGNORECASE,
 )
+_KNOWN_TOKEN_AUDIENCES = {
+    "azure_management": "https://management.azure.com/.default",
+    "cognitive_services": "https://cognitiveservices.azure.com/.default",
+    "fabric": "https://api.fabric.microsoft.com/.default",
+    "foundry_ai": "https://ai.azure.com/.default",
+    "search": "https://search.azure.com/.default",
+    "storage": "https://storage.azure.com/.default",
+}
+_NON_AUTHORITY_CONTAINERS = frozenset({
+    "auth",
+    "authentication",
+    "certificates",
+    "connectionstrings",
+    "credentials",
+    "keys",
+    "secrets",
+    "tokens",
+})
+_AUTHORITY_ALLOWED_KEYS = frozenset({
+    "action",
+    "adminuserenabled",
+    "adoptedresourceids",
+    "application",
+    "approvebreakingmigration",
+    "approvedbreakingsemanticmigration",
+    "approvedataagentreplace",
+    "approvereplace",
+    "assertionpolicy",
+    "audiences",
+    "authoritativearmoutputfingerprints",
+    "authoritativearmoutputs",
+    "azure",
+    "azuremanagement",
+    "baselinestate",
+    "behaviorflags",
+    "blobendpoint",
+    "capacity",
+    "capacityid",
+    "cause",
+    "causeresolutionrelationship",
+    "causesymptomrelationship",
+    "causetypes",
+    "chat",
+    "chatdeploymentid",
+    "chatdeploymentname",
+    "chatmodelname",
+    "cognitiveservices",
+    "configuredid",
+    "containerregistryname",
+    "chatdeploymentname",
+    "competencysuiteenabled",
+    "container",
+    "containername",
+    "containerregistry",
+    "containerregistryid",
+    "containerregistryloginserver",
+    "containerregistryname",
+    "costbearing",
+    "costbearingskus",
+    "count",
+    "createdat",
+    "dataagentid",
+    "dataagentmode",
+    "dataagentname",
+    "dataagent",
+    "defaultlocation",
+    "densifyconfiguration",
+    "densifyenabled",
+    "dependson",
+    "deploymentmanifest",
+    "deploymentname",
+    "dependencies",
+    "deployagent",
+    "deployapp",
+    "deployknowledge",
+    "deployserving",
+    "details",
+    "diagnosedbyrelationship",
+    "dimensions",
+    "displayname",
+    "documentintelligence",
+    "documentintelligenceendpoint",
+    "documentintelligenceid",
+    "documentintelligencename",
+    "drawingmode",
+    "embed",
+    "enabled",
+    "embedding",
+    "embeddingdeploymentid",
+    "embeddingdeploymentname",
+    "embeddingmodelname",
+    "enableschemas",
+    "enabledstages",
+    "endpoint",
+    "environment",
+    "fabric",
+    "foundryai",
+    "fabricdataagent",
+    "fabricgraphmodelid",
+    "fabricgraphmodelguidance",
+    "fabricgraphmodelstate",
+    "fabriclakehouseid",
+    "fabricontologyid",
+    "fabricworkspaceid",
+    "features",
+    "format",
+    "foundry",
+    "foundryaccountid",
+    "foundryaccountname",
+    "foundryendpoint",
+    "foundryiq",
+    "foundryopenaiendpoint",
+    "foundryprojectendpoint",
+    "foundryprojectid",
+    "foundryprojectname",
+    "foundrysearchrequired",
+    "foundrysearchconnectionid",
+    "foundrysearchconnectionname",
+    "graph",
+    "graphmodel",
+    "hierarchicalnamespace",
+    "hub",
+    "identity",
+    "identityauthority",
+    "identityclientid",
+    "identityid",
+    "identityname",
+    "identityprincipalid",
+    "implementationfingerprint",
+    "importedoutputs",
+    "infrastructure",
+    "initializebaseline",
+    "initializesemanticbaseline",
+    "item",
+    "itemid",
+    "items",
+    "kind",
+    "lakehouse",
+    "lastoperation",
+    "lastoperationid",
+    "lastoperationstatus",
+    "location",
+    "loginserver",
+    "managedresourceids",
+    "managedby",
+    "manifest",
+    "mode",
+    "model",
+    "models",
+    "name",
+    "ontology",
+    "ordinal",
+    "outputs",
+    "packageversion",
+    "patterns",
+    "pipeline",
+    "plan",
+    "planhash",
+    "prefix",
+    "prereqs",
+    "principalid",
+    "principaltype",
+    "proceduresteps",
+    "proceduresteprelationship",
+    "proceduretypes",
+    "projectname",
+    "qualification",
+    "rbacassignments",
+    "rca",
+    "recursive",
+    "referenceapp",
+    "relationship",
+    "remediatedbyrelationship",
+    "reportedtype",
+    "resolutiontypes",
+    "resourcegroup",
+    "resourceid",
+    "resources",
+    "resourcename",
+    "resourcetype",
+    "retentiondays",
+    "rolename",
+    "runtimeacceptanceenabled",
+    "runtimeoutputs",
+    "schema",
+    "schemahash",
+    "schemaversion",
+    "scope",
+    "scr",
+    "search",
+    "searchendpoint",
+    "searchindex",
+    "searchindexname",
+    "searchserviceid",
+    "searchservicename",
+    "semanticranker",
+    "semanticcontracthash",
+    "semanticmodel",
+    "sha256",
+    "skipsearch",
+    "sku",
+    "sourcetypes",
+    "statekey",
+    "status",
+    "steptypes",
+    "storage",
+    "storageaccountid",
+    "storageaccountname",
+    "storageendpoint",
+    "subscriptionid",
+    "sourceprofilehash",
+    "proposalhash",
+    "prompthash",
+    "modelhash",
+    "contracthash",
+    "executionidentityhash",
+    "symptomresolutionrelationship",
+    "symptomtypes",
+    "tags",
+    "targetrelationships",
+    "targettpm",
+    "tenantid",
+    "tier",
+    "topk",
+    "umbrella",
+    "value",
+    "version",
+    "visualindexname",
+    "warnings",
+    "workspace",
+})
+_AUTHORITY_DYNAMIC_MAPS = frozenset({
+    "tags",
+    "targetrelationships",
+})
+_AUTHORITY_ARM_ID_MAPS = frozenset({
+    "adoptedresourceids",
+    "managedresourceids",
+})
+_AUTHORITY_SAFE_IDENTIFIER_KEYS = frozenset({
+    "action",
+    "configuredid",
+    "dataagentid",
+    "dataagentmode",
+    "dataagentname",
+    "deploymentname",
+    "displayname",
+    "documentintelligencename",
+    "chatdeploymentname",
+    "chatmodelname",
+    "embeddingdeploymentname",
+    "embeddingmodelname",
+    "environment",
+    "fabricgraphmodelid",
+    "fabriclakehouseid",
+    "fabricontologyid",
+    "fabricworkspaceid",
+    "format",
+    "foundryaccountname",
+    "foundryprojectname",
+    "foundrysearchconnectionname",
+    "identityclientid",
+    "identityname",
+    "identityprincipalid",
+    "item",
+    "itemid",
+    "kind",
+    "location",
+    "mode",
+    "model",
+    "name",
+    "prefix",
+    "principalid",
+    "principaltype",
+    "projectname",
+    "reportedtype",
+    "resourcename",
+    "resourcetype",
+    "rolename",
+    "sku",
+    "statekey",
+    "status",
+    "searchservicename",
+    "searchindexname",
+    "storageaccountname",
+    "version",
+    "visualindexname",
+    "workspace",
+})
+_AUTHORITY_OPTIONAL_EMPTY_KEYS = frozenset({
+    "configuredid",
+    "displayname",
+    "prefix",
+})
 
 _STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "semantic_compatibility": ("domain_gate",),
@@ -375,48 +714,11 @@ def _is_non_authority_key(field_name: str) -> bool:
 
 
 def _canonical_https_authority(value: str) -> str | None:
-    candidate = value.strip()
-    if not candidate or any(
-        character.isspace() or ord(character) < 32
-        for character in candidate
-    ):
-        return None
-    try:
-        parsed = urlsplit(candidate)
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        return None
-    decoded_path = parsed.path
-    for _ in range(8):
-        expanded = unquote(decoded_path)
-        if expanded == decoded_path:
-            break
-        decoded_path = expanded
-    else:
-        return None
-    if re.search(r"%[0-9A-Fa-f]{2}", decoded_path):
-        return None
-    canonical_path = _canonical_authority_key(decoded_path)
-    if (
-        _is_non_authority_key(decoded_path)
-        or any(
-            marker in canonical_path
-            for marker in _NON_AUTHORITY_COMPOUND_MARKERS
-        )
-    ):
-        return None
-    host = parsed.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    netloc = f"{host}:{port}" if port is not None else host
-    return urlunsplit(("https", netloc, parsed.path, "", ""))
+    from fabric_kg_builder.release.redact import (
+        canonicalize_https_authority,
+    )
+
+    return canonicalize_https_authority(value)
 
 
 def _canonical_arm_resource_id(value: str) -> str | None:
@@ -431,28 +733,335 @@ def _canonical_arm_resource_id(value: str) -> str | None:
     )
 
 
-def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
-    """Remove source/auth material while preserving mutation authority."""
+def _canonical_tenant_id(value: str) -> str:
+    try:
+        tenant_id = str(uuid.UUID(str(value).strip()))
+    except (ValueError, AttributeError) as exc:
+        raise BuildDeployError(
+            "Live mutation authority requires a GUID tenant ID from "
+            "FABRIC_KG_TENANT_ID or AZURE_TENANT_ID."
+        ) from exc
+    return tenant_id
+
+
+def _canonical_token_audience(value: str) -> str:
+    candidate = str(value).strip()
+    if candidate in _KNOWN_TOKEN_AUDIENCES.values():
+        return candidate
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme.lower() == "api"
+        and parsed.netloc
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and not any(character.isspace() for character in candidate)
+    ):
+        return urlunsplit(("api", parsed.netloc.lower(), parsed.path, "", ""))
+    endpoint = _canonical_https_authority(candidate)
+    if endpoint is None:
+        raise BuildDeployError(
+            "FABRIC_KG_AUDIENCE must be a canonical api:// or HTTPS URI "
+            "without credentials, query, or fragment."
+        )
+    return endpoint
+
+
+def _resolve_live_identity_authority(
+    behavior_flags: dict[str, Any],
+    *,
+    subscription_id: str | None = None,
+    runner: Any | None = None,
+) -> dict[str, Any]:
+    live_mutation = any(
+        behavior_flags.get(key)
+        for key in (
+            "provision",
+            "deploy_serving",
+            "deploy_knowledge",
+            "deploy_agent",
+            "deploy_app",
+        )
+    )
+    if not live_mutation:
+        return {"tenant_id": None, "audiences": {}}
+    fabric_tenant = os.environ.get("FABRIC_KG_TENANT_ID", "")
+    azure_tenant = os.environ.get("AZURE_TENANT_ID", "")
+    configured_tenant = (
+        _canonical_tenant_id(fabric_tenant or azure_tenant)
+        if fabric_tenant or azure_tenant
+        else None
+    )
+    if (
+        fabric_tenant
+        and azure_tenant
+        and _canonical_tenant_id(fabric_tenant)
+        != _canonical_tenant_id(azure_tenant)
+    ):
+        raise BuildDeployError(
+            "FABRIC_KG_TENANT_ID and AZURE_TENANT_ID target different "
+            "tenants; live mutation authority must be unambiguous."
+        )
+    if subscription_id is not None:
+        if runner is None:
+            raise BuildDeployError(
+                "Subscription tenant resolution requires an Azure CLI runner."
+            )
+        result = runner.run([
+            "az",
+            "account",
+            "show",
+            "--subscription",
+            subscription_id,
+            "--output",
+            "json",
+        ])
+        if not result.succeeded:
+            raise BuildDeployError(
+                "Could not resolve the tenant for subscription "
+                f"'{subscription_id}' from Azure CLI."
+            )
+        try:
+            account = json.loads(result.stdout)
+            actual_subscription = str(account.get("id") or "")
+            tenant_id = _canonical_tenant_id(
+                str(account.get("tenantId") or "")
+            )
+        except (json.JSONDecodeError, AttributeError) as exc:
+            raise BuildDeployError(
+                "Azure CLI returned invalid subscription tenant authority."
+            ) from exc
+        if actual_subscription.lower() != subscription_id.lower():
+            raise BuildDeployError(
+                "Azure CLI resolved a different subscription than the "
+                "infrastructure manifest."
+            )
+        if configured_tenant is not None and configured_tenant != tenant_id:
+            raise BuildDeployError(
+                "Configured tenant differs from the Azure subscription tenant."
+            )
+    elif configured_tenant is not None:
+        tenant_id = configured_tenant
+    else:
+        raise BuildDeployError(
+            "Live mutation authority requires a resolved subscription tenant."
+        )
+    audiences: dict[str, str] = {
+        "cognitive_services": _KNOWN_TOKEN_AUDIENCES["cognitive_services"],
+    }
+    if any(
+        behavior_flags.get(key)
+        for key in ("provision", "deploy_knowledge", "deploy_app")
+    ):
+        audiences["azure_management"] = _KNOWN_TOKEN_AUDIENCES[
+            "azure_management"
+        ]
+    if live_mutation:
+        audiences["fabric"] = _KNOWN_TOKEN_AUDIENCES["fabric"]
+    if behavior_flags.get("deploy_serving"):
+        audiences["storage"] = _KNOWN_TOKEN_AUDIENCES["storage"]
+    if any(
+        behavior_flags.get(key)
+        for key in (
+            "deploy_serving",
+            "deploy_knowledge",
+            "deploy_agent",
+            "deploy_app",
+        )
+    ):
+        audiences["search"] = _KNOWN_TOKEN_AUDIENCES["search"]
+    if behavior_flags.get("deploy_agent"):
+        audiences["foundry_ai"] = _KNOWN_TOKEN_AUDIENCES["foundry_ai"]
+    if behavior_flags.get("deploy_app"):
+        raw_audience = os.environ.get("FABRIC_KG_AUDIENCE", "")
+        if not raw_audience:
+            raise BuildDeployError(
+                "--deploy-app requires FABRIC_KG_AUDIENCE during dry-run "
+                "and live approval."
+            )
+        application_audience = _canonical_token_audience(raw_audience)
+        audiences["application"] = application_audience
+        raw_scope = os.environ.get("FABRIC_KG_API_SCOPE", "")
+        expected_scope = _canonical_token_audience(
+            f"{application_audience.rstrip('/')}/.default"
+        )
+        if (
+            raw_scope
+            and _canonical_token_audience(raw_scope) != expected_scope
+        ):
+            raise BuildDeployError(
+                "FABRIC_KG_API_SCOPE must equal the approved application "
+                "audience plus '/.default'."
+            )
+        audiences["application_scope"] = expected_scope
+    return {
+        "tenant_id": tenant_id,
+        "audiences": audiences,
+    }
+
+
+class _AuthorityBoundCredential:
+    """Constrain token acquisition to one approved tenant and scope set."""
+
+    def __init__(
+        self,
+        credential: Any,
+        identity_authority: dict[str, Any],
+    ) -> None:
+        self._credential = credential
+        self._tenant_id = str(identity_authority["tenant_id"])
+        self._scopes = frozenset(
+            str(scope)
+            for scope in identity_authority["audiences"].values()
+            if str(scope).endswith("/.default")
+        )
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        if not scopes or any(scope not in self._scopes for scope in scopes):
+            raise BuildDeployError(
+                "Live token scope differs from approved mutation authority."
+            )
+        requested_tenant = kwargs.get("tenant_id")
+        if requested_tenant not in (None, self._tenant_id):
+            raise BuildDeployError(
+                "Live token tenant differs from approved mutation authority."
+            )
+        kwargs["tenant_id"] = self._tenant_id
+        return self._credential.get_token(*scopes, **kwargs)
+
+
+def _identity_authority_environment(
+    identity_authority: dict[str, Any],
+) -> dict[str, str]:
+    tenant_id = identity_authority.get("tenant_id")
+    audiences = identity_authority.get("audiences") or {}
+    if not tenant_id:
+        return {}
+    result = {
+        "AZURE_TENANT_ID": str(tenant_id),
+        "FABRIC_KG_APPROVED_TENANT_ID": str(tenant_id),
+        "FABRIC_KG_APPROVED_TOKEN_SCOPES": json.dumps(
+            sorted(
+                str(scope)
+                for scope in audiences.values()
+                if str(scope).endswith("/.default")
+            ),
+            separators=(",", ":"),
+        ),
+        "FABRIC_KG_TENANT_ID": str(tenant_id),
+    }
+    if audiences.get("fabric"):
+        result["FABRIC_KG_FABRIC_SCOPE"] = str(audiences["fabric"])
+    if audiences.get("application"):
+        result["FABRIC_KG_AUDIENCE"] = str(audiences["application"])
+    if audiences.get("application_scope"):
+        result["FABRIC_KG_API_SCOPE"] = str(
+            audiences["application_scope"]
+        )
+    return result
+
+
+def _safe_authority_string(value: str) -> str | None:
     from fabric_kg_builder.release.redact import (
         looks_like_secret,
         redact_secret_text,
     )
 
+    if (
+        not value
+        or len(value) > 2048
+        or any(ord(character) < 32 for character in value)
+        or looks_like_secret(value)
+        or redact_secret_text(value) != value
+    ):
+        return None
+    return value
+
+
+def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
+    """Admit only explicitly typed, non-secret mutation authority."""
+    from fabric_kg_builder.release.redact import redact_secret_text
+
+    canonical_field = _canonical_authority_key(field_name)
     if field_name and _is_non_authority_key(field_name):
         return _NON_AUTHORITY_PLACEHOLDER
     if isinstance(value, dict):
-        return {
-            str(key): _secret_free_authority(item, field_name=str(key))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
+        result: dict[str, Any] = {}
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            key_text = str(key)
+            canonical_key = _canonical_authority_key(key_text)
+            if (
+                canonical_key in _NON_AUTHORITY_CONTAINERS
+                or _is_non_authority_key(key_text)
+            ):
+                continue
+            if canonical_field in _AUTHORITY_ARM_ID_MAPS:
+                resource_id = (
+                    _canonical_arm_resource_id(item)
+                    if isinstance(item, str)
+                    else None
+                )
+                if resource_id is not None:
+                    result[key_text] = resource_id
+                continue
+            if canonical_field == "audiences":
+                if canonical_key in {
+                    "application",
+                    "applicationscope",
+                    "azuremanagement",
+                    "cognitiveservices",
+                    "fabric",
+                    "foundryai",
+                    "search",
+                    "storage",
+                } and isinstance(item, str):
+                    result[key_text] = _canonical_token_audience(item)
+                continue
+            if canonical_field == "authoritativearmoutputfingerprints":
+                if (
+                    isinstance(item, str)
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                ):
+                    result[key_text] = item
+                continue
+            if canonical_field in _AUTHORITY_DYNAMIC_MAPS:
+                if (
+                    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/ -]{0,127}", key_text)
+                    and isinstance(item, (str, bool, int, float))
+                ):
+                    safe_item = (
+                        _safe_authority_string(item)
+                        if isinstance(item, str)
+                        else item
+                    )
+                    if safe_item is not None:
+                        result[key_text] = safe_item
+                continue
+            if canonical_key not in _AUTHORITY_ALLOWED_KEYS:
+                continue
+            result[key_text] = _secret_free_authority(
+                item,
+                field_name=key_text,
+            )
+        return result
     if isinstance(value, (list, tuple)):
-        return [
-            _secret_free_authority(item, field_name=field_name)
-            for item in value
-        ]
+        result_list = []
+        for item in value:
+            safe_item = _secret_free_authority(
+                item,
+                field_name=field_name,
+            )
+            if safe_item != _NON_AUTHORITY_PLACEHOLDER:
+                result_list.append(safe_item)
+        return result_list
     if isinstance(value, str):
-        canonical_key = _canonical_authority_key(field_name)
-        if canonical_key.endswith("endpoint"):
+        if (
+            value == ""
+            and canonical_field in _AUTHORITY_OPTIONAL_EMPTY_KEYS
+        ):
+            return ""
+        if canonical_field.endswith("endpoint"):
             endpoint = _canonical_https_authority(value)
             if (
                 endpoint is None
@@ -460,7 +1069,7 @@ def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
             ):
                 return _NON_AUTHORITY_PLACEHOLDER
             return endpoint
-        if canonical_key in _ARM_RESOURCE_ID_KEYS:
+        if canonical_field in _ARM_RESOURCE_ID_KEYS:
             return (
                 _canonical_arm_resource_id(value)
                 or _NON_AUTHORITY_PLACEHOLDER
@@ -468,17 +1077,35 @@ def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
         arm_resource_id = _canonical_arm_resource_id(value)
         if arm_resource_id is not None:
             return arm_resource_id
-        if looks_like_secret(value):
+        if canonical_field == "tenantid":
+            return _canonical_tenant_id(value)
+        if canonical_field in {"audience", "application"}:
+            return _canonical_token_audience(value)
+        if canonical_field not in _AUTHORITY_ALLOWED_KEYS:
             return _NON_AUTHORITY_PLACEHOLDER
-        parsed = urlsplit(value)
-        if parsed.scheme.lower() in {"http", "https"} and parsed.query:
-            return urlunsplit(
-                (parsed.scheme, parsed.netloc, parsed.path, "", "")
-            )
-        return value
+        if (
+            canonical_field == "sha256"
+            or canonical_field.endswith("hash")
+            or canonical_field.endswith("fingerprint")
+        ):
+            if re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value):
+                return value
+            return _NON_AUTHORITY_PLACEHOLDER
+        if canonical_field in _AUTHORITY_SAFE_IDENTIFIER_KEYS:
+            if (
+                len(value) <= 512
+                and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.:/ -]*",
+                    value,
+                )
+                and redact_secret_text(value) == value
+            ):
+                return value
+            return _NON_AUTHORITY_PLACEHOLDER
+        return _safe_authority_string(value) or _NON_AUTHORITY_PLACEHOLDER
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return str(value)
+    return _NON_AUTHORITY_PLACEHOLDER
 
 
 def _load_authority_document(path: Path | None) -> Any:
@@ -491,10 +1118,69 @@ def _load_authority_document(path: Path | None) -> Any:
         payload = json.loads(raw)
     safe_payload = _secret_free_authority(payload)
     return {
-        "path": str(path.resolve()),
         "sha256": _canonical_json_hash(safe_payload),
         "value": safe_payload,
     }
+
+
+def _load_infrastructure_outputs_authority(
+    path: Path | None,
+) -> dict[str, Any] | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildDeployError(
+            f"Could not load infrastructure output authority: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise BuildDeployError(
+            "Infrastructure output authority must be a JSON object."
+        )
+    for key in payload:
+        key_text = str(key)
+        if _is_non_authority_key(key_text):
+            continue
+        if _canonical_authority_key(key_text) not in (
+            _INFRA_OUTPUT_AUTHORITY_KEYS
+        ):
+            raise BuildDeployError(
+                f"Unknown infrastructure output authority field: {key_text}"
+            )
+    safe = _secret_free_authority(payload)
+    _assert_complete_authority(safe)
+    return {
+        "sha256": _canonical_json_hash(safe),
+        "value": safe,
+    }
+
+
+def _load_deployment_authority(path: Path) -> dict[str, Any]:
+    from fabric_kg_builder.deploy.manifest import load_deployment_manifest
+
+    effective = load_deployment_manifest(path).model_dump(mode="json")
+    safe = _secret_free_authority(effective)
+    return {
+        "sha256": _canonical_json_hash(safe),
+        "value": safe,
+    }
+
+
+def _assert_complete_authority(value: Any, *, path: str = "") -> None:
+    if value == _NON_AUTHORITY_PLACEHOLDER:
+        raise BuildDeployError(
+            f"Mutation authority field '{path or '<root>'}' is invalid or unsafe."
+        )
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _assert_complete_authority(
+                item,
+                path=f"{path}.{key}" if path else str(key),
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _assert_complete_authority(item, path=f"{path}[{index}]")
 
 
 def _pipeline_implementation_fingerprint() -> str:
@@ -519,6 +1205,7 @@ def _build_resolved_mutation_snapshot(
     densify_configuration: Any,
     enabled_stages: list[str],
     behavior_flags: dict[str, Any],
+    identity_authority: dict[str, Any],
     package_version: str,
     implementation_fingerprint: str,
 ) -> tuple[dict[str, Any], str]:
@@ -544,8 +1231,10 @@ def _build_resolved_mutation_snapshot(
             "implementation_fingerprint": implementation_fingerprint,
             "enabled_stages": enabled_stages,
             "behavior_flags": behavior_flags,
+            "identity_authority": identity_authority,
         },
     })
+    _assert_complete_authority(snapshot)
     return snapshot, _canonical_json_hash(snapshot)
 
 
@@ -556,19 +1245,34 @@ def _infrastructure_authority_source(
     explicit_outputs_path: Path | None,
 ) -> tuple[Path | None, Path | None]:
     target_outputs = run_root / "infra" / environment / "outputs.json"
-    candidates = (
+    external_candidates = (
         explicit_outputs_path,
         Path("build") / "infra" / environment / "outputs.json",
-        target_outputs,
     )
-    outputs_path = next(
+    external_outputs = next(
         (
             candidate.resolve()
-            for candidate in candidates
+            for candidate in external_candidates
             if candidate is not None and candidate.is_file()
         ),
         None,
     )
+    resolved_target = (
+        target_outputs.resolve() if target_outputs.is_file() else None
+    )
+    if resolved_target is not None and external_outputs is not None:
+        target_authority = _load_infrastructure_outputs_authority(
+            resolved_target
+        )
+        external_authority = _load_infrastructure_outputs_authority(
+            external_outputs
+        )
+        if target_authority != external_authority:
+            raise BuildDeployError(
+                "Run-local infrastructure outputs differ from their approved "
+                "external source. Run a new --dry-run."
+            )
+    outputs_path = resolved_target or external_outputs
     state_path = (
         outputs_path.with_name("state.json")
         if outputs_path is not None
@@ -607,7 +1311,9 @@ def _resolve_cli_mutation_authority(
         explicit_outputs_path=infra_outputs_path,
     )
     imported_outputs = (
-        _load_authority_document(outputs_path) if not provision else None
+        _load_infrastructure_outputs_authority(outputs_path)
+        if not provision
+        else None
     )
     if baseline_state is not None:
         plan_state = InfraState.model_validate(baseline_state)
@@ -618,15 +1324,16 @@ def _resolve_cli_mutation_authority(
     else:
         plan_state = load_state(run_root, environment)
     plan = build_plan(manifest, existing_state=plan_state)
+    authority_runner = RealCommandRunner()
     arm_outputs = resolve_connected_arm_authority(
         manifest,
-        RealCommandRunner(),
+        authority_runner,
     )
     fallback_deployment_path = (
         Path("ontology") / "environments" / f"{environment}.json"
     )
     if deployment_manifest_path is not None:
-        deployment_authority = _load_authority_document(
+        deployment_authority = _load_deployment_authority(
             deployment_manifest_path
         )
     elif fallback_deployment_path.is_file():
@@ -671,6 +1378,11 @@ def _resolve_cli_mutation_authority(
         ),
         enabled_stages=enabled_stages,
         behavior_flags=behavior_flags,
+        identity_authority=_resolve_live_identity_authority(
+            behavior_flags,
+            subscription_id=manifest.azure.subscription_id,
+            runner=authority_runner,
+        ),
         package_version=__version__,
         implementation_fingerprint=_pipeline_implementation_fingerprint(),
     )
@@ -984,12 +1696,17 @@ def _runtime_environment(
     outputs: dict[str, Any],
     run_root: Path,
     environment: str,
+    subscription_id: str,
+    resource_group: str,
 ) -> dict[str, str]:
     """Map imported infrastructure outputs to child-command runtime settings."""
     candidates = {
         "FABRIC_KG_INFRA_OUTPUTS_PATH": (
             run_root / "infra" / environment / "outputs.json"
         ),
+        "AZURE_SUBSCRIPTION_ID": subscription_id,
+        "AZURE_RESOURCE_GROUP": resource_group,
+        "ACR_LOGIN_SERVER": outputs.get("containerRegistryLoginServer"),
         "AZURE_AI_FOUNDRY_ENDPOINT": (
             outputs.get("foundryProjectEndpoint")
             or outputs.get("foundryEndpoint")
@@ -1001,6 +1718,7 @@ def _runtime_environment(
             "embeddingDeploymentName"
         ),
         "AZURE_SEARCH_ENDPOINT": outputs.get("searchEndpoint"),
+        "FABRIC_KG_SEARCH_ENDPOINT": outputs.get("searchEndpoint"),
         "AZURE_STORAGE_ACCOUNT": outputs.get("storageAccountName"),
         "AZURE_STORAGE_ACCOUNT_URL": outputs.get("blobEndpoint"),
         "AZURE_BLOB_CONTAINER": outputs.get("containerName"),
@@ -1015,11 +1733,24 @@ def _runtime_environment(
         "FABRIC_KG_GRAPH_MODEL_ID": outputs.get("fabricGraphModelId"),
         "FABRIC_KG_BLOB_ACCOUNT_URL": outputs.get("blobEndpoint"),
         "FABRIC_KG_BLOB_CONTAINER": outputs.get("containerName"),
+        "FABRIC_KG_STORAGE_ACCOUNT_RESOURCE_ID": outputs.get(
+            "storageAccountId"
+        ),
+        "FABRIC_KG_SEARCH_SERVICE_RESOURCE_ID": outputs.get(
+            "searchServiceId"
+        ),
+        "FABRIC_KG_MANAGED_IDENTITY_RESOURCE_ID": outputs.get("identityId"),
+        "FABRIC_KG_MANAGED_IDENTITY_CLIENT_ID": outputs.get(
+            "identityClientId"
+        ),
+        "FABRIC_KG_MANAGED_IDENTITY_PRINCIPAL_ID": outputs.get(
+            "identityPrincipalId"
+        ),
+        "FABRIC_KG_ACR_RESOURCE_ID": outputs.get("containerRegistryId"),
     }
     return {
-        name: str(value)
+        name: "" if value is None else str(value)
         for name, value in candidates.items()
-        if value is not None and str(value).strip()
     }
 
 
@@ -1338,8 +2069,10 @@ def _import_infrastructure_state(
             f"Infrastructure outputs at {source_outputs} are empty or invalid."
         )
 
+    from fabric_kg_builder.infra.apply import save_outputs
+
     target_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_json(target_outputs, outputs)
+    save_outputs(outputs, run_root, environment)
     source_state = source_outputs.with_name("state.json")
     target_state = target_dir / "state.json"
     if source_state.exists() and source_state.resolve() != target_state.resolve():
@@ -1485,7 +2218,10 @@ def _ensure_fabric_runtime_access(
     *,
     workspace_id: str,
     principal_id: str,
+    identity_authority: dict[str, Any],
 ) -> dict[str, Any]:
+    from azure.identity import DefaultAzureCredential
+
     from fabric_kg_builder.infra.fabric_client import (
         DefaultAzureCredentialFabricTransport,
     )
@@ -1495,7 +2231,13 @@ def _ensure_fabric_runtime_access(
             "Fabric runtime access requires workspace and managed-identity "
             "principal IDs."
         )
-    response = DefaultAzureCredentialFabricTransport().request(
+    credential = _AuthorityBoundCredential(
+        DefaultAzureCredential(),
+        identity_authority,
+    )
+    response = DefaultAzureCredentialFabricTransport(
+        credential=credential,
+    ).request(
         "POST",
         (
             "https://api.fabric.microsoft.com/v1/workspaces/"
@@ -1583,6 +2325,7 @@ def _deploy_knowledge(
     data_agent_item_id: str | None,
     data_agent_display_name: str | None,
     approve_data_agent_replace: bool,
+    identity_authority: dict[str, Any],
     require_foundry_search_connection: bool = False,
     deploy_manifest_path: str | None = None,
 ) -> dict[str, Any]:
@@ -1712,7 +2455,12 @@ def _deploy_knowledge(
     source_name = f"fkg-{run_token}-search-source"
     kb_name = f"fkg-{run_token}-knowledge-base"
     data_agent_name = configured_name
-    credential = DefaultAzureCredential()
+    credential = _AuthorityBoundCredential(
+        DefaultAzureCredential(),
+        identity_authority,
+    )
+    fabric_scope = str(identity_authority["audiences"]["fabric"])
+    search_scope = str(identity_authority["audiences"]["search"])
     _bd_competency_contract_exists = False
     _bd_competency_payload: dict[str, Any] = {}
     _bd_example_receipts: list[Any] = []
@@ -1790,7 +2538,7 @@ def _deploy_knowledge(
         }
         _bd_graph_client = GraphModelGQLClient(
             token_provider=lambda: credential.get_token(
-                "https://api.fabric.microsoft.com/.default"
+                fabric_scope
             ).token,
         )
 
@@ -2020,6 +2768,9 @@ def _deploy_knowledge(
     search_client = SearchKbClient(
         capability=capability,
         transport=RequestsTransport(),
+        token_provider=lambda: credential.get_token(
+            search_scope
+        ).token,
     )
     source_result = search_client.upsert_knowledge_source(
         SearchIndexKnowledgeSourceSpec(
@@ -2126,7 +2877,7 @@ def _deploy_knowledge(
         }
 
     fabric_token = credential.get_token(
-        "https://api.fabric.microsoft.com/.default"
+        fabric_scope
     ).token
     data_agent_client = FabricDataAgentClient(
         workspace_id=workspace_id,
@@ -2175,7 +2926,7 @@ def _deploy_knowledge(
             mcp_executor = DataAgentMcpExecutor(
                 endpoint=mcp_endpoint,
                 token_provider=lambda: credential.get_token(
-                    "https://api.fabric.microsoft.com/.default"
+                    fabric_scope
                 ).token,
             )
 
@@ -3500,9 +4251,10 @@ def build_deploy_cmd(
         )
 
     approval_checked = False
+    resolved_live_identity_authority: dict[str, Any] | None = None
 
     def _ensure_live_mutation_authority() -> None:
-        nonlocal approval_checked
+        nonlocal approval_checked, resolved_live_identity_authority
         if approval_checked or not (is_schema2 and live_mutation_selected):
             return
         reviewed = state.data.get("resolved_mutation_authority")
@@ -3540,6 +4292,9 @@ def build_deploy_cmd(
             mutation_authority_snapshot=snapshot,
             mutation_authority_hash=snapshot_hash,
         )
+        resolved_live_identity_authority = dict(
+            snapshot["pipeline"]["identity_authority"]
+        )
         approval_checked = True
 
     def _approved_live_action(
@@ -3547,6 +4302,33 @@ def build_deploy_cmd(
     ) -> dict[str, Any] | None:
         _ensure_live_mutation_authority()
         return action()
+
+    def _approved_identity_authority() -> dict[str, Any]:
+        nonlocal resolved_live_identity_authority
+        _ensure_live_mutation_authority()
+        if (
+            resolved_live_identity_authority is None
+            and live_mutation_selected
+        ):
+            from fabric_kg_builder.infra.runner import RealCommandRunner
+
+            resolved_live_identity_authority = (
+                _resolve_live_identity_authority(
+                    mutation_behavior_flags,
+                    subscription_id=manifest.azure.subscription_id,
+                    runner=RealCommandRunner(),
+                )
+            )
+        if resolved_live_identity_authority is None:
+            raise BuildDeployError(
+                "Live identity authority was not resolved before mutation."
+            )
+        return resolved_live_identity_authority
+
+    def _approved_identity_environment() -> dict[str, str]:
+        return _identity_authority_environment(
+            _approved_identity_authority()
+        )
 
     click.echo(f"[build-deploy] run_id      : {effective_run_id}")
     click.echo(f"[build-deploy] environment : {env}")
@@ -3788,6 +4570,7 @@ def build_deploy_cmd(
                     ],
                     config_path=config_path,
                     environment=env,
+                    extra_env=_approved_identity_environment(),
                 )
             ),
             resume=resume,
@@ -3850,6 +4633,8 @@ def build_deploy_cmd(
         outputs=outputs,
         run_root=run_root,
         environment=env,
+        subscription_id=manifest.azure.subscription_id,
+        resource_group=str(manifest.azure.resource_group.name or ""),
     )
 
     state.execute(
@@ -4376,7 +5161,10 @@ def build_deploy_cmd(
                     ],
                     config_path=config_path,
                     environment=env,
-                    extra_env=runtime_env,
+                    extra_env={
+                        **runtime_env,
+                        **_approved_identity_environment(),
+                    },
                 )
             ),
             resume=resume,
@@ -4426,7 +5214,10 @@ def build_deploy_cmd(
                 ],
                 config_path=config_path,
                 environment=env,
-                extra_env=runtime_env,
+                extra_env={
+                    **runtime_env,
+                    **_approved_identity_environment(),
+                },
             )),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -4509,7 +5300,10 @@ def build_deploy_cmd(
                 ],
                 config_path=config_path,
                 environment=env,
-                extra_env=runtime_env,
+                extra_env={
+                    **runtime_env,
+                    **_approved_identity_environment(),
+                },
             )),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -4633,6 +5427,7 @@ def build_deploy_cmd(
                     ),
                     require_foundry_search_connection=deploy_agent,
                     deploy_manifest_path=deploy_manifest_path,
+                    identity_authority=_approved_identity_authority(),
                 )
             ),
             resume=resume,
@@ -4697,7 +5492,10 @@ def build_deploy_cmd(
                     deploy_agent_args,
                     config_path=config_path,
                     environment=env,
-                    extra_env=runtime_env,
+                    extra_env={
+                        **runtime_env,
+                        **_approved_identity_environment(),
+                    },
                 )
                 | {
                     "agent_name": str(
@@ -4797,6 +5595,7 @@ def build_deploy_cmd(
                     principal_id=str(
                         outputs.get("identityPrincipalId") or ""
                     ),
+                    identity_authority=_approved_identity_authority(),
                 )
             ),
             resume=resume,
@@ -4818,11 +5617,14 @@ def build_deploy_cmd(
         )
         app_env = {
             **runtime_env,
-            "FABRIC_KG_TENANT_ID": os.environ.get(
-                "FABRIC_KG_TENANT_ID",
-                os.environ.get("AZURE_TENANT_ID", ""),
+            "FABRIC_KG_KB_INDEX": search_index_name,
+            "FABRIC_KG_VISUAL_INDEX": "",
+            "FABRIC_KG_APP_CREATE_MANAGED_IDENTITY": "false",
+            "FABRIC_KG_APP_MANAGED_IDENTITY_NAME": str(
+                outputs.get("identityName") or ""
             ),
-            "FABRIC_KG_AUDIENCE": os.environ.get("FABRIC_KG_AUDIENCE", ""),
+            "FABRIC_KG_REQUIRED_APP_ROLE": "",
+            "FABRIC_KG_ALLOWED_CALLER_OBJECT_IDS": "",
             "FABRIC_KG_GRAPH_PREVIEW_ACKNOWLEDGED": "true",
             "FABRIC_KG_DOWNSTREAM_ACCESS_CONFIRMED": "true",
             "FABRIC_KG_QUERY_SCHEMA_MODE": (
@@ -4858,7 +5660,10 @@ def build_deploy_cmd(
                     deploy_app_args,
                     config_path=config_path,
                     environment=env,
-                    extra_env=app_env,
+                    extra_env={
+                        **app_env,
+                        **_approved_identity_environment(),
+                    },
                 )
             ),
             resume=resume,

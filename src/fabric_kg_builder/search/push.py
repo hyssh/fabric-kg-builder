@@ -59,7 +59,9 @@ def _search_credential(api_key: str | None) -> Any:
 
     from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-    return DefaultAzureCredential()
+    from fabric_kg_builder.azure_identity import default_azure_credential
+
+    return default_azure_credential()
 
 
 def push_index(

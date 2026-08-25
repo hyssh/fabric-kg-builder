@@ -246,6 +246,25 @@ class TestSyncRuntimeConfiguration:
         assert data["ai_search"]["index_prefix"] == "kg-staging-"
         assert data["ai_search"]["endpoint"] == "https://search.example.com"
 
+    def test_rejects_external_endpoint_query_before_runtime_persistence(
+        self,
+        tmp_path,
+    ):
+        with pytest.raises(ValueError, match="without userinfo, query"):
+            sync_runtime_configuration(
+                environment="dev",
+                manifest=_make_minimal_manifest(),
+                outputs={
+                    "searchEndpoint": (
+                        "https://search.example.test/path?sig=opaque"
+                    )
+                },
+                fabric_environment_path=tmp_path / "fabric_env.json",
+                agent_metadata_path=tmp_path / "metadata.yaml",
+            )
+
+        assert not (tmp_path / "fabric_env.json").exists()
+
     def test_empty_outputs_still_works(self, tmp_path):
         fabric_env = tmp_path / "fabric_env.json"
         agent_metadata = tmp_path / "agent_metadata.yaml"
@@ -339,3 +358,49 @@ class TestSyncRuntimeConfiguration:
             )
 
         assert "stale.azurecr.io" in metadata.read_text(encoding="utf-8")
+
+    def test_reference_app_requires_authoritative_registry_output(
+        self,
+        tmp_path,
+    ):
+        manifest = _make_minimal_manifest()
+        manifest = manifest.model_copy(
+            update={
+                "features": manifest.features.model_copy(
+                    update={"reference_app": True}
+                )
+            }
+        )
+
+        with pytest.raises(ValueError, match="containerRegistryLoginServer"):
+            sync_runtime_configuration(
+                environment="dev",
+                manifest=manifest,
+                outputs={},
+                fabric_environment_path=tmp_path / "fabric_env.json",
+                agent_metadata_path=tmp_path / "metadata.yaml",
+            )
+
+    def test_disabled_reference_app_removes_stale_registry_target(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        metadata = tmp_path / "metadata.yaml"
+        metadata.write_text(
+            "environments:\n  dev:\n    acr:\n"
+            "      loginServer: stale.azurecr.io\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ACR_LOGIN_SERVER", "ambient.azurecr.io")
+
+        sync_runtime_configuration(
+            environment="dev",
+            manifest=_make_minimal_manifest(),
+            outputs={},
+            fabric_environment_path=tmp_path / "fabric_env.json",
+            agent_metadata_path=metadata,
+        )
+
+        payload = yaml.safe_load(metadata.read_text(encoding="utf-8"))
+        assert "loginServer" not in payload["environments"]["dev"]["acr"]

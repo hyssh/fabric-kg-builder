@@ -98,7 +98,11 @@ class BlobUploader:
             credential: Any = StorageSharedKeyCredential(config.account_name, storage_key)
         else:
             from azure.identity import DefaultAzureCredential  # type: ignore[import]
-            credential = DefaultAzureCredential()
+            from fabric_kg_builder.azure_identity import (
+                default_azure_credential,
+            )
+
+            credential = default_azure_credential()
 
         return BlobServiceClient(account_url=account_url, credential=credential)
 
