@@ -90,6 +90,12 @@ _FREE_TEXT_SECRET_PATTERNS: list[re.Pattern[str]] = [
 
 _REDACTED_PLACEHOLDER = "[REDACTED]"
 _CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_URL_QUERY = re.compile(r"(https://[^\s?]+)\?[^\s]+", re.IGNORECASE)
+_PYDANTIC_INPUT = re.compile(
+    r"input_value=.*?(?=,\s*input_type=|\]\s*$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 def _looks_like_secret(value: str) -> bool:
@@ -117,6 +123,38 @@ def redact_secret_text(value: str) -> str:
     for pattern in _FREE_TEXT_SECRET_PATTERNS:
         redacted = pattern.sub(_REDACTED_PLACEHOLDER, redacted)
     return redacted
+
+
+def sanitize_exception_message(
+    value: str,
+    *,
+    source_values: tuple[str, ...] = (),
+    max_length: int = 512,
+) -> str:
+    """Return bounded actionable exception text without source data or secrets."""
+    sanitized = str(value)
+    for source_value in sorted(
+        (item for item in source_values if item),
+        key=len,
+        reverse=True,
+    ):
+        sanitized = sanitized.replace(source_value, _REDACTED_PLACEHOLDER)
+    sanitized = _PYDANTIC_INPUT.sub(
+        f"input_value={_REDACTED_PLACEHOLDER}",
+        sanitized,
+    )
+    sanitized = _URL_QUERY.sub(
+        rf"\1?{_REDACTED_PLACEHOLDER}",
+        sanitized,
+    )
+    sanitized = redact_secret_text(sanitized)
+    sanitized = _CONTROL_CHARACTERS.sub(" ", sanitized)
+    sanitized = " ".join(sanitized.split())
+    if not sanitized:
+        sanitized = "No safe exception details available."
+    if len(sanitized) > max_length:
+        sanitized = sanitized[: max_length - 3].rstrip() + "..."
+    return sanitized
 
 
 def redact_value(field_name: str, value: Any) -> Any:

@@ -21,17 +21,95 @@ from click.testing import CliRunner
 
 _BUILD_DEPLOY_EPILOG = """\b
 Examples:
-  fabric-kg build-deploy --input .\\assets --domain-contract .\\domain.yaml --env dev
   fabric-kg build-deploy --input .\\assets --domain-contract .\\domain.yaml --env dev --dry-run
   fabric-kg build-deploy --input .\\assets --domain-contract .\\domain.yaml --env dev \
-    --deploy-knowledge --deploy-agent --deploy-app --graph-preview-acknowledged
+    --resume --approve-live --deploy-knowledge --deploy-agent --deploy-app \
+    --graph-preview-acknowledged
+
+Schema-2 live mutation requires review of a matching dry-run from the same run
+ID, followed by --resume --approve-live. Any changed input or authority requires
+a new dry-run.
 
 \b
 Questions? https://github.com/hyssh/fabric-kg-builder/issues
 """
 
-_STATE_SCHEMA = "fabric-kg-build-deploy/1.0"
+_STATE_SCHEMA = "fabric-kg-build-deploy/2.0"
+_FINGERPRINT_SCHEMA = "fabric-kg-stage-input/1.0"
 _LEDGER_SCHEMA = "fabric-kg-resource-ledger/1.0"
+
+_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "semantic_compatibility": ("domain_gate",),
+    "infrastructure": ("infrastructure_preflight",),
+    "infrastructure_import": ("infrastructure_preflight",),
+    "inspect_source": ("infrastructure", "infrastructure_import"),
+    "enrich": (
+        "domain_gate",
+        "inspect_source",
+        "infrastructure",
+        "infrastructure_import",
+    ),
+    "densify": ("enrich",),
+    "compile_data": ("enrich", "densify"),
+    "compile_semantic": ("compile_data", "semantic_compatibility"),
+    "compile_ontology": ("compile_semantic",),
+    "compile_graph": ("compile_semantic",),
+    "compile_agent": ("compile_semantic", "domain_gate"),
+    "compile_search": ("compile_data", "compile_semantic"),
+    "package": (
+        "compile_ontology",
+        "compile_graph",
+        "compile_agent",
+        "compile_search",
+    ),
+    "validate": ("package",),
+    "deploy_lakehouse": (
+        "validate",
+        "compile_data",
+        "compile_semantic",
+        "infrastructure",
+        "infrastructure_import",
+    ),
+    "deploy_ontology": ("deploy_lakehouse", "compile_ontology"),
+    "record_semantic_baseline": ("deploy_ontology",),
+    "deploy_serving": (
+        "deploy_ontology",
+        "compile_graph",
+        "compile_search",
+        "package",
+    ),
+    "validate_projection": (
+        "deploy_lakehouse",
+        "deploy_ontology",
+        "deploy_serving",
+    ),
+    "deploy_knowledge": ("validate_projection", "compile_agent"),
+    "deploy_agent": ("deploy_knowledge", "compile_agent"),
+    "fabric_runtime_access": (
+        "infrastructure",
+        "infrastructure_import",
+        "deploy_serving",
+    ),
+    "deploy_app": (
+        "fabric_runtime_access",
+        "deploy_serving",
+        "compile_agent",
+        "deploy_knowledge",
+        "deploy_agent",
+    ),
+    "deployment_receipt": (
+        "validate",
+        "deploy_lakehouse",
+        "deploy_ontology",
+        "deploy_serving",
+        "validate_projection",
+        "deploy_knowledge",
+        "deploy_agent",
+        "deploy_app",
+    ),
+    "runtime_config": ("deployment_receipt",),
+    "runtime_acceptance": ("runtime_config", "compile_agent"),
+}
 
 
 class BuildDeployError(click.ClickException):
@@ -96,6 +174,29 @@ def _input_fingerprint(
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _enrichment_prompt_schema_fingerprint() -> str:
+    """Return the fixed enrichment prompt/schema authority without source text."""
+    from fabric_kg_builder.enrichment.orchestrator import (
+        LLM_OUTPUT_JSON_SCHEMA,
+        _ENRICH_SYSTEM_PROMPT,
+    )
+
+    return _input_fingerprint(
+        values={
+            "system_prompt_sha256": hashlib.sha256(
+                _ENRICH_SYSTEM_PROMPT.encode("utf-8")
+            ).hexdigest(),
+            "output_schema_sha256": hashlib.sha256(
+                json.dumps(
+                    LLM_OUTPUT_JSON_SCHEMA,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+    )
+
+
 class _RunState:
     def __init__(
         self,
@@ -119,6 +220,7 @@ class _RunState:
                     f"{payload.get('environment')!r}, not {environment!r}."
                 )
             self.data = payload
+            self.data["schema"] = _STATE_SCHEMA
         else:
             if resume:
                 raise BuildDeployError(
@@ -146,22 +248,71 @@ class _RunState:
         *,
         resume: bool,
         input_fingerprint: str | None = None,
+        dependencies: tuple[str, ...] | None = None,
+        invalidate_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
+        direct_input_fingerprint = input_fingerprint or _input_fingerprint(
+            values={"stage": name}
+        )
+        dependency_names = (
+            dependencies
+            if dependencies is not None
+            else _STAGE_DEPENDENCIES.get(name, ())
+        )
+        dependency_fingerprints = {
+            dependency: str(
+                self.data.get("stages", {})
+                .get(dependency, {})
+                .get("input_fingerprint", "")
+            )
+            for dependency in dependency_names
+            if dependency in self.data.get("stages", {})
+        }
+        input_fingerprint = _input_fingerprint(
+            values={
+                "schema": _FINGERPRINT_SCHEMA,
+                "stage": name,
+                "direct": direct_input_fingerprint,
+                "dependencies": dependency_fingerprints,
+            }
+        )
         current = self.data.setdefault("stages", {}).get(name, {})
         if resume and current.get("status") == "succeeded":
-            if input_fingerprint is None:
-                click.echo(f"[build-deploy] SKIP {name} (already succeeded)")
-                return dict(current.get("details") or {})
             if current.get("input_fingerprint") == input_fingerprint:
                 click.echo(
                     f"[build-deploy] SKIP {name} "
-                    "(semantic input fingerprint unchanged)"
+                    "(input and dependency fingerprints unchanged)"
                 )
                 return dict(current.get("details") or {})
+            changed_dependencies = sorted(
+                dependency
+                for dependency, fingerprint in dependency_fingerprints.items()
+                if (
+                    current.get("dependency_fingerprints", {}).get(dependency)
+                    != fingerprint
+                )
+            )
+            reason = (
+                "dependencies changed: " + ", ".join(changed_dependencies)
+                if changed_dependencies
+                else "direct inputs changed or legacy fingerprint is incomplete"
+            )
             click.echo(
                 f"[build-deploy] INVALIDATE {name} "
-                "(semantic input fingerprint changed)"
+                f"({reason})"
             )
+            run_root = self.path.parent.resolve()
+            for target in invalidate_paths:
+                resolved = target.resolve()
+                if not resolved.is_relative_to(run_root):
+                    raise BuildDeployError(
+                        f"Refusing to invalidate stage output outside run root: "
+                        f"{resolved}"
+                    )
+                if resolved.is_dir():
+                    shutil.rmtree(resolved)
+                else:
+                    resolved.unlink(missing_ok=True)
 
         stage = {
             "status": "running",
@@ -169,6 +320,8 @@ class _RunState:
             "completed_at": None,
             "details": {},
             "input_fingerprint": input_fingerprint,
+            "direct_input_fingerprint": direct_input_fingerprint,
+            "dependency_fingerprints": dependency_fingerprints,
         }
         self.data["stages"][name] = stage
         self.data["status"] = "running"
@@ -227,6 +380,54 @@ def _invoke_cli(
             f"{' '.join(args)}\n{detail}"
         )
     return {"command": ["fabric-kg", *args], "exit_code": result.exit_code}
+
+
+def _approve_schema2_live_plan(
+    state: _RunState,
+    *,
+    plan_fingerprint: str,
+    managed_baseline_fingerprint: str,
+) -> None:
+    """Persist or reuse explicit approval for one unchanged reviewed plan."""
+    if state.data.get("plan_fingerprint") != plan_fingerprint:
+        raise BuildDeployError(
+            "Schema-2 live inputs or authorities differ from the reviewed "
+            "dry-run. Run a new --dry-run before approving mutation."
+        )
+    baseline_stage = (
+        state.data.get("stages", {}).get("record_semantic_baseline", {})
+    )
+    recorded_baseline_fingerprint = (
+        baseline_stage.get("details", {}).get(
+            "semantic_baseline_fingerprint"
+        )
+        if baseline_stage.get("status") == "succeeded"
+        else None
+    )
+    expected_baseline = (
+        recorded_baseline_fingerprint
+        if recorded_baseline_fingerprint
+        else state.data.get("reviewed_semantic_baseline_fingerprint")
+    )
+    if (
+        expected_baseline is not None
+        and expected_baseline != managed_baseline_fingerprint
+    ):
+        raise BuildDeployError(
+            "The managed semantic baseline differs from the reviewed or "
+            "successfully recorded authority. Run a new --dry-run before "
+            "approving mutation."
+        )
+    if state.data.get("status") == "planned":
+        state.data["approved_plan_fingerprint"] = plan_fingerprint
+        state.data["live_approved_at"] = _utc_now()
+        state.save()
+        return
+    if state.data.get("approved_plan_fingerprint") != plan_fingerprint:
+        raise BuildDeployError(
+            "Schema-2 live retry has no approval for the current plan. Run a "
+            "new --dry-run, then --resume --approve-live."
+        )
 
 
 def _runtime_paths(run_root: Path) -> dict[str, Path]:
@@ -365,7 +566,12 @@ def _record_semantic_baseline(
     temporary = destination.with_name(f".{destination.name}.tmp")
     temporary.write_bytes(source.read_bytes())
     temporary.replace(destination)
-    return {"semantic_baseline": str(destination)}
+    return {
+        "semantic_baseline": str(destination),
+        "semantic_baseline_fingerprint": _input_fingerprint(
+            files={"managed_semantic_baseline": destination}
+        ),
+    }
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -2404,6 +2610,15 @@ def _run_runtime_acceptance(
         "the current contract to establish its first local baseline."
     ),
 )
+@click.option(
+    "--approve-live",
+    is_flag=True,
+    default=False,
+    help=(
+        "Explicitly approve schema-2 live mutation after reviewing the matching "
+        "dry-run plan for this run ID. Requires --resume."
+    ),
+)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--resume", is_flag=True, default=False)
 @click.option("--force", is_flag=True, default=False)
@@ -2444,6 +2659,7 @@ def build_deploy_cmd(
     approve_breaking_semantic_migration: bool,
     previous_semantic_contract: Path | None,
     initialize_semantic_baseline: bool,
+    approve_live: bool,
     dry_run: bool,
     resume: bool,
     force: bool,
@@ -2551,6 +2767,9 @@ def build_deploy_cmd(
     local_semantic_baseline_path = (
         Path("build") / "semantic-state" / env / "contract.yaml"
     )
+    managed_semantic_baseline_fingerprint = _input_fingerprint(
+        files={"managed_semantic_baseline": local_semantic_baseline_path}
+    )
     comparison_semantic_baseline_path = (
         previous_semantic_contract.resolve()
         if previous_semantic_contract
@@ -2600,6 +2819,108 @@ def build_deploy_cmd(
 
     domain = load_domain_contract(domain_path)
     manifest = load_manifest(infra_manifest_path)
+    is_schema2 = str(getattr(domain, "schema_version", "")) == "2.0"
+    pipeline_plan_fingerprint = _input_fingerprint(
+        files={
+            "config": config_path,
+            "domain_contract": domain_path,
+            "semantic_contract": semantic_contract_path,
+            "semantic_mappings": semantic_mappings_path,
+            "semantic_vocabulary": semantic_vocabulary_path,
+            "semantic_ids_lock": semantic_ids_lock_path,
+            "competency_suite": (
+                competency_suite.resolve()
+                if competency_suite is not None
+                else None
+            ),
+            "runtime_config": (
+                runtime_config_template.resolve()
+                if runtime_config_template is not None
+                else None
+            ),
+            "previous_semantic_contract": (
+                previous_semantic_contract.resolve()
+                if previous_semantic_contract is not None
+                else None
+            ),
+            "deployment_manifest": (
+                Path(deploy_manifest_path).resolve()
+                if deploy_manifest_path
+                else None
+            ),
+        },
+        directories={
+            "source": source_path if source_path.is_dir() else None,
+            "infra": infra_root,
+        },
+        values={
+            "source_file": (
+                _input_fingerprint(files={"source": source_path})
+                if source_path.is_file()
+                else None
+            ),
+            "environment": env,
+            "schema_mode": "schema2" if is_schema2 else "schema1",
+            "sealed_source_profile_hash": str(
+                getattr(getattr(domain, "approval", None), "source_profile_hash", "")
+                or ""
+            ),
+            "sealed_proposal_hash": str(
+                getattr(getattr(domain, "approval", None), "proposal_hash", "")
+                or ""
+            ),
+            "sealed_prompt_hash": str(
+                getattr(getattr(domain, "approval", None), "prompt_hash", "")
+                or ""
+            ),
+            "sealed_model_hash": str(
+                getattr(getattr(domain, "approval", None), "model_hash", "")
+                or ""
+            ),
+            "recursive": recursive,
+            "drawing_mode": drawing_mode,
+            "densify": bool(densify_config),
+            "embed": embed,
+            "skip_search": skip_search,
+            "provision": provision,
+            "deploy_serving": deploy_serving,
+            "deploy_knowledge": deploy_knowledge,
+            "deploy_agent": deploy_agent,
+            "deploy_app": deploy_app,
+            "data_agent_mode": data_agent_mode,
+            "data_agent_id": data_agent_id,
+            "data_agent_name": data_agent_name,
+            "initialize_semantic_baseline": initialize_semantic_baseline,
+            "approve_breaking_semantic_migration": (
+                approve_breaking_semantic_migration
+            ),
+        },
+    )
+    live_mutation_selected = (
+        provision
+        or deploy_serving
+        or deploy_knowledge
+        or deploy_agent
+        or deploy_app
+    )
+    if is_schema2 and live_mutation_selected and not dry_run:
+        if not resume or not approve_live:
+            raise BuildDeployError(
+                "Schema-2 live mutation requires a matching prior --dry-run, "
+                "then --resume --approve-live with the same run ID."
+            )
+        _approve_schema2_live_plan(
+            state,
+            plan_fingerprint=pipeline_plan_fingerprint,
+            managed_baseline_fingerprint=(
+                managed_semantic_baseline_fingerprint
+            ),
+        )
+    elif approve_live and (not is_schema2 or dry_run or not resume):
+        raise BuildDeployError(
+            "--approve-live is valid only for a schema-2 live --resume after "
+            "a matching dry-run."
+        )
 
     click.echo(f"[build-deploy] run_id      : {effective_run_id}")
     click.echo(f"[build-deploy] environment : {env}")
@@ -2653,6 +2974,37 @@ def build_deploy_cmd(
             ),
         },
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={"domain_contract": domain_path},
+            values={
+                "schema_mode": "schema2" if is_schema2 else "schema1",
+                "contract_hash": str(
+                    getattr(getattr(domain, "approval", None), "contract_hash", "")
+                    or ""
+                ),
+                "proposal_hash": str(
+                    getattr(getattr(domain, "approval", None), "proposal_hash", "")
+                    or ""
+                ),
+                "source_profile_hash": str(
+                    getattr(
+                        getattr(domain, "approval", None),
+                        "source_profile_hash",
+                        "",
+                    )
+                    or ""
+                ),
+                "prompt_hash": str(
+                    getattr(getattr(domain, "approval", None), "prompt_hash", "")
+                    or ""
+                ),
+                "model_hash": str(
+                    getattr(getattr(domain, "approval", None), "model_hash", "")
+                    or ""
+                ),
+            },
+        ),
+        dependencies=(),
     )
     if dry_run:
         if provision:
@@ -2675,6 +3027,18 @@ def build_deploy_cmd(
                     environment=env,
                 ),
                 resume=resume,
+                input_fingerprint=_input_fingerprint(
+                    files={
+                        "config": config_path,
+                        "infra_manifest": infra_manifest_path,
+                    },
+                    directories={"infra": infra_root},
+                    values={
+                        "environment": env,
+                        "pipeline_plan_fingerprint": pipeline_plan_fingerprint,
+                    },
+                ),
+                dependencies=(),
             )
         state.data["planned_stages"] = [
             "inspect_source",
@@ -2704,6 +3068,12 @@ def build_deploy_cmd(
             "deployment_receipt",
             *(["runtime_config", "runtime_acceptance"] if runtime_config_template else []),
         ]
+        state.data["plan_fingerprint"] = pipeline_plan_fingerprint
+        state.data["reviewed_semantic_baseline_fingerprint"] = (
+            managed_semantic_baseline_fingerprint
+        )
+        state.data.pop("approved_plan_fingerprint", None)
+        state.data.pop("live_approved_at", None)
         state.complete(dry_run=True)
         # Name plan was already emitted at function start; just signal completion.
         click.echo("[build-deploy] DRY RUN complete; no build or deployment mutations ran.")
@@ -2725,6 +3095,31 @@ def build_deploy_cmd(
                 enforce=True,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "semantic_contract": semantic_contract_path,
+                    "explicit_baseline_contract": (
+                        previous_semantic_contract.resolve()
+                        if previous_semantic_contract is not None
+                        else None
+                    ),
+                },
+                values={
+                    "managed_baseline_fingerprint": (
+                        state.data.setdefault(
+                            "reviewed_semantic_baseline_fingerprint",
+                            managed_semantic_baseline_fingerprint,
+                        )
+                        if previous_semantic_contract is None
+                        else None
+                    ),
+                    "approve_breaking_migration": (
+                        approve_breaking_semantic_migration
+                    ),
+                    "initialize_baseline": initialize_semantic_baseline,
+                },
+            ),
+            dependencies=("domain_gate",),
         )
 
     state.execute(
@@ -2743,6 +3138,15 @@ def build_deploy_cmd(
             environment=env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                "config": config_path,
+                "infra_manifest": infra_manifest_path,
+            },
+            directories={"infra": infra_root},
+            values={"environment": env},
+        ),
+        dependencies=(),
     )
 
     if provision:
@@ -2764,6 +3168,15 @@ def build_deploy_cmd(
                 environment=env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "config": config_path,
+                    "infra_manifest": infra_manifest_path,
+                },
+                directories={"infra": infra_root},
+                values={"environment": env, "provision": True},
+            ),
+            dependencies=("infrastructure_preflight",),
         )
     else:
         state.execute(
@@ -2776,6 +3189,19 @@ def build_deploy_cmd(
                 ),
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "config": config_path,
+                    "infra_manifest": infra_manifest_path,
+                    "imported_outputs": (
+                        infra_outputs.resolve()
+                        if infra_outputs is not None
+                        else None
+                    ),
+                },
+                values={"environment": env, "provision": False},
+            ),
+            dependencies=("infrastructure_preflight",),
         )
 
     from fabric_kg_builder.infra.apply import load_outputs
@@ -2819,6 +3245,27 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                "config": config_path,
+                "source": source_path if source_path.is_file() else None,
+            },
+            directories={
+                "source": source_path if source_path.is_dir() else None,
+            },
+            values={
+                "environment": env,
+                "recursive": recursive,
+                "drawing_mode": drawing_mode,
+                "document_intelligence_endpoint": str(
+                    outputs.get("documentIntelligenceEndpoint") or ""
+                ),
+            },
+        ),
+        dependencies=(
+            "infrastructure" if provision else "infrastructure_import",
+        ),
+        invalidate_paths=(paths["inspection"],),
     )
 
     enrich_args = [
@@ -2860,6 +3307,48 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                "config": config_path,
+                "domain_contract": domain_path,
+                "semantic_contract": semantic_contract_path,
+                "semantic_mappings": semantic_mappings_path,
+                "semantic_vocabulary": semantic_vocabulary_path,
+                "semantic_ids_lock": semantic_ids_lock_path,
+                "source": source_path if source_path.is_file() else None,
+            },
+            directories={
+                "source": source_path if source_path.is_dir() else None,
+                "inspection": paths["inspection"],
+            },
+            values={
+                "environment": env,
+                "run_id": effective_run_id,
+                "recursive": recursive,
+                "drawing_mode": drawing_mode,
+                "chat_deployment": str(
+                    outputs.get("chatDeploymentName") or ""
+                ),
+                "foundry_endpoint": str(
+                    outputs.get("foundryProjectEndpoint")
+                    or outputs.get("foundryOpenAIEndpoint")
+                    or ""
+                ),
+                "semantic_contract_hash": str(
+                    getattr(getattr(domain, "approval", None), "contract_hash", "")
+                    or ""
+                ),
+                "prompt_schema_fingerprint": (
+                    _enrichment_prompt_schema_fingerprint()
+                ),
+            },
+        ),
+        dependencies=(
+            "domain_gate",
+            "inspect_source",
+            "infrastructure" if provision else "infrastructure_import",
+        ),
+        invalidate_paths=(paths["enriched"],),
     )
 
     compile_input = paths["enriched"]
@@ -2886,6 +3375,19 @@ def build_deploy_cmd(
                 extra_env=runtime_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "domain_contract": domain_path,
+                    "densify_config": Path(densify_config).resolve(),
+                },
+                directories={"enriched": paths["enriched"]},
+                values={
+                    "link_associations": True,
+                    "link_steps": True,
+                    "link_diagnostics": True,
+                },
+            ),
+            invalidate_paths=(paths["enriched_dense"],),
         )
         compile_input = paths["enriched_dense"]
 
@@ -2905,6 +3407,20 @@ def build_deploy_cmd(
             extra_env=runtime_env,
         ),
         resume=resume,
+        input_fingerprint=_input_fingerprint(
+            files={
+                "domain_run_manifest": (
+                    compile_input / "domain.run-manifest.json"
+                ),
+                "quality_report": (
+                    compile_input / "semantic-quality-report.json"
+                ),
+            },
+            directories={"compile_input": compile_input},
+            values={"validate": True},
+        ),
+        dependencies=("densify",) if densify_config else ("enrich",),
+        invalidate_paths=(paths["parquet"],),
     )
     semantic_args = [
         "--contract",
@@ -2968,6 +3484,12 @@ def build_deploy_cmd(
             directories={"parquet": paths["parquet"]},
             values={"data_version": effective_run_id},
         ),
+        dependencies=(
+            ("compile_data", "semantic_compatibility")
+            if deploy_serving
+            else ("compile_data",)
+        ),
+        invalidate_paths=(paths["semantic"],),
     )
     state.execute(
         "compile_ontology",
@@ -2990,6 +3512,7 @@ def build_deploy_cmd(
             directories={"semantic": paths["semantic"]},
             values={"environment": env},
         ),
+        invalidate_paths=(paths["ontology"],),
     )
     state.execute(
         "compile_graph",
@@ -3017,6 +3540,7 @@ def build_deploy_cmd(
                 "lakehouse_id": str(outputs.get("fabricLakehouseId") or ""),
             },
         ),
+        invalidate_paths=(paths["graph"],),
     )
     semantic_authority_files = {
         "normalized_contract": (
@@ -3087,6 +3611,7 @@ def build_deploy_cmd(
             },
             directories={"semantic": paths["semantic"]},
         ),
+        invalidate_paths=(paths["agents"],),
     )
 
     if not skip_search:
@@ -3130,6 +3655,7 @@ def build_deploy_cmd(
                     ),
                 },
             ),
+            invalidate_paths=(paths["search"],),
         )
 
     package_args = [
@@ -3155,6 +3681,13 @@ def build_deploy_cmd(
             directories={"build": paths["build"]},
             values={"include_search": not skip_search},
         ),
+        dependencies=(
+            "compile_ontology",
+            "compile_graph",
+            "compile_agent",
+            *(("compile_search",) if not skip_search else ()),
+        ),
+        invalidate_paths=(paths["dist"],),
     )
     state.execute(
         "validate",
@@ -3181,6 +3714,7 @@ def build_deploy_cmd(
             },
             values={"environment": env},
         ),
+        invalidate_paths=(paths["release"] / "validation.json",),
     )
 
     search_index_name = f"fkg-{run_token}-chunks"
@@ -3234,6 +3768,9 @@ def build_deploy_cmd(
                 },
                 values={"environment": env},
             ),
+            invalidate_paths=(
+                paths["release"] / "materialization-deployment.json",
+            ),
         )
         state.execute(
             "deploy_ontology",
@@ -3279,6 +3816,9 @@ def build_deploy_cmd(
                 },
                 values={"environment": env},
             ),
+            invalidate_paths=(
+                paths["release"] / "ontology-deployment.json",
+            ),
         )
         state.execute(
             "record_semantic_baseline",
@@ -3287,6 +3827,10 @@ def build_deploy_cmd(
                 local_semantic_baseline_path,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={"semantic_contract": semantic_contract_path},
+                values={"environment": env},
+            ),
         )
         state.execute(
             "deploy_serving",
@@ -3363,6 +3907,9 @@ def build_deploy_cmd(
                     "dimensions": 1536,
                 },
             ),
+            invalidate_paths=(
+                paths["release"] / "serving-deployment.json",
+            ),
         )
         state.execute(
             "validate_projection",
@@ -3405,6 +3952,9 @@ def build_deploy_cmd(
                     ),
                 },
                 directories={"semantic": paths["semantic"]},
+            ),
+            invalidate_paths=(
+                paths["release"] / "persisted-projection-receipt.json",
             ),
         )
 
@@ -3451,6 +4001,39 @@ def build_deploy_cmd(
                 deploy_manifest_path=deploy_manifest_path,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "domain_contract": domain_path,
+                    "metadata_authority": (
+                        Path(".foundry") / "agent-metadata.yaml"
+                    ),
+                    "persisted_projection": (
+                        paths["release"]
+                        / "persisted-projection-receipt.json"
+                    ),
+                    "semantic_context": (
+                        paths["agents"] / "semantic-context.json"
+                    ),
+                    "agent_instructions": (
+                        paths["agents"] / "instructions.md"
+                    ),
+                    "deployment_manifest": (
+                        Path(deploy_manifest_path).resolve()
+                        if deploy_manifest_path
+                        else None
+                    ),
+                },
+                directories={"semantic": paths["semantic"]},
+                values={
+                    "environment": env,
+                    "search_index_name": knowledge_index_name,
+                    "data_agent_mode": data_agent_mode,
+                    "data_agent_id": data_agent_id,
+                    "data_agent_name": data_agent_name,
+                    "approve_replace": approve_data_agent_replace,
+                    "foundry_search_required": deploy_agent,
+                },
+            ),
         )
 
     if deploy_agent:
@@ -3505,6 +4088,16 @@ def build_deploy_cmd(
                 }
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "domain_contract": domain_path,
+                    "metadata_authority": (
+                        Path(".foundry") / "agent-metadata.yaml"
+                    ),
+                },
+                directories={"agents": paths["agents"]},
+                values={"environment": env, "run_token": run_token},
+            ),
         )
 
     if deploy_app:
@@ -3564,6 +4157,20 @@ def build_deploy_cmd(
                 principal_id=str(outputs.get("identityPrincipalId") or ""),
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "persisted_query_schema": source_query_schema_path,
+                },
+                values={
+                    "workspace_id": str(
+                        outputs.get("fabricWorkspaceId") or ""
+                    ),
+                    "principal_id": str(
+                        outputs.get("identityPrincipalId") or ""
+                    ),
+                    "query_schema_mode": app_query_schema.schema_mode,
+                },
+            ),
         )
         app_env = {
             **runtime_env,
@@ -3609,6 +4216,31 @@ def build_deploy_cmd(
                 extra_env=app_env,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "metadata_authority": (
+                        Path(".foundry") / "agent-metadata.yaml"
+                    ),
+                    "persisted_query_schema": source_query_schema_path,
+                },
+                values={
+                    "environment": env,
+                    "query_schema_mode": app_query_schema.schema_mode,
+                    "query_schema_hash": app_query_schema.schema_hash,
+                    "query_authority_hash": (
+                        app_query_schema.authority.authority_hash
+                        if app_query_schema.authority is not None
+                        else ""
+                    ),
+                },
+            ),
+            dependencies=(
+                "fabric_runtime_access",
+                "deploy_serving",
+                "compile_agent",
+                *(("deploy_knowledge",) if deploy_knowledge else ()),
+                *(("deploy_agent",) if deploy_agent else ()),
+            ),
         )
 
     state.execute(
@@ -3643,6 +4275,25 @@ def build_deploy_cmd(
             },
             values={"environment": env},
         ),
+        dependencies=(
+            "validate",
+            *(
+                (
+                    "deploy_lakehouse",
+                    "deploy_ontology",
+                    "deploy_serving",
+                    "validate_projection",
+                )
+                if deploy_serving
+                else ()
+            ),
+            *(("deploy_knowledge",) if deploy_knowledge else ()),
+            *(("deploy_agent",) if deploy_agent else ()),
+            *(("deploy_app",) if deploy_app else ()),
+        ),
+        invalidate_paths=(
+            paths["release"] / "deployment-receipt.json",
+        ),
     )
     ledger = _build_resource_ledger(
         run_id=effective_run_id,
@@ -3668,6 +4319,34 @@ def build_deploy_cmd(
                 state=state,
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "runtime_template": runtime_config_template.resolve(),
+                    "deployment_receipt": (
+                        paths["release"] / "deployment-receipt.json"
+                    ),
+                },
+                values={
+                    "environment": env,
+                    "outputs_fingerprint": _input_fingerprint(
+                        values={
+                            key: outputs.get(key)
+                            for key in sorted(outputs)
+                            if not any(
+                                marker in key.lower()
+                                for marker in (
+                                    "key",
+                                    "secret",
+                                    "password",
+                                    "token",
+                                    "connection",
+                                    "sas",
+                                )
+                            )
+                        }
+                    ),
+                },
+            ),
         )
         state.execute(
             "runtime_acceptance",
@@ -3679,6 +4358,17 @@ def build_deploy_cmd(
                 release_dir=paths["release"],
             ),
             resume=resume,
+            input_fingerprint=_input_fingerprint(
+                files={
+                    "competency_contract": (
+                        paths["agents"] / "competency-contract.json"
+                    ),
+                    "runtime_config": runtime_config_path,
+                    "persisted_query_schema": (
+                        paths["agents"] / "persisted-query-schema.json"
+                    ),
+                },
+            ),
         )
     state.complete()
     click.echo(

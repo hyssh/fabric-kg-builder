@@ -52,11 +52,14 @@ from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 _GROUP_EPILOG = """\b
 Recommended production pipeline (run in dependency order):
   1. Author and approve
-     init -> init-domain --input <source-path> -> domain review -> domain approve -> inspect-ontology
+     init -> init-domain --input <source-path> -> domain review -> domain approve
+     Approval seals N, K, source profile, prompt/model identity, mappings, and IDs.
   2. Extract and compile
      enrich -> [densify] -> compile-data -> compile-semantic
      -> compile-ontology + compile-graph + compile-agent + compile-search
      -> validate-artifacts -> package -> validate
+     Raw unresolved/rejected/discovery candidates remain audit-only. Ontology,
+     Graph, and agent artifacts consume only asserted, exact-evidence semantic rows.
   3. Deploy structured semantic surfaces
      deploy-lakehouse -> deploy-ontology -> deploy-graph
      -> validate-projection
@@ -83,13 +86,19 @@ Recommended production pipeline (run in dependency order):
   7. Accept and report
      collect-evidence -> evaluate -> validate-deployment -> report
 
+  Schema-2 live build-deploy:
+     First run --dry-run with a stable --run-id and review the complete plan.
+     Continue only the unchanged run with --resume --approve-live.
+     Generated and runtime Graph plans may never exceed the approved K.
+
 \b
 Guidance for Copilot and other AI agents:
   Prefer the ordered workflow above. For large document sets, choose Blob +
   indexer ingestion with --integrated-vectorization; do not default to repeated
   direct Search uploads. Never invent or bypass projection receipts, deploy a
   Foundry agent before its Fabric Data Agent dependency, or treat a CLI polling
-  timeout as an indexer failure without checking indexer status.
+  timeout as an indexer failure without checking indexer status. Never publish
+  audit-only lifecycle rows, bypass exact evidence, or exceed approved K.
 
 \b
 PowerShell example (large document set):
@@ -154,10 +163,11 @@ def cli(
     Transforms heterogeneous domain assets into traceable Search, Lakehouse,
     Graph, and Ontology artifacts plus a deployable agent experience.
 
-    Graph quality depends on an approved domain contract. Capture the business
-    context, problem, entity and relationship concepts, constraints, and
-    competency questions before enrichment. Optional densification is driven by
-    explicit domain configuration; no sample taxonomy is applied implicitly.
+    Schema-2 quality depends on an explicitly approved domain contract that
+    seals bounded relationship vocabulary N, traversal depth K, source profile,
+    prompt/model identity, mappings, vocabulary, and stable IDs. Exact evidence
+    is verified locally; unresolved/rejected candidates remain audit-only, and
+    deployment consumes only the sealed semantic projection.
 
     Run any subcommand with --help for options, defaults, and a usage example.
 

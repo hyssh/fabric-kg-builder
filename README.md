@@ -4,41 +4,51 @@
 
 📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
-📋 **Current assessment and roadmap:** [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md)
+📋 **0.2.4 release proof:** [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md) · **Post-merge live checklist:** [`docs/SMOKE-TEST-0.2.4.md`](docs/SMOKE-TEST-0.2.4.md)
 
 ---
 
 ## What It Does
 
-`fabric-kg-builder` is a Python CLI that runs a structured pipeline from raw source files to a fully deployed Fabric knowledge graph:
+`fabric-kg-builder` is a Python CLI for governed, evidence-backed knowledge
+graphs:
 
-1. **Ingest** PDFs, Word documents, HTML pages, and CSVs  
-2. **Extract** text, tables (as structured cells and HTML), images, and figures — using Azure AI Document Intelligence (Layout model)  
-3. **Upload** visual assets (images, figures) to Azure Blob Storage  
-4. **Enrich** with LLM entity/relationship extraction via Microsoft Foundry (`azure-ai-projects`) / Azure OpenAI  
-5. **Compile** enriched JSON into 8 canonical Parquet tables (entities, relationships, chunks, document elements, evidence, …)  
-6. **Compile** a Fabric Ontology definition over those Parquet tables  
-7. **Compile** Azure AI Search index schemas and document batches (vector + keyword retrieval)  
-8. **Package** all build artifacts into a versioned `dist/` bundle  
-9. **Deploy** Parquet tables → Fabric Lakehouse, Ontology definition → Fabric workspace, Search documents → Azure AI Search — all via **fabric-cicd**
+1. **Propose the domain** from business goals, five to ten competency questions,
+   and representative sources.
+2. **Review and explicitly approve** one schema-2 contract that seals the bounded
+   relationship vocabulary `N`, traversal depth `K`, source profile, prompt/model
+   identity, mappings, and stable IDs.
+3. **Extract and locally verify exact evidence**. Unsupported, unresolved, and
+   rejected candidates remain available for audit but never enter serving tables.
+4. **Compile one sealed semantic projection** into typed Lakehouse, Ontology,
+   Graph, agent, and Search artifacts with count/hash equivalence gates.
+5. **Package and validate** the complete authority bundle.
+6. **Review a dry-run and explicitly approve live mutation**. Schema-2
+   `build-deploy` requires the same run ID, unchanged plan fingerprint,
+   `--resume`, and `--approve-live`.
+7. **Execute bounded queries** from persisted plans that cannot exceed approved
+   `K`, with exact evidence returned for relationship findings.
 
-The tool is a **reusable framework**, not a demo. Every domain (hardware support, legal docs, product manuals, etc.) is modelled via a domain brief, and the pipeline is repeatable across dev / test / prod environments.
+Schema-1 contracts remain readable through their compatibility workflow and are
+not automatically migrated.
 
 ---
 
 ## Features
 
-- **End-to-end CLI** — single command (`build-deploy`) or fine-grained stage-by-stage control  
+- **Copilot-assisted domain design** — cited proposal, deterministic YAML/JSON automation, and explicit human approval
+- **Bounded semantic authority** — approved vocabulary `N`, traversal bound `K`, mappings, vocabulary, stable IDs, and hashes
 - **Document Intelligence** — tables extracted as HTML; figures as images stored in Blob  
-- **LLM enrichment** — entity / relationship / evidence extraction via Microsoft Foundry SDK  
-- **8-table canonical Parquet schema** — durable data contract; source-controlled and versionable  
-- **Fabric Ontology** — generates Ontology definition parts deployable to any Fabric workspace  
+- **Exact evidence extraction** — model-authored IDs are never trusted; spans and deterministic evidence IDs are verified locally
+- **Audit/serving separation** — raw lifecycle candidates are retained while only asserted, evidence-backed semantic rows publish
+- **Sealed deployment** — Lakehouse, Ontology, and Graph consume the same semantic projection and receipts
+- **Resume dependency graph** — source, profile, domain, model/prompt, semantic, Search, package, deploy, and validation changes invalidate exact transitive stages
+- **Bounded Graph queries** — persisted plans and runtime execution enforce approved `K`
 - **Azure AI Search** — vector (text-embedding-3-large, 1536 dims) + keyword indexes for grounded retrieval  
-- **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
 - **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
-- **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  
+- **Reviewed live mutation** — matching dry-run and explicit approval are required for schema-2 `build-deploy`
 - **Multi-environment** — `dev` / `test` / `prod` configs in `ontology/environments/`  
-- **Resume-safe enrichment** — `--resume` skips already-processed files  
+- **Actionable safe diagnostics** — checkpointed per-work-unit category/message/retry context without source content or secrets
 - **DefaultAzureCredential** auth — `az login` for dev; Service Principal for CI/prod  
 
 ---
@@ -46,28 +56,27 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 ## Architecture Overview
 
 ```
+Business goals + competency questions + representative sources
+    │
+    ▼  init-domain → cited proposal → domain approve
+    │  seals N, K, profile, prompt/model, semantic mappings and IDs
+    │
 Source files (PDF / DOCX / HTML / CSV)
     │
-    ▼  inspect-source
-    │  Document Intelligence (Layout) — tables as HTML, figures as images → Blob Storage
-    │
-    ▼  enrich
-    │  Microsoft Foundry / Azure OpenAI — entity, relationship, evidence extraction
-    │  → enriched JSON (per-file, resume-safe)
+    ▼  inspect-source → enrich
+    │  exact span verification + asserted/unresolved/rejected/discovery lifecycle
     │
     ▼  compile-data
-    │  → 8 canonical Parquet tables  (entities, relationships, chunks,
-    │                                  document_elements, evidence, …)
+    │  ├─ raw candidate/audit surfaces
+    │  └─ sealed semantic entity/relationship projection
     │
-    ├─▶ compile-ontology → Fabric Ontology definition parts
+    ├─▶ compile-semantic → compile-ontology + compile-graph + compile-agent
+    ├─▶ compile-search
+    ▼  validate-artifacts → package → validate
     │
-    ├─▶ compile-search   → AI Search index schemas + document batches
-    │
-    ▼  package  → dist/ bundle (manifest + all artifacts)
-    │
-    ├─▶ deploy-lakehouse  → Fabric Lakehouse (OneLake Tables) via fabric-cicd
-    ├─▶ deploy-ontology   → Fabric workspace Ontology via fabric-cicd
-    └─▶ deploy-search     → Azure AI Search indexes + documents
+    ▼  build-deploy --dry-run → operator review
+    ▼  build-deploy --resume --approve-live
+    └─▶ Lakehouse + Ontology + Graph + Search + bounded agent/runtime
 ```
 
 > Structured graph/ontology data lives in the Lakehouse. Document text and vector embeddings are searched via Azure AI Search — they are **not** stored in the Lakehouse.
@@ -159,110 +168,52 @@ Each file (`dev.json`, `test.json`, `prod.json`) contains workspace IDs, lakehou
 
 ---
 
-## Quickstart — End-to-End Example
-
-The `sample_data\Surface_Troubleshootings` directory contains 22 Surface service-guide PDFs. This walkthrough runs the full pipeline against that dataset.
-
-### Step 1 — Authenticate
+## Quickstart — Schema-2 Workflow
 
 ```bash
-az login
+# 1. Generate draft proposal + contract from deterministic intake and sources.
+fabric-kg init-domain \
+  --input ./sources \
+  --intake ./domain-intake.yaml \
+  --non-interactive \
+  --out ./domain.yaml
+
+# 2. Review, then explicitly seal the proposal/profile/contract.
+fabric-kg domain validate --file ./domain.yaml
+fabric-kg domain approve \
+  --file ./domain.yaml \
+  --proposal ./.fkg/domain-proposal.json \
+  --source-profile ./.fkg/source-profile.json \
+  --approved-by "$OPERATOR"
+
+# 3. Review the complete non-mutating plan under a stable run ID.
+RUN_ID="$(python -c 'import uuid; print(uuid.uuid4())')"
+fabric-kg build-deploy \
+  --input ./sources \
+  --domain-contract ./domain.yaml \
+  --semantic-contract ./ontology/semantic-contract.yaml \
+  --env dev \
+  --run-id "$RUN_ID" \
+  --dry-run
+
+# 4. Only after operator review, continue the unchanged plan.
+fabric-kg build-deploy \
+  --input ./sources \
+  --domain-contract ./domain.yaml \
+  --semantic-contract ./ontology/semantic-contract.yaml \
+  --env dev \
+  --run-id "$RUN_ID" \
+  --resume \
+  --approve-live \
+  --graph-preview-acknowledged
 ```
 
-### Step 2 — Configure secrets
-
-```bash
-cp .env.example .env
-# Open .env and fill in your Azure endpoint URLs
-```
-
-### Step 3 — Set the domain brief
-
-```bash
-fabric-kg set-domain \
-  --prompt "Microsoft Surface hardware troubleshooting guides covering repair procedures, components, error codes, and replacement parts."
-```
-
-Writes `build\enriched\domain.json` (default `--out build\enriched`).  
-Or supply a file: `--domain-file docs\surface_domain.txt`
-
-### Step 4 — Enrich source documents
-
-```bash
-fabric-kg enrich \
-  --input sample_data\Surface_Troubleshootings \
-  --resume
-```
-
-Outputs to `build\enriched\` (default `--out build\enriched`).  
-`domain.json` is picked up automatically from `build\enriched\domain.json`.  
-`--resume` skips files already processed — safe to re-run after interruption.
-
-### Step 5 — Compile canonical Parquet tables
-
-```bash
-fabric-kg compile-data
-```
-
-Reads `build\enriched\` → writes 8 Parquet tables to `build\parquet\` (default `--input build\enriched`, `--out build\parquet`).
-
-### Step 6 — Compile Fabric Ontology
-
-```bash
-fabric-kg compile-ontology
-```
-
-Writes ontology definition parts to `build\ontology\` (default `--out build\ontology`).
-
-### Step 7 — Compile AI Search schemas
-
-```bash
-fabric-kg compile-search
-```
-
-Reads `build\parquet\` → writes index schemas and document batches to `build\search\` (default `--input build\parquet`, `--out build\search`).
-
-### Step 8 — Package build artifacts
-
-```bash
-fabric-kg package --include-search
-```
-
-Reads `build\` (parquet + ontology + search) → writes `dist\fabric-kg-package\` with a `manifest.json` (default `--build-dir build`, `--out dist`).
-
-### Step 9 — Deploy to Fabric Lakehouse
-
-```bash
-fabric-kg deploy-lakehouse --env dev --dist dist
-```
-
-Reads Parquet tables from `dist\fabric-kg-package\parquet` (default `--dist dist`).
-
-### Step 10 — Deploy AI Search indexes
-
-```bash
-fabric-kg deploy-search --env dev --dist build\search
-```
-
-Reads directly from the `build\search\` directory produced by `compile-search` (default `--dist build\search`).
-
-### Step 11 — Deploy Fabric Ontology
-
-```bash
-fabric-kg deploy-ontology --env dev --no-mock
-```
-
-`deploy-ontology` defaults to `--mock` (safe dry-run); pass `--no-mock` for a live Fabric workspace deploy.
-
-By default the ontology models all entities as a single generic `KGEntity` type (one box in the Fabric Ontology Explorer). For a **rich, multi-type graph** — one node type per real domain type (Device, DeviceModel, Component, Part, PartNumber, Procedure, Step, Tool, Symptom, Cause, Resolution, Section) plus typed relationships (`has_step`, `uses_tool`, `has_part`, `has_part_number`, `causes`, `resolved_by`, …) — use `--multitype`:
-
-```bash
-fabric-kg deploy-ontology --env dev --multitype --parquet-dir data\surface_kg\parquet --no-mock
-```
-
-This plans the types/relationships from your data, materializes one Lakehouse table per type (`entities_<type>`) and per relationship pair (`rel_<src>_<tgt>`), then pushes the ontology definition. Tune `--min-pair-count N` to control how many edges a `(source → target)` pair needs before it becomes a typed relationship (default 10). The Ontology Explorer is a *schema* view — it shows one box per entity **type**, with all instances bound behind it from the Lakehouse tables.
-
-> **One-shot alternative:** `fabric-kg build-deploy --input sample_data\Surface_Troubleshootings --env dev` runs all stages in sequence (in development — see Notes).
+If source, domain/profile, model/prompt, semantic mappings/vocabulary/IDs,
+configuration, or selected deployment stages change, the plan fingerprint no
+longer matches and a new dry-run is required. See
+[`docs/SMOKE-TEST-0.2.4.md`](docs/SMOKE-TEST-0.2.4.md) for the post-merge live
+read-back sequence. This repository does not claim 0.2.4 live success until that
+checklist is completed.
 
 ---
 
@@ -295,7 +246,15 @@ Note `--build-dir data\surface_kg` (not `--build-dir data\surface_kg\parquet`) a
 
 ---
 
-## Domain Template Playbook
+## Legacy Schema-1 Domain Template Playbook
+
+> **Compatibility reference only.** The material in this section documents the
+> older schema-1 `set-domain`, heuristic densification, generic `--multitype`,
+> and Surface reproduction workflow. It must not be used to bypass schema-2
+> proposal approval, closed vocabulary, exact evidence, audit/serving
+> separation, sealed semantic deployment, or bounded K. New 0.2.4 projects use
+> the schema-2 quickstart above. Measured Surface results below are historical
+> 0.2.3 evidence, not a claim of 0.2.4 live acceptance.
 
 ### Concept — Domain-Fit Model
 
@@ -568,18 +527,21 @@ All commands accept the global options `--config PATH`, `--env [dev|test|prod]`,
 | Command | Description |
 |---|---|
 | `init` | Scaffold a new project — creates `fabric-kg.yaml`, ontology model stub, and directory layout |
-| `set-domain` | Persist a domain brief to `build/enriched/domain.json` (`--industry`, `--business-domain` **required**; `--prompt` or `--domain-file`; `--questions-file` for sample questions) |
+| `set-domain` | Legacy schema-1 domain brief compatibility command; new projects use `init-domain` plus `domain approve` |
 | `inspect-source` | Analyse source files and report columns, structure, and detected file types |
 | `enrich` | Run LLM extraction on source files; produce per-file enriched JSON (`--input`, `--out`, `--domain-file`, `--resume`, `--force`) |
-| `densify` | Add DeviceModel hub edges + Cause/Symptom/Resolution links to enriched JSON (`--input`, `--out`, `--link-scr`) |
-| `compile-data` | Convert enriched JSON into the 8 canonical Parquet tables (`--input`, `--out`) |
-| `compile-ontology` | Generate Fabric Ontology definition parts from Parquet schema (`--out`) |
+| `densify` | Optional explicit, domain-configured additive rules; schema-2 output still must pass closed-vocabulary/evidence gates |
+| `init-domain` | Generate a cited schema-2 proposal and draft contract; never auto-approves noninteractive output |
+| `domain` | Validate, review, explicitly approve, and inspect domain authority |
+| `compile-data` | Produce reconciled raw audit and sealed semantic Parquet surfaces |
+| `compile-semantic` | Seal semantic contract, mappings, vocabulary, IDs, projection, and query authority |
+| `compile-ontology` / `compile-graph` / `compile-agent` | Compile serving artifacts only from sealed semantic authority |
 | `compile-search` | Generate Azure AI Search index schemas and document batches (`--input`, `--out`) |
 | `package` | Bundle build artifacts into `dist/` with a manifest (`--out`, `--include-search`) |
-| `validate` | Validate build artifacts, ontology shape, and AI Search schemas |
-| `build-deploy` | Run the full pipeline end-to-end (`--input`, `--env`, `--resume`, `--force`, `--skip-search`) |
+| `validate-artifacts` / `validate` | Enforce exact evidence, lifecycle, identity, hash/count, and package gates |
+| `build-deploy` | Fingerprinted pipeline; schema-2 live mutation requires matching dry-run, `--resume`, and `--approve-live` |
 | `deploy-lakehouse` | Upload canonical Parquet tables to Fabric Lakehouse via fabric-cicd (`--env`, `--dist`) |
-| `deploy-ontology` | Deploy Fabric Ontology definition (`--env`, `--no-mock`; `--multitype` for a rich typed graph; `--create-data-agent-instruction` writes Data Agent grounding) |
+| `deploy-ontology` | Deploy sealed schema-2 Ontology artifacts; legacy `--multitype` remains compatibility-only |
 | `deploy-search` | Upload AI Search index schemas and document batches (`--env`, `--dist`) |
 
 ---
@@ -617,8 +579,8 @@ fabric-kg-builder/
 │       ├── cli/            # Click commands (one file per command)
 │       ├── config/         # Config loader (fabric-kg.yaml + env JSON)
 │       ├── sources/        # Document router, PDF/DOCX/HTML/CSV loaders, chunker
-│       ├── enrichment/     # Foundry client, domain brief, LLM orchestrator
-│       ├── parquet/        # Canonical schema writers (8 tables)
+│       ├── enrichment/     # Foundry client, exact evidence, lifecycle orchestrator
+│       ├── parquet/        # Canonical raw/audit and semantic schema writers
 │       ├── ontology/       # Fabric Ontology definition builder
 │       ├── search/         # AI Search schema + batch generators
 │       ├── deploy/         # Lakehouse, Ontology, Search deployers (fabric-cicd)
@@ -755,11 +717,11 @@ To migrate:
 
 ## Notes & Limitations
 
-- **`build-deploy` is not yet fully implemented** — use the step-by-step commands for now.  
 - **Embedding dimensions are locked at 1536** (`text-embedding-3-large`). Changing the embedding model requires a full reindex and schema migration.  
 - **Document text is not stored in the Lakehouse** — it is indexed in Azure AI Search for retrieval.  
 - **Visual assets** (images, figures) are stored in Azure Blob Storage; only their URLs appear in Parquet / Search documents.  
 - **`deploy-ontology` defaults to mock mode** — pass `--no-mock` for a live Fabric workspace deploy.  
+- **0.2.4 live acceptance is pending post-merge validation** — local gates do not prove live Lakehouse/Ontology/Graph/Search read-back.
 - **Windows path separators** are used in examples throughout; POSIX equivalents use forward slashes.  
 - **Sensitivity labels** for Fabric items must be set to your organisation's display name in `ontology/environments/{env}.json` (`fabric.sensitivity_label`).  
 - **Schema-enabled Lakehouse required** — the Fabric Lakehouse must be created with `enableSchemas=true`.

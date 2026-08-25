@@ -426,6 +426,12 @@ class TestRelationshipEndpointMismatch:
         assert "indexed_as" in msg or "DocumentChunk" in msg, (
             f"Error message must name the relationship or entity type. Got: {msg}"
         )
+        assert (
+            "Map semantic 'DocumentChunk.entity_id' directly to the physical "
+            "'chunk_id' column"
+        ) in msg
+        assert "Do not add a duplicate property alias" in msg
+        assert "Add an 'entity_id' property alias" not in msg
 
     def test_target_endpoint_wrong_identity_domain_raises(self):
         """Target endpoint referencing wrong identity domain triggers OKV-001 error."""

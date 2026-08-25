@@ -241,10 +241,109 @@ class EnrichmentWorkResult:
     input_hash: str
     records: CanonicalRecords = field(default_factory=CanonicalRecords)
     llm_output: LLMOutput | None = None
+    exception_category: str | None = None
     error_type: str | None = None
+    error_message: str | None = None
+    retry_eligible: bool | None = None
     queue_seconds: float = 0.0
     call_seconds: float = 0.0
     receipt: str | None = None
+
+
+def _exception_diagnostic(
+    exc: BaseException,
+    *,
+    source_content: str,
+) -> tuple[str, str, bool]:
+    """Classify and sanitize one enrichment failure for checkpoint persistence."""
+    from fabric_kg_builder.release.redact import sanitize_exception_message
+
+    error_type = type(exc).__name__
+    lowered = f"{error_type} {exc}".lower()
+    if isinstance(exc, (CancelledError, KeyboardInterrupt, SystemExit)):
+        category, retry_eligible = "cancellation", True
+    elif isinstance(exc, TimeoutError) or "timeout" in lowered:
+        category, retry_eligible = "timeout", True
+    elif "ratelimit" in lowered or "rate_limit" in lowered or "429" in lowered:
+        category, retry_eligible = "rate_limit", True
+    elif any(token in lowered for token in ("authentication", "unauthorized", "401", "403")):
+        category, retry_eligible = "authentication", False
+    elif isinstance(exc, (ValueError, TypeError)) or "validation" in lowered:
+        category, retry_eligible = "validation", True
+    elif any(token in lowered for token in ("http", "service", "connection")):
+        category, retry_eligible = "service", True
+    else:
+        category, retry_eligible = "internal", False
+    message = sanitize_exception_message(
+        str(exc),
+        source_values=(source_content,),
+    )
+    return category, message, retry_eligible
+
+
+def _checkpoint_attempt_fields(
+    item: EnrichmentWorkItem,
+    result: EnrichmentWorkResult,
+    previous: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build safe common checkpoint fields while preserving prior attempts."""
+    previous = previous or {}
+    previous_attempts = (
+        list(previous.get("attempts", []))
+        if isinstance(previous.get("attempts"), list)
+        else []
+    )
+    attempt_number = int(
+        previous.get("attempt_count", len(previous_attempts))
+    ) + 1
+    attempt = {
+        "attempt": attempt_number,
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "status": result.status,
+        "source_file_id": item.source_file_id,
+        "work_unit_key": item.work_unit_key,
+        "group_key": item.group_key,
+        "semantic_contract_hash": item.semantic_contract_hash,
+        "execution_identity_hash": item.execution_identity_hash,
+    }
+    if result.status != "succeeded":
+        default_category = (
+            "validation"
+            if "Budget" in str(result.error_type or "")
+            else "internal"
+        )
+        attempt.update(
+            {
+                "exception_category": (
+                    result.exception_category or default_category
+                ),
+                "exception_type": (
+                    result.error_type or "EnrichmentError"
+                ),
+                "exception_message": (
+                    result.error_message
+                    or "No safe exception details available."
+                ),
+                "retry_eligible": (
+                    bool(result.retry_eligible)
+                    if result.retry_eligible is not None
+                    else default_category == "validation"
+                ),
+            }
+        )
+    return {
+        "input_hash": item.input_hash,
+        "ordinal": item.ordinal,
+        "source_file_id": item.source_file_id,
+        "work_unit_key": item.work_unit_key,
+        "group_key": item.group_key,
+        "semantic_contract_hash": item.semantic_contract_hash,
+        "execution_identity_hash": item.execution_identity_hash,
+        "attempt_count": attempt_number,
+        "attempts": (
+            previous_attempts + [attempt]
+        )[-_MAX_ATTEMPT_HISTORY:],
+    }
 
 
 @dataclass
@@ -1041,6 +1140,7 @@ def canonicalize_llm_output(
 
 
 _CHECKPOINT_SCHEMA_VERSION = "3.0"
+_MAX_ATTEMPT_HISTORY = 20
 _LOGGER = logging.getLogger(__name__)
 _CHECKPOINT_IO_LOCK = threading.RLock()
 
@@ -1700,24 +1800,40 @@ def _execute_work_item(
             queue_seconds=queue_seconds,
             call_seconds=max(0.0, time.perf_counter() - started),
         )
-    except CancelledError:
+    except CancelledError as exc:
+        category, message, retry_eligible = _exception_diagnostic(
+            exc,
+            source_content=item.source_content,
+        )
         return EnrichmentWorkResult(
             work_unit_key=item.work_unit_key,
             group_key=item.group_key,
             ordinal=item.ordinal,
             status="cancelled",
             input_hash=item.input_hash,
+            exception_category=category,
             error_type="CancelledError",
+            error_message=message,
+            retry_eligible=retry_eligible,
             queue_seconds=queue_seconds,
             call_seconds=max(0.0, time.perf_counter() - started),
         )
     except AssertionError:
         raise
     except Exception as exc:
+        category, message, retry_eligible = _exception_diagnostic(
+            exc,
+            source_content=item.source_content,
+        )
         _LOGGER.error(
-            "enrichment work %s failed with %s",
+            "enrichment work failed source=%s work_unit=%s category=%s "
+            "type=%s retry_eligible=%s message=%s",
+            item.source_file_id,
             item.work_unit_key,
+            category,
             type(exc).__name__,
+            retry_eligible,
+            message,
         )
         return EnrichmentWorkResult(
             work_unit_key=item.work_unit_key,
@@ -1725,7 +1841,10 @@ def _execute_work_item(
             ordinal=item.ordinal,
             status="failed",
             input_hash=item.input_hash,
+            exception_category=category,
             error_type=type(exc).__name__,
+            error_message=message,
+            retry_eligible=retry_eligible,
             queue_seconds=queue_seconds,
             call_seconds=max(0.0, time.perf_counter() - started),
         )
@@ -1951,13 +2070,32 @@ def _run_schema2_work_items(
         item: EnrichmentWorkItem,
         result: EnrichmentWorkResult,
     ) -> list[EnrichmentWorkResult]:
+        common_state = _checkpoint_attempt_fields(
+            item,
+            result,
+            manifest["work_units"].get(item.work_unit_key),
+        )
         manifest["work_units"][item.work_unit_key] = {
+            **common_state,
             "status": result.status,
-            "input_hash": item.input_hash,
-            "ordinal": item.ordinal,
-            "semantic_contract_hash": item.semantic_contract_hash,
-            "execution_identity_hash": item.execution_identity_hash,
+            "exception_category": (
+                result.exception_category
+                or (
+                    "validation"
+                    if "Budget" in str(result.error_type or "")
+                    else "internal"
+                )
+            ),
             "error_type": result.error_type or "EnrichmentError",
+            "error_message": (
+                result.error_message
+                or "No safe exception details available."
+            ),
+            "retry_eligible": (
+                bool(result.retry_eligible)
+                if result.retry_eligible is not None
+                else "Budget" in str(result.error_type or "")
+            ),
             "attempted_at": datetime.now(timezone.utc).isoformat(),
         }
         if result.status == "cancelled":
@@ -2042,12 +2180,14 @@ def _run_schema2_work_items(
             result,
         )
         result.receipt = receipt
+        common_state = _checkpoint_attempt_fields(
+            item,
+            result,
+            manifest["work_units"].get(item.work_unit_key),
+        )
         manifest["work_units"][item.work_unit_key] = {
+            **common_state,
             "status": "succeeded",
-            "input_hash": item.input_hash,
-            "ordinal": item.ordinal,
-            "semantic_contract_hash": item.semantic_contract_hash,
-            "execution_identity_hash": item.execution_identity_hash,
             "parent_work_unit_key": item.parent_work_unit_key,
             "split_depth": item.split_depth,
             "source_start": item.source_start,
@@ -2169,13 +2309,20 @@ def _run_work_items(
     def _invoke(item: EnrichmentWorkItem) -> EnrichmentWorkResult:
         nonlocal active_calls
         if effective_cancel_event.is_set():
+            category, message, retry_eligible = _exception_diagnostic(
+                CancelledError(),
+                source_content=item.source_content,
+            )
             return EnrichmentWorkResult(
                 work_unit_key=item.work_unit_key,
                 group_key=item.group_key,
                 ordinal=item.ordinal,
                 status="cancelled",
                 input_hash=item.input_hash,
+                exception_category=category,
                 error_type="CancelledError",
+                error_message=message,
+                retry_eligible=retry_eligible,
             )
         with active_lock:
             active_calls += 1
@@ -2200,6 +2347,56 @@ def _run_work_items(
 
     def _persist_result(result: EnrichmentWorkResult) -> None:
         item = item_by_key[result.work_unit_key]
+        previous = manifest["work_units"].get(item.work_unit_key, {})
+        previous_attempts = (
+            list(previous.get("attempts", []))
+            if isinstance(previous, dict)
+            and isinstance(previous.get("attempts"), list)
+            else []
+        )
+        attempt_number = int(
+            previous.get("attempt_count", len(previous_attempts))
+            if isinstance(previous, dict)
+            else len(previous_attempts)
+        ) + 1
+        attempt = {
+            "attempt": attempt_number,
+            "attempted_at": datetime.now(timezone.utc).isoformat(),
+            "status": result.status,
+            "source_file_id": item.source_file_id,
+            "work_unit_key": item.work_unit_key,
+            "group_key": item.group_key,
+            "semantic_contract_hash": item.semantic_contract_hash,
+            "execution_identity_hash": item.execution_identity_hash,
+        }
+        if result.status != "succeeded":
+            attempt.update(
+                {
+                    "exception_category": (
+                        result.exception_category or "internal"
+                    ),
+                    "exception_type": (
+                        result.error_type or "EnrichmentError"
+                    ),
+                    "exception_message": (
+                        result.error_message
+                        or "No safe exception details available."
+                    ),
+                    "retry_eligible": bool(result.retry_eligible),
+                }
+            )
+        attempts = (previous_attempts + [attempt])[-_MAX_ATTEMPT_HISTORY:]
+        common_state = {
+            "input_hash": item.input_hash,
+            "ordinal": item.ordinal,
+            "source_file_id": item.source_file_id,
+            "work_unit_key": item.work_unit_key,
+            "group_key": item.group_key,
+            "semantic_contract_hash": item.semantic_contract_hash,
+            "execution_identity_hash": item.execution_identity_hash,
+            "attempt_count": attempt_number,
+            "attempts": attempts,
+        }
         metrics.total_queue_seconds += result.queue_seconds
         metrics.total_call_seconds += result.call_seconds
         if result.status == "succeeded":
@@ -2210,11 +2407,8 @@ def _run_work_items(
             )
             result.receipt = receipt
             manifest["work_units"][item.work_unit_key] = {
+                **common_state,
                 "status": "succeeded",
-                "input_hash": item.input_hash,
-                "ordinal": item.ordinal,
-                "semantic_contract_hash": item.semantic_contract_hash,
-                "execution_identity_hash": item.execution_identity_hash,
                 "receipt": receipt,
                 "receipt_sha256": receipt_sha256,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -2222,23 +2416,33 @@ def _run_work_items(
             metrics.succeeded += 1
         elif result.status == "cancelled":
             manifest["work_units"][item.work_unit_key] = {
+                **common_state,
                 "status": "cancelled",
-                "input_hash": item.input_hash,
-                "ordinal": item.ordinal,
-                "semantic_contract_hash": item.semantic_contract_hash,
-                "execution_identity_hash": item.execution_identity_hash,
+                "exception_category": (
+                    result.exception_category or "cancellation"
+                ),
                 "error_type": result.error_type or "CancelledError",
+                "error_message": (
+                    result.error_message
+                    or "No safe exception details available."
+                ),
+                "retry_eligible": bool(result.retry_eligible),
                 "attempted_at": datetime.now(timezone.utc).isoformat(),
             }
             metrics.cancelled += 1
         else:
             manifest["work_units"][item.work_unit_key] = {
+                **common_state,
                 "status": "failed",
-                "input_hash": item.input_hash,
-                "ordinal": item.ordinal,
-                "semantic_contract_hash": item.semantic_contract_hash,
-                "execution_identity_hash": item.execution_identity_hash,
+                "exception_category": (
+                    result.exception_category or "internal"
+                ),
                 "error_type": result.error_type or "EnrichmentError",
+                "error_message": (
+                    result.error_message
+                    or "No safe exception details available."
+                ),
+                "retry_eligible": bool(result.retry_eligible),
                 "attempted_at": datetime.now(timezone.utc).isoformat(),
             }
             metrics.failed += 1
@@ -2267,13 +2471,20 @@ def _run_work_items(
                 except AssertionError:
                     raise
                 except Exception as exc:
+                    category, message, retry_eligible = _exception_diagnostic(
+                        exc,
+                        source_content=item.source_content,
+                    )
                     result = EnrichmentWorkResult(
                         work_unit_key=item.work_unit_key,
                         group_key=item.group_key,
                         ordinal=item.ordinal,
                         status="failed",
                         input_hash=item.input_hash,
+                        exception_category=category,
                         error_type=type(exc).__name__,
+                        error_message=message,
+                        retry_eligible=retry_eligible,
                     )
                 _persist_result(result)
                 persisted_futures.add(future)
@@ -2296,6 +2507,10 @@ def _run_work_items(
                 try:
                     result = future.result()
                 except BaseException as exc:
+                    category, message, retry_eligible = _exception_diagnostic(
+                        exc,
+                        source_content=item.source_content,
+                    )
                     result = EnrichmentWorkResult(
                         work_unit_key=item.work_unit_key,
                         group_key=item.group_key,
@@ -2309,7 +2524,10 @@ def _run_work_items(
                             else "failed"
                         ),
                         input_hash=item.input_hash,
+                        exception_category=category,
                         error_type=type(exc).__name__,
+                        error_message=message,
+                        retry_eligible=retry_eligible,
                     )
                 _persist_result(result)
             if unfinished:

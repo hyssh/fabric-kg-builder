@@ -177,6 +177,26 @@ def _is_endpoint_compatible(entity: dict[str, Any], fk_col: str) -> bool:
     return False
 
 
+def _identity_remediation(
+    *,
+    entity_name: str,
+    identity_column: str,
+    endpoint_column: str,
+) -> str:
+    if entity_name == "DocumentChunk" and identity_column == "chunk_id":
+        return (
+            "Map semantic 'DocumentChunk.entity_id' directly to the physical "
+            "'chunk_id' column, then bind the relationship endpoint to that "
+            "same chunk_id identity domain. Do not add a duplicate property alias."
+        )
+    return (
+        f"Map the semantic identity property directly to the one authoritative "
+        f"physical identity column '{identity_column}', or change endpoint column "
+        f"'{endpoint_column}' to reference that identity domain. Do not bind "
+        "duplicate identity aliases to the same physical column."
+    )
+
+
 def _check_okv001(model: dict[str, Any]) -> list[IdentityViolation]:
     violations: list[IdentityViolation] = []
     entity_map = {et.get("name", ""): et for et in model.get("entityTypes", [])}
@@ -215,8 +235,11 @@ def _check_okv001(model: dict[str, Any]) -> list[IdentityViolation]:
                             f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{rel_name}' "
                             f"source endpoint column '{src_col}' is incompatible with entity "
                             f"'{src_type}' identity column '{src_id_col}'. "
-                            f"Add an 'entity_id' property alias to '{src_type}' or use a "
-                            f"compatible FK column."
+                            + _identity_remediation(
+                                entity_name=src_type,
+                                identity_column=src_id_col,
+                                endpoint_column=src_col,
+                            )
                         ),
                     )
                 )
@@ -244,8 +267,11 @@ def _check_okv001(model: dict[str, Any]) -> list[IdentityViolation]:
                             f"ONTOLOGY_RELATIONSHIP_KEY_MISMATCH: relationship '{rel_name}' "
                             f"target endpoint column '{tgt_col}' is incompatible with entity "
                             f"'{tgt_type}' identity column '{tgt_id_col}'. "
-                            f"Add an 'entity_id' property alias to '{tgt_type}' or use a "
-                            f"compatible FK column."
+                            + _identity_remediation(
+                                entity_name=tgt_type,
+                                identity_column=tgt_id_col,
+                                endpoint_column=tgt_col,
+                            )
                         ),
                     )
                 )

@@ -172,7 +172,7 @@ def create_app(
     graph_adapter: "FabricDataAgentAdapter | None" = None,
     rate_limiter: "RateLimiter | None" = None,
     environment: str = "dev",
-    version: str = "0.2.3",
+    version: str = "0.2.4",
     require_downstreams: bool = False,
     _allow_all_override: bool = False,
 ) -> "FastAPI":

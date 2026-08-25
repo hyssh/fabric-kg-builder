@@ -1,0 +1,3 @@
+environment: local
+azure:
+  subscription_id: fixture-subscription

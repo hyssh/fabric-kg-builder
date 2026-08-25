@@ -1,0 +1,417 @@
+from __future__ import annotations
+
+import json
+
+from fabric_kg_builder.infra.apply import apply_plan, load_outputs, save_outputs
+from fabric_kg_builder.infra.runner import FakeCommandRunner
+from fabric_kg_builder.infra.schema import (
+    InfraManifest,
+    InfraPlan,
+    PlanAction,
+    PlanItem,
+    ResourceMode,
+)
+
+
+def _connected_manifest() -> InfraManifest:
+    return InfraManifest.model_validate(
+        {
+            "environment": "dev",
+            "azure": {
+                "subscription_id": "sub-001",
+                "resource_group": {"mode": "connect", "name": "rg-existing"},
+            },
+            "resources": {
+                "storage": {"mode": "connect", "name": "storage-existing"},
+                "document_intelligence": {
+                    "mode": "connect",
+                    "name": "documents-existing",
+                },
+                "foundry": {
+                    "mode": "connect",
+                    "name": "foundry-existing",
+                    "project_name": "project-existing",
+                    "models": {
+                        "chat": {
+                            "model": "gpt-4.1",
+                            "deployment_name": "chat-existing",
+                        },
+                        "embedding": {
+                            "model": "text-embedding-3-large",
+                            "deployment_name": "embedding-existing",
+                        },
+                    },
+                },
+                "search": {"mode": "connect", "name": "search-existing"},
+            },
+        }
+    )
+
+
+def _resource_id(provider_type: str, name: str) -> str:
+    return (
+        "/subscriptions/sub-001/resourceGroups/rg-existing/providers/"
+        f"{provider_type}/{name}"
+    )
+
+
+def _adopt_item(resource_type: str, resource_name: str) -> PlanItem:
+    return PlanItem(
+        resource_type=resource_type,
+        resource_name=resource_name,
+        action=PlanAction.ADOPT,
+    )
+
+
+def _add_resource_response(
+    runner: FakeCommandRunner,
+    resource_id: str,
+    payload: dict,
+) -> None:
+    runner.add_response(
+        ["az", "resource", "show", "--subscription", "sub-001", "--ids", resource_id],
+        stdout=json.dumps(payload),
+    )
+
+
+def test_connected_arm_endpoints_are_persisted_without_host_synthesis(tmp_path):
+    manifest = _connected_manifest()
+    storage_id = _resource_id(
+        "Microsoft.Storage/storageAccounts", "storage-existing"
+    )
+    documents_id = _resource_id(
+        "Microsoft.CognitiveServices/accounts", "documents-existing"
+    )
+    foundry_id = _resource_id(
+        "Microsoft.CognitiveServices/accounts", "foundry-existing"
+    )
+    project_id = f"{foundry_id}/projects/project-existing"
+    search_id = _resource_id(
+        "Microsoft.Search/searchServices", "search-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        storage_id,
+        {
+            "name": "storage-existing",
+            "properties": {
+                "primaryEndpoints": {
+                    "blob": "https://private-storage.example.test/"
+                }
+            },
+        },
+    )
+    _add_resource_response(
+        runner,
+        documents_id,
+        {
+            "name": "documents-existing",
+            "properties": {
+                "endpoint": "https://documents-authoritative.example.test/"
+            },
+        },
+    )
+    _add_resource_response(
+        runner,
+        foundry_id,
+        {
+            "name": "foundry-existing",
+            "properties": {
+                "endpoints": {
+                    "AI Foundry API": "https://foundry-authoritative.example.test/",
+                    "OpenAI Language Model Instance API": (
+                        "https://openai-authoritative.example.test/"
+                    ),
+                }
+            },
+        },
+    )
+    _add_resource_response(
+        runner,
+        project_id,
+        {
+            "name": "foundry-existing/project-arm-name",
+            "properties": {
+                "endpoint": (
+                    "https://project-authoritative.example.test/"
+                    "api/projects/project-arm-name"
+                )
+            },
+        },
+    )
+    _add_resource_response(
+        runner,
+        search_id,
+        {
+            "name": "search-existing",
+            "properties": {
+                "endpoint": "https://search-authoritative.example.test"
+            },
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            _adopt_item(
+                "Microsoft.Storage/storageAccounts", "storage-existing"
+            ),
+            _adopt_item(
+                "Microsoft.CognitiveServices/accounts", "documents-existing"
+            ),
+            _adopt_item(
+                "Microsoft.CognitiveServices/accounts", "foundry-existing"
+            ),
+            _adopt_item(
+                "Microsoft.CognitiveServices/accounts/projects",
+                "foundry-existing/project-existing",
+            ),
+            _adopt_item(
+                "Microsoft.Search/searchServices", "search-existing"
+            ),
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert status.succeeded
+    outputs = load_outputs(tmp_path, "dev")
+    assert outputs["blobEndpoint"] == "https://private-storage.example.test/"
+    assert (
+        outputs["documentIntelligenceEndpoint"]
+        == "https://documents-authoritative.example.test/"
+    )
+    assert (
+        outputs["foundryEndpoint"]
+        == "https://foundry-authoritative.example.test/"
+    )
+    assert (
+        outputs["foundryOpenAIEndpoint"]
+        == "https://openai-authoritative.example.test/"
+    )
+    assert outputs["foundryProjectEndpoint"] == (
+        "https://project-authoritative.example.test/"
+        "api/projects/project-arm-name"
+    )
+    assert (
+        outputs["searchEndpoint"]
+        == "https://search-authoritative.example.test"
+    )
+
+
+def test_connected_resource_missing_endpoint_fails_with_id_and_property_path(
+    tmp_path,
+):
+    manifest = _connected_manifest()
+    resource_id = _resource_id(
+        "Microsoft.CognitiveServices/accounts", "documents-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        resource_id,
+        {"name": "documents-existing", "properties": {}},
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            _adopt_item(
+                "Microsoft.CognitiveServices/accounts", "documents-existing"
+            )
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert not status.succeeded
+    assert resource_id in status.errors[0]
+    assert "properties.endpoint" in status.errors[0]
+    outputs = load_outputs(tmp_path, "dev")
+    assert "documentIntelligenceEndpoint" not in outputs
+
+
+def test_connected_resource_rejects_non_https_arm_endpoint(tmp_path):
+    manifest = _connected_manifest()
+    resource_id = _resource_id(
+        "Microsoft.Search/searchServices", "search-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        resource_id,
+        {
+            "name": "search-existing",
+            "properties": {"endpoint": "http://search.example.test"},
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            _adopt_item(
+                "Microsoft.Search/searchServices", "search-existing"
+            )
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert not status.succeeded
+    assert resource_id in status.errors[0]
+    assert "properties.endpoint" in status.errors[0]
+    assert "malformed HTTPS endpoint" in status.errors[0]
+
+
+def test_connected_foundry_project_never_synthesizes_missing_endpoint(
+    tmp_path,
+):
+    manifest = _connected_manifest()
+    foundry_id = _resource_id(
+        "Microsoft.CognitiveServices/accounts", "foundry-existing"
+    )
+    project_id = f"{foundry_id}/projects/project-existing"
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        project_id,
+        {
+            "name": "foundry-existing/project-existing",
+            "properties": {},
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            _adopt_item(
+                "Microsoft.CognitiveServices/accounts/projects",
+                "foundry-existing/project-existing",
+            )
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert not status.succeeded
+    assert project_id in status.errors[0]
+    assert "properties.endpoint" in status.errors[0]
+    assert 'properties.endpoints["AI Foundry API"]' in status.errors[0]
+    assert "services.ai.azure.com" not in status.errors[0]
+
+
+def test_connected_arm_endpoint_overrides_mixed_bicep_output(tmp_path):
+    manifest = _connected_manifest()
+    manifest = manifest.model_copy(
+        update={
+            "resources": manifest.resources.model_copy(
+                update={
+                    "document_intelligence": (
+                        manifest.resources.document_intelligence.model_copy(
+                            update={"mode": ResourceMode.CREATE}
+                        )
+                    )
+                }
+            )
+        }
+    )
+    storage_id = _resource_id(
+        "Microsoft.Storage/storageAccounts", "storage-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        storage_id,
+        {
+            "name": "storage-existing",
+            "properties": {
+                "primaryEndpoints": {
+                    "blob": "https://blob-from-arm.example.test/"
+                }
+            },
+        },
+    )
+    runner.add_response(
+        ["az", "deployment", "group", "create"],
+        stdout=json.dumps(
+            {
+                "properties": {
+                    "outputs": {
+                        "blobEndpoint": {
+                            "type": "String",
+                            "value": "https://blob-from-bicep.example.test/",
+                        },
+                        "documentIntelligenceEndpoint": {
+                            "type": "String",
+                            "value": "https://documents-from-bicep.example.test/",
+                        },
+                    }
+                }
+            }
+        ),
+    )
+    infra_dir = tmp_path / "templates"
+    infra_dir.mkdir()
+    (infra_dir / "main.bicep").write_text("// mocked by FakeCommandRunner\n")
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            _adopt_item(
+                "Microsoft.Storage/storageAccounts", "storage-existing"
+            ),
+            PlanItem(
+                resource_type="Microsoft.CognitiveServices/accounts",
+                resource_name="documents-existing",
+                action=PlanAction.CREATE,
+            ),
+        ],
+    )
+
+    status = apply_plan(
+        manifest,
+        plan,
+        runner,
+        build_root=tmp_path,
+        infra_dir=infra_dir,
+    )
+
+    assert status.succeeded
+    outputs = load_outputs(tmp_path, "dev")
+    assert outputs["blobEndpoint"] == "https://blob-from-arm.example.test/"
+    assert outputs["documentIntelligenceEndpoint"] == (
+        "https://documents-from-bicep.example.test/"
+    )
+
+
+def test_no_op_apply_retains_previous_authoritative_endpoints(tmp_path):
+    manifest = _connected_manifest()
+    previous = {
+        "blobEndpoint": "https://blob.arm.example.test/",
+        "documentIntelligenceEndpoint": "https://documents.arm.example.test/",
+        "foundryEndpoint": "https://foundry.arm.example.test/",
+        "foundryOpenAIEndpoint": "https://openai.arm.example.test/",
+        "foundryProjectEndpoint": (
+            "https://foundry.arm.example.test/api/projects/project-existing"
+        ),
+        "searchEndpoint": "https://search.arm.example.test",
+    }
+    save_outputs(previous, tmp_path, "dev")
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            PlanItem(
+                resource_type="Microsoft.Storage/storageAccounts",
+                resource_name="storage-existing",
+                action=PlanAction.NO_OP,
+            )
+        ],
+    )
+
+    status = apply_plan(
+        manifest,
+        plan,
+        FakeCommandRunner(),
+        build_root=tmp_path,
+    )
+
+    assert status.succeeded
+    outputs = load_outputs(tmp_path, "dev")
+    for key, endpoint in previous.items():
+        assert outputs[key] == endpoint

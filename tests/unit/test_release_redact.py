@@ -15,6 +15,7 @@ from fabric_kg_builder.release.redact import (
     redact_ledger,
     redact_secret_text,
     redact_value,
+    sanitize_exception_message,
 )
 
 
@@ -129,6 +130,35 @@ class TestRedactSecretText:
     )
     def test_ordinary_hyphenated_names_are_preserved(self, value: str) -> None:
         assert redact_secret_text(value) == value
+
+    def test_exception_message_removes_source_secret_and_query_values(
+        self,
+    ) -> None:
+        source = "Customer source sentence that must never persist."
+        secret = "A" * 32
+        value = (
+            f"Validation failed for {source}; api-key={secret}; "
+            "https://service.example/path?sig=secret-value"
+        )
+
+        result = sanitize_exception_message(
+            value,
+            source_values=(source,),
+        )
+
+        assert source not in result
+        assert secret not in result
+        assert "sig=secret-value" not in result
+        assert result.count("[REDACTED]") >= 3
+
+    def test_exception_message_strips_pydantic_input_value(self) -> None:
+        result = sanitize_exception_message(
+            "bad field [type=value_error, input_value='source excerpt', "
+            "input_type=str]"
+        )
+
+        assert "source excerpt" not in result
+        assert "input_value=[REDACTED]" in result
 
 
 # ---------------------------------------------------------------------------

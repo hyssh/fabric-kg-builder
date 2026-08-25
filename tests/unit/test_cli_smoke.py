@@ -16,20 +16,42 @@ from fabric_kg_builder.cli import cli
 # ---------------------------------------------------------------------------
 
 EXPECTED_COMMANDS = [
-    "set-domain",
-    "inspect-source",
-    "enrich",
-    "densify",
+    "app",
+    "assets",
+    "build-deploy",
+    "collect-evidence",
+    "compile-agent",
     "compile-data",
+    "compile-graph",
     "compile-ontology",
     "compile-search",
-    "package",
+    "compile-semantic",
+    "densify",
+    "deploy-data-agent",
+    "deploy-graph",
     "deploy-lakehouse",
     "deploy-ontology",
     "deploy-search",
-    "validate",
-    "build-deploy",
+    "deploy-serving",
+    "domain",
+    "enrich",
+    "evaluate",
+    "infra",
     "init",
+    "init-domain",
+    "inspect-diagnostics",
+    "inspect-ontology",
+    "inspect-source",
+    "knowledge",
+    "lineage",
+    "package",
+    "report",
+    "set-domain",
+    "trace",
+    "validate",
+    "validate-artifacts",
+    "validate-deployment",
+    "validate-projection",
 ]
 
 
@@ -85,7 +107,15 @@ class TestCliHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert result.output.strip(), "Expected non-empty version output"
+        assert result.output.strip() == "fabric-kg, version 0.2.4"
+
+    def test_schema2_live_approval_is_discoverable(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["build-deploy", "--help"])
+
+        assert result.exit_code == 0
+        assert "--approve-live" in result.output
+        assert "matching dry-run" in result.output
 
     @pytest.mark.parametrize("command", EXPECTED_COMMANDS)
     def test_each_command_has_help(self, command: str):

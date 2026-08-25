@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from .runner import CommandRunner, CommandError
 from .schema import InfraPlan, InfraState, InfraManifest, PlanAction, ResourceMode
@@ -579,9 +580,13 @@ def _azure_adoptions(
 
 
 def _connected_runtime_outputs(manifest: InfraManifest) -> dict[str, str]:
-    """Return deterministic non-secret runtime values for adopted services."""
+    """Return non-endpoint runtime metadata.
+
+    Service endpoints are deliberately absent.  CREATE endpoints come from
+    Bicep outputs, while CONNECT endpoints come from the corresponding ARM
+    resource representation.
+    """
     from .names import (
-        make_document_intelligence_name,
         make_foundry_name,
         make_search_name,
         make_storage_name,
@@ -592,11 +597,6 @@ def _connected_runtime_outputs(manifest: InfraManifest) -> dict[str, str]:
         resources.storage.name
         or _resource_name(resources.storage.resource_id)
         or make_storage_name(manifest.environment)
-    )
-    document_intelligence_name = (
-        resources.document_intelligence.name
-        or _resource_name(resources.document_intelligence.resource_id)
-        or make_document_intelligence_name(manifest.environment)
     )
     foundry_name = (
         resources.foundry.name
@@ -610,28 +610,148 @@ def _connected_runtime_outputs(manifest: InfraManifest) -> dict[str, str]:
     )
     return {
         "storageAccountName": storage_name,
-        "blobEndpoint": f"https://{storage_name}.blob.core.windows.net/",
         "containerName": resources.storage.container,
-        "documentIntelligenceEndpoint": (
-            f"https://{document_intelligence_name}.cognitiveservices.azure.com/"
-        ),
         "searchServiceName": search_name,
-        "searchEndpoint": f"https://{search_name}.search.windows.net",
         "foundryAccountName": foundry_name,
-        "foundryEndpoint": f"https://{foundry_name}.services.ai.azure.com/",
-        "foundryOpenAIEndpoint": (
-            f"https://{foundry_name}.cognitiveservices.azure.com/"
-        ),
         "foundryProjectName": resources.foundry.project_name,
-        "foundryProjectEndpoint": (
-            f"https://{foundry_name}.services.ai.azure.com/api/projects/"
-            f"{resources.foundry.project_name}"
-        ),
         "chatDeploymentName": resources.foundry.models.chat.deployment_name
         or "",
         "embeddingDeploymentName": resources.foundry.models.embedding.deployment_name
         or "",
     }
+
+
+def _property_path(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = payload
+    for segment in path:
+        if not isinstance(value, dict) or segment not in value:
+            return None
+        value = value[segment]
+    return value
+
+
+def _format_property_path(path: tuple[str, ...]) -> str:
+    result = path[0]
+    for segment in path[1:]:
+        if segment.replace("_", "").isalnum() and " " not in segment:
+            result += f".{segment}"
+        else:
+            result += f"[{json.dumps(segment)}]"
+    return result
+
+
+def _required_https_endpoint(
+    payload: dict[str, Any],
+    *,
+    resource_id: str,
+    path: tuple[str, ...],
+) -> str:
+    """Read and validate an authoritative HTTPS endpoint from an ARM payload."""
+    value = _property_path(payload, path)
+    property_path = _format_property_path(path)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"Connected resource '{resource_id}' is missing the required HTTPS "
+            f"endpoint at '{property_path}'."
+        )
+    endpoint = value.strip()
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(character.isspace() for character in endpoint)
+    ):
+        raise ValueError(
+            f"Connected resource '{resource_id}' has a malformed HTTPS endpoint "
+            f"at '{property_path}': {value!r}."
+        )
+    return endpoint
+
+
+def _required_https_endpoint_from_paths(
+    payload: dict[str, Any],
+    *,
+    resource_id: str,
+    paths: tuple[tuple[str, ...], ...],
+) -> str:
+    for path in paths:
+        if _property_path(payload, path) not in (None, ""):
+            return _required_https_endpoint(
+                payload,
+                resource_id=resource_id,
+                path=path,
+            )
+    expected = " or ".join(
+        f"'{_format_property_path(path)}'" for path in paths
+    )
+    raise ValueError(
+        f"Connected resource '{resource_id}' is missing the required HTTPS "
+        f"endpoint at {expected}."
+    )
+
+
+def _arm_runtime_outputs(
+    *,
+    state_key: str,
+    resource_id: str,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    """Extract connected-resource runtime outputs from ARM-reported properties."""
+    if state_key == "Microsoft.Storage/storageAccounts":
+        return {
+            "blobEndpoint": _required_https_endpoint(
+                payload,
+                resource_id=resource_id,
+                path=("properties", "primaryEndpoints", "blob"),
+            )
+        }
+    if state_key == "Microsoft.CognitiveServices/accounts/document-intelligence":
+        return {
+            "documentIntelligenceEndpoint": _required_https_endpoint(
+                payload,
+                resource_id=resource_id,
+                path=("properties", "endpoint"),
+            )
+        }
+    if state_key == "Microsoft.CognitiveServices/accounts/foundry":
+        return {
+            "foundryEndpoint": _required_https_endpoint(
+                payload,
+                resource_id=resource_id,
+                path=("properties", "endpoints", "AI Foundry API"),
+            ),
+            "foundryOpenAIEndpoint": _required_https_endpoint(
+                payload,
+                resource_id=resource_id,
+                path=(
+                    "properties",
+                    "endpoints",
+                    "OpenAI Language Model Instance API",
+                ),
+            ),
+        }
+    if state_key == "Microsoft.CognitiveServices/accounts/projects":
+        return {
+            "foundryProjectEndpoint": _required_https_endpoint_from_paths(
+                payload,
+                resource_id=resource_id,
+                paths=(
+                    ("properties", "endpoint"),
+                    ("properties", "endpoints", "AI Foundry API"),
+                ),
+            )
+        }
+    if state_key == "Microsoft.Search/searchServices":
+        return {
+            "searchEndpoint": _required_https_endpoint(
+                payload,
+                resource_id=resource_id,
+                path=("properties", "endpoint"),
+            )
+        }
+    return {}
 
 
 def _validate_and_record_azure_adoption(
@@ -640,6 +760,7 @@ def _validate_and_record_azure_adoption(
     item: Any,
     state: InfraState,
     build_root: Path,
+    connected_outputs: dict[str, str] | None = None,
 ) -> InfraState:
     adoption = _azure_adoptions(manifest).get(
         (item.resource_type, item.resource_name)
@@ -669,6 +790,24 @@ def _validate_and_record_azure_adoption(
             f"Cannot connect {item.resource_name}: {result.stderr}",
             result=result,
         )
+    if item.resource_type != "Microsoft.Resources/resourceGroups":
+        try:
+            payload = json.loads(result.stdout)
+            if not isinstance(payload, dict):
+                raise ValueError("response is not a JSON object")
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise CommandError(
+                f"Connected resource '{resource_id}' returned invalid JSON: {exc}",
+                result=result,
+            ) from exc
+        if connected_outputs is not None:
+            connected_outputs.update(
+                _arm_runtime_outputs(
+                    state_key=state_key,
+                    resource_id=resource_id,
+                    payload=payload,
+                )
+            )
     adopted = dict(state.adopted_resource_ids)
     adopted[state_key] = resource_id
     state = state.model_copy(update={"adopted_resource_ids": adopted})
@@ -904,6 +1043,14 @@ def apply_plan(
         "last_operation_id": operation_id,
         "last_operation_status": "in_progress",
     })
+    # Retain last known authoritative values for NO_OP resources.  Successful
+    # ARM reads and Bicep deployments below replace values for actionable
+    # resources.
+    flat_outputs: dict[str, Any] = load_outputs(
+        build_root, manifest.environment
+    )
+    flat_outputs.update(_connected_runtime_outputs(manifest))
+    connected_outputs: dict[str, str] = {}
 
     # --- Generate Bicep parameters from manifest (always, even in dry-run) ---
     params_path = save_bicep_parameters(manifest, build_root)
@@ -976,7 +1123,12 @@ def apply_plan(
         try:
             if item.action == PlanAction.ADOPT:
                 state = _validate_and_record_azure_adoption(
-                    runner, manifest, item, state, build_root
+                    runner,
+                    manifest,
+                    item,
+                    state,
+                    build_root,
+                    connected_outputs,
                 )
             else:
                 tags = [
@@ -1017,7 +1169,12 @@ def apply_plan(
         for item in azure_adopts:
             try:
                 state = _validate_and_record_azure_adoption(
-                    runner, manifest, item, state, build_root
+                    runner,
+                    manifest,
+                    item,
+                    state,
+                    build_root,
+                    connected_outputs,
                 )
                 succeeded += 1
             except Exception as exc:
@@ -1059,7 +1216,6 @@ def apply_plan(
         )
 
     # --- Persist successful ARM outputs before Fabric operations ---
-    flat_outputs: dict[str, Any] = _connected_runtime_outputs(manifest)
     if deploy_succeeded:
         arm_ids = _managed_arm_ids_from_outputs(raw_outputs, manifest)
         if arm_ids:
@@ -1071,6 +1227,10 @@ def apply_plan(
             key: (value.get("value") if isinstance(value, dict) else value)
             for key, value in raw_outputs.items()
         })
+    # A mixed CREATE/CONNECT Bicep deployment can emit values for existing
+    # declarations.  ARM reads remain authoritative for every connected
+    # resource, so apply them after deployment outputs.
+    flat_outputs.update(connected_outputs)
 
     # --- Execute Fabric create/connect operations sequentially ---
     if fabric_items and not errors:

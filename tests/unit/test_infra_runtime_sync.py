@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from fabric_kg_builder.infra.runtime_sync import (
     _atomic_write_text,
@@ -155,6 +156,58 @@ def _make_minimal_manifest() -> InfraManifest:
 
 
 class TestSyncRuntimeConfiguration:
+    def test_preserves_authoritative_arm_endpoints(self, tmp_path):
+        fabric_env = tmp_path / "fabric_env.json"
+        agent_metadata = tmp_path / "agent_metadata.yaml"
+        fabric_env.write_text(
+            json.dumps(
+                {
+                    "blob_storage": {"endpoint": "https://stale.example.test"},
+                    "document_intelligence": {
+                        "endpoint": "https://stale.example.test"
+                    },
+                    "ai_search": {"endpoint": "https://stale.example.test"},
+                    "foundry": {"endpoint": "https://stale.example.test"},
+                }
+            )
+        )
+
+        sync_runtime_configuration(
+            environment="dev",
+            manifest=_make_minimal_manifest(),
+            outputs={
+                "blobEndpoint": "https://blob.arm.example.test/",
+                "documentIntelligenceEndpoint": "https://documents.arm.example.test/",
+                "searchEndpoint": "https://search.arm.example.test",
+                "foundryEndpoint": "https://foundry.arm.example.test/",
+                "foundryOpenAIEndpoint": "https://openai.arm.example.test/",
+                "foundryProjectEndpoint": (
+                    "https://foundry.arm.example.test/api/projects/project-arm"
+                ),
+            },
+            fabric_environment_path=fabric_env,
+            agent_metadata_path=agent_metadata,
+        )
+
+        data = json.loads(fabric_env.read_text())
+        assert data["blob_storage"]["endpoint"] == "https://blob.arm.example.test/"
+        assert data["document_intelligence"]["endpoint"] == (
+            "https://documents.arm.example.test/"
+        )
+        assert data["ai_search"]["endpoint"] == "https://search.arm.example.test"
+        assert data["foundry"] == {
+            "account_endpoint": "https://foundry.arm.example.test/",
+            "endpoint": "https://foundry.arm.example.test/api/projects/project-arm",
+            "openai_endpoint": "https://openai.arm.example.test/",
+            "project_endpoint": (
+                "https://foundry.arm.example.test/api/projects/project-arm"
+            ),
+        }
+        metadata = yaml.safe_load(agent_metadata.read_text())
+        assert metadata["environments"]["dev"]["projectEndpoint"] == (
+            "https://foundry.arm.example.test/api/projects/project-arm"
+        )
+
     def test_creates_fabric_config(self, tmp_path):
         fabric_env = tmp_path / "fabric_env.json"
         agent_metadata = tmp_path / "agent_metadata.yaml"

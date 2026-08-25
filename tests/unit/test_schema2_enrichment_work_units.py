@@ -141,6 +141,17 @@ class _MixedMalformedRelationshipClient(_BudgetClient):
         }
 
 
+class _FailureThenSuccessClient(_SingleClient):
+    def complete_json(self, **kwargs) -> dict:
+        if self.calls == 0:
+            self.calls += 1
+            raise ValueError(
+                f"Invalid source payload: {_SOURCE_TEXT}; "
+                f"api-key={'A' * 32}"
+            )
+        return super().complete_json(**kwargs)
+
+
 def _root_item() -> EnrichmentWorkItem:
     context = _context()
     return EnrichmentWorkItem(
@@ -393,3 +404,56 @@ def test_schema1_tolerant_relationship_behavior_remains_compatible(
     assert len(records.relationships) == 1
     assert records.failed_work_units == []
     assert state["status"] == "succeeded"
+
+
+def test_failure_diagnostics_are_actionable_redacted_and_retained_on_resume(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    client = _FailureThenSuccessClient()
+    first = enrich_batch(
+        _SOURCE_TEXT,
+        _SOURCE_FILE_ID,
+        client,
+        None,
+        tmp_path,
+        schema2_context=_context(),
+    )
+    assert first.failed_work_units == [f"{_SOURCE_FILE_ID}:pass:p2"]
+
+    resumed = enrich_batch(
+        _SOURCE_TEXT,
+        _SOURCE_FILE_ID,
+        client,
+        None,
+        tmp_path,
+        schema2_context=_context(),
+        resume=True,
+    )
+    assert resumed.failed_work_units == []
+
+    checkpoint_text = (tmp_path / ".checkpoint.json").read_text(
+        encoding="utf-8"
+    )
+    checkpoint = json.loads(checkpoint_text)
+    state = checkpoint["work_units"][f"{_SOURCE_FILE_ID}:pass:p2"]
+
+    assert state["status"] == "succeeded"
+    assert state["source_file_id"] == _SOURCE_FILE_ID
+    assert state["work_unit_key"] == f"{_SOURCE_FILE_ID}:pass:p2"
+    assert state["attempt_count"] == 2
+    assert [attempt["status"] for attempt in state["attempts"]] == [
+        "failed",
+        "succeeded",
+    ]
+    failure = state["attempts"][0]
+    assert failure["exception_category"] == "validation"
+    assert failure["exception_type"] == "ValueError"
+    assert failure["retry_eligible"] is True
+    assert "[REDACTED]" in failure["exception_message"]
+    assert _SOURCE_TEXT not in checkpoint_text
+    assert "A" * 32 not in checkpoint_text
+    assert _SOURCE_TEXT not in caplog.text
+    assert "A" * 32 not in caplog.text
+    assert f"source={_SOURCE_FILE_ID}" in caplog.text
+    assert "retry_eligible=True" in caplog.text
