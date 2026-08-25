@@ -41,6 +41,24 @@ class UnknownContractMajorError(ContractError):
     """Raised when a reader does not support an artifact's major version."""
 
 
+class EvidencePurposeAmbiguousError(ContractError):
+    """Raised when trusted context cannot prove an evidence purpose."""
+
+    code = "C0_EVIDENCE_PURPOSE_AMBIGUOUS"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"{self.code}: {message}")
+
+
+class EvidencePurposePromotionError(ContractError):
+    """Raised when a legacy span is promoted beyond its proven purpose."""
+
+    code = "C0_EVIDENCE_PURPOSE_PROMOTION_PROHIBITED"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"{self.code}: {message}")
+
+
 class FrozenDict(dict[K, V]):
     """Small dependency-free immutable mapping for frozen contract fields."""
 

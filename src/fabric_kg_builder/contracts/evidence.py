@@ -10,6 +10,7 @@ from pydantic import Field, field_validator, model_validator
 from .base import (
     ContractModel,
     RequiredText,
+    SemVer,
     Sha256,
     canonical_sha256,
     deterministic_contract_id,
@@ -152,20 +153,20 @@ class EvidenceSpan(ContractModel):
             raise ValueError("evidence locator offsets must equal the span offsets")
         if self.quote_hash != utf8_sha256(self.quote):
             raise ValueError("quote_hash must hash the exact quote")
-        expected_id = deterministic_contract_id(
-            "evidence-span",
-            {
-                "source_unit_id": self.source_unit_id,
-                "span_start": self.span_start,
-                "span_end": self.span_end,
-                "quote_hash": self.quote_hash,
-                "verifier_name": self.verifier_name,
-                "verifier_version": self.verifier_version,
-            },
-        )
+        expected_id = deterministic_contract_id("evidence-span", self._id_seed())
         if self.evidence_span_id != expected_id:
             raise ValueError("evidence_span_id was not minted from verified span fields")
         return self
+
+    def _id_seed(self) -> dict[str, Any]:
+        return {
+            "source_unit_id": self.source_unit_id,
+            "span_start": self.span_start,
+            "span_end": self.span_end,
+            "quote_hash": self.quote_hash,
+            "verifier_name": self.verifier_name,
+            "verifier_version": self.verifier_version,
+        }
 
     @classmethod
     def mint_verified(
@@ -248,3 +249,92 @@ class EvidenceSpan(ContractModel):
             raise ValueError(
                 "evidence locator source coordinates differ from SourceUnit locator"
             )
+
+
+EvidenceSpanV1_0 = EvidenceSpan
+EvidencePurpose = Literal["domain_design", "extraction_assertion"]
+
+
+class EvidenceIdentityV1_1(CanonicalIdentityEnvelope):
+    """Evidence-only identity revision; other C0 contracts remain at 1.0.0."""
+
+    contract_kind: Literal["c0.evidence_span"] = "c0.evidence_span"
+    contract_version: Literal["1.1.0"] = "1.1.0"
+
+
+class EvidenceSpanV1_1(EvidenceSpan):
+    """Purpose-bound evidence span with versioned verifier intent."""
+
+    identity: EvidenceIdentityV1_1
+    purpose: EvidencePurpose
+    verifier_purpose_version: SemVer
+
+    def _id_seed(self) -> dict[str, Any]:
+        return {
+            **super()._id_seed(),
+            "purpose": self.purpose,
+            "verifier_purpose_version": self.verifier_purpose_version,
+        }
+
+    @classmethod
+    def mint_verified(
+        cls,
+        *,
+        source_unit: SourceUnit,
+        span_start: int,
+        span_end: int,
+        verifier_name: str,
+        verifier_version: str,
+        purpose: EvidencePurpose,
+        verifier_purpose_version: str,
+        verified_at_utc: datetime,
+    ) -> "EvidenceSpanV1_1":
+        """Verify exact offsets and bind structured purpose into the evidence ID."""
+        if not 0 <= span_start < span_end <= source_unit.codepoint_count:
+            raise ValueError("evidence span is outside the exact SourceUnit text")
+        quote = source_unit.text[span_start:span_end]
+        if not quote:
+            raise ValueError("evidence quote must not be empty")
+        locator_raw: dict[str, Any] = source_unit.locator.to_authority()
+        locator_raw["char_start"] = span_start
+        locator_raw["char_end"] = span_end
+        locator_raw["locator_version"] = "1.0"
+        locator_raw["locator_hash"] = canonical_sha256(locator_raw)
+        locator = ImmutableSourceLocator.model_validate(locator_raw)
+        seed = {
+            "source_unit_id": source_unit.source_unit_id,
+            "span_start": span_start,
+            "span_end": span_end,
+            "quote_hash": utf8_sha256(quote),
+            "verifier_name": verifier_name,
+            "verifier_version": verifier_version,
+            "purpose": purpose,
+            "verifier_purpose_version": verifier_purpose_version,
+        }
+        identity_values = source_unit.identity.model_dump(mode="python")
+        identity_values.update(
+            {
+                "contract_kind": "c0.evidence_span",
+                "contract_version": "1.1.0",
+                "immutable_locator": locator,
+            }
+        )
+        identity = EvidenceIdentityV1_1.model_validate(identity_values)
+        return cls(
+            identity=identity,
+            evidence_span_id=deterministic_contract_id("evidence-span", seed),
+            source_unit_id=source_unit.source_unit_id,
+            source_file_id=source_unit.source_file_id,
+            asset_version_id=source_unit.identity.asset_version_id,
+            span_start=span_start,
+            span_end=span_end,
+            quote=quote,
+            quote_hash=utf8_sha256(quote),
+            source_text_content_hash=source_unit.text_content_hash,
+            locator=locator,
+            verifier_name=verifier_name,
+            verifier_version=verifier_version,
+            purpose=purpose,
+            verifier_purpose_version=verifier_purpose_version,
+            verified_at_utc=verified_at_utc,
+        )

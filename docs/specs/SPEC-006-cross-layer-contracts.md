@@ -1,7 +1,7 @@
 # SPEC-006: Cross-Layer Contracts (C0.Core and C0.Extraction)
 
 **Status:** Approved foundation
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Date:** 2026-08-24
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
@@ -79,14 +79,17 @@ are Unicode code-point offsets against that exact text.
 
 ## 4. Registered C0.Core contracts
 
-All registered artifacts use contract version `1.0.0`.
+All registered artifacts use contract version `1.0.0` except the additive
+`c0.evidence_span@1.1.0`; readers retain exact support for both EvidenceSpan
+versions.
 
 | `contract_kind` | Model | Contract-specific authority |
 |---|---|---|
 | `c0.identity` | `CanonicalIdentityEnvelope` | Cross-layer references; no generic `record_id` |
 | nested primitive | `ImmutableSourceLocator` | Immutable typed locator, version `1.0` |
 | `c0.source_unit` | `SourceUnit` | Exact source text and partition identity |
-| `c0.evidence_span` | `EvidenceSpan` | Local verifier-minted exact span |
+| `c0.evidence_span@1.0.0` | `EvidenceSpan` | Legacy local verifier-minted exact span |
+| `c0.evidence_span@1.1.0` | `EvidenceSpanV1_1` | Purpose-bound local verifier-minted exact span |
 | `c0.extraction_candidate_batch` | `ExtractionCandidateBatch` | L2 candidate and C0.Core accounting carrier |
 | `c0.required_member_set_proposal` | `RequiredMemberSetProposal` | L2 proposed scope-membership carrier |
 | `c0.required_member_manifest` | `RequiredMemberManifest` | L3 deterministic scope-membership seal |
@@ -148,6 +151,22 @@ proves:
 5. locator character offsets match the span.
 
 Model-authored evidence IDs are never accepted as verified evidence.
+
+EvidenceSpan `1.1.0` adds required `purpose` with the exact values
+`domain_design|extraction_assertion` and required
+`verifier_purpose_version`. Both fields participate in canonical JSON,
+canonical hashes, and the deterministic evidence ID seed. All exact quote,
+Unicode-codepoint, source-unit, source-file, asset-version, source-text hash,
+and immutable-locator invariants remain unchanged.
+
+The only `1.0.0 -> 1.1.0` adapter accepts an explicit trusted, intact
+`l1.design_sample_manifest@1.0.0` context and the exact source unit. It emits
+only `domain_design` when the legacy span is manifest-listed and uses the
+standard verifier name
+`fabric-kg.local-evidence-verifier/domain_design`. Missing or ambiguous proof
+fails with `C0_EVIDENCE_PURPOSE_AMBIGUOUS`; adaptation to
+`extraction_assertion` is prohibited. Existing `1.0.0` artifacts are read
+without reinterpretation or hash changes, and no bulk migration is defined.
 
 ## 6A. C0.Extraction carriers
 

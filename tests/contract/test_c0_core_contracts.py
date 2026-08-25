@@ -23,6 +23,7 @@ from fabric_kg_builder.contracts import (
     EvidenceSpan,
     ImmutableSourceLocator,
     REGISTERED_CONTRACTS,
+    REGISTERED_CONTRACT_VERSIONS,
     SemanticServingProjection,
     SourceUnit,
     StageReceipt,
@@ -35,6 +36,7 @@ from fabric_kg_builder.contracts import (
     validate_asserted_serving_subset,
     validate_receipt_resources,
     validate_skip_preconditions,
+    write_registered_schemas,
 )
 from fabric_kg_builder.contracts.base import (
     CONTRACT_VERSION,
@@ -873,9 +875,10 @@ def test_generated_schema_registry_matches_registered_kinds() -> None:
             / "registry.json"
         ).read_text(encoding="utf-8")
     )
-    assert {item["contract_kind"] for item in registry["schemas"]} == set(
-        REGISTERED_CONTRACTS
-    )
+    assert {
+        (item["contract_kind"], item["contract_version"])
+        for item in registry["schemas"]
+    } == set(REGISTERED_CONTRACT_VERSIONS)
     for item in registry["schemas"]:
         path = (
             Path(__file__).parents[2]
@@ -888,16 +891,26 @@ def test_generated_schema_registry_matches_registered_kinds() -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert canonical_sha256(payload) == item["schema_hash"]
         schema = payload["schema"]
-        identity_schema = (
-            schema
-            if item["contract_kind"] == "c0.identity"
-            else schema["$defs"]["CanonicalIdentityEnvelope"]
-        )
+        identity_schema = schema
+        if item["contract_kind"] != "c0.identity":
+            identity_schema = next(
+                definition
+                for name, definition in schema["$defs"].items()
+                if name in {"CanonicalIdentityEnvelope", "EvidenceIdentityV1_1"}
+            )
         assert (
             identity_schema["properties"]["contract_kind"]["const"]
             == item["contract_kind"]
         )
         assert (
             identity_schema["properties"]["contract_version"]["const"]
-            == CONTRACT_VERSION
+            == item["contract_version"]
         )
+
+
+@pytest.mark.contract
+def test_schema_writer_retains_legacy_hash_lookup_keys(tmp_path: Path) -> None:
+    hashes = write_registered_schemas(tmp_path)
+    assert hashes["c0.source_unit"] == hashes["c0.source_unit@1.0.0"]
+    assert hashes["c0.evidence_span"] == hashes["c0.evidence_span@1.0.0"]
+    assert "c0.evidence_span@1.1.0" in hashes

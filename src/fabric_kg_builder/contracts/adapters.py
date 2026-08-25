@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
+
+from pydantic import Field, field_validator
 
 from .assertions import (
     CanonicalEntityAssertion,
     CanonicalPropertyAssertion,
     CanonicalRelationshipAssertion,
 )
-from .base import CONTRACT_VERSION
+from .base import (
+    CONTRACT_VERSION,
+    ContractModel,
+    EvidencePurposeAmbiguousError,
+    EvidencePurposePromotionError,
+    RequiredText,
+    Sha256,
+    sorted_unique,
+)
+from .evidence import EvidencePurpose, EvidenceSpanV1_0, EvidenceSpanV1_1, SourceUnit
 from .identity import CanonicalIdentityEnvelope, ImmutableSourceLocator
 
 if TYPE_CHECKING:
@@ -20,6 +31,62 @@ if TYPE_CHECKING:
         PropertyObservationRow,
         RelationshipRow,
     )
+
+DESIGN_VERIFIER_NAME = "fabric-kg.local-evidence-verifier/domain_design"
+
+
+class TrustedL1DesignEvidenceManifestContext(ContractModel):
+    """Explicit trust boundary for an already validated L1 design manifest."""
+
+    manifest_contract_kind: Literal["l1.design_sample_manifest"]
+    manifest_contract_version: Literal["1.0.0"]
+    design_sample_manifest_id: RequiredText
+    design_sample_manifest_hash: Sha256
+    evidence_span_ids: Annotated[tuple[RequiredText, ...], Field(min_length=1)]
+
+    @field_validator("evidence_span_ids", mode="before")
+    @classmethod
+    def _evidence_ids(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return sorted_unique(value, field_name="evidence_span_ids")
+        return value
+
+
+def adapt_evidence_span_v1_0_to_v1_1(
+    span: EvidenceSpanV1_0,
+    *,
+    source_unit: SourceUnit,
+    trusted_manifest: TrustedL1DesignEvidenceManifestContext,
+    purpose: EvidencePurpose,
+    verifier_purpose_version: str,
+) -> EvidenceSpanV1_1:
+    """Promote only intact, manifest-listed L1 design evidence."""
+    if span.identity.contract_version != "1.0.0":
+        raise ValueError("evidence adapter input must be EvidenceSpan 1.0.0")
+    if purpose != "domain_design":
+        raise EvidencePurposePromotionError(
+            "EvidenceSpan 1.0 can only adapt to domain_design"
+        )
+    if span.evidence_span_id not in trusted_manifest.evidence_span_ids:
+        raise EvidencePurposeAmbiguousError(
+            "legacy span is not listed by the trusted L1 design manifest"
+        )
+    if span.verifier_name != DESIGN_VERIFIER_NAME:
+        raise EvidencePurposeAmbiguousError(
+            "legacy verifier_name does not unambiguously prove domain_design"
+        )
+    span.verify_against(source_unit)
+    adapted = EvidenceSpanV1_1.mint_verified(
+        source_unit=source_unit,
+        span_start=span.span_start,
+        span_end=span.span_end,
+        verifier_name=span.verifier_name,
+        verifier_version=span.verifier_version,
+        purpose="domain_design",
+        verifier_purpose_version=verifier_purpose_version,
+        verified_at_utc=span.verified_at_utc,
+    )
+    return adapted
 
 
 def assert_domain_hash_authority(
