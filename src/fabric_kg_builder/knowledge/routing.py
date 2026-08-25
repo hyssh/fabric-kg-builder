@@ -172,6 +172,7 @@ def classify_question(question: str) -> RoutingResult:
     has_search = bool(search_signals)
     explicit_search_request = bool(
         has_search
+        and not has_graph
         and re.match(
             r"^\s*(?:find|search|locate|retrieve)\b",
             q,

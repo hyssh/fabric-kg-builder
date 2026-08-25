@@ -859,7 +859,17 @@ def test_approved_plan_serving_executes_locally_and_graph_intent_abstains() -> N
         ("Find documents about Pump A.", "search", False),
         ("What is the status of component A?", "search", False),
         ("Find documents about component A.", "search", False),
-        ("Find documents about graph topology.", "search", False),
+        ("Find documents about graph topology.", "unsupported", True),
+        (
+            "Search for the graph path from Pump A to Plant B cost.",
+            "unsupported",
+            True,
+        ),
+        (
+            "Find documents about entities related to Pump A.",
+            "unsupported",
+            True,
+        ),
         ("What depends on Pump A?", "unsupported", True),
         (
             "Which components are related to Pump A and what document describes them?",
@@ -909,6 +919,36 @@ def test_cost_factual_question_invokes_search_not_graph() -> None:
     assert refused is False
     assert search.questions == ["What is the cost of Pump A?"]
     assert graph_client.queries == []
+
+
+def test_prefixed_mixed_request_executes_only_with_sealed_plan() -> None:
+    search = _SearchKnowledgeBase()
+    graph_client = _GraphClient()
+    adapter = FabricDataAgentAdapter(
+        _client=graph_client,
+        schema_mode="schema2_bounded",
+        query_schema=_query_schema(3),
+    )
+    question = "Find documents about entities related to Pump A."
+    _answer, route, _citations, refused = _answer_question(
+        question=question,
+        kb=search,
+        graph=adapter,
+    )
+    assert route == "unsupported"
+    assert refused is True
+    assert search.questions == []
+    assert graph_client.queries == []
+
+    _answer, route, _citations, refused = _answer_question(
+        question=question,
+        kb=search,
+        graph=adapter,
+        approved_plan_id="cq:q1",
+    )
+    assert route == "ontology"
+    assert refused is False
+    assert graph_client.queries
 
 
 def test_readiness_requires_configured_graph_only() -> None:

@@ -690,7 +690,6 @@ def _answer_question(
     if (
         graph.schema_mode == "schema2_bounded"
         and bool(routing.graph_signals)
-        and not routing.explicit_search_request
     ):
         if graph.is_unsupported_query_type(q_lower):
             return (
@@ -712,7 +711,6 @@ def _answer_question(
     if (
         graph.schema_mode == "schema1_compatibility"
         and bool(routing.graph_signals)
-        and not routing.explicit_search_request
         and graph.is_unsupported_query_type(q_lower)
     ):
         return (
@@ -726,7 +724,7 @@ def _answer_question(
     for r in kb_results:
         raw_citations.append(r.to_citation_dict())
 
-    if routing.graph_signals and not routing.explicit_search_request:
+    if routing.graph_signals:
         route_type = "ontology"
         graph_result = graph.query_keyword(_graph_keyword(question))
         if graph_result.status == "error":

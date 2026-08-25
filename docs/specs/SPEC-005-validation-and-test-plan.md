@@ -1355,6 +1355,9 @@ live-smoke evidence without weakening these gates.
 - cost/price/availability factual questions invoke Search when they contain no
   Graph signals, while unsupported explicit Graph paths abstain and never fall
   through to Search.
+- Search-prefixed document-only requests without Graph signals use Search;
+  Search-prefixed graph paths and relation-plus-detail Mixed requests abstain
+  without an approved plan and execute only through a sealed plan ID.
 
 ### 15.2 Layer-5 deployment regression matrix
 

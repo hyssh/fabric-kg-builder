@@ -1761,9 +1761,11 @@ publication, or deployed Data Agent instruction hash. Schema-1 acceptance keeps
 those requirements.
 
 Deterministic routing abstains only when explicit Graph signals are present.
-Explicit Search signals and unclassified factual questions remain Search-safe
-fallbacks. A true mixed request contains both Search and Graph signals and
-therefore abstains without an approved plan ID.
+Explicit Search prefixes and unclassified factual questions remain Search-safe
+fallbacks only when no Graph/path/relationship signal is present. A true mixed
+request contains both Search and Graph signals; Graph authority wins regardless
+of `find`/`search`/`locate`/`retrieve` prefixes or cost terms, so the request
+abstains without an approved plan ID.
 Terms such as cost, price, and availability are not global refusal signals:
 without structural Graph intent they remain Search-safe factual queries.
 Unsupported-type rejection applies only after deterministic Graph/Mixed intent
