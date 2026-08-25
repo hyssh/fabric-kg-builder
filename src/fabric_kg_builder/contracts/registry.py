@@ -41,6 +41,16 @@ from .publication import (
 )
 from .receipts import ArtifactManifest, StageReceipt
 from .resources import StageResourceMetrics
+from .runtime import (
+    AgenticRetrievalCoverageReceipt,
+    AgenticRetrievalRequestContext,
+    CitationPresentation,
+    OntologyScopeEnvelope,
+    QueryBudget,
+    ResolvedOntologyScope,
+    ResolvedRetrievalScope,
+    SearchCitationEnvelope,
+)
 
 REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
     "c0.identity": StandaloneCanonicalIdentityEnvelope,
@@ -60,6 +70,14 @@ REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
     "c0.projection_equivalence": ProjectionEquivalence,
     "c0.governed_asset_reference": GovernedAssetReference,
     "c0.access_policy": AccessPolicy,
+    "c0.query_budget": QueryBudget,
+    "c0.ontology_scope_envelope": OntologyScopeEnvelope,
+    "c0.resolved_ontology_scope": ResolvedOntologyScope,
+    "c0.resolved_retrieval_scope": ResolvedRetrievalScope,
+    "c0.agentic_retrieval_request_context": AgenticRetrievalRequestContext,
+    "c0.agentic_retrieval_coverage_receipt": AgenticRetrievalCoverageReceipt,
+    "c0.search_citation_envelope": SearchCitationEnvelope,
+    "c0.citation_presentation": CitationPresentation,
     "c0.artifact_manifest": ArtifactManifest,
     "c0.stage_receipt": StageReceipt,
     "c0.stage_resource_metrics": StageResourceMetrics,
@@ -167,7 +185,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.3.0",
+        "registry_version": "1.4.0",
         "schemas": [
             {
                 "contract_kind": kind,

@@ -1,20 +1,20 @@
-# SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, and C0.Publish)
+# SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, C0.Publish, and C0.Runtime)
 
 **Status:** Approved foundation
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Date:** 2026-08-24
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
 
 ## 1. Scope
 
-C0.Core, the additive C0.Extraction carriers, and behavior-free C0.Publish
-proof/reference contracts are the shared contract, specification, schema,
-fixture, and hashing foundation used across L1-L5.
+C0.Core, the additive C0.Extraction carriers, and behavior-free C0.Publish and
+C0.Runtime proof/reference contracts are the shared contract, specification,
+schema, fixture, and hashing foundation used across L1-L6.
 They contain no proposal UX,
 LLM request, extraction activation, evidence pipeline integration, canonical
-Parquet rewrite, publication/deployment operation, runtime query, citation,
-answer, or live Fabric behavior.
+Parquet rewrite, publication/deployment operation, runtime transport, retrieval,
+synthesis, answer, or live Fabric behavior.
 
 Stable layer vocabulary:
 
@@ -31,8 +31,10 @@ Stable layer vocabulary:
 | L7 | Acceptance |
 
 C0.Publish registers only crosswalk, equivalence, governed-asset reference, and
-access-policy contracts. C0.Runtime query/citation/answer contracts remain an
-explicitly deferred additive slice.
+access-policy contracts. C0.Runtime registers only canonical scope, bounded
+request configuration, structural coverage, and citation-data contracts.
+Downstream Agent intent, orchestration, retry, synthesis, final-answer, claim,
+and answer-evidence UX are not fabric-kg contract behavior.
 
 ## 2. Existing authorities and ownership
 
@@ -50,7 +52,7 @@ cross-layer primitives. It does not replace mature field authorities:
 | Checkpoint fingerprint | `sources/checkpoint.py` | Equality adapter |
 | Semantic projection | `serving/semantic_projection.py` | Header ID adapter |
 | Semantic contracts | `semantic/models.py`, `semantic/schemas.py` | Referenced, not duplicated |
-| Runtime traces | `runtime/semantic_reliability.py` | Unchanged; C0.Runtime deferred |
+| Runtime traces | `runtime/semantic_reliability.py` | Unchanged; C0.Runtime contracts are additive only |
 
 Contract instances are strict and frozen. Unknown fields, wrong types, wrong
 registered versions, and unknown contract majors fail closed. Enrichment means
@@ -108,6 +110,14 @@ readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 | `c0.projection_equivalence` | `ProjectionEquivalence` | Expected/compiled/deployed/read-back equality proof |
 | `c0.governed_asset_reference` | `GovernedAssetReference` | Generic immutable delivery-asset reference |
 | `c0.access_policy` | `AccessPolicy` | Credential-free authorization and retention policy |
+| `c0.query_budget` | `QueryBudget` | Agent-selected request ceilings with separate hierarchy depth and relationship K |
+| `c0.ontology_scope_envelope` | `OntologyScopeEnvelope` | Agent-requested canonical scope proposal |
+| `c0.resolved_ontology_scope` | `ResolvedOntologyScope` | Structured authoritative Ontology/Graph scope response |
+| `c0.resolved_retrieval_scope` | `ResolvedRetrievalScope` | Locally validated canonical retrieval scope |
+| `c0.agentic_retrieval_request_context` | `AgenticRetrievalRequestContext` | Capability-gated safe Search request configuration |
+| `c0.agentic_retrieval_coverage_receipt` | `AgenticRetrievalCoverageReceipt` | Bounded maximal structural coverage receipt |
+| `c0.search_citation_envelope` | `SearchCitationEnvelope` | Exact authorized Search grounding and canonical lineage |
+| `c0.citation_presentation` | `CitationPresentation` | User-displayable exact citation with transient URL exclusion |
 | `c0.artifact_manifest` | `ArtifactManifest` | Sorted artifact entries and totals |
 | `c0.stage_receipt` | `StageReceipt` | Immutable stage outcome |
 | `c0.stage_resource_metrics` | `StageResourceMetrics` | Future-measurement counters |
@@ -436,7 +446,118 @@ deferred pending baseline capture and approval. Confirmed integrity ceilings
 such as evidence completeness, no lifecycle loss, no N+1 design, and count/hash
 identity may be named as hard dimensions.
 
-## 12. Registry and compatibility
+## 12. C0.Runtime contracts
+
+C0.Runtime is exclusively owned by the C0 Contract Owner. Its registered
+contracts are strict, frozen `1.0.0` schemas. They define data-plane boundaries
+only; they perform no Ontology/Graph request, Search request, agentic
+decomposition, retry, synthesis, deployment, or live acceptance.
+
+`OntologyScopeEnvelope` uses only approved canonical semantic type, entity,
+relationship, role, path, and policy identities. Its modes are `exact_type`,
+`descendants`, `ancestors_context`, and `explicit_member_set`. A relative scope
+change is `exact`, `narrow`, or `expand`, with parent ID/hash identity required
+for narrow or expand. Narrowing cannot add members, types, roles, paths,
+includes, hierarchy depth, or relationship K, remove exclusions, or replace
+sealed authority; expansion applies the inverse constraints. Display names,
+natural-language resolver output, raw GQL,
+raw OData, untrusted filters, ontology definitions, and schema deltas have no
+authority. Hierarchy expansion policy/depth and relationship traversal K are
+distinct fields and cannot substitute for each other. Normal relationship
+K is at most 3; K=4 requires a reviewed justification.
+
+`ResolvedOntologyScope` is the structured authoritative resolver response. It
+carries canonical aggregate, collection, member, semantic type, relationship,
+assertion, evidence, group, ordering, adjacency, and type-assertion identities;
+sealed hierarchy/closure identity and deterministic expansion trace; exact
+projection, crosswalk, Graph, publication, ACL, and receipt hashes; and a
+deterministic canonical key-set hash. Canonical entity IDs remain stable across
+subtype reclassification while type-assertion versions and affected scope hashes
+change. Its acceptance hook binds every authority-bearing envelope dimension,
+including includes/exclusions, requested types/roles/paths, project scope, and
+agent policy, requires expanded types to equal the exact traced hierarchy
+closure, constrains every relationship to approved authority, validates
+adjacency endpoints/assertions/evidence, and rejects duplicate current type
+assertions. Natural-language-only, label-only, omitted-key, stale-hash,
+ambiguous, collision, unauthorized, or orphan results fail closed.
+
+`ResolvedRetrievalScope` records local validation of the resolver response and
+the safe canonical-ID Graph filter. It references
+`RequiredMemberManifest@1.1.0` by exact ID, version, schema hash, manifest hash,
+and authoritative collection hash. That L3 manifest remains the sole
+completeness and membership authority; C0.Runtime does not define or infer a
+competing member manifest. Acceptance validates the referenced manifest object
+itself and requires exact scope, relationship, ordering, cardinality, unique
+member count, roles, canonical members, semantic types, member order, supporting
+evidence, manifest hash, and authoritative collection hash.
+
+`QueryBudget` records Agent-selected request ceilings for one bounded
+Ontology/Graph scope request and one mutually exclusive Search retrieval mode.
+Agentic modes permit one Agent-owned retrieval invocation and zero direct Search
+requests; the stable fallback permits one direct Search request and zero
+agentic invocations. Internal subquery/source-call, document, token, byte, time,
+Graph/Search request, and Graph/Search result fields are request ceilings and
+observed-budget dimensions, not approved performance thresholds. Coverage binds
+every declared ceiling to its exact budget and reconciles observed invocation,
+subquery, source-call, direct-request, document, and Search-result counts. The
+contract contains no synthesis or hidden retry field.
+
+`AgenticRetrievalRequestContext` seals knowledge-base, knowledge-source, Search
+index, capability, static base-policy, ACL, publication, hierarchy, scope,
+filter, and budget identities. Preview mode requires API
+`2026-05-01-preview`, an explicit feature gate, available references/activity,
+and a structured canonical-ID-only narrowing proof for:
+
+```text
+baseFilter AND filterAddOn
+```
+
+The add-on may narrow but cannot replace or broaden the static project, ACL, and
+asserted-publication boundary. The stable fallback is
+`direct_hybrid_prefilter` with the exact canonical Graph-ID scope and
+`vectorFilterMode=preFilter`. A fallback execution context hash-references its
+originating agentic context, preserves the exact scope and authority dimensions,
+and binds its own direct-mode budget. Capability loss selects only the declared
+fallback or a typed fail-closed result; a scope filter is never silently removed.
+Search document ID is delivery identity only and never substitutes for canonical
+keys.
+
+Every cross-contract acceptance hook conserves canonical identity authority,
+including project, asset/version, run, source, content, Domain, Semantic,
+canonical-schema, and locator identity. Child artifacts cannot retain a parent
+ID/hash while changing those authority dimensions.
+
+`AgenticRetrievalCoverageReceipt` records required, returned, missing,
+unexpected, duplicate, and orphan canonical IDs; groups, roles, ordering,
+adjacency, counts, collection hashes, subqueries, activity, references, source
+calls, warnings, truncation, budget observations, citations, and typed
+remediation. Status is `complete`, `partial`, or `invalid`. `complete` means
+exact structural coverage inside the declared canonical scope and request
+budget. Required group, sequence, and adjacency hashes are copied through the
+validated retrieval scope and request context; equal self-attested receipt hashes
+cannot establish completeness. Returned member/type/role/group/order records and
+adjacency edges deterministically produce the returned hashes, source successes
+carry response hashes, and every citation mapping includes the exact citation
+envelope hash. Citation acceptance resolves those hashes against the actual
+`SearchCitationEnvelope` artifacts. It never means exhaustive discovery of every
+fact in a corpus. Missing
+members or roles, duplicates, collection mismatch, warning, truncation, source
+failure, missing reference, unsupported capability, or budget exhaustion cannot
+produce `complete`.
+
+`SearchCitationEnvelope` and `CitationPresentation` preserve original document
+name, source/file/unit/chunk/evidence IDs, canonical entity/relationship/assertion
+IDs, exact caller-authorized quote, page/section, immutable locator, and
+quote/content/asset hashes. An optional governed asset is referenced by exact
+ID/hash. Duplicated source-file, source-unit, content-hash, locator, page, and
+section lineage must equal the canonical identity envelope exactly. A protected
+asset URL is response-only and HTTPS-only. It is a private out-of-band response
+value that is absent from the registered persisted schema as well as
+serialization, canonical hashes, caches, logs, metrics, fixtures, and durable
+receipts. Secrets, tokens, durable access URLs, unauthorized quotes, stale
+authority, and missing exact evidence fail closed.
+
+## 13. Registry and compatibility
 
 The registry maps each kind to one model and exact supported versions. Readers
 reject unknown kinds, unknown majors, and unregistered minor/patch versions.
@@ -444,11 +565,12 @@ Schema 1.x domain behavior remains unchanged. Domain schema 2.0 is
 new-project-only. There is no implicit migration, dual write, automatic
 feature activation, or reuse of schema-1 approval artifacts.
 
-C0.Runtime contracts may register later under the same owner. A required field,
-changed meaning/type, changed ID/hash seed, tightened accepted value set,
-lifecycle transition change, or serving enum addition requires a new major.
+C0.Runtime contracts are registered under the same exclusive C0 owner. A
+required field, changed meaning/type, changed ID/hash seed, tightened accepted
+value set, lifecycle transition change, or serving enum addition requires a new
+major.
 
-## 13. Contract gate
+## 14. Contract gate
 
 The C0.Core gate includes:
 
@@ -475,6 +597,16 @@ The C0.Core gate includes:
   without asset references;
 - deterministic access-policy/asset/crosswalk/equivalence hashes and
   credential, SAS, bearer-token, secret, and durable-URL rejection;
+- exact/narrow/expand and all four hierarchy scope modes over canonical IDs;
+- stable entity identity across subtype reclassification with revised
+  type-assertion and scope hashes;
+- strict hierarchy expansion depth versus relationship K separation;
+- preview `baseFilter AND filterAddOn` narrowing and direct `preFilter` fallback;
+- bounded complete/partial/invalid coverage with generic member sets,
+  truncation, warnings, missing IDs, collisions, and orphan rejection;
+- exact authorized citation lineage and transient protected URL exclusion;
+- exact C0.Runtime registry negotiation with no synthesis, answer, or retry
+  behavior;
 - manifest totals and receipt skip preconditions;
 - secret/token/path rejection;
 - domain hash, `CommonLineageRow`, source locator, canonical row ID/hash,
@@ -483,14 +615,15 @@ The C0.Core gate includes:
 
 No test in this gate performs a remote request or live Fabric mutation.
 
-## 13. Deferred decisions and exclusions
+## 15. Deferred decisions and exclusions
 
 Deferred:
 
 - numeric cache TTLs;
 - numeric latency, RSS, service-call, token, byte, and retry thresholds;
-- publication crosswalk/equivalence/governed asset contracts; and
-- runtime query, citation, claim, and answer contracts.
+- downstream Agent claim/answer evidence and final-answer UX; and
+- L6 transport, retrieval, orchestration, retry, synthesis, and acceptance
+  behavior.
 
 Excluded from C0.Core:
 

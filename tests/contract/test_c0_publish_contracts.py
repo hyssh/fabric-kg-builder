@@ -44,6 +44,16 @@ HASH_F = "f" * 64
 REQUIRED_MEMBER_SCHEMA_HASH = (
     "e33003e128746f09c77ba44b4b4802510eadbdf000eb60430f16a4d2654a3c4c"
 )
+RUNTIME_CONTRACT_KINDS = {
+    "c0.query_budget",
+    "c0.ontology_scope_envelope",
+    "c0.resolved_ontology_scope",
+    "c0.resolved_retrieval_scope",
+    "c0.agentic_retrieval_request_context",
+    "c0.agentic_retrieval_coverage_receipt",
+    "c0.search_citation_envelope",
+    "c0.citation_presentation",
+}
 FROZEN_EXISTING_SCHEMA_HASHES = {
     ("c0.artifact_manifest", "1.0.0"): (
         "d6337f29de3bc304a9426c385095a6c7f19d14ff7474f1113cf9efdd55670d1b"
@@ -752,13 +762,12 @@ def test_publish_schemas_are_generated_and_existing_hashes_are_unchanged(
     previous_hashes = {
         (item["contract_kind"], item["contract_version"]): item["schema_hash"]
         for item in previous_registry["schemas"]
-        if not item["contract_kind"]
-        in {
+        if item["contract_kind"] not in {
             "c0.publication_crosswalk",
             "c0.projection_equivalence",
             "c0.governed_asset_reference",
             "c0.access_policy",
-        }
+        } | RUNTIME_CONTRACT_KINDS
     }
     assert previous_hashes == FROZEN_EXISTING_SCHEMA_HASHES
     hashes = write_registered_schemas(tmp_path)
