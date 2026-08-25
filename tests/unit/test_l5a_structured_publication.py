@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import copy
 import json
 import shutil
 from pathlib import Path
@@ -27,6 +28,7 @@ from fabric_kg_builder.contracts.publication import (
 )
 from fabric_kg_builder.contracts.receipts import StageReceipt
 from fabric_kg_builder.contracts.resources import StageResourceMetrics
+from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.serving.lifecycle_projection import run_l4
 from fabric_kg_builder.semantic.source_tables import require_l5_publication_receipt
 from fabric_kg_builder.serving.structured_publication import (
@@ -48,6 +50,7 @@ from fabric_kg_builder.serving.structured_publication import (
     _required_member_snapshots,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
+from tests.unit.test_schema2_validation_stage import _subtypes
 
 
 class _FakeClient:
@@ -292,44 +295,55 @@ def _crosswalk(source) -> PublicationCrosswalk:
     manifest = pq.read_table(
         source.resolve("semantic_required_member_manifests")
     ).to_pylist()[0]
-    types = sorted({
-        row["semantic_type_id"]
-        for row in pq.read_table(
-            source.resolve("semantic_entity_type_assertions")
-        ).to_pylist()
-    } | {
-        row["member_semantic_type_id"]
-        for row in pq.read_table(
-            source.resolve("semantic_required_members")
-        ).to_pylist()
-    })
+    authority_row = pq.read_table(
+        source.resolve("semantic_publication_authority")
+    ).to_pylist()[0]
+    contract = DomainContractV2.model_validate_json(
+        authority_row["domain_contract_json"]
+    )
     type_mappings = []
-    for ordinal, type_id in enumerate(types, start=1):
+    for ordinal, definition in enumerate(
+        contract.candidate_model.entity_types,
+        start=1,
+    ):
+        type_id = definition.type_id
         suffix = type_id.rsplit(".", 1)[-1].replace("-", "_")
-        property_id = f"property:{suffix}:canonical-id"
+        property_mappings = tuple(
+            PropertyProjectionMapping(
+                canonical_property_id=prop.property_id,
+                physical_column_id=f"{suffix}_{index}",
+                ontology_bigint_id=2000 + (ordinal * 10) + index,
+                graph_property=f"{suffix}_{index}",
+                search_index_field=f"{suffix}_{index}",
+                search_filter_field=f"{suffix}_{index}",
+                search_vector_field=None,
+                data_agent_selected_property_id=None,
+            )
+            for index, prop in enumerate(
+                definition.declared_properties,
+                start=1,
+            )
+        )
+        assert property_mappings
         type_mappings.append(SemanticTypeProjectionMapping(
             canonical_semantic_type_id=type_id,
-            canonical_parent_semantic_type_id=None,
+            canonical_parent_semantic_type_id=definition.parent_type_id,
             physical_table_id=f"l5a_{suffix}",
             ontology_bigint_id=1000 + ordinal,
             graph_label=f"L5A_{suffix.upper()}",
             graph_aliases=(),
-            canonical_instance_key_property_ids=(property_id,),
-            property_mappings=(
-                PropertyProjectionMapping(
-                    canonical_property_id=property_id,
-                    physical_column_id=f"{suffix}_id",
-                    ontology_bigint_id=2000 + ordinal,
-                    graph_property=f"{suffix}_id",
-                    search_index_field=f"{suffix}_id",
-                    search_filter_field=f"{suffix}_id",
-                    search_vector_field=None,
-                    data_agent_selected_property_id=None,
-                ),
+            canonical_instance_key_property_ids=(
+                property_mappings[0].canonical_property_id,
             ),
+            property_mappings=property_mappings,
         ))
-    source_type, target_type = types
-    relationship_id = manifest["membership_semantic_relationship_id"]
+    relationship_definition = contract.candidate_model.relationship_types[0]
+    source_type = relationship_definition.source_type_ids[0]
+    target_type = relationship_definition.target_type_ids[0]
+    relationship_id = relationship_definition.relationship_type_id
+    type_mapping_by_id = {
+        item.canonical_semantic_type_id: item for item in type_mappings
+    }
     relationship = RelationshipProjectionMapping(
         canonical_semantic_relationship_id=relationship_id,
         source_semantic_type_id=source_type,
@@ -340,13 +354,17 @@ def _crosswalk(source) -> PublicationCrosswalk:
         graph_aliases=(),
         source_key_fields=(
             EndpointKeyProjectionMapping(
-                canonical_property_id=type_mappings[0].canonical_instance_key_property_ids[0],
+                canonical_property_id=type_mapping_by_id[
+                    source_type
+                ].canonical_instance_key_property_ids[0],
                 physical_column_id="source_id",
             ),
         ),
         target_key_fields=(
             EndpointKeyProjectionMapping(
-                canonical_property_id=type_mappings[1].canonical_instance_key_property_ids[0],
+                canonical_property_id=type_mapping_by_id[
+                    target_type
+                ].canonical_instance_key_property_ids[0],
                 physical_column_id="target_id",
             ),
         ),
@@ -388,10 +406,37 @@ def _crosswalk(source) -> PublicationCrosswalk:
     )
 
 
-def _inputs(tmp_path: Path, *, member_count: int = 1):
+def _inputs(
+    tmp_path: Path,
+    *,
+    member_count: int = 1,
+    extra_types=(),
+    extra_type_properties=None,
+    extra_relationship_targets=False,
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     l4 = run_l4(
-        _l3_with_sealed_manifest(tmp_path, member_count=member_count),
+        _l3_with_sealed_manifest(
+            tmp_path,
+            member_count=member_count,
+            type_properties={
+                "semantic-type:manufacturing.record": ({
+                    "property_id": "property:record:canonical-id",
+                    "display_name": "Record ID",
+                    "value_type": "string",
+                    "required": True,
+                },),
+                "semantic-type:manufacturing.subject": ({
+                    "property_id": "property:subject:canonical-id",
+                    "display_name": "Subject ID",
+                    "value_type": "string",
+                    "required": True,
+                },),
+                **(extra_type_properties or {}),
+            },
+            extra_types=extra_types,
+            extra_relationship_targets=extra_relationship_targets,
+        ),
         state_root=tmp_path / ".fkg" / "l4",
     )
     source = l4.sealed_source()
@@ -415,6 +460,47 @@ def _inputs(tmp_path: Path, *, member_count: int = 1):
         ),
         "target_ids": target_ids,
     }
+
+
+def _nontrivial_inputs(tmp_path: Path):
+    extra_types = list(copy.deepcopy(_subtypes("manufacturing")))
+    intermediate_id = "semantic-type:manufacturing.record-b"
+    grandchild = extra_types[0]["proposed_type"]
+    grandchild["parent_type_id"] = intermediate_id
+    grandchild["identity_root_type_id"] = "semantic-type:manufacturing.record"
+    return _inputs(
+        tmp_path,
+        extra_types=tuple(extra_types),
+        extra_relationship_targets=True,
+        extra_type_properties={
+            "semantic-type:manufacturing.record": (
+                {
+                    "property_id": "property:record:canonical-id",
+                    "display_name": "Record ID",
+                    "value_type": "string",
+                    "required": True,
+                },
+                {
+                    "property_id": "property:record:status",
+                    "display_name": "Record Status",
+                    "value_type": "string",
+                    "required": False,
+                },
+            ),
+            "semantic-type:manufacturing.record-a": ({
+                "property_id": "property:record-a:detail",
+                "display_name": "Record A Detail",
+                "value_type": "string",
+                "required": False,
+            },),
+            "semantic-type:manufacturing.record-b": ({
+                "property_id": "property:record-b:detail",
+                "display_name": "Record B Detail",
+                "value_type": "string",
+                "required": False,
+            },),
+        },
+    )
 
 
 @pytest.mark.unit
@@ -467,6 +553,153 @@ def test_l5a_persists_and_reads_back_all_structured_targets(tmp_path: Path) -> N
         )
         if proof.projection_kind == "parquet":
             assert proof.expected.row_fingerprint == required.row_fingerprint
+
+
+@pytest.mark.unit
+def test_l5a_derives_inherited_properties_and_full_endpoint_sets(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    compiled = compile_l5a_publication(**inputs)
+    contract = DomainContractV2.model_validate_json(
+        pq.read_table(
+            inputs["source"].resolve("semantic_publication_authority")
+        ).to_pylist()[0]["domain_contract_json"]
+    )
+    child_id = "semantic-type:manufacturing.record-a"
+    child = next(
+        item
+        for item in compiled.definitions["parquet"]["semantic_types"]
+        if item["canonical_semantic_type_id"] == child_id
+    )
+    assert child["flattened_ancestor_type_ids"] == (
+        contract.hierarchy_closure.ancestors_by_type[child_id]
+    )
+    assert child["flattened_ancestor_type_ids"] != [
+        "semantic-type:manufacturing.record-b",
+        "semantic-type:manufacturing.record",
+    ]
+    assert {
+        item["canonical_property_id"] for item in child["properties"]
+    } == set(
+        contract.hierarchy_closure.effective_property_ids_by_type[child_id]
+    )
+    assert {
+        item["declaring_semantic_type_id"] for item in child["properties"]
+    } == {
+        "semantic-type:manufacturing.record",
+        "semantic-type:manufacturing.record-a",
+        "semantic-type:manufacturing.record-b",
+    }
+    relationship = compiled.definitions["parquet"]["relationships"][0]
+    authority = contract.candidate_model.relationship_types[0]
+    assert relationship["source_semantic_type_ids"] == authority.source_type_ids
+    assert relationship["target_semantic_type_ids"] == authority.target_type_ids
+    assert len(relationship["source_semantic_type_ids"]) > 1
+    assert len(relationship["target_semantic_type_ids"]) > 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", ("omit", "extra"))
+def test_l5a_rejects_nonexact_canonical_property_ownership(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    record = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.record"
+    )
+    if mutation == "omit":
+        record["property_mappings"] = record["property_mappings"][:1]
+    else:
+        record["property_mappings"][1]["canonical_property_id"] = (
+            "property:forged:shadow"
+        )
+        record["property_mappings"] = sorted(
+            record["property_mappings"],
+            key=lambda item: item["canonical_property_id"],
+        )
+    forged = PublicationCrosswalk(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PROPERTY_MAPPING_SET_MISMATCH",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (forged,)},
+        )
+
+
+@pytest.mark.unit
+def test_crosswalk_rejects_duplicate_inherited_physical_property_owner(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    child = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.record-a"
+    )
+    child["property_mappings"][0]["canonical_property_id"] = (
+        "property:record:canonical-id"
+    )
+    child["canonical_instance_key_property_ids"] = [
+        "property:record:canonical-id"
+    ]
+
+    with pytest.raises(ValueError, match="globally unique"):
+        PublicationCrosswalk(
+            **values,
+            crosswalk_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_physical_relationship_representative_outside_authority(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    relationship = values["relationship_mappings"][0]
+    subject = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.subject"
+    )
+    relationship["source_semantic_type_id"] = (
+        "semantic-type:manufacturing.subject"
+    )
+    relationship["source_key_fields"] = [{
+        "canonical_property_id": subject[
+            "canonical_instance_key_property_ids"
+        ][0],
+        "physical_column_id": "source_id",
+    }]
+    forged = PublicationCrosswalk(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_RELATIONSHIP_AUTHORITY_MISMATCH",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (forged,)},
+        )
 
 
 @pytest.mark.unit

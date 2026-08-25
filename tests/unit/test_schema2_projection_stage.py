@@ -1828,6 +1828,9 @@ def _l3_with_sealed_manifest(
     ordered: bool = False,
     roles: bool = False,
     member_count: int = 1,
+    type_properties=None,
+    extra_types=(),
+    extra_relationship_targets=False,
 ):
     fact_set = _fact_set(
         "manufacturing",
@@ -1863,6 +1866,9 @@ def _l3_with_sealed_manifest(
         "manufacturing",
         fact_set=fact_set,
         mutate=mutate,
+        type_properties=type_properties,
+        extra_types=extra_types,
+        extra_relationship_targets=extra_relationship_targets,
     )
     l3 = _l3(tmp_path, l1_root, domain_path)
     manifest = schema2_validation_stage._seal_manifest(
