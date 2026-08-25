@@ -1521,6 +1521,98 @@ def test_l5a_rejects_reserved_physical_column_collision(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_l5a_rejects_forged_parent_with_coordinated_caller_reseals(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    child = crosswalk.semantic_type_mappings[1]
+    forged_child = child.model_copy(update={
+        "canonical_parent_semantic_type_id": (
+            crosswalk.semantic_type_mappings[0].canonical_semantic_type_id
+        ),
+    })
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    values["semantic_type_mappings"] = (
+        crosswalk.semantic_type_mappings[0],
+        forged_child,
+    )
+    forged = PublicationCrosswalk(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_TYPE_AUTHORITY_MISMATCH",
+    ):
+        _assets(
+            inputs["source"],
+            forged,
+            inputs["access_policy"],
+            inputs["target_ids"],
+        )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_physical_name_shadow_of_carried_authority(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    values["semantic_type_mappings"][0]["physical_table_id"] = (
+        "l4_semantic_publication_authority"
+    )
+    changed = PublicationCrosswalk(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PHYSICAL_TABLE_COLLISION",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (changed,)},
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("outcome", ("success", "reuse", "failure"))
+def test_l5a_cpu_metrics_are_stage_elapsed_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    inputs = _inputs(tmp_path)
+    client = _FakeClient()
+    state_root = tmp_path / ".fkg" / "l5a"
+    if outcome == "reuse":
+        run_l5a(**inputs, client=client, state_root=state_root)
+    elif outcome == "failure":
+        client.fail_publish = "ontology"
+    process_times = iter((10_000.0, 10_000.012))
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.structured_publication.time.process_time",
+        lambda: next(process_times),
+    )
+
+    if outcome == "failure":
+        with pytest.raises(L5aPublicationError) as raised:
+            run_l5a(**inputs, client=client, state_root=state_root)
+        metrics = raised.value.metrics
+        assert metrics is not None
+    else:
+        metrics = run_l5a(
+            **inputs,
+            client=client,
+            state_root=state_root,
+        ).metrics
+
+    assert metrics.cpu_ms == 12
+
+
+@pytest.mark.unit
 def test_l5a_schema1_and_later_layers_remain_inactive(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     with pytest.raises(L5aPublicationError, match="L5A_SCHEMA2_SOURCE_REQUIRED"):

@@ -368,6 +368,73 @@ def _rewrite_required_member_artifacts(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("domain_contract_json", "{}"),
+        ("domain_contract_hash", "f" * 64),
+        ("hierarchy_hash", "f" * 64),
+        ("identity_policy_hash", "f" * 64),
+        ("relationship_vocabulary_hash", "f" * 64),
+        ("graph_policy_hash", "f" * 64),
+        ("graph_max_hops", 1),
+    ),
+)
+def test_l4_rejects_resealed_publication_authority_tampering(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    table_name = "semantic_publication_authority"
+    path = result.run_root / f"{table_name}.parquet"
+    row = pq.read_table(path).to_pylist()[0]
+    if row[field] == replacement:
+        replacement = 2
+    row[field] = replacement
+    row["row_hash"] = canonical_sha256({
+        key: value for key, value in row.items() if key != "row_hash"
+    })
+    pq.write_table(
+        pa.Table.from_pylist(
+            [row],
+            schema=L4_PROJECTION_TABLE_SCHEMAS[table_name],
+        ),
+        path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    manifest, _metrics, receipt = _rewrite_l4_artifacts(
+        result,
+        ((
+            f"l4-table:{table_name}",
+            f"{table_name}.parquet",
+            path.read_bytes(),
+            {
+                "canonical_id_set_hash": canonical_sha256([
+                    "l4-publication-authority"
+                ]),
+                "row_count": 1,
+            },
+        ),),
+    )
+
+    with pytest.raises(ValueError, match="publication authority"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+            input_manifest=result.source.output_manifest,
+        )
+
+
+@pytest.mark.unit
 def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> None:
     l1_root, domain_path, _ = _pipeline(
         tmp_path,

@@ -497,8 +497,21 @@ SEMANTIC_REQUIRED_MEMBERS_SCHEMA = pa.schema([
     pa.field("row_hash", _STR, nullable=False),
 ])
 
+SEMANTIC_PUBLICATION_AUTHORITY_SCHEMA = pa.schema([
+    pa.field("authority_id", _STR, nullable=False),
+    pa.field("domain_contract_json", _STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("identity_policy_hash", _STR, nullable=False),
+    pa.field("relationship_vocabulary_hash", _STR, nullable=False),
+    pa.field("graph_policy_hash", _STR, nullable=False),
+    pa.field("graph_max_hops", _INT32, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
 L4_PROJECTION_TABLE_SCHEMAS: dict[str, pa.Schema] = {
     "audit_candidates": AUDIT_CANDIDATES_SCHEMA,
+    "semantic_publication_authority": SEMANTIC_PUBLICATION_AUTHORITY_SCHEMA,
     "semantic_asserted_entities": SEMANTIC_ASSERTED_ENTITIES_SCHEMA,
     "semantic_entity_type_assertions": SEMANTIC_ENTITY_TYPE_ASSERTIONS_SCHEMA,
     "semantic_asserted_relationships": SEMANTIC_ASSERTED_RELATIONSHIPS_SCHEMA,
