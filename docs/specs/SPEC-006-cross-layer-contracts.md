@@ -188,7 +188,8 @@ the C0.Core candidate ID/version/kind, semantic type, lifecycle record, and
 C0.Core's mutually exclusive retained/deduplicated accounting. Candidate counts,
 the retained ID-set hash, and the batch hash reconcile deterministically.
 
-Legacy `RequiredMemberSetProposal@1.0.0` is emitted by L2. It carries the batch ID/hash,
+Legacy `RequiredMemberSetProposal@1.0.0` remains registered for exact reads and
+explicit fail-closed migration. It carries the batch ID/hash,
 sealed authority references, aggregate/scope canonical ID, membership semantic
 relationship ID, and ordered members. Each member carries only a canonical ID,
 semantic type ID, domain-authored role ID, order, cardinality, originating
@@ -273,12 +274,13 @@ L2 adoption of `1.1.0` requires it to:
    cardinality without defaults;
 3. emit null role/order for unsupported policy dimensions, never
    `role:unspecified` or fabricated ordinals;
-4. normalize ordered positions only when Domain authority declares unique,
-   contiguous integer ordinals, and canonicalize unordered members by stable ID;
+4. accept observed ordered positions only when Domain authority declares unique,
+   contiguous integer ordinals and the positions are already exact zero-based
+   contiguous values, and canonicalize unordered members by stable ID;
 5. compute every member, tuple, proposal, and collection hash through the C0
    model factories; and
-6. keep incomplete/unresolved diagnostics in existing lifecycle or validation
-   records rather than encoding them in the proposal.
+6. keep incomplete/unresolved diagnostics in L2 audit/view or lifecycle records
+   rather than encoding them in the proposal.
 
 No L2, L3, feature, enrichment, semantic, deployment, publication, or runtime
 behavior is activated by this C0 contract registration.

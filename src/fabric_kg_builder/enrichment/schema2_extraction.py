@@ -26,8 +26,10 @@ from fabric_kg_builder.contracts.extraction import (
     ExtractionAuthorityReferences,
     ExtractionCandidateBatch,
     ExtractionCandidateReference,
-    RequiredMemberReference,
-    RequiredMemberSetProposal,
+    RequiredMemberOrderingPolicyV1_1,
+    RequiredMemberReferenceV1_1,
+    RequiredMemberSetProposalIdentityV1_1,
+    RequiredMemberSetProposalV1_1,
 )
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
 from fabric_kg_builder.contracts.lifecycle import (
@@ -52,8 +54,8 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 
 from .schema2_sources import L2StageError
 
-L2_PROMPT_VERSION = "l2-schema-constrained/1.0.0"
-L2_EXTRACTOR_VERSION = "1.0.0"
+L2_PROMPT_VERSION = "l2-schema-constrained/1.1.0"
+L2_EXTRACTOR_VERSION = "1.1.0"
 UNKNOWN_SEMANTIC_TYPE = {
     "entity": "unapproved-observation:entity",
     "relationship": "unapproved-observation:relationship",
@@ -97,6 +99,8 @@ class RawRelationshipCandidate(_StrictProposal):
     observed_predicate: str = Field(min_length=1)
     direction: Literal["source_to_target", "reverse", "unknown"]
     governed_context: dict[str, Any] | str | None = None
+    member_role_id: str | None = None
+    member_order: int | None = Field(default=None, ge=0)
     anchor: ProposedAnchor | None = None
 
 
@@ -147,6 +151,8 @@ class ProposedCandidateRecord:
     proposed_target_entity_id: str | None = None
     proposed_source_semantic_type_id: str | None = None
     proposed_target_semantic_type_id: str | None = None
+    proposed_member_role_id: str | None = None
+    proposed_member_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -169,24 +175,16 @@ class CollectionMemberFragment:
     member_order: int | None
     membership_relationship_candidate_id: str
     source_unit_id: str
-    ordinal_property_candidate_id: str | None = None
-    adjacency_relationship_candidate_id: str | None = None
-    proposed_count_anchor: ProposedAnchor | None = None
 
 
 @dataclass(frozen=True)
 class ProposedRequiredMemberSetView:
-    proposal: RequiredMemberSetProposal
+    proposal: RequiredMemberSetProposalV1_1
     requirement_id: str
     aggregate_entity_id: str
     member_entity_ids: tuple[str, ...]
     contributing_source_unit_ids: tuple[str, ...]
     membership_relationship_candidate_ids: tuple[str, ...]
-    ordinal_property_candidate_ids: tuple[str, ...]
-    adjacency_relationship_candidate_ids: tuple[str, ...]
-    expected_count: int | None
-    minimum_count: int | None
-    maximum_count: int | None
     unresolved_reasons: tuple[str, ...]
     view_hash: str
 
@@ -635,6 +633,8 @@ def _make_candidate_record(
     proposed_target_entity_id: str | None = None
     proposed_source_semantic_type_id: str | None = None
     proposed_target_semantic_type_id: str | None = None
+    proposed_member_role_id: str | None = None
+    proposed_member_order: int | None = None
     if isinstance(raw, RawEntityCandidate):
         definition = vocabulary.entities_by_alias.get(raw.observed_type.casefold())
         entity_id = _entity_identity(
@@ -689,6 +689,8 @@ def _make_candidate_record(
         proposed_target_entity_id = target_id
         proposed_source_semantic_type_id = source[1] if source is not None else None
         proposed_target_semantic_type_id = target[1] if target is not None else None
+        proposed_member_role_id = raw.member_role_id
+        proposed_member_order = raw.member_order
         approved_id = (
             relationship.relationship_type_id if relationship is not None else None
         )
@@ -795,6 +797,8 @@ def _make_candidate_record(
         proposed_target_entity_id=proposed_target_entity_id,
         proposed_source_semantic_type_id=proposed_source_semantic_type_id,
         proposed_target_semantic_type_id=proposed_target_semantic_type_id,
+        proposed_member_role_id=proposed_member_role_id,
+        proposed_member_order=proposed_member_order,
     )
 
 
@@ -1139,6 +1143,38 @@ def build_required_member_set_proposals(
         grouped[(fragment.requirement_id, fragment.aggregate_entity_id)].append(
             fragment
         )
+    aggregate_ids_by_type: defaultdict[str, set[str]] = defaultdict(set)
+    for leaf in leaves:
+        for candidate in leaf.proposed_candidates:
+            if (
+                candidate.candidate_kind == "entity"
+                and candidate.approved_semantic_id is not None
+            ):
+                aggregate_ids_by_type[candidate.approved_semantic_id].add(
+                    candidate.semantic_id
+                )
+    for requirement in contract.completeness_requirements:
+        fact_set = requirement.structured_fact_set
+        if fact_set is None:
+            continue
+        cardinality = fact_set.cardinality
+        empty_reasons: list[str] = []
+        if cardinality is not None and cardinality.expected_count not in {None, 0}:
+            empty_reasons.append("EXPECTED_MEMBER_COUNT_MISMATCH")
+        if cardinality is not None and cardinality.minimum_count not in {None, 0}:
+            empty_reasons.append("MINIMUM_MEMBERS_NOT_OBSERVED")
+        if fact_set.member_role_ids:
+            empty_reasons.append("L2_ORDER_ROLE_UNSPECIFIED")
+        for aggregate_id in aggregate_ids_by_type[fact_set.aggregate_type_id]:
+            if (
+                (requirement.requirement_id, aggregate_id) not in grouped
+                and empty_reasons
+            ):
+                raise L2StageError(
+                    "L2_REQUIRED_MEMBER_SET_INVALID",
+                    "observed aggregate has no required-member observations: "
+                    + ", ".join(sorted(set(empty_reasons))),
+                )
     candidate_ids = {
         candidate.candidate_id
         for leaf in leaves
@@ -1181,15 +1217,9 @@ def build_required_member_set_proposals(
             if fact_set.member_role_ids and member.member_role_id is None:
                 unresolved.add("L2_ORDER_ROLE_UNSPECIFIED")
             if fact_set.ordering_policy.mode == "ordered":
-                if (
-                    member.member_order is None
-                    or member.ordinal_property_candidate_id is None
-                ):
+                if member.member_order is None:
                     unresolved.add("L2_ORDER_ROLE_INVALID")
-            elif (
-                member.member_order is not None
-                or member.ordinal_property_candidate_id is not None
-            ):
+            elif member.member_order is not None:
                 unresolved.add("L2_ORDER_ROLE_INVALID")
             prior = member_by_identity.get(member.member_entity_id)
             if prior is not None and prior != member:
@@ -1207,25 +1237,56 @@ def build_required_member_set_proposals(
         expected = cardinality.expected_count if cardinality else None
         minimum = cardinality.minimum_count if cardinality else None
         maximum = cardinality.maximum_count if cardinality else None
-        if expected is not None and len(ordered_members) < expected:
-            unresolved.add("EXPECTED_MEMBERS_NOT_OBSERVED")
+        if expected is not None and len(ordered_members) != expected:
+            unresolved.add("EXPECTED_MEMBER_COUNT_MISMATCH")
         if minimum is not None and len(ordered_members) < minimum:
             unresolved.add("MINIMUM_MEMBERS_NOT_OBSERVED")
         if maximum is not None and len(ordered_members) > maximum:
             unresolved.add("MAXIMUM_MEMBERS_EXCEEDED")
 
+        ordering = fact_set.ordering_policy
+        if ordering.mode == "ordered":
+            if ordering.unique_ordinals is not True or ordering.contiguous is not True:
+                raise L2StageError(
+                    "L2_ORDER_ROLE_INVALID",
+                    "C0 1.1 requires approved unique contiguous ordered-member semantics",
+                )
+            observed_orders = [member.member_order for member in ordered_members]
+            if observed_orders != list(range(len(ordered_members))):
+                raise L2StageError(
+                    "L2_ORDER_ROLE_INVALID",
+                    "ordered members require observed unique contiguous zero-based positions",
+                )
+        if fact_set.member_role_ids:
+            observed_roles = {member.member_role_id for member in ordered_members}
+            if None in observed_roles or observed_roles != set(fact_set.member_role_ids):
+                raise L2StageError(
+                    "L2_ORDER_ROLE_INVALID",
+                    "observed member roles do not exactly cover approved required roles",
+                )
+        structural_errors = {
+            "L2_REQUIRED_MEMBER_REFERENCE_INVALID",
+            "L2_ORDER_ROLE_INVALID",
+            "L2_ORDER_ROLE_UNSPECIFIED",
+            "L2_REQUIRED_MEMBER_IDENTITY_CONFLICT",
+        }
+        if unresolved & structural_errors:
+            raise L2StageError(
+                "L2_REQUIRED_MEMBER_SET_INVALID",
+                "required-member proposal has structural violations: "
+                + ", ".join(sorted(unresolved & structural_errors)),
+            )
+
         c0_members = tuple(
-            RequiredMemberReference(
+            RequiredMemberReferenceV1_1.seal(
                 member_canonical_id=member.member_entity_id,
                 member_semantic_type_id=member.member_semantic_type_id,
-                member_role_id=member.member_role_id or "role:unspecified",
-                member_order=index,
-                minimum_cardinality=0,
-                maximum_cardinality=None,
+                member_role_id=member.member_role_id,
+                member_order=member.member_order,
                 candidate_id=member.member_candidate_id,
                 supporting_evidence_span_ids=(),
             )
-            for index, member in enumerate(ordered_members)
+            for member in ordered_members
         )
         if not c0_members:
             raise L2StageError(
@@ -1236,6 +1297,7 @@ def build_required_member_set_proposals(
             "required-member-set-proposal",
             {
                 "domain_contract_hash": compute_contract_hash(contract),
+                "carrier_version": "1.1.0",
                 "requirement_id": requirement_id,
                 "aggregate_entity_id": aggregate_id,
                 "member_entity_ids": [
@@ -1244,17 +1306,27 @@ def build_required_member_set_proposals(
                 "source_unit_ids": sorted(
                     {member.source_unit_id for member in ordered_members}
                 ),
-                "count_anchor_hashes": sorted(
-                    canonical_sha256(member.proposed_count_anchor.model_dump(mode="json"))
-                    for member in ordered_members
-                    if member.proposed_count_anchor is not None
-                ),
             },
         )
-        proposal = RequiredMemberSetProposal.seal(
-            identity=_validated_identity(
-                base_identity,
-                contract_kind="c0.required_member_set_proposal",
+        ordering_policy = RequiredMemberOrderingPolicyV1_1(
+            mode=ordering.mode,
+            ordinal_property_id=ordering.ordinal_property_id,
+            ordinal_value_type=ordering.ordinal_value_type,
+            direction=ordering.direction,
+            unique_ordinals=ordering.unique_ordinals,
+            contiguous=ordering.contiguous,
+            member_order_encoding=(
+                "zero_based_contiguous" if ordering.mode == "ordered" else None
+            ),
+        )
+        proposal_identity_values = _validated_identity(
+            base_identity,
+            contract_kind="c0.required_member_set_proposal",
+        ).model_dump(mode="python")
+        proposal_identity_values["contract_version"] = "1.1.0"
+        proposal = RequiredMemberSetProposalV1_1.seal(
+            identity=RequiredMemberSetProposalIdentityV1_1.model_validate(
+                proposal_identity_values
             ),
             required_member_set_proposal_id=proposal_id,
             extraction_candidate_batch_id=merged_batch.extraction_candidate_batch_id,
@@ -1264,6 +1336,11 @@ def build_required_member_set_proposals(
             membership_semantic_relationship_id=(
                 fact_set.membership_relationship_type_id
             ),
+            ordering_policy=ordering_policy,
+            expected_cardinality=expected,
+            minimum_cardinality=minimum,
+            maximum_cardinality=maximum,
+            required_role_ids=tuple(fact_set.member_role_ids),
             members=c0_members,
         )
         proposal.validate_against_batch(merged_batch)
@@ -1285,27 +1362,6 @@ def build_required_member_set_proposals(
                     }
                 )
             ),
-            "ordinal_property_candidate_ids": tuple(
-                sorted(
-                    {
-                        member.ordinal_property_candidate_id
-                        for member in ordered_members
-                        if member.ordinal_property_candidate_id is not None
-                    }
-                )
-            ),
-            "adjacency_relationship_candidate_ids": tuple(
-                sorted(
-                    {
-                        member.adjacency_relationship_candidate_id
-                        for member in ordered_members
-                        if member.adjacency_relationship_candidate_id is not None
-                    }
-                )
-            ),
-            "expected_count": expected,
-            "minimum_count": minimum,
-            "maximum_count": maximum,
             "unresolved_reasons": tuple(sorted(unresolved)),
         }
         views.append(
@@ -1381,8 +1437,8 @@ def derive_collection_member_fragments(
                             member_entity_id=member_id,
                             member_candidate_id=member_candidate.candidate_id,
                             member_semantic_type_id=member_type_id,
-                            member_role_id=None,
-                            member_order=None,
+                            member_role_id=relationship.proposed_member_role_id,
+                            member_order=relationship.proposed_member_order,
                             membership_relationship_candidate_id=(
                                 relationship.candidate_id
                             ),

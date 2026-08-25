@@ -1545,7 +1545,7 @@ endpoint IDs. Classification is a separate immutable candidate version.
 
 Model output contains proposed observations and untrusted SourceUnit-relative
 anchors only. L2 may seal `ExtractionCandidateBatch@1.0.0`,
-`RequiredMemberSetProposal@1.0.0`, proposed canonical references, mutually
+`RequiredMemberSetProposal@1.1.0`, proposed canonical references, mutually
 exclusive retained/deduplicated accounting, and initial append-only
 `None -> proposed` lifecycle events. Every input candidate receives exactly one
 accounting disposition. Audit reason metrics are separate from accounting reason
@@ -1566,8 +1566,13 @@ are rerun individually, while successful remote work is not repeated.
 Structured fact-set proposals are domain-neutral and consume only sealed
 `CompletenessRequirementV2`. L2 may propose observed aggregate, member,
 membership, role, order, and cardinality references, but may not invent an
-unspecified count, order, role, or adjacency rule. L3 alone validates and seals
-those facts.
+unspecified count, order, role, or adjacency rule. The C0 1.1 proposal carries
+the exact nullable expected/minimum/maximum bounds, approved role IDs, and
+ordered/unordered policy. Role and order remain null when absent; unordered
+members canonicalize by stable member ID, and ordered members require observed
+approved unique contiguous positions. L2 diagnostics may reference the complete
+proposal but do not redefine its policy. L3 alone validates and seals those
+facts as `RequiredMemberManifest@1.1.0`.
 
 ---
 

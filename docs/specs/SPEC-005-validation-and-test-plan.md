@@ -1296,6 +1296,12 @@ The L2 merge gate runs offline and covers:
   rerun without repeated successful remote work;
 - manufacturing, clinical, and logistics structured fact-set fixtures proving
   domain-neutral use of sealed completeness roles/order/cardinality;
+- exact `RequiredMemberSetProposal@1.1.0` policy and nullable cardinality
+  preservation, roleless unordered canonicalization, role-bearing ordered
+  positions, structural-violation observability, and prohibition of sentinel
+  roles or fabricated order;
+- proposal schema/hash, receipt, skip-key, and accepted-version binding to C0
+  carrier 1.1, including invalidation of legacy 1.0 resume fingerprints;
 - proposed anchors without EvidenceSpan minting, asserted state, endpoint/subtype
   terminal validation, required-member sealing, serving, publication, or Graph
   activation;

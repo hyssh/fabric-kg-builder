@@ -19,7 +19,16 @@ from fabric_kg_builder.enrichment.schema2_sources import (
     L2StageError,
     load_l2_inputs,
 )
-from fabric_kg_builder.enrichment.schema2_stage import dry_run_l2, run_l2
+from fabric_kg_builder.enrichment import schema2_sources
+from fabric_kg_builder.enrichment.schema2_extraction import (
+    L2_EXTRACTOR_VERSION,
+    L2_PROMPT_VERSION,
+)
+from fabric_kg_builder.enrichment.schema2_stage import (
+    L2_RESPONSE_SCHEMA_HASH,
+    dry_run_l2,
+    run_l2,
+)
 from fabric_kg_builder.model.schemas import AssetRow, AssetVersionRow
 from tests.unit.test_l1_stage import _candidates, _intake, _preflight
 
@@ -174,6 +183,7 @@ def test_l2_is_not_activated_in_product_cli() -> None:
 
 def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     l1_state_root, domain_path = _approved_l1(
         tmp_path,
@@ -303,9 +313,46 @@ def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
     assert len(first.required_member_sets) == 1
     assert any(
         entry.contract_kind == "c0.required_member_set_proposal"
+        and entry.contract_version == "1.1.0"
         for entry in first.output_manifest.entries
     )
-    assert first.required_member_sets[0].expected_count is None
+    proposal = first.required_member_sets[0].proposal
+    assert proposal.identity.contract_version == "1.1.0"
+    assert proposal.ordering_policy.mode == "unordered"
+    assert proposal.expected_cardinality is None
+    assert proposal.minimum_cardinality is None
+    assert proposal.maximum_cardinality is None
+    assert proposal.required_role_ids == ()
+    assert proposal.members[0].member_role_id is None
+    assert proposal.members[0].member_order is None
+    assert "role:unspecified" not in proposal.model_dump_json()
+    assert (
+        first.receipt.accepted_contract_versions[
+            "c0.required_member_set_proposal"
+        ]
+        == "1.1.0"
+    )
+    legacy_versions = dict(schema2_sources.L2_ACCEPTED_VERSIONS)
+    legacy_versions["c0.required_member_set_proposal"] = "1.0.0"
+    with monkeypatch.context() as context:
+        context.setattr(
+            schema2_sources,
+            "L2_ACCEPTED_VERSIONS",
+            legacy_versions,
+        )
+        legacy_fingerprint = schema2_sources.l2_input_fingerprint(
+            first.inputs,
+            first.materialized.source_unit_manifest,
+            prompt_version=L2_PROMPT_VERSION,
+            prompt_hash=canonical_sha256({"prompt": "l2-test"}),
+            model_version="fixture/1.0.0",
+            model_hash=canonical_sha256({"model": "fixture"}),
+            extractor_name="schema2-extractor",
+            extractor_version=L2_EXTRACTOR_VERSION,
+            response_schema_hash=L2_RESPONSE_SCHEMA_HASH,
+            split_policy_version="paragraph-sentence-token/1.0.0",
+        )
+    assert legacy_fingerprint != first.receipt.skip_key
     assert all(
         record.to_state.value == "proposed"
         and not record.evidence_span_ids

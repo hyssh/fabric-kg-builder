@@ -53,7 +53,7 @@ L2_ACCEPTED_VERSIONS = {
     "c0.candidate_accounting_disposition": "1.0.0",
     "c0.candidate_lifecycle_record": "1.0.0",
     "c0.extraction_candidate_batch": "1.0.0",
-    "c0.required_member_set_proposal": "1.0.0",
+    "c0.required_member_set_proposal": "1.1.0",
     "c0.source_unit": "1.0.0",
     "c0.stage_receipt": "1.0.0",
     "c0.stage_resource_metrics": "1.0.0",

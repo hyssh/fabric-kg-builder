@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from fabric_kg_builder.contracts.identity import (
 )
 from fabric_kg_builder.domain.hierarchy import build_type_hierarchy_closure
 from fabric_kg_builder.domain.models import (
+    CardinalityExpectationV2,
     CollectionIdentityPolicyV2,
     CompletenessRequirementV2,
     DomainContractV2,
@@ -24,10 +26,10 @@ from fabric_kg_builder.domain.models import (
 )
 from fabric_kg_builder.domain.service import load_domain_contract
 from fabric_kg_builder.enrichment.schema2_extraction import (
-    CollectionMemberFragment,
     build_candidate_batch,
     build_required_member_set_proposals,
     compile_closed_vocabulary,
+    derive_collection_member_fragments,
 )
 from fabric_kg_builder.enrichment.schema2_sources import L2StageError
 
@@ -308,7 +310,7 @@ def test_structured_fact_sets_are_domain_neutral_and_do_not_invent_semantics(
             ordinal_value_type="integer",
             direction="ascending",
             unique_ordinals=True,
-            contiguous=False,
+            contiguous=True,
         )
         if ordered
         else OrderingPolicyV2(mode="unordered")
@@ -328,7 +330,13 @@ def test_structured_fact_sets_are_domain_neutral_and_do_not_invent_semantics(
             allowed_member_type_ids=[equipment.type_id],
             member_role_ids=[raw["member_role_id"]],
             ordering_policy=ordering,
-            cardinality=None,
+            cardinality=CardinalityExpectationV2(
+                expected_count=1,
+                minimum_count=1,
+                maximum_count=3,
+                source_kind="governance_rule",
+                reviewed_rationale="Approved exact collection bounds.",
+            ),
             collection_identity_policy=CollectionIdentityPolicyV2(
                 member_roles_included=True,
                 ordinals_included=ordered,
@@ -348,39 +356,19 @@ def test_structured_fact_sets_are_domain_neutral_and_do_not_invent_semantics(
         ),
     )
     contract = DomainContractV2.model_construct(**fields)
-    leaf = _build(contract, _response())
-    aggregate = next(
-        item
-        for item in leaf.proposed_candidates
-        if item.local_reference == "facility-a"
+    response = _response()
+    raw_membership = next(
+        item for item in response if item["candidate_kind"] == "relationship"
     )
-    member = next(
-        item
-        for item in leaf.proposed_candidates
-        if item.local_reference == "equipment-1"
-    )
-    membership = next(
-        item
-        for item in leaf.proposed_candidates
-        if item.candidate_kind == "relationship"
-    )
-    fragment = CollectionMemberFragment(
-        requirement_id=requirement.requirement_id,
-        aggregate_entity_id=aggregate.semantic_id,
-        member_entity_id=member.semantic_id,
-        member_candidate_id=member.candidate_id,
-        member_semantic_type_id=equipment.type_id,
-        member_role_id=raw["member_role_id"],
-        member_order=0 if ordered else None,
-        membership_relationship_candidate_id=membership.candidate_id,
-        source_unit_id=_source_unit().source_unit_id,
-        ordinal_property_candidate_id=(
-            "property-candidate:proposed-order" if ordered else None
-        ),
-    )
+    raw_membership["member_role_id"] = raw["member_role_id"]
+    raw_membership["member_order"] = 0 if ordered else None
+    leaf = _build(contract, response)
+    fragments = derive_collection_member_fragments((leaf,), contract=contract)
+    assert len(fragments) == 1
+    fragment = fragments[0]
 
     views = build_required_member_set_proposals(
-        (fragment,),
+        fragments,
         leaves=(leaf,),
         contract=contract,
         authority_factory=lambda _requirement: _authority(contract),
@@ -390,12 +378,84 @@ def test_structured_fact_sets_are_domain_neutral_and_do_not_invent_semantics(
     assert len(views) == 1
     view = views[0]
     assert view.requirement_id == raw["requirement_id"]
-    assert view.expected_count is None
-    assert view.minimum_count is None
-    assert view.maximum_count is None
+    assert (
+        view.proposal.expected_cardinality,
+        view.proposal.minimum_cardinality,
+        view.proposal.maximum_cardinality,
+    ) == (1, 1, 3)
+    assert view.proposal.identity.contract_version == "1.1.0"
+    assert view.proposal.ordering_policy.mode == raw["ordering"]
+    assert view.proposal.required_role_ids == (raw["member_role_id"],)
     assert view.proposal.members[0].member_role_id == raw["member_role_id"]
+    assert view.proposal.members[0].member_order == (0 if ordered else None)
     assert view.unresolved_reasons == ()
     assert view.proposal.members[0].supporting_evidence_span_ids == ()
+    assert view.proposal.proposal_hash == canonical_sha256(
+        view.proposal.model_dump(mode="json", exclude={"proposal_hash"})
+    )
+    assert "role:unspecified" not in view.proposal.model_dump_json()
+    assert not hasattr(view, "expected_count")
+
+    if ordered:
+        with pytest.raises(L2StageError, match="observed unique contiguous"):
+            build_required_member_set_proposals(
+                (replace(fragment, member_order=None),),
+                leaves=(leaf,),
+                contract=contract,
+                authority_factory=lambda _requirement: _authority(contract),
+                base_identity=_identity(),
+            )
+
+    second_entity = json.loads(
+        json.dumps(
+            next(
+                item
+                for item in response
+                if item["candidate_kind"] == "entity"
+                and item["local_id"] == "equipment-1"
+            )
+        )
+    )
+    second_entity.update(
+        local_id="equipment-2",
+        label="Pump 2",
+        identity_key={"equipment_id": "pump-2"},
+    )
+    second_membership = json.loads(json.dumps(raw_membership))
+    second_membership["target_local_id"] = "equipment-2"
+    if ordered:
+        second_membership["member_order"] = 1
+    excess_leaf = _build(
+        contract,
+        [*response, second_entity, second_membership],
+    )
+    excess_fragments = derive_collection_member_fragments(
+        (excess_leaf,),
+        contract=contract,
+    )
+    excess_views = build_required_member_set_proposals(
+        excess_fragments,
+        leaves=(excess_leaf,),
+        contract=contract,
+        authority_factory=lambda _requirement: _authority(contract),
+        base_identity=_identity(),
+    )
+    assert excess_views[0].unresolved_reasons == (
+        "EXPECTED_MEMBER_COUNT_MISMATCH",
+    )
+
+    empty_leaf = _build(
+        contract,
+        [item for item in response if item["candidate_kind"] != "relationship"],
+    )
+    with pytest.raises(L2StageError, match="no required-member observations"):
+        build_required_member_set_proposals(
+            (),
+            leaves=(empty_leaf,),
+            contract=contract,
+            authority_factory=lambda _requirement: _authority(contract),
+            base_identity=_identity(),
+        )
 
 
 def test_malformed_response_is_rejected_atomically() -> None:

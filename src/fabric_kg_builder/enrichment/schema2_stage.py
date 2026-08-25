@@ -68,6 +68,7 @@ L2_RESPONSE_SCHEMA_HASH = canonical_sha256(
         "proposal_only": True,
         "verified_evidence_fields": False,
         "assertion_state_fields": False,
+        "required_member_observation_fields": ["member_role_id", "member_order"],
     }
 )
 
@@ -496,7 +497,7 @@ def _output_artifacts(
             _artifact_entry(
                 artifact_id=proposal.required_member_set_proposal_id,
                 contract_kind="c0.required_member_set_proposal",
-                contract_version="1.0.0",
+                contract_version="1.1.0",
                 schema_hash=canonical_sha256(type(proposal).model_json_schema()),
                 content_hash=proposal.proposal_hash,
                 payload=proposal_payload,
@@ -522,11 +523,11 @@ def _output_artifacts(
             _artifact_entry(
                 artifact_id=f"{proposal.required_member_set_proposal_id}:view",
                 contract_kind="l2.required_member_set_view",
-                contract_version="1.0.0",
+                contract_version="1.1.0",
                 schema_hash=canonical_sha256(
                     {
                         "contract_kind": "l2.required_member_set_view",
-                        "version": "1.0.0",
+                        "version": "1.1.0",
                     }
                 ),
                 content_hash=view.view_hash,
