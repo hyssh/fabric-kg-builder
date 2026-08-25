@@ -260,3 +260,82 @@ class TestSyncRuntimeConfiguration:
         )
         assert isinstance(result, dict)
         assert fabric_env.exists()
+
+    def test_connected_resource_requires_refreshed_arm_endpoint(
+        self,
+        tmp_path,
+    ):
+        manifest = _make_minimal_manifest()
+        manifest = manifest.model_copy(
+            update={
+                "resources": manifest.resources.model_copy(
+                    update={
+                        "search": manifest.resources.search.model_copy(
+                            update={
+                                "mode": "connect",
+                                "name": "existing-search",
+                            }
+                        )
+                    }
+                )
+            }
+        )
+        fabric_env = tmp_path / "fabric_env.json"
+        fabric_env.write_text(
+            json.dumps(
+                {"ai_search": {"endpoint": "https://stale.example.test"}}
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="authoritative ARM"):
+            sync_runtime_configuration(
+                environment="dev",
+                manifest=manifest,
+                outputs={},
+                fabric_environment_path=fabric_env,
+                agent_metadata_path=tmp_path / "agent_metadata.yaml",
+            )
+
+        assert "stale.example.test" in fabric_env.read_text(encoding="utf-8")
+
+    def test_connected_registry_rejects_stale_metadata_and_environment(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        manifest = _make_minimal_manifest()
+        manifest = manifest.model_copy(
+            update={
+                "resources": manifest.resources.model_copy(
+                    update={
+                        "container_registry": (
+                            manifest.resources.container_registry.model_copy(
+                                update={
+                                    "mode": "connect",
+                                    "name": "existing-registry",
+                                }
+                            )
+                        )
+                    }
+                )
+            }
+        )
+        metadata = tmp_path / "agent_metadata.yaml"
+        metadata.write_text(
+            "environments:\n  dev:\n    acr:\n"
+            "      loginServer: stale.azurecr.io\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ACR_LOGIN_SERVER", "environment.azurecr.io")
+
+        with pytest.raises(ValueError, match="container_registry"):
+            sync_runtime_configuration(
+                environment="dev",
+                manifest=manifest,
+                outputs={},
+                fabric_environment_path=tmp_path / "fabric_env.json",
+                agent_metadata_path=metadata,
+            )
+
+        assert "stale.azurecr.io" in metadata.read_text(encoding="utf-8")

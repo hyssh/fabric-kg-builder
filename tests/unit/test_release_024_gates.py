@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 from pathlib import Path
@@ -73,3 +74,34 @@ def test_schema1_compatibility_descriptor_remains_present() -> None:
     )
 
     assert payload == {"schema_mode": "schema1_compatibility"}
+
+
+def test_installed_release_smoke_enforces_wheel_isolation() -> None:
+    script = (
+        _ROOT / "scripts" / "smoke-0.2.4-local.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'env -u PYTHONPATH "$INSTALLED_PYTHON"' in script
+    assert 'env -u PYTHONPATH "$FABRIC_KG"' in script
+    assert "fabric_kg_builder-0.2.4-py3-none-any.whl" in script
+    assert "origin.is_relative_to(prefix)" in script
+    assert "not origin.is_relative_to(repo)" in script
+    assert "binary.is_relative_to(prefix)" in script
+    assert "test_golden_canonical.py" in script
+    assert "test_e2e_trace.py" in script
+    assert "uv tool install" not in script
+    assert "--no-deps" not in script
+    assert "fabric_kg_builder-0.2.4-py3-none-any.whl[dev]" in script
+    assert "--find-links" in script
+    assert "--locked --extra dev --no-emit-project" in script
+    assert 'PYTHONPATH="$ROOT/src:$ROOT"' not in script
+
+
+def test_source_and_tests_parse_with_python_310_grammar() -> None:
+    for root in (_ROOT / "src", _ROOT / "tests"):
+        for path in root.rglob("*.py"):
+            ast.parse(
+                path.read_text(encoding="utf-8-sig"),
+                filename=str(path),
+                feature_version=(3, 10),
+            )

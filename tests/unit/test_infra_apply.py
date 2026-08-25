@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 
-from fabric_kg_builder.infra.apply import apply_plan, load_outputs, save_outputs
+from fabric_kg_builder.infra.apply import (
+    _arm_authority_record,
+    apply_plan,
+    load_outputs,
+    save_outputs,
+)
 from fabric_kg_builder.infra.runner import FakeCommandRunner
 from fabric_kg_builder.infra.schema import (
     InfraManifest,
@@ -380,10 +385,10 @@ def test_connected_arm_endpoint_overrides_mixed_bicep_output(tmp_path):
     )
 
 
-def test_no_op_apply_retains_previous_authoritative_endpoints(tmp_path):
+def test_no_op_apply_refreshes_stale_authoritative_endpoint(tmp_path):
     manifest = _connected_manifest()
     previous = {
-        "blobEndpoint": "https://blob.arm.example.test/",
+        "blobEndpoint": "https://storage-existing.blob.core.windows.net/",
         "documentIntelligenceEndpoint": "https://documents.arm.example.test/",
         "foundryEndpoint": "https://foundry.arm.example.test/",
         "foundryOpenAIEndpoint": "https://openai.arm.example.test/",
@@ -393,6 +398,23 @@ def test_no_op_apply_retains_previous_authoritative_endpoints(tmp_path):
         "searchEndpoint": "https://search.arm.example.test",
     }
     save_outputs(previous, tmp_path, "dev")
+    runner = FakeCommandRunner()
+    storage_id = _resource_id(
+        "Microsoft.Storage/storageAccounts", "storage-existing"
+    )
+    _add_resource_response(
+        runner,
+        storage_id,
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "name": "storage-existing",
+            "properties": {
+                "primaryEndpoints": {
+                    "blob": "https://private-storage.example.test/"
+                }
+            },
+        },
+    )
     plan = InfraPlan(
         environment="dev",
         items=[
@@ -407,11 +429,183 @@ def test_no_op_apply_retains_previous_authoritative_endpoints(tmp_path):
     status = apply_plan(
         manifest,
         plan,
-        FakeCommandRunner(),
+        runner,
         build_root=tmp_path,
     )
 
     assert status.succeeded
     outputs = load_outputs(tmp_path, "dev")
+    assert outputs["blobEndpoint"] == "https://private-storage.example.test/"
     for key, endpoint in previous.items():
+        if key == "blobEndpoint":
+            continue
         assert outputs[key] == endpoint
+
+
+def test_no_op_apply_fails_closed_and_removes_stale_endpoint(tmp_path):
+    manifest = _connected_manifest()
+    save_outputs(
+        {
+            "blobEndpoint": (
+                "https://storage-existing.blob.core.windows.net/"
+            )
+        },
+        tmp_path,
+        "dev",
+    )
+    storage_id = _resource_id(
+        "Microsoft.Storage/storageAccounts", "storage-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        storage_id,
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "name": "storage-existing",
+            "properties": {"primaryEndpoints": {}},
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            PlanItem(
+                resource_type="Microsoft.Storage/storageAccounts",
+                resource_name="storage-existing",
+                action=PlanAction.NO_OP,
+            )
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert not status.succeeded
+    assert storage_id in status.errors[0]
+    assert "properties.primaryEndpoints.blob" in status.errors[0]
+    assert "blobEndpoint" not in load_outputs(tmp_path, "dev")
+
+
+def test_no_op_apply_rejects_arm_type_mismatch(tmp_path):
+    manifest = _connected_manifest()
+    storage_id = _resource_id(
+        "Microsoft.Storage/storageAccounts", "storage-existing"
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        storage_id,
+        {
+            "type": "Microsoft.Search/searchServices",
+            "name": "storage-existing",
+            "properties": {
+                "primaryEndpoints": {
+                    "blob": "https://private-storage.example.test/"
+                }
+            },
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[
+            PlanItem(
+                resource_type="Microsoft.Storage/storageAccounts",
+                resource_name="storage-existing",
+                action=PlanAction.NO_OP,
+            )
+        ],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert not status.succeeded
+    assert "type mismatch" in status.errors[0]
+
+
+def test_connected_deployment_authority_tracks_model_version() -> None:
+    first = _arm_authority_record(
+        state_key=(
+            "Microsoft.CognitiveServices/accounts/deployments/chat"
+        ),
+        resource_id="/subscriptions/sub/resourceGroups/rg/providers/model/chat",
+        resource_type="Microsoft.CognitiveServices/accounts/deployments",
+        payload={
+            "type": "Microsoft.CognitiveServices/accounts/deployments",
+            "properties": {
+                "model": {
+                    "format": "OpenAI",
+                    "name": "gpt-4.1",
+                    "version": "2026-01-01",
+                }
+            },
+        },
+        runtime_outputs={},
+    )
+    second = _arm_authority_record(
+        state_key=(
+            "Microsoft.CognitiveServices/accounts/deployments/chat"
+        ),
+        resource_id="/subscriptions/sub/resourceGroups/rg/providers/model/chat",
+        resource_type="Microsoft.CognitiveServices/accounts/deployments",
+        payload={
+            "type": "Microsoft.CognitiveServices/accounts/deployments",
+            "properties": {
+                "model": {
+                    "format": "OpenAI",
+                    "name": "gpt-4.1",
+                    "version": "2026-02-01",
+                }
+            },
+        },
+        runtime_outputs={},
+    )
+
+    assert first["model"]["version"] != second["model"]["version"]
+
+
+def test_no_op_connected_registry_refreshes_login_server(tmp_path):
+    manifest = _connected_manifest()
+    manifest = manifest.model_copy(
+        update={
+            "resources": manifest.resources.model_copy(
+                update={
+                    "container_registry": (
+                        manifest.resources.container_registry.model_copy(
+                            update={
+                                "mode": ResourceMode.CONNECT,
+                                "name": "registry-existing",
+                            }
+                        )
+                    )
+                }
+            ),
+        }
+    )
+    registry_id = _resource_id(
+        "Microsoft.ContainerRegistry/registries", "registry-existing"
+    )
+    save_outputs(
+        {"containerRegistryLoginServer": "stale.azurecr.io"},
+        tmp_path,
+        "dev",
+    )
+    runner = FakeCommandRunner()
+    _add_resource_response(
+        runner,
+        registry_id,
+        {
+            "type": "Microsoft.ContainerRegistry/registries",
+            "name": "registry-existing",
+            "properties": {"loginServer": "authoritative.azurecr.io"},
+        },
+    )
+    plan = InfraPlan(
+        environment="dev",
+        items=[],
+    )
+
+    status = apply_plan(manifest, plan, runner, build_root=tmp_path)
+
+    assert status.succeeded
+    assert load_outputs(tmp_path, "dev")[
+        "containerRegistryLoginServer"
+    ] == "authoritative.azurecr.io"

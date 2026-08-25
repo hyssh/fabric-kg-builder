@@ -44,44 +44,53 @@ scripts/smoke-0.2.4-local.sh
 Full fast suite:
 
 ```text
-2985 passed, 2 skipped, 4 deselected
+3013 passed, 2 skipped, 4 deselected
 ```
 
 Focused hardening result:
 
 ```text
-247 passed
+136 passed
 ```
 
-The wheel was installed non-editably into a fresh isolated virtual environment.
-Because the implementation environment was offline and one locked transitive
-wheel was absent from the uv artifact cache, the equivalent validation copied
-the already locked dependency environment and installed the built wheel with
-`--no-deps`. The product package itself was not editable. The isolated command
+The wheel and the exact locked core/dev dependency closure were installed into
+a fresh virtual environment by the package resolver from a local wheelhouse.
+The wheelhouse was reconstructed from the synchronized locked environment for
+offline operation; the resolver still enforced the lock and dependency
+specifiers. No editable install, repository `PYTHONPATH`, or repository working
+directory was used. Package/module origins and the invoked binary were asserted
+under the isolated environment and outside the repository. The isolated gate
 reported:
 
 ```text
 fabric-kg, version 0.2.4
 36 commands discovered
+64 packages resolved
+18 committed-fixture tests passed
 ```
 
-A clean temporary schema-2 fixture run then:
+A clean temporary installed-tool run then:
 
 - deterministically validated an approved contract;
-- compiled 2 raw relationships into 1 asserted semantic relationship while
-  retaining the audit row;
-- wrote 14 canonical/semantic Parquet tables;
+- compiled the committed golden canonical fixture into 14 Parquet tables;
 - passed data-integrity gates;
 - completed `build-deploy --dry-run` with status `planned`, a nonempty plan
-  fingerprint, and the complete expected stage list;
+  fingerprint, a resolved mutation-authority snapshot/hash, and the complete
+  expected stage list;
+- passed the installed golden canonical and offline end-to-end trace selectors;
 - performed no Azure or Fabric mutation.
+
+The release gate also parsed all source and test modules with Python 3.10
+grammar and retains the Python 3.10 `tomli` dependency fallback. The local host
+did not have a Python 3.10 interpreter cached, so an actual 3.10 runtime run
+remains delegated to the existing CI 3.10 matrix.
 
 ## Artifact proof
 
 | Artifact | SHA-256 |
 |---|---|
-| `fabric_kg_builder-0.2.4-py3-none-any.whl` | `861918f7a15d32134fef14269a2cfd7ff42de67ddf855326ff0aa141b4bb96a8` |
-| `fabric_kg_builder-0.2.4.tar.gz` | `8293f19a8b6400d07a1dac5bcf4454450cc9e6abdc87377701206e48498125ca` |
+| `fabric_kg_builder-0.2.4-py3-none-any.whl` | `41ade3de3b72b6d8ebb26b7b1ce389e94322ae93ea00506e8345f39f96dc7e24` |
+| `fabric_kg_builder-0.2.4.tar.gz` | `1058b67e0e1ff6f87975247fb6186be630b0c023b031cc039f904ffaeee3c9e1` |
 
 ## Acceptance status
 
@@ -91,7 +100,7 @@ A clean temporary schema-2 fixture run then:
 | 12: fresh live nonempty Lakehouse, Ontology, Graph, and Search | Pending post-merge live smoke |
 | 13: live read-back with exact count equality and no unexplained drops | Pending post-merge live smoke |
 | 14: generated Graph plans never exceed approved K | Covered locally; live plan execution pending |
-| 15: isolated installed CLI and release tests | Passed locally; environment-dependent live checks remain pending |
+| 15: isolated installed CLI and release tests | Passed for committed offline fixtures; real-PDF and live selectors remain pending |
 | 16: all version surfaces report 0.2.4 | Passed, including isolated installed CLI |
 
 Local compilation and mock/read-back contracts do not prove that a tenant's

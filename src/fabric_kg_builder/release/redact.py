@@ -96,6 +96,45 @@ _PYDANTIC_INPUT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]+")
+_SAFE_DIAGNOSTIC_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_SAFE_SERVICE_CODE = re.compile(r"^[1-5][0-9]{2}$")
+_DIAGNOSTIC_TEMPLATES: dict[str, str] = {
+    "timeout": "The enrichment request timed out; retry is permitted.",
+    "rate_limit": "The enrichment service rate limit was reached; retry is permitted.",
+    "authentication": "The enrichment service rejected authentication; operator action is required.",
+    "validation": "The enrichment result failed validation; review the contract and retry metadata.",
+    "service": "The enrichment service request failed; retry according to the recorded policy.",
+    "cancellation": "The enrichment work was cancelled before completion and remains resumable.",
+    "internal": "The enrichment worker failed internally; inspect safe category and retry metadata.",
+}
+_DIAGNOSTIC_TYPES = frozenset({
+    "AuthenticationError",
+    "CancelledError",
+    "EnrichmentError",
+    "EnrichmentInternalError",
+    "EnrichmentServiceError",
+    "KeyboardInterrupt",
+    "RateLimitError",
+    "RelationBudgetOverflowError",
+    "RelationBudgetSplitDepthError",
+    "Schema2MalformedRelationshipError",
+    "Schema2WorkUnitInvariantError",
+    "ServiceError",
+    "SystemExit",
+    "TimeoutError",
+    "TypeError",
+    "ValidationError",
+    "ValueError",
+})
+_CATEGORY_DEFAULT_TYPE = {
+    "timeout": "TimeoutError",
+    "rate_limit": "RateLimitError",
+    "authentication": "AuthenticationError",
+    "validation": "ValidationError",
+    "service": "EnrichmentServiceError",
+    "cancellation": "CancelledError",
+    "internal": "EnrichmentInternalError",
+}
 
 
 def _looks_like_secret(value: str) -> bool:
@@ -130,31 +169,44 @@ def sanitize_exception_message(
     *,
     source_values: tuple[str, ...] = (),
     max_length: int = 512,
+    category: str = "internal",
 ) -> str:
-    """Return bounded actionable exception text without source data or secrets."""
-    sanitized = str(value)
-    for source_value in sorted(
-        (item for item in source_values if item),
-        key=len,
-        reverse=True,
-    ):
-        sanitized = sanitized.replace(source_value, _REDACTED_PLACEHOLDER)
-    sanitized = _PYDANTIC_INPUT.sub(
-        f"input_value={_REDACTED_PLACEHOLDER}",
-        sanitized,
+    """Return a fixed operator template; never derive persisted text from *value*."""
+    del value, source_values
+    safe_category = (
+        category if category in _DIAGNOSTIC_TEMPLATES else "internal"
     )
-    sanitized = _URL_QUERY.sub(
-        rf"\1?{_REDACTED_PLACEHOLDER}",
-        sanitized,
+    return _DIAGNOSTIC_TEMPLATES[safe_category][:max_length]
+
+
+def allowlisted_diagnostic(
+    *,
+    category: str | None,
+    error_type: str | None,
+    service_code: str | None = None,
+) -> dict[str, str]:
+    """Return stable diagnostic fields safe for logs and checkpoints."""
+    safe_category = (
+        str(category)
+        if category in _DIAGNOSTIC_TEMPLATES
+        else "internal"
     )
-    sanitized = redact_secret_text(sanitized)
-    sanitized = _CONTROL_CHARACTERS.sub(" ", sanitized)
-    sanitized = " ".join(sanitized.split())
-    if not sanitized:
-        sanitized = "No safe exception details available."
-    if len(sanitized) > max_length:
-        sanitized = sanitized[: max_length - 3].rstrip() + "..."
-    return sanitized
+    candidate_type = str(error_type or "")
+    safe_type = (
+        candidate_type
+        if candidate_type in _DIAGNOSTIC_TYPES
+        and _SAFE_DIAGNOSTIC_TOKEN.fullmatch(candidate_type)
+        else _CATEGORY_DEFAULT_TYPE[safe_category]
+    )
+    result = {
+        "category": safe_category,
+        "type": safe_type,
+        "message": _DIAGNOSTIC_TEMPLATES[safe_category],
+    }
+    candidate_code = str(service_code or "")
+    if candidate_code and _SAFE_SERVICE_CODE.fullmatch(candidate_code):
+        result["code"] = candidate_code
+    return result
 
 
 def redact_value(field_name: str, value: Any) -> Any:

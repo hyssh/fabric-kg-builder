@@ -8,6 +8,7 @@ from fabric_kg_builder.release.redact import (
     _REDACTED_PLACEHOLDER,
     _SOURCE_CONTENT_FIELDS,
     _looks_like_secret,
+    allowlisted_diagnostic,
     assert_no_secrets,
     assert_no_source_content,
     redact_dict,
@@ -149,7 +150,10 @@ class TestRedactSecretText:
         assert source not in result
         assert secret not in result
         assert "sig=secret-value" not in result
-        assert result.count("[REDACTED]") >= 3
+        assert result == (
+            "The enrichment worker failed internally; inspect safe category "
+            "and retry metadata."
+        )
 
     def test_exception_message_strips_pydantic_input_value(self) -> None:
         result = sanitize_exception_message(
@@ -158,7 +162,56 @@ class TestRedactSecretText:
         )
 
         assert "source excerpt" not in result
-        assert "input_value=[REDACTED]" in result
+        assert result == (
+            "The enrichment worker failed internally; inspect safe category "
+            "and retry metadata."
+        )
+
+    @pytest.mark.parametrize(
+        "canary",
+        [
+            "full source snippet from a private document",
+            "partial source fragment",
+            "Jane Customer",
+            "jane.customer@example.test",
+            "123-45-6789",
+            "UnlabeledCredentialValue0123456789ABCDEF",
+            "password=SuperSensitiveCredential012345",
+            "https://service.example/path?sig=remote-secret",
+            "remote response body with private material",
+            "control\x00characters\x1f",
+        ],
+    )
+    def test_allowlisted_diagnostics_never_persist_exception_canaries(
+        self,
+        canary: str,
+    ) -> None:
+        result = sanitize_exception_message(
+            f"validation failed: {canary}",
+            category="validation",
+        )
+        assert canary not in result
+        assert result == (
+            "The enrichment result failed validation; review the contract "
+            "and retry metadata."
+        )
+
+    def test_service_code_requires_safe_token_grammar(self) -> None:
+        safe = allowlisted_diagnostic(
+            category="service",
+            error_type="ServiceError",
+            service_code="503",
+        )
+        unsafe = allowlisted_diagnostic(
+            category="service",
+            error_type="PrivateCustomerName",
+            service_code="bad code jane@example.test",
+        )
+
+        assert safe["code"] == "503"
+        assert safe["type"] == "ServiceError"
+        assert "code" not in unsafe
+        assert unsafe["type"] == "EnrichmentServiceError"
 
 
 # ---------------------------------------------------------------------------

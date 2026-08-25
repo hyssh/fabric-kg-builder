@@ -13,6 +13,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 import yaml
@@ -37,6 +38,28 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 _STATE_SCHEMA = "fabric-kg-build-deploy/2.0"
 _FINGERPRINT_SCHEMA = "fabric-kg-stage-input/1.0"
 _LEDGER_SCHEMA = "fabric-kg-resource-ledger/1.0"
+_MUTATION_AUTHORITY_SCHEMA = "fabric-kg-mutation-authority/1.0"
+_NON_AUTHORITY_PLACEHOLDER = "[REDACTED_NON_AUTHORITY]"
+_NON_AUTHORITY_KEY_PARTS = frozenset({
+    "apikey",
+    "api_key",
+    "authorization",
+    "body",
+    "connectionstring",
+    "connection_string",
+    "content",
+    "credential",
+    "document_text",
+    "key",
+    "ocr_text",
+    "password",
+    "raw_text",
+    "sas",
+    "secret",
+    "source_text",
+    "text",
+    "token",
+})
 
 _STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "semantic_compatibility": ("domain_gate",),
@@ -174,6 +197,247 @@ def _input_fingerprint(
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_json_hash(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _secret_free_authority(value: Any, *, field_name: str = "") -> Any:
+    """Remove source/auth material while preserving mutation authority."""
+    from fabric_kg_builder.release.redact import looks_like_secret
+
+    normalized_field = field_name.lower().replace("-", "_")
+    compact_field = normalized_field.replace("_", "")
+    if any(
+        part == normalized_field
+        or part.replace("_", "") == compact_field
+        or normalized_field.endswith(f"_{part}")
+        for part in _NON_AUTHORITY_KEY_PARTS
+    ):
+        return _NON_AUTHORITY_PLACEHOLDER
+    if isinstance(value, dict):
+        return {
+            str(key): _secret_free_authority(item, field_name=str(key))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _secret_free_authority(item, field_name=field_name)
+            for item in value
+        ]
+    if isinstance(value, str):
+        if looks_like_secret(value):
+            return _NON_AUTHORITY_PLACEHOLDER
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() in {"http", "https"} and parsed.query:
+            return urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, "", "")
+            )
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)
+
+
+def _load_authority_document(path: Path | None) -> Any:
+    if path is None or not path.is_file():
+        return None
+    raw = path.read_text(encoding="utf-8")
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        payload = yaml.safe_load(raw)
+    else:
+        payload = json.loads(raw)
+    return {
+        "path": str(path.resolve()),
+        "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        "value": payload,
+    }
+
+
+def _pipeline_implementation_fingerprint() -> str:
+    package_root = Path(__file__).resolve().parents[1]
+    entries = []
+    for candidate in sorted(package_root.rglob("*.py")):
+        entries.append({
+            "path": candidate.relative_to(package_root).as_posix(),
+            "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+        })
+    return _canonical_json_hash(entries)
+
+
+def _build_resolved_mutation_snapshot(
+    *,
+    infrastructure_manifest: Any,
+    infrastructure_plan: Any,
+    infrastructure_baseline_state: Any,
+    imported_outputs: Any,
+    authoritative_arm_outputs: Any,
+    deployment_manifest: Any,
+    densify_configuration: Any,
+    enabled_stages: list[str],
+    behavior_flags: dict[str, Any],
+    package_version: str,
+    implementation_fingerprint: str,
+) -> tuple[dict[str, Any], str]:
+    """Build the canonical schema-2 authority reviewed before live mutation."""
+    arm_outputs = _secret_free_authority(authoritative_arm_outputs or {})
+    snapshot = _secret_free_authority({
+        "schema": _MUTATION_AUTHORITY_SCHEMA,
+        "infrastructure": {
+            "manifest": infrastructure_manifest,
+            "plan": infrastructure_plan,
+            "baseline_state": infrastructure_baseline_state,
+            "imported_outputs": imported_outputs,
+            "authoritative_arm_outputs": arm_outputs,
+            "authoritative_arm_output_fingerprints": {
+                key: _canonical_json_hash(value)
+                for key, value in sorted(arm_outputs.items())
+            },
+        },
+        "deployment_manifest": deployment_manifest,
+        "densify_configuration": densify_configuration,
+        "pipeline": {
+            "package_version": package_version,
+            "implementation_fingerprint": implementation_fingerprint,
+            "enabled_stages": enabled_stages,
+            "behavior_flags": behavior_flags,
+        },
+    })
+    return snapshot, _canonical_json_hash(snapshot)
+
+
+def _infrastructure_authority_source(
+    *,
+    environment: str,
+    run_root: Path,
+    explicit_outputs_path: Path | None,
+) -> tuple[Path | None, Path | None]:
+    target_outputs = run_root / "infra" / environment / "outputs.json"
+    candidates = (
+        explicit_outputs_path,
+        Path("build") / "infra" / environment / "outputs.json",
+        target_outputs,
+    )
+    outputs_path = next(
+        (
+            candidate.resolve()
+            for candidate in candidates
+            if candidate is not None and candidate.is_file()
+        ),
+        None,
+    )
+    state_path = (
+        outputs_path.with_name("state.json")
+        if outputs_path is not None
+        and outputs_path.with_name("state.json").is_file()
+        else None
+    )
+    return outputs_path, state_path
+
+
+def _resolve_cli_mutation_authority(
+    *,
+    manifest: Any,
+    environment: str,
+    run_root: Path,
+    infra_outputs_path: Path | None,
+    provision: bool,
+    deployment_manifest_path: Path | None,
+    densify_config_path: Path | None,
+    enabled_stages: list[str],
+    behavior_flags: dict[str, Any],
+    baseline_state: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Re-read all non-secret authority used by schema-2 live mutations."""
+    from fabric_kg_builder import __version__
+    from fabric_kg_builder.infra.apply import (
+        load_state,
+        resolve_connected_arm_authority,
+    )
+    from fabric_kg_builder.infra.plan import build_plan
+    from fabric_kg_builder.infra.runner import RealCommandRunner
+    from fabric_kg_builder.infra.schema import InfraState
+
+    outputs_path, source_state_path = _infrastructure_authority_source(
+        environment=environment,
+        run_root=run_root,
+        explicit_outputs_path=infra_outputs_path,
+    )
+    imported_outputs = (
+        _load_authority_document(outputs_path) if not provision else None
+    )
+    if baseline_state is not None:
+        plan_state = InfraState.model_validate(baseline_state)
+    elif source_state_path is not None:
+        plan_state = InfraState.model_validate(
+            json.loads(source_state_path.read_text(encoding="utf-8"))
+        )
+    else:
+        plan_state = load_state(run_root, environment)
+    plan = build_plan(manifest, existing_state=plan_state)
+    arm_outputs = resolve_connected_arm_authority(
+        manifest,
+        RealCommandRunner(),
+    )
+    fallback_deployment_path = (
+        Path("ontology") / "environments" / f"{environment}.json"
+    )
+    if deployment_manifest_path is not None:
+        deployment_authority = _load_authority_document(
+            deployment_manifest_path
+        )
+    elif fallback_deployment_path.is_file():
+        from fabric_kg_builder.deploy.name_authority import (
+            manifest_from_env_config,
+        )
+        from fabric_kg_builder.infra.schema import ResourceMode
+
+        env_payload = json.loads(
+            fallback_deployment_path.read_text(encoding="utf-8")
+        )
+        effective_manifest = manifest_from_env_config(env_payload).model_dump(
+            mode="json"
+        )
+        if manifest.fabric.workspace.mode == ResourceMode.CREATE:
+            effective_manifest["workspace"] = ""
+        fabric_modes = {
+            "lakehouse": manifest.fabric.lakehouse.mode,
+            "ontology": manifest.fabric.ontology.mode,
+            "graph_model": manifest.fabric.graph_model.mode,
+        }
+        for item_name, mode in fabric_modes.items():
+            if mode == ResourceMode.CREATE:
+                effective_manifest["items"][item_name]["configured_id"] = ""
+        if behavior_flags.get("data_agent_mode") == "create":
+            effective_manifest["items"]["data_agent"]["configured_id"] = ""
+        deployment_authority = {
+            "path": str(fallback_deployment_path.resolve()),
+            "value": effective_manifest,
+        }
+    else:
+        deployment_authority = None
+    return _build_resolved_mutation_snapshot(
+        infrastructure_manifest=manifest.model_dump(mode="json"),
+        infrastructure_plan=plan.model_dump(mode="json"),
+        infrastructure_baseline_state=plan_state.model_dump(mode="json"),
+        imported_outputs=imported_outputs,
+        authoritative_arm_outputs=arm_outputs,
+        deployment_manifest=deployment_authority,
+        densify_configuration=_load_authority_document(
+            densify_config_path
+        ),
+        enabled_stages=enabled_stages,
+        behavior_flags=behavior_flags,
+        package_version=__version__,
+        implementation_fingerprint=_pipeline_implementation_fingerprint(),
+    )
+
+
 def _enrichment_prompt_schema_fingerprint() -> str:
     """Return the fixed enrichment prompt/schema authority without source text."""
     from fabric_kg_builder.enrichment.orchestrator import (
@@ -250,6 +514,7 @@ class _RunState:
         input_fingerprint: str | None = None,
         dependencies: tuple[str, ...] | None = None,
         invalidate_paths: tuple[Path, ...] = (),
+        before_start: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         direct_input_fingerprint = input_fingerprint or _input_fingerprint(
             values={"stage": name}
@@ -314,6 +579,8 @@ class _RunState:
                 else:
                     resolved.unlink(missing_ok=True)
 
+        if before_start is not None:
+            before_start()
         stage = {
             "status": "running",
             "started_at": _utc_now(),
@@ -346,6 +613,8 @@ class _RunState:
     def complete(self, *, dry_run: bool = False) -> None:
         self.data["status"] = "planned" if dry_run else "succeeded"
         self.data["completed_at"] = _utc_now()
+        if dry_run:
+            self.data["dry_run_completed_at"] = self.data["completed_at"]
         self.save()
 
 
@@ -387,12 +656,24 @@ def _approve_schema2_live_plan(
     *,
     plan_fingerprint: str,
     managed_baseline_fingerprint: str,
+    mutation_authority_snapshot: dict[str, Any],
+    mutation_authority_hash: str,
 ) -> None:
     """Persist or reuse explicit approval for one unchanged reviewed plan."""
     if state.data.get("plan_fingerprint") != plan_fingerprint:
         raise BuildDeployError(
             "Schema-2 live inputs or authorities differ from the reviewed "
             "dry-run. Run a new --dry-run before approving mutation."
+        )
+    if (
+        state.data.get("resolved_mutation_authority_hash")
+        != mutation_authority_hash
+        or state.data.get("resolved_mutation_authority")
+        != mutation_authority_snapshot
+    ):
+        raise BuildDeployError(
+            "Resolved mutation authority drifted from the reviewed dry-run. "
+            "Run a new --dry-run; the newly resolved authority is not approved."
         )
     baseline_stage = (
         state.data.get("stages", {}).get("record_semantic_baseline", {})
@@ -418,12 +699,22 @@ def _approve_schema2_live_plan(
             "successfully recorded authority. Run a new --dry-run before "
             "approving mutation."
         )
-    if state.data.get("status") == "planned":
+    if (
+        state.data.get("approved_mutation_authority_hash") is None
+        and state.data.get("dry_run_completed_at")
+    ):
         state.data["approved_plan_fingerprint"] = plan_fingerprint
+        state.data["approved_mutation_authority_hash"] = (
+            mutation_authority_hash
+        )
         state.data["live_approved_at"] = _utc_now()
         state.save()
         return
-    if state.data.get("approved_plan_fingerprint") != plan_fingerprint:
+    if (
+        state.data.get("approved_plan_fingerprint") != plan_fingerprint
+        or state.data.get("approved_mutation_authority_hash")
+        != mutation_authority_hash
+    ):
         raise BuildDeployError(
             "Schema-2 live retry has no approval for the current plan. Run a "
             "new --dry-run, then --resume --approve-live."
@@ -2820,6 +3111,61 @@ def build_deploy_cmd(
     domain = load_domain_contract(domain_path)
     manifest = load_manifest(infra_manifest_path)
     is_schema2 = str(getattr(domain, "schema_version", "")) == "2.0"
+    planned_stages = [
+        "inspect_source",
+        "enrich",
+        *(["densify"] if densify_config else []),
+        "compile_data",
+        "compile_semantic",
+        "compile_ontology",
+        "compile_graph",
+        "compile_agent",
+        *(["compile_search"] if not skip_search else []),
+        "package",
+        "validate",
+        *(
+            [
+                "deploy_lakehouse",
+                "deploy_ontology",
+                "deploy_serving",
+                "validate_projection",
+            ]
+            if deploy_serving
+            else []
+        ),
+        *(["deploy_knowledge"] if deploy_knowledge else []),
+        *(["deploy_agent"] if deploy_agent else []),
+        *(["deploy_app"] if deploy_app else []),
+        "deployment_receipt",
+        *(
+            ["runtime_config", "runtime_acceptance"]
+            if runtime_config_template
+            else []
+        ),
+    ]
+    mutation_behavior_flags = {
+        "environment": env,
+        "recursive": recursive,
+        "drawing_mode": drawing_mode,
+        "densify_enabled": bool(densify_config),
+        "embed": embed,
+        "skip_search": skip_search,
+        "provision": provision,
+        "deploy_serving": deploy_serving,
+        "deploy_knowledge": deploy_knowledge,
+        "deploy_agent": deploy_agent,
+        "deploy_app": deploy_app,
+        "data_agent_mode": data_agent_mode,
+        "data_agent_id": data_agent_id,
+        "data_agent_name": data_agent_name,
+        "approve_data_agent_replace": approve_data_agent_replace,
+        "approve_breaking_semantic_migration": (
+            approve_breaking_semantic_migration
+        ),
+        "initialize_semantic_baseline": initialize_semantic_baseline,
+        "runtime_acceptance_enabled": runtime_config_template is not None,
+        "competency_suite_enabled": competency_suite is not None,
+    }
     pipeline_plan_fingerprint = _input_fingerprint(
         files={
             "config": config_path,
@@ -2909,18 +3255,60 @@ def build_deploy_cmd(
                 "Schema-2 live mutation requires a matching prior --dry-run, "
                 "then --resume --approve-live with the same run ID."
             )
+    elif approve_live and (not is_schema2 or dry_run or not resume):
+        raise BuildDeployError(
+            "--approve-live is valid only for a schema-2 live --resume after "
+            "a matching dry-run."
+        )
+
+    approval_checked = False
+
+    def _ensure_live_mutation_authority() -> None:
+        nonlocal approval_checked
+        if approval_checked or not (is_schema2 and live_mutation_selected):
+            return
+        reviewed = state.data.get("resolved_mutation_authority")
+        baseline_state = (
+            reviewed.get("infrastructure", {}).get("baseline_state")
+            if isinstance(reviewed, dict)
+            else None
+        )
+        snapshot, snapshot_hash = _resolve_cli_mutation_authority(
+            manifest=manifest,
+            environment=env,
+            run_root=run_root,
+            infra_outputs_path=(
+                infra_outputs.resolve() if infra_outputs else None
+            ),
+            provision=provision,
+            deployment_manifest_path=(
+                Path(deploy_manifest_path).resolve()
+                if deploy_manifest_path
+                else None
+            ),
+            densify_config_path=(
+                Path(densify_config).resolve() if densify_config else None
+            ),
+            enabled_stages=planned_stages,
+            behavior_flags=mutation_behavior_flags,
+            baseline_state=baseline_state,
+        )
         _approve_schema2_live_plan(
             state,
             plan_fingerprint=pipeline_plan_fingerprint,
             managed_baseline_fingerprint=(
                 managed_semantic_baseline_fingerprint
             ),
+            mutation_authority_snapshot=snapshot,
+            mutation_authority_hash=snapshot_hash,
         )
-    elif approve_live and (not is_schema2 or dry_run or not resume):
-        raise BuildDeployError(
-            "--approve-live is valid only for a schema-2 live --resume after "
-            "a matching dry-run."
-        )
+        approval_checked = True
+
+    def _approved_live_action(
+        action: Callable[[], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        _ensure_live_mutation_authority()
+        return action()
 
     click.echo(f"[build-deploy] run_id      : {effective_run_id}")
     click.echo(f"[build-deploy] environment : {env}")
@@ -3040,39 +3428,34 @@ def build_deploy_cmd(
                 ),
                 dependencies=(),
             )
-        state.data["planned_stages"] = [
-            "inspect_source",
-            "enrich",
-            *(["densify"] if densify_config else []),
-            "compile_data",
-            "compile_semantic",
-            "compile_ontology",
-            "compile_graph",
-            "compile_agent",
-            *(["compile_search"] if not skip_search else []),
-            "package",
-            "validate",
-            *(
-                [
-                    "deploy_lakehouse",
-                    "deploy_ontology",
-                    "deploy_serving",
-                    "validate_projection",
-                ]
-                if deploy_serving
-                else []
+        snapshot, snapshot_hash = _resolve_cli_mutation_authority(
+            manifest=manifest,
+            environment=env,
+            run_root=run_root,
+            infra_outputs_path=(
+                infra_outputs.resolve() if infra_outputs else None
             ),
-            *(["deploy_knowledge"] if deploy_knowledge else []),
-            *(["deploy_agent"] if deploy_agent else []),
-            *(["deploy_app"] if deploy_app else []),
-            "deployment_receipt",
-            *(["runtime_config", "runtime_acceptance"] if runtime_config_template else []),
-        ]
+            provision=provision,
+            deployment_manifest_path=(
+                Path(deploy_manifest_path).resolve()
+                if deploy_manifest_path
+                else None
+            ),
+            densify_config_path=(
+                Path(densify_config).resolve() if densify_config else None
+            ),
+            enabled_stages=planned_stages,
+            behavior_flags=mutation_behavior_flags,
+        )
+        state.data["planned_stages"] = planned_stages
         state.data["plan_fingerprint"] = pipeline_plan_fingerprint
+        state.data["resolved_mutation_authority"] = snapshot
+        state.data["resolved_mutation_authority_hash"] = snapshot_hash
         state.data["reviewed_semantic_baseline_fingerprint"] = (
             managed_semantic_baseline_fingerprint
         )
         state.data.pop("approved_plan_fingerprint", None)
+        state.data.pop("approved_mutation_authority_hash", None)
         state.data.pop("live_approved_at", None)
         state.complete(dry_run=True)
         # Name plan was already emitted at function start; just signal completion.
@@ -3152,20 +3535,22 @@ def build_deploy_cmd(
     if provision:
         state.execute(
             "infrastructure",
-            lambda: _invoke_cli(
-                [
-                    "infra",
-                    "apply",
-                    "--env",
-                    env,
-                    "--infra-dir",
-                    str(infra_root),
-                    "--build-root",
-                    str(run_root),
-                    "--auto-approve",
-                ],
-                config_path=config_path,
-                environment=env,
+            lambda: _approved_live_action(
+                lambda: _invoke_cli(
+                    [
+                        "infra",
+                        "apply",
+                        "--env",
+                        env,
+                        "--infra-dir",
+                        str(infra_root),
+                        "--build-root",
+                        str(run_root),
+                        "--auto-approve",
+                    ],
+                    config_path=config_path,
+                    environment=env,
+                )
             ),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -3177,6 +3562,7 @@ def build_deploy_cmd(
                 values={"environment": env, "provision": True},
             ),
             dependencies=("infrastructure_preflight",),
+            before_start=_ensure_live_mutation_authority,
         )
     else:
         state.execute(
@@ -3723,31 +4109,37 @@ def build_deploy_cmd(
         docs_file = paths["search"] / "kg-chunks" / "docs.json"
         state.execute(
             "deploy_lakehouse",
-            lambda: _invoke_cli(
-                [
-                    "deploy-lakehouse",
-                    "--env",
-                    env,
-                    "--parquet-dir",
-                    str(paths["parquet"]),
-                    "--semantic-dir",
-                    str(paths["semantic"]),
-                    "--projection-receipt",
-                    str(
-                        paths["parquet"]
-                        / "semantic-projection-receipt.json"
-                    ),
-                    "--materialization-receipt-out",
-                    str(
-                        paths["release"]
-                        / "materialization-deployment.json"
-                    ),
-                    "--no-mock",
-                    *(["--manifest", deploy_manifest_path] if deploy_manifest_path else []),
-                ],
-                config_path=config_path,
-                environment=env,
-                extra_env=runtime_env,
+            lambda: _approved_live_action(
+                lambda: _invoke_cli(
+                    [
+                        "deploy-lakehouse",
+                        "--env",
+                        env,
+                        "--parquet-dir",
+                        str(paths["parquet"]),
+                        "--semantic-dir",
+                        str(paths["semantic"]),
+                        "--projection-receipt",
+                        str(
+                            paths["parquet"]
+                            / "semantic-projection-receipt.json"
+                        ),
+                        "--materialization-receipt-out",
+                        str(
+                            paths["release"]
+                            / "materialization-deployment.json"
+                        ),
+                        "--no-mock",
+                        *(
+                            ["--manifest", deploy_manifest_path]
+                            if deploy_manifest_path
+                            else []
+                        ),
+                    ],
+                    config_path=config_path,
+                    environment=env,
+                    extra_env=runtime_env,
+                )
             ),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -3771,10 +4163,11 @@ def build_deploy_cmd(
             invalidate_paths=(
                 paths["release"] / "materialization-deployment.json",
             ),
+            before_start=_ensure_live_mutation_authority,
         )
         state.execute(
             "deploy_ontology",
-            lambda: _invoke_cli(
+            lambda: _approved_live_action(lambda: _invoke_cli(
                 [
                     "deploy-ontology",
                     "--env",
@@ -3796,7 +4189,7 @@ def build_deploy_cmd(
                 config_path=config_path,
                 environment=env,
                 extra_env=runtime_env,
-            ),
+            )),
             resume=resume,
             input_fingerprint=_input_fingerprint(
                 files={
@@ -3819,6 +4212,7 @@ def build_deploy_cmd(
             invalidate_paths=(
                 paths["release"] / "ontology-deployment.json",
             ),
+            before_start=_ensure_live_mutation_authority,
         )
         state.execute(
             "record_semantic_baseline",
@@ -3834,7 +4228,7 @@ def build_deploy_cmd(
         )
         state.execute(
             "deploy_serving",
-            lambda: _invoke_cli(
+            lambda: _approved_live_action(lambda: _invoke_cli(
                 [
                     "deploy-serving",
                     "--env",
@@ -3878,7 +4272,7 @@ def build_deploy_cmd(
                 config_path=config_path,
                 environment=env,
                 extra_env=runtime_env,
-            ),
+            )),
             resume=resume,
             input_fingerprint=_input_fingerprint(
                 files={
@@ -3910,6 +4304,7 @@ def build_deploy_cmd(
             invalidate_paths=(
                 paths["release"] / "serving-deployment.json",
             ),
+            before_start=_ensure_live_mutation_authority,
         )
         state.execute(
             "validate_projection",
@@ -3965,40 +4360,42 @@ def build_deploy_cmd(
         )
         state.execute(
             "deploy_knowledge",
-            lambda: _deploy_knowledge(
-                environment=env,
-                run_token=run_token,
-                domain_contract=domain,
-                metadata_path=paths["metadata"],
-                outputs=outputs,
-                manifest=manifest,
-                search_index_name=knowledge_index_name,
-                semantic_dir=paths["semantic"],
-                persisted_projection_path=(
-                    paths["release"]
-                    / "persisted-projection-receipt.json"
-                ),
-                semantic_context_path=(
-                    paths["agents"] / "semantic-context.json"
-                ),
-                agent_instructions_path=paths["agents"] / "instructions.md",
-                agent_publication_receipt_path=(
-                    paths["release"]
-                    / "agent-publication-receipt.json"
-                ),
-                workspace_name=str(
-                    manifest.fabric.workspace.display_name
-                    or manifest.fabric.workspace.name
-                    or env
-                ),
-                data_agent_mode=str(data_agent_mode),
-                data_agent_item_id=data_agent_id,
-                data_agent_display_name=data_agent_name,
-                approve_data_agent_replace=(
-                    approve_data_agent_replace
-                ),
-                require_foundry_search_connection=deploy_agent,
-                deploy_manifest_path=deploy_manifest_path,
+            lambda: _approved_live_action(
+                lambda: _deploy_knowledge(
+                    environment=env,
+                    run_token=run_token,
+                    domain_contract=domain,
+                    metadata_path=paths["metadata"],
+                    outputs=outputs,
+                    manifest=manifest,
+                    search_index_name=knowledge_index_name,
+                    semantic_dir=paths["semantic"],
+                    persisted_projection_path=(
+                        paths["release"]
+                        / "persisted-projection-receipt.json"
+                    ),
+                    semantic_context_path=(
+                        paths["agents"] / "semantic-context.json"
+                    ),
+                    agent_instructions_path=paths["agents"] / "instructions.md",
+                    agent_publication_receipt_path=(
+                        paths["release"]
+                        / "agent-publication-receipt.json"
+                    ),
+                    workspace_name=str(
+                        manifest.fabric.workspace.display_name
+                        or manifest.fabric.workspace.name
+                        or env
+                    ),
+                    data_agent_mode=str(data_agent_mode),
+                    data_agent_item_id=data_agent_id,
+                    data_agent_display_name=data_agent_name,
+                    approve_data_agent_replace=(
+                        approve_data_agent_replace
+                    ),
+                    require_foundry_search_connection=deploy_agent,
+                    deploy_manifest_path=deploy_manifest_path,
+                )
             ),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -4034,6 +4431,7 @@ def build_deploy_cmd(
                     "foundry_search_required": deploy_agent,
                 },
             ),
+            before_start=_ensure_live_mutation_authority,
         )
 
     if deploy_agent:
@@ -4056,7 +4454,7 @@ def build_deploy_cmd(
             ])
         state.execute(
             "deploy_agent",
-            lambda: (
+            lambda: _approved_live_action(lambda: (
                 _invoke_cli(
                     deploy_agent_args,
                     config_path=config_path,
@@ -4086,7 +4484,7 @@ def build_deploy_cmd(
                         )
                     ),
                 }
-            ),
+            )),
             resume=resume,
             input_fingerprint=_input_fingerprint(
                 files={
@@ -4098,6 +4496,7 @@ def build_deploy_cmd(
                 directories={"agents": paths["agents"]},
                 values={"environment": env, "run_token": run_token},
             ),
+            before_start=_ensure_live_mutation_authority,
         )
 
     if deploy_app:
@@ -4152,9 +4551,15 @@ def build_deploy_cmd(
             )
         state.execute(
             "fabric_runtime_access",
-            lambda: _ensure_fabric_runtime_access(
-                workspace_id=str(outputs.get("fabricWorkspaceId") or ""),
-                principal_id=str(outputs.get("identityPrincipalId") or ""),
+            lambda: _approved_live_action(
+                lambda: _ensure_fabric_runtime_access(
+                    workspace_id=str(
+                        outputs.get("fabricWorkspaceId") or ""
+                    ),
+                    principal_id=str(
+                        outputs.get("identityPrincipalId") or ""
+                    ),
+                )
             ),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -4171,6 +4576,7 @@ def build_deploy_cmd(
                     "query_schema_mode": app_query_schema.schema_mode,
                 },
             ),
+            before_start=_ensure_live_mutation_authority,
         )
         app_env = {
             **runtime_env,
@@ -4209,11 +4615,13 @@ def build_deploy_cmd(
             ])
         state.execute(
             "deploy_app",
-            lambda: _invoke_cli(
-                deploy_app_args,
-                config_path=config_path,
-                environment=env,
-                extra_env=app_env,
+            lambda: _approved_live_action(
+                lambda: _invoke_cli(
+                    deploy_app_args,
+                    config_path=config_path,
+                    environment=env,
+                    extra_env=app_env,
+                )
             ),
             resume=resume,
             input_fingerprint=_input_fingerprint(
@@ -4241,6 +4649,7 @@ def build_deploy_cmd(
                 *(("deploy_knowledge",) if deploy_knowledge else ()),
                 *(("deploy_agent",) if deploy_agent else ()),
             ),
+            before_start=_ensure_live_mutation_authority,
         )
 
     state.execute(

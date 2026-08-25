@@ -243,6 +243,7 @@ class EnrichmentWorkResult:
     llm_output: LLMOutput | None = None
     exception_category: str | None = None
     error_type: str | None = None
+    error_code: str | None = None
     error_message: str | None = None
     retry_eligible: bool | None = None
     queue_seconds: float = 0.0
@@ -254,9 +255,9 @@ def _exception_diagnostic(
     exc: BaseException,
     *,
     source_content: str,
-) -> tuple[str, str, bool]:
-    """Classify and sanitize one enrichment failure for checkpoint persistence."""
-    from fabric_kg_builder.release.redact import sanitize_exception_message
+) -> tuple[str, str, str | None, str, bool]:
+    """Classify one failure into allowlisted persistence fields."""
+    from fabric_kg_builder.release.redact import allowlisted_diagnostic
 
     error_type = type(exc).__name__
     lowered = f"{error_type} {exc}".lower()
@@ -274,11 +275,30 @@ def _exception_diagnostic(
         category, retry_eligible = "service", True
     else:
         category, retry_eligible = "internal", False
-    message = sanitize_exception_message(
-        str(exc),
-        source_values=(source_content,),
+    service_code = next(
+        (
+            str(value)
+            for value in (
+                getattr(exc, "status_code", None),
+                getattr(exc, "code", None),
+            )
+            if value not in (None, "")
+        ),
+        None,
     )
-    return category, message, retry_eligible
+    diagnostic = allowlisted_diagnostic(
+        category=category,
+        error_type=error_type,
+        service_code=service_code,
+    )
+    del source_content
+    return (
+        diagnostic["category"],
+        diagnostic["type"],
+        diagnostic.get("code"),
+        diagnostic["message"],
+        retry_eligible,
+    )
 
 
 def _checkpoint_attempt_fields(
@@ -312,18 +332,18 @@ def _checkpoint_attempt_fields(
             if "Budget" in str(result.error_type or "")
             else "internal"
         )
+        from fabric_kg_builder.release.redact import allowlisted_diagnostic
+
+        diagnostic = allowlisted_diagnostic(
+            category=result.exception_category or default_category,
+            error_type=result.error_type,
+            service_code=result.error_code,
+        )
         attempt.update(
             {
-                "exception_category": (
-                    result.exception_category or default_category
-                ),
-                "exception_type": (
-                    result.error_type or "EnrichmentError"
-                ),
-                "exception_message": (
-                    result.error_message
-                    or "No safe exception details available."
-                ),
+                "exception_category": diagnostic["category"],
+                "exception_type": diagnostic["type"],
+                "exception_message": diagnostic["message"],
                 "retry_eligible": (
                     bool(result.retry_eligible)
                     if result.retry_eligible is not None
@@ -331,6 +351,8 @@ def _checkpoint_attempt_fields(
                 ),
             }
         )
+        if "code" in diagnostic:
+            attempt["exception_code"] = diagnostic["code"]
     return {
         "input_hash": item.input_hash,
         "ordinal": item.ordinal,
@@ -1226,6 +1248,147 @@ def _new_checkpoint(
     }
 
 
+_CHECKPOINT_WORK_UNIT_FIELDS = frozenset({
+    "attempt_count",
+    "attempted_at",
+    "attempts",
+    "child_work_unit_keys",
+    "completed_at",
+    "error_code",
+    "error_message",
+    "error_type",
+    "exception_category",
+    "execution_identity_hash",
+    "group_key",
+    "input_hash",
+    "ordinal",
+    "parent_work_unit_key",
+    "receipt",
+    "receipt_sha256",
+    "retry_eligible",
+    "semantic_contract_hash",
+    "source_end",
+    "source_file_id",
+    "source_start",
+    "split_at",
+    "split_depth",
+    "split_policy",
+    "status",
+    "work_unit_key",
+})
+_CHECKPOINT_ATTEMPT_FIELDS = frozenset({
+    "attempt",
+    "attempted_at",
+    "exception_code",
+    "exception_category",
+    "exception_message",
+    "exception_type",
+    "execution_identity_hash",
+    "group_key",
+    "retry_eligible",
+    "semantic_contract_hash",
+    "source_file_id",
+    "status",
+    "work_unit_key",
+})
+
+
+def _sanitize_checkpoint_attempt(attempt: Any) -> dict[str, Any]:
+    from fabric_kg_builder.release.redact import allowlisted_diagnostic
+
+    if not isinstance(attempt, dict):
+        return {}
+    safe = {
+        key: value
+        for key, value in attempt.items()
+        if key in _CHECKPOINT_ATTEMPT_FIELDS
+    }
+    if safe.get("status") != "succeeded":
+        diagnostic = allowlisted_diagnostic(
+            category=safe.get("exception_category"),
+            error_type=safe.get("exception_type"),
+            service_code=safe.get("exception_code"),
+        )
+        safe["exception_category"] = diagnostic["category"]
+        safe["exception_type"] = diagnostic["type"]
+        safe["exception_message"] = diagnostic["message"]
+        if "code" in diagnostic:
+            safe["exception_code"] = diagnostic["code"]
+        else:
+            safe.pop("exception_code", None)
+    else:
+        for key in (
+            "exception_category",
+            "exception_type",
+            "exception_message",
+            "exception_code",
+            "retry_eligible",
+        ):
+            safe.pop(key, None)
+    return safe
+
+
+def _sanitize_checkpoint_manifest(manifest: dict[str, Any]) -> None:
+    from fabric_kg_builder.release.redact import allowlisted_diagnostic
+
+    sanitized_work_units: dict[str, Any] = {}
+    for key, value in (manifest.get("work_units") or {}).items():
+        if not isinstance(value, dict):
+            continue
+        safe = {
+            field: item
+            for field, item in value.items()
+            if field in _CHECKPOINT_WORK_UNIT_FIELDS
+        }
+        safe["attempts"] = [
+            normalized
+            for attempt in safe.get("attempts", [])
+            if (normalized := _sanitize_checkpoint_attempt(attempt))
+        ]
+        if safe.get("status") not in {"succeeded", "split"}:
+            diagnostic = allowlisted_diagnostic(
+                category=safe.get("exception_category"),
+                error_type=safe.get("error_type"),
+                service_code=safe.get("error_code"),
+            )
+            safe["exception_category"] = diagnostic["category"]
+            safe["error_type"] = diagnostic["type"]
+            safe["error_message"] = diagnostic["message"]
+            if "code" in diagnostic:
+                safe["error_code"] = diagnostic["code"]
+            else:
+                safe.pop("error_code", None)
+        else:
+            for field in (
+                "exception_category",
+                "error_type",
+                "error_message",
+                "error_code",
+                "retry_eligible",
+            ):
+                safe.pop(field, None)
+        sanitized_work_units[str(key)] = safe
+    manifest["work_units"] = sanitized_work_units
+    manifest["groups"] = {
+        str(key): {
+            field: item
+            for field, item in value.items()
+            if field in {"status", "work_unit_keys"}
+        }
+        for key, value in (manifest.get("groups") or {}).items()
+        if isinstance(value, dict)
+    }
+    manifest["documents"] = {
+        str(key): {
+            field: item
+            for field, item in value.items()
+            if field in {"status", "work_unit_keys", "plan_hash"}
+        }
+        for key, value in (manifest.get("documents") or {}).items()
+        if isinstance(value, dict)
+    }
+
+
 def _load_checkpoint_manifest(
     checkpoint_path: Path,
     *,
@@ -1362,6 +1525,7 @@ def _save_checkpoint_manifest(
                     set(current.get("legacy_completed") or [])
                     | set(manifest.get("legacy_completed") or [])
                 )
+        _sanitize_checkpoint_manifest(manifest)
         _refresh_completed(manifest)
         _write_json_atomic(checkpoint_path, manifest)
 
@@ -1801,7 +1965,7 @@ def _execute_work_item(
             call_seconds=max(0.0, time.perf_counter() - started),
         )
     except CancelledError as exc:
-        category, message, retry_eligible = _exception_diagnostic(
+        category, error_type, error_code, message, retry_eligible = _exception_diagnostic(
             exc,
             source_content=item.source_content,
         )
@@ -1812,7 +1976,8 @@ def _execute_work_item(
             status="cancelled",
             input_hash=item.input_hash,
             exception_category=category,
-            error_type="CancelledError",
+            error_type=error_type,
+            error_code=error_code,
             error_message=message,
             retry_eligible=retry_eligible,
             queue_seconds=queue_seconds,
@@ -1821,7 +1986,7 @@ def _execute_work_item(
     except AssertionError:
         raise
     except Exception as exc:
-        category, message, retry_eligible = _exception_diagnostic(
+        category, error_type, error_code, message, retry_eligible = _exception_diagnostic(
             exc,
             source_content=item.source_content,
         )
@@ -1831,7 +1996,7 @@ def _execute_work_item(
             item.source_file_id,
             item.work_unit_key,
             category,
-            type(exc).__name__,
+            error_type,
             retry_eligible,
             message,
         )
@@ -1842,7 +2007,8 @@ def _execute_work_item(
             status="failed",
             input_hash=item.input_hash,
             exception_category=category,
-            error_type=type(exc).__name__,
+            error_type=error_type,
+            error_code=error_code,
             error_message=message,
             retry_eligible=retry_eligible,
             queue_seconds=queue_seconds,
@@ -2070,6 +2236,18 @@ def _run_schema2_work_items(
         item: EnrichmentWorkItem,
         result: EnrichmentWorkResult,
     ) -> list[EnrichmentWorkResult]:
+        from fabric_kg_builder.release.redact import allowlisted_diagnostic
+
+        default_category = (
+            "validation"
+            if "Budget" in str(result.error_type or "")
+            else "internal"
+        )
+        diagnostic = allowlisted_diagnostic(
+            category=result.exception_category or default_category,
+            error_type=result.error_type,
+            service_code=result.error_code,
+        )
         common_state = _checkpoint_attempt_fields(
             item,
             result,
@@ -2078,19 +2256,9 @@ def _run_schema2_work_items(
         manifest["work_units"][item.work_unit_key] = {
             **common_state,
             "status": result.status,
-            "exception_category": (
-                result.exception_category
-                or (
-                    "validation"
-                    if "Budget" in str(result.error_type or "")
-                    else "internal"
-                )
-            ),
-            "error_type": result.error_type or "EnrichmentError",
-            "error_message": (
-                result.error_message
-                or "No safe exception details available."
-            ),
+            "exception_category": diagnostic["category"],
+            "error_type": diagnostic["type"],
+            "error_message": diagnostic["message"],
             "retry_eligible": (
                 bool(result.retry_eligible)
                 if result.retry_eligible is not None
@@ -2098,6 +2266,10 @@ def _run_schema2_work_items(
             ),
             "attempted_at": datetime.now(timezone.utc).isoformat(),
         }
+        if "code" in diagnostic:
+            manifest["work_units"][item.work_unit_key]["error_code"] = (
+                diagnostic["code"]
+            )
         if result.status == "cancelled":
             metrics.cancelled += 1
         else:
@@ -2309,7 +2481,7 @@ def _run_work_items(
     def _invoke(item: EnrichmentWorkItem) -> EnrichmentWorkResult:
         nonlocal active_calls
         if effective_cancel_event.is_set():
-            category, message, retry_eligible = _exception_diagnostic(
+            category, error_type, error_code, message, retry_eligible = _exception_diagnostic(
                 CancelledError(),
                 source_content=item.source_content,
             )
@@ -2320,7 +2492,8 @@ def _run_work_items(
                 status="cancelled",
                 input_hash=item.input_hash,
                 exception_category=category,
-                error_type="CancelledError",
+                error_type=error_type,
+                error_code=error_code,
                 error_message=message,
                 retry_eligible=retry_eligible,
             )
@@ -2346,6 +2519,8 @@ def _run_work_items(
     item_by_key = {item.work_unit_key: item for item in items}
 
     def _persist_result(result: EnrichmentWorkResult) -> None:
+        from fabric_kg_builder.release.redact import allowlisted_diagnostic
+
         item = item_by_key[result.work_unit_key]
         previous = manifest["work_units"].get(item.work_unit_key, {})
         previous_attempts = (
@@ -2370,21 +2545,21 @@ def _run_work_items(
             "execution_identity_hash": item.execution_identity_hash,
         }
         if result.status != "succeeded":
+            diagnostic = allowlisted_diagnostic(
+                category=result.exception_category,
+                error_type=result.error_type,
+                service_code=result.error_code,
+            )
             attempt.update(
                 {
-                    "exception_category": (
-                        result.exception_category or "internal"
-                    ),
-                    "exception_type": (
-                        result.error_type or "EnrichmentError"
-                    ),
-                    "exception_message": (
-                        result.error_message
-                        or "No safe exception details available."
-                    ),
+                    "exception_category": diagnostic["category"],
+                    "exception_type": diagnostic["type"],
+                    "exception_message": diagnostic["message"],
                     "retry_eligible": bool(result.retry_eligible),
                 }
             )
+            if "code" in diagnostic:
+                attempt["exception_code"] = diagnostic["code"]
         attempts = (previous_attempts + [attempt])[-_MAX_ATTEMPT_HISTORY:]
         common_state = {
             "input_hash": item.input_hash,
@@ -2418,14 +2593,9 @@ def _run_work_items(
             manifest["work_units"][item.work_unit_key] = {
                 **common_state,
                 "status": "cancelled",
-                "exception_category": (
-                    result.exception_category or "cancellation"
-                ),
-                "error_type": result.error_type or "CancelledError",
-                "error_message": (
-                    result.error_message
-                    or "No safe exception details available."
-                ),
+                "exception_category": diagnostic["category"],
+                "error_type": diagnostic["type"],
+                "error_message": diagnostic["message"],
                 "retry_eligible": bool(result.retry_eligible),
                 "attempted_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -2434,18 +2604,17 @@ def _run_work_items(
             manifest["work_units"][item.work_unit_key] = {
                 **common_state,
                 "status": "failed",
-                "exception_category": (
-                    result.exception_category or "internal"
-                ),
-                "error_type": result.error_type or "EnrichmentError",
-                "error_message": (
-                    result.error_message
-                    or "No safe exception details available."
-                ),
+                "exception_category": diagnostic["category"],
+                "error_type": diagnostic["type"],
+                "error_message": diagnostic["message"],
                 "retry_eligible": bool(result.retry_eligible),
                 "attempted_at": datetime.now(timezone.utc).isoformat(),
             }
             metrics.failed += 1
+        if result.status != "succeeded" and "code" in diagnostic:
+            manifest["work_units"][item.work_unit_key]["error_code"] = (
+                diagnostic["code"]
+            )
         results.append(result)
         _save_checkpoint_manifest(checkpoint_path, manifest)
 
@@ -2471,7 +2640,7 @@ def _run_work_items(
                 except AssertionError:
                     raise
                 except Exception as exc:
-                    category, message, retry_eligible = _exception_diagnostic(
+                    category, error_type, error_code, message, retry_eligible = _exception_diagnostic(
                         exc,
                         source_content=item.source_content,
                     )
@@ -2482,7 +2651,8 @@ def _run_work_items(
                         status="failed",
                         input_hash=item.input_hash,
                         exception_category=category,
-                        error_type=type(exc).__name__,
+                        error_type=error_type,
+                        error_code=error_code,
                         error_message=message,
                         retry_eligible=retry_eligible,
                     )
@@ -2507,7 +2677,7 @@ def _run_work_items(
                 try:
                     result = future.result()
                 except BaseException as exc:
-                    category, message, retry_eligible = _exception_diagnostic(
+                    category, error_type, error_code, message, retry_eligible = _exception_diagnostic(
                         exc,
                         source_content=item.source_content,
                     )
@@ -2525,7 +2695,8 @@ def _run_work_items(
                         ),
                         input_hash=item.input_hash,
                         exception_category=category,
-                        error_type=type(exc).__name__,
+                        error_type=error_type,
+                        error_code=error_code,
                         error_message=message,
                         retry_eligible=retry_eligible,
                     )

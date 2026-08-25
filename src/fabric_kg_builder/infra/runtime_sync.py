@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from .schema import InfraManifest
+from .schema import ResourceMode
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -65,6 +66,43 @@ def sync_runtime_configuration(
     agent_metadata_path: Path,
 ) -> dict[str, str]:
     """Write non-secret Azure/Fabric outputs to both runtime configuration files."""
+    required_connected_outputs: list[tuple[str, tuple[str, ...]]] = []
+    if manifest.resources.storage.mode == ResourceMode.CONNECT:
+        required_connected_outputs.append(("storage", ("blobEndpoint",)))
+    if manifest.resources.document_intelligence.mode == ResourceMode.CONNECT:
+        required_connected_outputs.append(
+            ("document_intelligence", ("documentIntelligenceEndpoint",))
+        )
+    if manifest.resources.foundry.mode == ResourceMode.CONNECT:
+        required_connected_outputs.append(
+            (
+                "foundry",
+                (
+                    "foundryEndpoint",
+                    "foundryOpenAIEndpoint",
+                    "foundryProjectEndpoint",
+                ),
+            )
+        )
+    if manifest.resources.search.mode == ResourceMode.CONNECT:
+        required_connected_outputs.append(("search", ("searchEndpoint",)))
+    if manifest.resources.container_registry.mode == ResourceMode.CONNECT:
+        required_connected_outputs.append(
+            ("container_registry", ("containerRegistryLoginServer",))
+        )
+    for resource_name, keys in required_connected_outputs:
+        missing = [
+            key
+            for key in keys
+            if not isinstance(outputs.get(key), str)
+            or not str(outputs.get(key)).strip()
+        ]
+        if missing:
+            raise ValueError(
+                f"Connected {resource_name} runtime outputs are missing "
+                f"authoritative ARM values: {', '.join(missing)}."
+            )
+
     fabric_config = _load_json(fabric_environment_path)
     fabric = fabric_config.setdefault("fabric", {})
     search = fabric_config.setdefault("ai_search", {})
@@ -177,11 +215,13 @@ def sync_runtime_configuration(
     _set_if_present(env_config, "resourceGroup", manifest.azure.resource_group.name)
 
     acr = env_config.setdefault("acr", {})
-    login_server = (
-        outputs.get("containerRegistryLoginServer")
-        or os.environ.get("ACR_LOGIN_SERVER")
-        or acr.get("loginServer")
-    )
+    login_server = outputs.get("containerRegistryLoginServer")
+    if manifest.resources.container_registry.mode != ResourceMode.CONNECT:
+        login_server = (
+            login_server
+            or os.environ.get("ACR_LOGIN_SERVER")
+            or acr.get("loginServer")
+        )
     _set_if_present(acr, "loginServer", login_server)
     acr.setdefault("repository", "fabric-kg")
 

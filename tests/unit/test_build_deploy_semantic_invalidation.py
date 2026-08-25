@@ -23,7 +23,50 @@ _RunState = _MODULE._RunState
 _input_fingerprint = _MODULE._input_fingerprint
 _STAGE_DEPENDENCIES = _MODULE._STAGE_DEPENDENCIES
 _approve_schema2_live_plan = _MODULE._approve_schema2_live_plan
+_build_resolved_mutation_snapshot = _MODULE._build_resolved_mutation_snapshot
 BuildDeployError = _MODULE.BuildDeployError
+
+
+def _mutation_authority(
+    **overrides,
+) -> tuple[dict, str]:
+    values = {
+        "infrastructure_manifest": {
+            "azure": {
+                "subscription_id": "sub-1",
+                "resource_group": {"name": "rg-1"},
+            },
+            "fabric": {
+                "workspace": {"item_id": "workspace-1"},
+                "lakehouse": {"item_id": "lakehouse-1"},
+            },
+        },
+        "infrastructure_plan": {
+            "items": [{"action": "adopt", "resource_name": "search-1"}]
+        },
+        "infrastructure_baseline_state": {"environment": "test"},
+        "imported_outputs": {
+            "value": {
+                "searchEndpoint": "https://search.example.test",
+                "fabricWorkspaceId": "workspace-1",
+            }
+        },
+        "authoritative_arm_outputs": {
+            "searchEndpoint": "https://search.example.test"
+        },
+        "deployment_manifest": {
+            "value": {"workspace_id": "workspace-1"}
+        },
+        "densify_configuration": {
+            "value": {"top_k": 3, "relationship_types": ["related_to"]}
+        },
+        "enabled_stages": ["deploy_lakehouse", "deploy_serving"],
+        "behavior_flags": {"deploy_serving": True, "provision": False},
+        "package_version": "0.2.4",
+        "implementation_fingerprint": "sha256:" + "d" * 64,
+    }
+    values.update(overrides)
+    return _build_resolved_mutation_snapshot(**values)
 
 
 def test_input_fingerprint_changes_with_projection_and_plan(tmp_path: Path) -> None:
@@ -105,6 +148,37 @@ def test_legacy_stage_without_fingerprint_is_conservatively_invalidated(
         resume=True,
     )
     assert calls == ["first", "second"]
+
+
+def test_before_start_rejection_does_not_mutate_reviewed_run_state(
+    tmp_path: Path,
+) -> None:
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    state.complete(dry_run=True)
+
+    with pytest.raises(BuildDeployError, match="authority drift"):
+        state.execute(
+            "infrastructure",
+            lambda: pytest.fail("live action must not run"),
+            resume=True,
+            before_start=lambda: (_ for _ in ()).throw(
+                BuildDeployError("authority drift")
+            ),
+        )
+
+    persisted = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=True,
+    )
+    assert persisted.data["status"] == "planned"
+    assert "infrastructure" not in persisted.data["stages"]
 
 
 def test_semantic_change_invalidates_all_downstream_artifact_stages(
@@ -517,12 +591,19 @@ def test_approved_schema2_plan_remains_resumable_after_failure(
     state.data["reviewed_semantic_baseline_fingerprint"] = (
         baseline_fingerprint
     )
+    authority, authority_hash = _mutation_authority()
+    state.data["resolved_mutation_authority"] = authority
+    state.data["resolved_mutation_authority_hash"] = authority_hash
     state.complete(dry_run=True)
+    state.data["status"] = "running"
+    state.save()
 
     _approve_schema2_live_plan(
         state,
         plan_fingerprint=plan_fingerprint,
         managed_baseline_fingerprint=baseline_fingerprint,
+        mutation_authority_snapshot=authority,
+        mutation_authority_hash=authority_hash,
     )
     assert state.data["approved_plan_fingerprint"] == plan_fingerprint
 
@@ -533,6 +614,8 @@ def test_approved_schema2_plan_remains_resumable_after_failure(
             state,
             plan_fingerprint=plan_fingerprint,
             managed_baseline_fingerprint="sha256:" + "c" * 64,
+            mutation_authority_snapshot=authority,
+            mutation_authority_hash=authority_hash,
         )
 
     state.data["stages"]["record_semantic_baseline"] = {
@@ -545,6 +628,8 @@ def test_approved_schema2_plan_remains_resumable_after_failure(
         state,
         plan_fingerprint=plan_fingerprint,
         managed_baseline_fingerprint="sha256:" + "c" * 64,
+        mutation_authority_snapshot=authority,
+        mutation_authority_hash=authority_hash,
     )
 
 
@@ -578,6 +663,9 @@ def test_new_dry_run_can_review_contract_change_after_recorded_baseline(
     )
     state.data["plan_fingerprint"] = new_plan
     state.data["reviewed_semantic_baseline_fingerprint"] = old_baseline
+    authority, authority_hash = _mutation_authority()
+    state.data["resolved_mutation_authority"] = authority
+    state.data["resolved_mutation_authority_hash"] = authority_hash
     state.data.pop("approved_plan_fingerprint")
     state.complete(dry_run=True)
 
@@ -585,9 +673,131 @@ def test_new_dry_run_can_review_contract_change_after_recorded_baseline(
         state,
         plan_fingerprint=new_plan,
         managed_baseline_fingerprint=old_baseline,
+        mutation_authority_snapshot=authority,
+        mutation_authority_hash=authority_hash,
     )
 
     assert state.data["approved_plan_fingerprint"] == new_plan
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        (
+            "imported_outputs",
+            {"value": {"fabricWorkspaceId": "workspace-2"}},
+        ),
+        (
+            "authoritative_arm_outputs",
+            {"searchEndpoint": "https://changed.example.test"},
+        ),
+        (
+            "densify_configuration",
+            {"value": {"top_k": 5, "relationship_types": ["related_to"]}},
+        ),
+        ("implementation_fingerprint", "sha256:" + "e" * 64),
+    ],
+)
+def test_resolved_mutation_authority_detects_required_drift(
+    field: str,
+    changed,
+) -> None:
+    _, baseline_hash = _mutation_authority()
+    _, changed_hash = _mutation_authority(**{field: changed})
+    assert changed_hash != baseline_hash
+
+
+def test_resolved_mutation_authority_excludes_secrets_and_source_content() -> None:
+    snapshot, _ = _mutation_authority(
+        imported_outputs={
+            "value": {
+                "token": "unlabeled credential " + "A" * 32,
+                "source_text": "Customer Jane jane@example.test 123-45-6789",
+                "searchEndpoint": (
+                    "https://search.example.test?sig=credential-value"
+                ),
+            }
+        }
+    )
+    serialized = str(snapshot)
+    assert "A" * 32 not in serialized
+    assert "Customer Jane" not in serialized
+    assert "jane@example.test" not in serialized
+    assert "123-45-6789" not in serialized
+    assert "sig=credential-value" not in serialized
+    assert "[REDACTED_NON_AUTHORITY]" in serialized
+
+
+def test_approved_snapshot_retry_is_unchanged_after_partial_failure(
+    tmp_path: Path,
+) -> None:
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    plan = "sha256:" + "a" * 64
+    baseline = "sha256:" + "b" * 64
+    authority, authority_hash = _mutation_authority()
+    state.data.update({
+        "plan_fingerprint": plan,
+        "reviewed_semantic_baseline_fingerprint": baseline,
+        "resolved_mutation_authority": authority,
+        "resolved_mutation_authority_hash": authority_hash,
+    })
+    state.complete(dry_run=True)
+    _approve_schema2_live_plan(
+        state,
+        plan_fingerprint=plan,
+        managed_baseline_fingerprint=baseline,
+        mutation_authority_snapshot=authority,
+        mutation_authority_hash=authority_hash,
+    )
+    state.data["status"] = "failed"
+    state.save()
+    _approve_schema2_live_plan(
+        state,
+        plan_fingerprint=plan,
+        managed_baseline_fingerprint=baseline,
+        mutation_authority_snapshot=authority,
+        mutation_authority_hash=authority_hash,
+    )
+
+
+def test_approval_rejects_target_drift_without_auto_approving(
+    tmp_path: Path,
+) -> None:
+    state = _RunState(
+        tmp_path / "state.json",
+        run_id="run-1",
+        environment="test",
+        resume=False,
+    )
+    plan = "sha256:" + "a" * 64
+    baseline = "sha256:" + "b" * 64
+    authority, authority_hash = _mutation_authority()
+    drifted, drifted_hash = _mutation_authority(
+        authoritative_arm_outputs={
+            "searchEndpoint": "https://changed.example.test"
+        }
+    )
+    state.data.update({
+        "plan_fingerprint": plan,
+        "reviewed_semantic_baseline_fingerprint": baseline,
+        "resolved_mutation_authority": authority,
+        "resolved_mutation_authority_hash": authority_hash,
+    })
+    state.complete(dry_run=True)
+    with pytest.raises(BuildDeployError, match="authority drifted"):
+        _approve_schema2_live_plan(
+            state,
+            plan_fingerprint=plan,
+            managed_baseline_fingerprint=baseline,
+            mutation_authority_snapshot=drifted,
+            mutation_authority_hash=drifted_hash,
+        )
+    assert "approved_mutation_authority_hash" not in state.data
 
 
 def test_managed_baseline_write_does_not_invalidate_compatibility_stage(

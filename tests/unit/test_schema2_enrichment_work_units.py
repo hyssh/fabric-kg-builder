@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fabric_kg_builder.enrichment.orchestrator import (
     EnrichmentWorkItem,
+    _sanitize_checkpoint_manifest,
     _split_schema2_work_item,
     enrich_batch,
 )
@@ -147,7 +148,12 @@ class _FailureThenSuccessClient(_SingleClient):
             self.calls += 1
             raise ValueError(
                 f"Invalid source payload: {_SOURCE_TEXT}; "
-                f"api-key={'A' * 32}"
+                f"partial=LEFT marker; name=Jane Customer; "
+                f"email=jane.customer@example.test; ssn=123-45-6789; "
+                f"unlabeled=CredentialValue0123456789ABCDEF; "
+                f"api-key={'A' * 32}; "
+                f"url=https://service.example/path?sig=remote-secret; "
+                f"body=private response\x00fragment"
             )
         return super().complete_json(**kwargs)
 
@@ -450,10 +456,63 @@ def test_failure_diagnostics_are_actionable_redacted_and_retained_on_resume(
     assert failure["exception_category"] == "validation"
     assert failure["exception_type"] == "ValueError"
     assert failure["retry_eligible"] is True
-    assert "[REDACTED]" in failure["exception_message"]
+    assert failure["exception_message"] == (
+        "The enrichment result failed validation; review the contract and "
+        "retry metadata."
+    )
     assert _SOURCE_TEXT not in checkpoint_text
     assert "A" * 32 not in checkpoint_text
+    for canary in (
+        "LEFT marker",
+        "Jane Customer",
+        "jane.customer@example.test",
+        "123-45-6789",
+        "CredentialValue0123456789ABCDEF",
+        "sig=remote-secret",
+        "private response",
+    ):
+        assert canary not in checkpoint_text
+        assert canary not in caplog.text
     assert _SOURCE_TEXT not in caplog.text
     assert "A" * 32 not in caplog.text
     assert f"source={_SOURCE_FILE_ID}" in caplog.text
     assert "retry_eligible=True" in caplog.text
+
+
+def test_legacy_checkpoint_diagnostics_are_normalized_before_resave() -> None:
+    canary = "Jane jane@example.test 123-45-6789 secret response body"
+    manifest = {
+        "work_units": {
+            "src:test:pass:p2": {
+                "status": "failed",
+                "input_hash": "input:test",
+                "error_type": "CustomerSpecificFailure",
+                "error_message": canary,
+                "validation_payload": {"body": canary},
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "status": "failed",
+                        "exception_type": "CustomerSpecificFailure",
+                        "exception_message": canary,
+                        "raw_response": canary,
+                    }
+                ],
+            }
+        },
+        "groups": {},
+        "documents": {},
+    }
+
+    _sanitize_checkpoint_manifest(manifest)
+
+    serialized = json.dumps(manifest)
+    assert canary not in serialized
+    state = manifest["work_units"]["src:test:pass:p2"]
+    assert state["error_type"] == "EnrichmentInternalError"
+    assert state["attempts"][0]["exception_message"] == (
+        "The enrichment worker failed internally; inspect safe category and "
+        "retry metadata."
+    )
+    assert "validation_payload" not in state
+    assert "raw_response" not in state["attempts"][0]

@@ -26,7 +26,14 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from .runner import CommandRunner, CommandError
-from .schema import InfraPlan, InfraState, InfraManifest, PlanAction, ResourceMode
+from .schema import (
+    InfraManifest,
+    InfraPlan,
+    InfraState,
+    PlanAction,
+    PlanItem,
+    ResourceMode,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +699,33 @@ def _required_https_endpoint_from_paths(
     )
 
 
+def _required_registry_login_server(
+    payload: dict[str, Any],
+    *,
+    resource_id: str,
+) -> str:
+    value = _property_path(payload, ("properties", "loginServer"))
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"Connected resource '{resource_id}' is missing the required "
+            "registry host at 'properties.loginServer'."
+        )
+    host = value.strip()
+    parsed = urlsplit(f"//{host}")
+    if (
+        parsed.hostname != host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or any(character.isspace() for character in host)
+    ):
+        raise ValueError(
+            f"Connected resource '{resource_id}' has a malformed registry host "
+            "at 'properties.loginServer'."
+        )
+    return host
+
+
 def _arm_runtime_outputs(
     *,
     state_key: str,
@@ -751,31 +785,82 @@ def _arm_runtime_outputs(
                 path=("properties", "endpoint"),
             )
         }
+    if state_key == "Microsoft.ContainerRegistry/registries":
+        return {
+            "containerRegistryLoginServer": _required_registry_login_server(
+                payload,
+                resource_id=resource_id,
+            )
+        }
     return {}
 
 
-def _validate_and_record_azure_adoption(
+def _arm_authority_record(
+    *,
+    state_key: str,
+    resource_id: str,
+    resource_type: str,
+    payload: dict[str, Any],
+    runtime_outputs: dict[str, str],
+) -> dict[str, Any]:
+    """Select only mutation-relevant, non-secret ARM resource properties."""
+    record: dict[str, Any] = {
+        "resource_id": resource_id,
+        "state_key": state_key,
+        "resource_type": resource_type,
+        "reported_type": payload.get("type"),
+        "kind": payload.get("kind"),
+        "location": payload.get("location"),
+        "runtime_outputs": runtime_outputs,
+    }
+    sku = payload.get("sku")
+    if isinstance(sku, dict):
+        record["sku"] = {
+            key: sku.get(key)
+            for key in ("name", "tier", "capacity")
+            if sku.get(key) is not None
+        }
+    if state_key.startswith(
+        "Microsoft.CognitiveServices/accounts/deployments/"
+    ):
+        model = _property_path(payload, ("properties", "model"))
+        if not isinstance(model, dict) or not all(
+            isinstance(model.get(key), str) and model.get(key).strip()
+            for key in ("name", "version")
+        ):
+            raise ValueError(
+                f"Connected resource '{resource_id}' is missing authoritative "
+                "model name/version at 'properties.model'."
+            )
+        record["model"] = {
+            key: model.get(key)
+            for key in ("format", "name", "version")
+            if model.get(key) is not None
+        }
+    return record
+
+
+def _read_connected_azure_resource(
     runner: CommandRunner,
     manifest: InfraManifest,
-    item: Any,
-    state: InfraState,
-    build_root: Path,
-    connected_outputs: dict[str, str] | None = None,
-) -> InfraState:
+    *,
+    resource_type: str,
+    resource_name: str,
+) -> tuple[str, str, dict[str, str], dict[str, Any]]:
     adoption = _azure_adoptions(manifest).get(
-        (item.resource_type, item.resource_name)
+        (resource_type, resource_name)
     )
     if adoption is None:
         raise ValueError(
-            f"No connect configuration found for {item.resource_type}/"
-            f"{item.resource_name}."
+            f"No connect configuration found for {resource_type}/"
+            f"{resource_name}."
         )
     state_key, resource_id = adoption
-    if item.resource_type == "Microsoft.Resources/resourceGroups":
+    if resource_type == "Microsoft.Resources/resourceGroups":
         result = runner.run([
             "az", "group", "show",
             "--subscription", manifest.azure.subscription_id,
-            "--name", item.resource_name,
+            "--name", resource_name,
             "--output", "json",
         ])
     else:
@@ -787,27 +872,88 @@ def _validate_and_record_azure_adoption(
         ])
     if not result.succeeded:
         raise CommandError(
-            f"Cannot connect {item.resource_name}: {result.stderr}",
+            f"Cannot connect {resource_name}: {result.stderr}",
             result=result,
         )
-    if item.resource_type != "Microsoft.Resources/resourceGroups":
-        try:
-            payload = json.loads(result.stdout)
-            if not isinstance(payload, dict):
-                raise ValueError("response is not a JSON object")
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise CommandError(
-                f"Connected resource '{resource_id}' returned invalid JSON: {exc}",
-                result=result,
-            ) from exc
-        if connected_outputs is not None:
-            connected_outputs.update(
-                _arm_runtime_outputs(
-                    state_key=state_key,
-                    resource_id=resource_id,
-                    payload=payload,
-                )
+    try:
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("response is not a JSON object")
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise CommandError(
+            f"Connected resource '{resource_id}' returned invalid JSON: {exc}",
+            result=result,
+        ) from exc
+    actual_type = payload.get("type")
+    if (
+        isinstance(actual_type, str)
+        and actual_type.strip()
+        and actual_type.strip().lower() != resource_type.lower()
+    ):
+        raise ValueError(
+            f"Connected resource '{resource_id}' type mismatch: expected "
+            f"'{resource_type}', ARM returned '{actual_type}'."
+        )
+    outputs = (
+        {}
+        if resource_type == "Microsoft.Resources/resourceGroups"
+        else _arm_runtime_outputs(
+            state_key=state_key,
+            resource_id=resource_id,
+            payload=payload,
+        )
+    )
+    return state_key, resource_id, outputs, payload
+
+
+def resolve_connected_arm_authority(
+    manifest: InfraManifest,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    """Read every manifest-connected Azure resource without persisting state."""
+    outputs: dict[str, str] = {}
+    resources: list[dict[str, Any]] = []
+    for resource_type, resource_name in sorted(_azure_adoptions(manifest)):
+        state_key, resource_id, resource_outputs, payload = (
+            _read_connected_azure_resource(
+                runner,
+                manifest,
+                resource_type=resource_type,
+                resource_name=resource_name,
             )
+        )
+        outputs.update(resource_outputs)
+        resources.append(_arm_authority_record(
+            state_key=state_key,
+            resource_id=resource_id,
+            resource_type=resource_type,
+            payload=payload,
+            runtime_outputs=resource_outputs,
+        ))
+    return {
+        "resources": resources,
+        "runtime_outputs": outputs,
+    }
+
+
+def _validate_and_record_azure_adoption(
+    runner: CommandRunner,
+    manifest: InfraManifest,
+    item: Any,
+    state: InfraState,
+    build_root: Path,
+    connected_outputs: dict[str, str] | None = None,
+) -> InfraState:
+    state_key, resource_id, resource_outputs, _ = (
+        _read_connected_azure_resource(
+            runner,
+            manifest,
+            resource_type=item.resource_type,
+            resource_name=item.resource_name,
+        )
+    )
+    if connected_outputs is not None:
+        connected_outputs.update(resource_outputs)
     adopted = dict(state.adopted_resource_ids)
     adopted[state_key] = resource_id
     state = state.model_copy(update={"adopted_resource_ids": adopted})
@@ -1043,9 +1189,6 @@ def apply_plan(
         "last_operation_id": operation_id,
         "last_operation_status": "in_progress",
     })
-    # Retain last known authoritative values for NO_OP resources.  Successful
-    # ARM reads and Bicep deployments below replace values for actionable
-    # resources.
     flat_outputs: dict[str, Any] = load_outputs(
         build_root, manifest.environment
     )
@@ -1064,15 +1207,31 @@ def apply_plan(
     skipped = len(no_op_items)
     actionable_items = [i for i in plan.items if i.action != PlanAction.NO_OP]
     attempted = len(actionable_items)
+    adoption_map = _azure_adoptions(manifest)
+    azure_connected_items = [
+        item
+        for item in plan.items
+        if (item.resource_type, item.resource_name) in adoption_map
+    ]
+    planned_connected_keys = {
+        (item.resource_type, item.resource_name)
+        for item in azure_connected_items
+    }
+    for resource_type, resource_name in sorted(adoption_map):
+        state_key, _ = adoption_map[(resource_type, resource_name)]
+        if (
+            state_key == "Microsoft.ContainerRegistry/registries"
+            and (resource_type, resource_name) not in planned_connected_keys
+        ):
+            azure_connected_items.append(PlanItem(
+                resource_type=resource_type,
+                resource_name=resource_name,
+                action=PlanAction.NO_OP,
+            ))
     resource_group_items = [
         i for i in actionable_items
         if i.resource_type == "Microsoft.Resources/resourceGroups"
-    ]
-    azure_adopts = [
-        i for i in actionable_items
-        if not i.resource_type.startswith("Fabric/")
-        and i.resource_type != "Microsoft.Resources/resourceGroups"
-        and i.action == PlanAction.ADOPT
+        and (i.resource_type, i.resource_name) not in adoption_map
     ]
     azure_creates = [
         i for i in plan.items
@@ -1118,68 +1277,80 @@ def apply_plan(
             errors=errors,
         )
 
-    # --- Ensure or connect the resource group first ---
-    for item in resource_group_items:
+    # --- Refresh every connected Azure resource, including NO_OP resources ---
+    connected_endpoint_keys = {
+        "Microsoft.Storage/storageAccounts": {"blobEndpoint"},
+        "Microsoft.CognitiveServices/accounts/document-intelligence": {
+            "documentIntelligenceEndpoint"
+        },
+        "Microsoft.CognitiveServices/accounts/foundry": {
+            "foundryEndpoint",
+            "foundryOpenAIEndpoint",
+        },
+        "Microsoft.CognitiveServices/accounts/projects": {
+            "foundryProjectEndpoint"
+        },
+        "Microsoft.Search/searchServices": {"searchEndpoint"},
+        "Microsoft.ContainerRegistry/registries": {
+            "containerRegistryLoginServer"
+        },
+    }
+    for item in azure_connected_items:
+        state_key, _ = adoption_map[
+            (item.resource_type, item.resource_name)
+        ]
+        for output_key in connected_endpoint_keys.get(state_key, set()):
+            flat_outputs.pop(output_key, None)
         try:
-            if item.action == PlanAction.ADOPT:
-                state = _validate_and_record_azure_adoption(
-                    runner,
-                    manifest,
-                    item,
-                    state,
-                    build_root,
-                    connected_outputs,
-                )
-            else:
-                tags = [
-                    f"{key}={value}"
-                    for key, value in manifest.azure.tags.items()
-                ]
-                command = [
-                    "az", "group", "create",
-                    "--subscription", manifest.azure.subscription_id,
-                    "--name", item.resource_name,
-                    "--location", item.location
-                    or manifest.azure.default_location,
-                    "--output", "json",
-                ]
-                if tags:
-                    command.extend(["--tags", *tags])
-                result = runner.run(command)
-                if not result.succeeded:
-                    raise CommandError(
-                        f"Resource group create failed: {result.stderr}",
-                        result=result,
-                    )
-                managed = dict(state.managed_resource_ids)
-                managed["Microsoft.Resources/resourceGroups"] = (
-                    _resource_group_id(manifest)
-                )
-                state = state.model_copy(
-                    update={"managed_resource_ids": managed}
-                )
-                save_state(state, build_root)
-            succeeded += 1
+            state = _validate_and_record_azure_adoption(
+                runner,
+                manifest,
+                item,
+                state,
+                build_root,
+                connected_outputs,
+            )
+            if item.action != PlanAction.NO_OP:
+                succeeded += 1
         except Exception as exc:
             failed += 1
             errors.append(f"{item.resource_name}: {exc}")
 
-    # --- Validate and persist connected Azure resources ---
-    if not errors:
-        for item in azure_adopts:
-            try:
-                state = _validate_and_record_azure_adoption(
-                    runner,
-                    manifest,
-                    item,
-                    state,
-                    build_root,
-                    connected_outputs,
+    # --- Ensure or create the resource group first ---
+    for item in resource_group_items:
+        try:
+            tags = [
+                f"{key}={value}"
+                for key, value in manifest.azure.tags.items()
+            ]
+            command = [
+                "az", "group", "create",
+                "--subscription", manifest.azure.subscription_id,
+                "--name", item.resource_name,
+                "--location", item.location
+                or manifest.azure.default_location,
+                "--output", "json",
+            ]
+            if tags:
+                command.extend(["--tags", *tags])
+            result = runner.run(command)
+            if not result.succeeded:
+                raise CommandError(
+                    f"Resource group create failed: {result.stderr}",
+                    result=result,
                 )
-                succeeded += 1
-            except Exception as exc:
-                failed += 1
-                errors.append(f"{item.resource_name}: {exc}")
+            managed = dict(state.managed_resource_ids)
+            managed["Microsoft.Resources/resourceGroups"] = (
+                _resource_group_id(manifest)
+            )
+            state = state.model_copy(
+                update={"managed_resource_ids": managed}
+            )
+            save_state(state, build_root)
+            succeeded += 1
+        except Exception as exc:
+            failed += 1
+            errors.append(f"{item.resource_name}: {exc}")
 
     # --- Full Bicep deployment for Azure resources ---
     raw_outputs: dict = {}
