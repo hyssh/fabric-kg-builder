@@ -117,6 +117,24 @@ def _replace_manifest_entry(
     )
 
 
+def _manifest_with_entries(
+    manifest: ArtifactManifest,
+    entries: tuple,
+) -> ArtifactManifest:
+    ordered = tuple(sorted(entries, key=lambda entry: entry.artifact_id))
+    values = {
+        "identity": manifest.identity,
+        "artifact_manifest_id": manifest.artifact_manifest_id,
+        "entries": ordered,
+        "total_row_count": sum(entry.row_count or 0 for entry in ordered),
+        "total_byte_count": sum(entry.byte_count for entry in ordered),
+    }
+    return ArtifactManifest(
+        **values,
+        manifest_hash=canonical_sha256(values),
+    )
+
+
 def _rewrite_l4_artifact(
     result,
     *,
@@ -795,6 +813,7 @@ def test_schema2_source_requires_exact_l4_accepted_versions(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=result.output_manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -830,6 +849,7 @@ def test_schema2_source_rejects_cross_projection_inconsistency(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -1025,6 +1045,7 @@ def test_schema2_source_derives_asserted_membership_from_audit_rows(
             projection=serving,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -1116,6 +1137,7 @@ def test_schema2_source_rejects_resealed_serving_lineage_mismatch(
             projection=serving,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -1151,6 +1173,7 @@ def test_schema2_source_rejects_equivalence_authority_mismatch(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -1203,6 +1226,7 @@ def test_schema2_source_requires_deterministic_output_manifest_lineage(
                 projection=result.serving_projection,
                 receipt=receipt,
                 manifest=manifest,
+                input_manifest=result.source.output_manifest,
             )
 
 
@@ -1267,6 +1291,7 @@ def test_schema2_source_requires_l3_manifest_in_identity_ancestry(
             projection=serving,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -1307,6 +1332,7 @@ def test_schema2_source_rejects_resealed_invalid_parquet_row_hash(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -1918,6 +1944,128 @@ def test_l4_persists_and_reads_back_required_member_equivalence(
 
 
 @pytest.mark.unit
+def test_sealed_source_requires_receipt_anchored_l3_input_manifest(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    entry = next(
+        item
+        for item in result.source.output_manifest.entries
+        if item.contract_kind == "c0.required_member_manifest"
+    )
+    wrong_input = _replace_manifest_entry(
+        result.source.output_manifest,
+        entry.artifact_id,
+        content_hash="f" * 64,
+    )
+
+    with pytest.raises(ValueError, match="input manifest differs"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=result.receipt,
+            manifest=result.output_manifest,
+            input_manifest=wrong_input,
+        )
+
+
+@pytest.mark.unit
+def test_sealed_source_requires_exact_l3_required_member_entries(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = result.sealed_source()
+    input_manifest = result.source.output_manifest
+    required_entry = next(
+        entry
+        for entry in input_manifest.entries
+        if entry.contract_kind == "c0.required_member_manifest"
+    )
+    wrong = _replace_manifest_entry(
+        input_manifest,
+        required_entry.artifact_id,
+        content_hash="f" * 64,
+    )
+    missing = _manifest_with_entries(
+        input_manifest,
+        tuple(
+            entry
+            for entry in input_manifest.entries
+            if entry.artifact_id != required_entry.artifact_id
+        ),
+    )
+    extra_entry = required_entry.model_copy(update={
+        "artifact_id": "required-member-manifest:extra",
+    })
+    extra = _manifest_with_entries(
+        input_manifest,
+        (*input_manifest.entries, extra_entry),
+    )
+    tables = {
+        name: tuple(
+            pq.read_table(result.run_root / f"{name}.parquet").to_pylist()
+        )
+        for name in (
+            "semantic_required_member_manifests",
+            "semantic_required_members",
+        )
+    }
+
+    for changed in (wrong, missing, extra):
+        object.__setattr__(source, "input_manifest", changed)
+        with pytest.raises(ValueError, match="anchored L3 manifest"):
+            source._validate_projection_equivalences(
+                result.serving_projection,
+                result.projection_equivalences,
+                tables["semantic_required_member_manifests"],
+                tables["semantic_required_members"],
+            )
+
+
+@pytest.mark.unit
+def test_sealed_source_rejects_duplicate_l3_manifest_entry(
+    tmp_path: Path,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    input_manifest = result.source.output_manifest
+    required_entry = next(
+        entry
+        for entry in input_manifest.entries
+        if entry.contract_kind == "c0.required_member_manifest"
+    )
+    duplicate = ArtifactManifest.model_construct(
+        identity=input_manifest.identity,
+        artifact_manifest_id=input_manifest.artifact_manifest_id,
+        entries=(*input_manifest.entries, required_entry),
+        total_row_count=(
+            input_manifest.total_row_count + (required_entry.row_count or 0)
+        ),
+        total_byte_count=(
+            input_manifest.total_byte_count + required_entry.byte_count
+        ),
+        manifest_hash=input_manifest.manifest_hash,
+    )
+
+    with pytest.raises(ValueError, match="canonical L3 input manifest"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=result.receipt,
+            manifest=result.output_manifest,
+            input_manifest=duplicate,
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("field", "replacement"),
     (
@@ -1962,6 +2110,7 @@ def test_sealed_source_rejects_resealed_required_member_field_drift(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -2011,13 +2160,14 @@ def test_sealed_source_rejects_resealed_required_member_aggregate_drift(
 
     with pytest.raises(
         ValueError,
-        match="carried C0 authority",
+        match="carried C0 authority|anchored L3 manifest",
     ):
         SealedL4ServingSource(
             root=result.run_root,
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -2060,11 +2210,28 @@ def test_sealed_source_binds_recomputed_member_hashes_to_l3_manifest_hash(
         required_role_ids=carried.required_role_ids,
         members=members,
     )
+    forged_values = carried.model_dump(
+        mode="python",
+        exclude={"manifest_hash"},
+    )
+    forged_values.update({
+        "members": members,
+        "member_set_hash": member_set_hash,
+        "ordered_member_tuple_hash": ordered_tuple_hash,
+        "authoritative_collection_hash": collection_hash,
+    })
+    semantic_values = dict(forged_values)
+    semantic_values.pop("sealed_at_utc")
+    forged_manifest = RequiredMemberManifestV1_1(
+        **forged_values,
+        manifest_hash=canonical_sha256(semantic_values),
+    )
     member_rows[0].update({
         **forged_member.model_dump(mode="json"),
         "member_set_hash": member_set_hash,
         "ordered_member_tuple_hash": ordered_tuple_hash,
         "authoritative_collection_hash": collection_hash,
+        "manifest_hash": forged_manifest.manifest_hash,
     })
     member_rows[0]["row_hash"] = canonical_sha256({
         key: value
@@ -2075,6 +2242,7 @@ def test_sealed_source_binds_recomputed_member_hashes_to_l3_manifest_hash(
         "member_set_hash": member_set_hash,
         "ordered_member_tuple_hash": ordered_tuple_hash,
         "authoritative_collection_hash": collection_hash,
+        "manifest_hash": forged_manifest.manifest_hash,
     })
     manifest_rows[0]["row_hash"] = canonical_sha256({
         key: value
@@ -2087,12 +2255,13 @@ def test_sealed_source_binds_recomputed_member_hashes_to_l3_manifest_hash(
         member_rows,
     )
 
-    with pytest.raises(ValueError, match="carried C0 authority"):
+    with pytest.raises(ValueError, match="anchored L3 manifest entry"):
         SealedL4ServingSource(
             root=result.run_root,
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -2132,6 +2301,7 @@ def test_sealed_source_rejects_resealed_required_member_index_swap(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 
@@ -2174,6 +2344,7 @@ def test_sealed_source_rejects_resealed_noncanonical_required_roles(
             projection=result.serving_projection,
             receipt=receipt,
             manifest=manifest,
+            input_manifest=result.source.output_manifest,
         )
 
 

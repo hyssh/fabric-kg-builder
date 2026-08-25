@@ -141,6 +141,7 @@ class L4StageResult:
             projection=self.serving_projection,
             receipt=self.receipt,
             manifest=self.output_manifest,
+            input_manifest=self.source.output_manifest,
         )
 
 

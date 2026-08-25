@@ -198,8 +198,27 @@ class SealedL4ServingSource:
     projection: SemanticServingProjection
     receipt: StageReceipt
     manifest: ArtifactManifest
+    input_manifest: ArtifactManifest
 
     def __post_init__(self) -> None:
+        try:
+            canonical_input_manifest = ArtifactManifest.model_validate(
+                self.input_manifest.model_dump(mode="python")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "schema-2 serving requires a canonical L3 input manifest"
+            ) from exc
+        if (
+            canonical_input_manifest != self.input_manifest
+            or self.input_manifest.artifact_manifest_id
+            != self.receipt.input_manifest_id
+            or self.input_manifest.manifest_hash
+            != self.receipt.input_manifest_hash
+        ):
+            raise ValueError(
+                "L4 receipt input manifest differs from supplied L3 authority"
+            )
         if (
             self.receipt.stage_id != "L4"
             or self.receipt.stage_name != "schema2-audit-serving-projection"
@@ -851,6 +870,22 @@ class SealedL4ServingSource:
             or set(proof_by_manifest) != set(manifest_by_id)
         ):
             raise ValueError("required-member equivalence proof set is incomplete")
+        source_entries = tuple(
+            entry
+            for entry in self.input_manifest.entries
+            if entry.contract_kind == "c0.required_member_manifest"
+        )
+        source_entry_by_id = {
+            entry.artifact_id: entry for entry in source_entries
+        }
+        if (
+            len(source_entry_by_id) != len(source_entries)
+            or set(source_entry_by_id) != set(manifest_by_id)
+        ):
+            raise ValueError(
+                "projected required-member authority does not exactly match "
+                "the anchored L3 manifest"
+            )
         schema_hash = canonical_sha256(
             RequiredMemberManifestV1_1.model_json_schema()
         )
@@ -891,6 +926,19 @@ class SealedL4ServingSource:
                 members_by_manifest.pop(manifest_id, []),
                 key=lambda row: int(row["manifest_member_index"]),
             )
+            source_entry = source_entry_by_id[manifest_id]
+            if (
+                source_entry.contract_version != "1.1.0"
+                or source_entry.schema_hash != schema_hash
+                or source_entry.content_hash != manifest_row["manifest_hash"]
+                or source_entry.row_count != len(members)
+                or source_entry.canonical_id_set_hash
+                != manifest_row["member_set_hash"]
+            ):
+                raise ValueError(
+                    f"projected RequiredMemberManifest {manifest_id} differs "
+                    "from the anchored L3 manifest entry"
+                )
             if (
                 int(manifest_row["member_count"]) != len(members)
                 or manifest_row["domain_contract_hash"]
@@ -965,19 +1013,12 @@ class SealedL4ServingSource:
                     raise ValueError(
                         "required-member fields are not in canonical C0 form"
                     )
-                manifest_identity = self.receipt.identity.model_dump(
+                manifest_identity = self.input_manifest.identity.model_dump(
                     mode="python"
                 )
                 manifest_identity.update({
                     "contract_kind": "c0.required_member_manifest",
                     "contract_version": "1.1.0",
-                    "semantic_contract_hash": None,
-                    "canonical_schema_version": "c0-core/1.0.0",
-                    "parent_artifact_ids": tuple(
-                        artifact_id
-                        for artifact_id in self.receipt.identity.parent_artifact_ids
-                        if artifact_id != self.receipt.input_manifest_id
-                    ),
                 })
                 validated_manifest = RequiredMemberManifestV1_1.model_validate({
                     "identity": manifest_identity,
