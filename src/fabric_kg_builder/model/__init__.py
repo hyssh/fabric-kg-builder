@@ -21,7 +21,12 @@ from .schemas import (
     VisualAssetRow,
     VisualRegionRow,
 )
-from .arrow_schemas import TABLE_SCHEMAS, DRAWING_TABLE_SCHEMAS, ALL_TABLE_SCHEMAS
+from .arrow_schemas import (
+    ALL_TABLE_SCHEMAS,
+    DRAWING_TABLE_SCHEMAS,
+    L4_PROJECTION_TABLE_SCHEMAS,
+    TABLE_SCHEMAS,
+)
 from .ids import (
     content_hash,
     make_chunk_id,
@@ -58,6 +63,7 @@ __all__ = [
     "TABLE_SCHEMAS",
     "DRAWING_TABLE_SCHEMAS",
     "ALL_TABLE_SCHEMAS",
+    "L4_PROJECTION_TABLE_SCHEMAS",
     # ID helpers
     "make_id",
     "content_hash",

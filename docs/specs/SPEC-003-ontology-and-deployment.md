@@ -1628,11 +1628,14 @@ Because each table is indexed as its **own AI Search document** (`chunk_type="ta
 
 ### 12.11 Schema-2.0 Semantic Publication Invariant
 
-For schema-2.0 projects, Ontology and Graph publication must bind only the sealed
-`semantic_entities` and `semantic_relationships` sources. The raw `entities` and
-`relationships` tables remain audit and lineage surfaces and are not valid
-fallbacks. Deployment must never broaden the accepted lifecycle state beyond
-compilation.
+For schema-2.0 projects, future Ontology and Graph publication must bind only
+the sealed L4 `semantic_asserted_entities`,
+`semantic_entity_type_assertions`, `semantic_asserted_relationships`,
+`semantic_asserted_properties`, `semantic_required_member_manifests`, and
+`semantic_required_members` sources. The raw `entities`, `relationships`, and
+legacy semantic aliases remain audit or schema-1 surfaces and are not valid
+schema-2 fallbacks. Compilation or deployment must never broaden the accepted
+lifecycle state beyond L4.
 
 The materialization plan records the semantic contract hash, source projection
 hash, expected row count, and exact source table for every bound type.
@@ -1653,7 +1656,9 @@ The accepted source for future schema-2.0 publication is a sealed
 existing semantic projection authority, not a replacement semantic model.
 Compilation and deployment may consume it only after its asserted-only
 membership, manifest hash, and canonical ID/row hashes validate. C0.Core does
-not activate this consumption path or any remote operation.
+not activate this consumption path or any remote operation. L4 is local-only
+and does not authorize product serving readiness: schema-2 readiness remains
+fail-closed until L5 persists and validates a publication receipt.
 
 ## 13. Revision History
 
