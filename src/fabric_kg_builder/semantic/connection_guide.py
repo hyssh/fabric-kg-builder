@@ -60,11 +60,15 @@ def build_ontology_search_connection_guide(build_dir: Path) -> str:
         "",
         "## Responsibility boundary",
         "",
+        "Fabric Ontology is the high-level noun/verb structure. Detailed evidence "
+        "quotes belong to the later Search index and are not embedded in Ontology "
+        "or Graph definitions.",
+        "",
         "| Surface | Role | Reliability rule |",
         "|---|---|---|",
         "| Fabric Ontology | Approved meaning, layered entity nouns, properties, and relationship verb semantics | Required to interpret structured concepts |",
         "| Fabric Graph | Persisted directed entity and relationship instances | Required for reliable structured query execution and proof of relationships |",
-        "| Azure AI Search | Detailed definitions, descriptions, passages, table text, and source quotations | Supplies supporting detail after Ontology/Graph resolution; it does not prove graph edges |",
+        "| Azure AI Search | Later detailed definitions, descriptions, passages, table text, and source quotations | Supplies supporting detail after Ontology/Graph resolution; it does not prove graph edges |",
         "",
         "## Ontology layers",
         "",
@@ -181,4 +185,3 @@ def build_ontology_search_connection_guide(build_dir: Path) -> str:
         "",
     ])
     return "\n".join(lines)
-

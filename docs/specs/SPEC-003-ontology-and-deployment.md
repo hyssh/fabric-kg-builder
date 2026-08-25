@@ -1660,6 +1660,59 @@ not activate this consumption path or any remote operation. L4 is local-only
 and does not authorize product serving readiness: schema-2 readiness remains
 fail-closed until L5 persists and validates a publication receipt.
 
+### 12.12 L5a Structured Publication
+
+L5a consumes only `SealedL4ServingSource`, including its receipt-anchored L3
+`ArtifactManifest`. It accepts no raw canonical aliases and performs no
+membership recomputation. Every publication crosswalk must exactly preserve the
+`RequiredMemberManifestV1_1` ID, contract version, schema hash, manifest hash,
+authoritative collection hash, and anchored L3 artifact-manifest ID/hash.
+
+L5a locally materializes deterministic Parquet tables and persisted definitions
+for Lakehouse/Parquet, Semantic Model source surfaces, Fabric Ontology, and
+Fabric Graph. Hierarchy is flattened explicitly in Ontology metadata because
+native Fabric inheritance is not assumed. Graph includes only crosswalk-approved
+relationship labels, endpoints, and physical tables. Search, agent synthesis,
+and runtime query activation are not part of L5a.
+
+The target lifecycle is bounded and batched: one pre-update inspection, one
+publication operation, and one persisted read-back per structured target.
+Publication receives file paths for already materialized definitions and
+Parquet rather than transient in-memory definitions. A successful update
+response is insufficient: the resource must exist after update and its version,
+definition fingerprint, table schema/count/ID-set/row fingerprints, authority,
+and access policy must all equal the compiled state. Inspection and publication
+use compare-and-swap state, and every mutation carries a per-attempt ownership
+token. Created resources are conditionally deleted and updated resources are
+conditionally restored after partial failure; either action is applied only
+while the ownership token still matches. Failed or blocked attempts cannot emit
+a successful L5 receipt.
+
+Every remote inspect, publish, read-back, cleanup, and restore returns uniform
+accounting metadata. L5a records calls, positive request/response bytes,
+retries, wait time, globally unique operation references, and remote error
+codes. Missing or malformed accounting fails closed. The derived worst-case
+state machine permits at most 20 calls: four stale-reuse read-backs, four
+inspections, four publications, four post-publication read-backs, and four
+rollback mutations. Ambiguous publication recovery can add one inspection, but
+that path does not perform the post-publication read-back phase and therefore
+does not exceed the same bound.
+
+Stable canonical IDs remain in reserved identity and endpoint columns.
+Crosswalk property/key columns are emitted as schema-only nullable columns
+because sealed L4 does not carry property owner/value data; L5a fails closed if
+an asserted property would require inventing those values.
+
+Checkpoint reuse is keyed by the exact L4 seals, target IDs, target definitions,
+crosswalks, access policy, governed assets, and L5a code version. Local artifact
+integrity and current target read-back are both required before reuse. The
+resulting `ProjectionEquivalence` records are persisted for all four structured
+targets and all required-member authorities. Each proof is manifest-specific:
+L5a groups the actual persisted carried manifest/member rows by exact
+`required_member_manifest_id`, derives deterministic manifest/member canonical
+IDs, and fingerprints the carried rows. It compares those read-back observations
+to the anchored L3 authority without redefining or recomputing L3 membership.
+
 ## 13. Revision History
 
 | Date | Author | Summary |
@@ -1671,6 +1724,7 @@ fail-closed until L5 persists and validates a publication receipt.
 | 2026-06-24T15:41:07.842-07:00 | McManus | §9 deployment mechanism reframed per Hyunsuk Shin decision: `fabric-cicd` is the REQUIRED PRIMARY tool for deploy-lakehouse, deploy-ontology, and deploy-search — not an optional "wrap both" choice; Fabric REST API demoted to fallback only (item-level granularity when fabric-cicd cannot perform the operation); `fabric-cicd` added as CLI prerequisite (`pip install fabric-cicd`), reference to `docs/REQUIREMENTS-001-cli-prerequisites.md`; deploy flow documented as compile → dist/ → fabric-cicd publish; FabricDeployer defaults to fabric-cicd; deploy-search corrected from *(optional)* to in-MVP throughout; dev Lakehouse name updated to `kg_lakehouse` (item ID `44444444-4444-4444-4444-444444444444`, workspace `11111111-1111-1111-1111-111111111111`); §9.1.1 mechanism table, §9.4 deploy-ontology steps, §9.7 deploy-lakehouse steps, §9.8 CI/CD pipeline updated; `if: ENABLE_AI_SEARCH` gate removed from deploy-search job |
 | 2026-06-24T21:46:59.576-07:00 | McManus | §12 bridge — §12.10 added: Table document-element nodes (element_type="table", content_html, blob_url) participate in the evidenced_by / shown_in bridge, enabling graph↔table integration and AI Search indexing of tables as independent documents (coordinator-tables-via-docintel.md, verified 2026-06-24). |
 | 2026-08-23 | Copilot | Added §12.11: schema-2.0 Ontology/Graph publication is semantic-only and requires compile/deploy/persisted hash and count equivalence. |
+| 2026-08-25 | Copilot | Added §12.12: isolated L5a structured publication over sealed L4, persisted-definition lifecycle, exact read-back equivalence, and explicit Search/L6/L7 exclusions. |
 
 ---
 

@@ -1263,10 +1263,24 @@ class SealedL4ServingSource:
         return self._validate_table_artifact(table_name)[0]
 
 
-def require_l5_publication_receipt(_source: SealedL4ServingSource) -> None:
-    """Keep schema-2 product readiness fail-closed until L5 persists publication."""
+def require_l5_publication_receipt(
+    source: SealedL4ServingSource,
+    result: object | None = None,
+    *,
+    client: object | None = None,
+) -> None:
+    """Require the narrow L5a receipt without activating later runtime layers."""
 
-    raise ValueError(
-        "schema-2 serving is not product-ready until an L5 persisted publication "
-        "receipt validates"
+    if result is None:
+        raise ValueError(
+            "schema-2 serving is not product-ready until an L5 persisted publication "
+            "receipt validates"
+        )
+    from fabric_kg_builder.serving.structured_publication import (  # noqa: PLC0415
+        L5aStageResult,
+        require_l5a_publication_receipt,
     )
+
+    if not isinstance(result, L5aStageResult):
+        raise ValueError("schema-2 serving requires an L5a structured publication")
+    require_l5a_publication_receipt(source, result, client=client)
