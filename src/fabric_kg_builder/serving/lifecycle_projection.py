@@ -107,6 +107,7 @@ class L4ProjectionError(ValueError):
 @dataclass(frozen=True)
 class L4ProjectionRows:
     audit_candidates: tuple[dict[str, Any], ...]
+    semantic_publication_authority: tuple[dict[str, Any], ...]
     semantic_asserted_entities: tuple[dict[str, Any], ...]
     semantic_entity_type_assertions: tuple[dict[str, Any], ...]
     semantic_asserted_relationships: tuple[dict[str, Any], ...]
@@ -1857,8 +1858,31 @@ def build_l4_projection(
         source.required_member_manifests
     )
     required_members = project_required_members(source.required_member_manifests)
+    domain_contract = source.inputs.domain_contract
+    relationship_payload = [
+        item.model_dump(mode="json")
+        for item in domain_contract.candidate_model.relationship_types
+    ]
+    graph_policy_payload = {
+        "reasoning_policy": domain_contract.reasoning_policy.model_dump(mode="json"),
+        "question_plans": [
+            item.model_dump(mode="json")
+            for item in domain_contract.question_plans
+        ],
+    }
+    publication_authority = (_seal_row({
+        "authority_id": "l4-publication-authority",
+        "domain_contract_json": canonical_json(domain_contract),
+        "domain_contract_hash": source.inputs.hierarchy.domain_contract_hash,
+        "hierarchy_hash": domain_contract.hierarchy_closure.hierarchy_hash,
+        "identity_policy_hash": domain_contract.identity_policy_hash,
+        "relationship_vocabulary_hash": canonical_sha256(relationship_payload),
+        "graph_policy_hash": canonical_sha256(graph_policy_payload),
+        "graph_max_hops": domain_contract.reasoning_policy.max_hops,
+    }),)
     rows = L4ProjectionRows(
         audit_candidates=audit_rows,
+        semantic_publication_authority=publication_authority,
         semantic_asserted_entities=entities,
         semantic_entity_type_assertions=types,
         semantic_asserted_relationships=relationships,
@@ -2270,6 +2294,7 @@ def run_l4(
             )
             row_ids = {
                 "audit_candidates": lambda row: row["input_candidate_id"],
+                "semantic_publication_authority": lambda row: row["authority_id"],
                 "semantic_asserted_entities": lambda row: row["entity_id"],
                 "semantic_entity_type_assertions": lambda row: (
                     f"{row['entity_id']}|{row['semantic_type_id']}"

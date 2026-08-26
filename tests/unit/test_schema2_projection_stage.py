@@ -368,6 +368,73 @@ def _rewrite_required_member_artifacts(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("domain_contract_json", "{}"),
+        ("domain_contract_hash", "f" * 64),
+        ("hierarchy_hash", "f" * 64),
+        ("identity_policy_hash", "f" * 64),
+        ("relationship_vocabulary_hash", "f" * 64),
+        ("graph_policy_hash", "f" * 64),
+        ("graph_max_hops", 1),
+    ),
+)
+def test_l4_rejects_resealed_publication_authority_tampering(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    result = run_l4(
+        _l3_with_sealed_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    table_name = "semantic_publication_authority"
+    path = result.run_root / f"{table_name}.parquet"
+    row = pq.read_table(path).to_pylist()[0]
+    if row[field] == replacement:
+        replacement = 2
+    row[field] = replacement
+    row["row_hash"] = canonical_sha256({
+        key: value for key, value in row.items() if key != "row_hash"
+    })
+    pq.write_table(
+        pa.Table.from_pylist(
+            [row],
+            schema=L4_PROJECTION_TABLE_SCHEMAS[table_name],
+        ),
+        path,
+        compression="zstd",
+        version="2.6",
+        use_dictionary=False,
+        write_statistics=True,
+    )
+    manifest, _metrics, receipt = _rewrite_l4_artifacts(
+        result,
+        ((
+            f"l4-table:{table_name}",
+            f"{table_name}.parquet",
+            path.read_bytes(),
+            {
+                "canonical_id_set_hash": canonical_sha256([
+                    "l4-publication-authority"
+                ]),
+                "row_count": 1,
+            },
+        ),),
+    )
+
+    with pytest.raises(ValueError, match="publication authority"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+            input_manifest=result.source.output_manifest,
+        )
+
+
+@pytest.mark.unit
 def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> None:
     l1_root, domain_path, _ = _pipeline(
         tmp_path,
@@ -1761,6 +1828,11 @@ def _l3_with_sealed_manifest(
     ordered: bool = False,
     roles: bool = False,
     member_count: int = 1,
+    type_properties=None,
+    extra_types=(),
+    extra_relationship_targets=False,
+    identity_business_keys=None,
+    inject_identity_keys=False,
 ):
     fact_set = _fact_set(
         "manufacturing",
@@ -1769,9 +1841,23 @@ def _l3_with_sealed_manifest(
         expected_count=None,
     )
     mutate = None
-    if ordered or roles or member_count > 1:
+    if ordered or roles or member_count > 1 or inject_identity_keys:
         def mutate(candidates, _work_unit):
             values = [dict(candidate) for candidate in candidates]
+            if inject_identity_keys:
+                for index, candidate in enumerate(values):
+                    if candidate["candidate_kind"] != "entity":
+                        continue
+                    candidate = dict(candidate)
+                    suffix = (
+                        "record"
+                        if candidate["local_id"].startswith("record")
+                        else "subject"
+                    )
+                    candidate["identity_key"] = {
+                        f"property:{suffix}:canonical-id": candidate["local_id"]
+                    }
+                    values[index] = candidate
             relationship = dict(values[2])
             relationship["member_role_id"] = (
                 "role:manufacturing.subject" if roles else None
@@ -1784,6 +1870,10 @@ def _l3_with_sealed_manifest(
                     "local_id": "subject-2",
                     "label": "Subject 2",
                 }
+                if inject_identity_keys:
+                    second_member["identity_key"] = {
+                        "property:subject:canonical-id": "subject-2"
+                    }
                 second_relationship = {
                     **relationship,
                     "target_local_id": "subject-2",
@@ -1796,6 +1886,10 @@ def _l3_with_sealed_manifest(
         "manufacturing",
         fact_set=fact_set,
         mutate=mutate,
+        type_properties=type_properties,
+        extra_types=extra_types,
+        extra_relationship_targets=extra_relationship_targets,
+        identity_business_keys=identity_business_keys,
     )
     l3 = _l3(tmp_path, l1_root, domain_path)
     manifest = schema2_validation_stage._seal_manifest(

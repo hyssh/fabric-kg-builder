@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import resource
 import shutil
@@ -11,7 +12,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -34,7 +35,7 @@ from fabric_kg_builder.contracts.publication import (
     GovernedAssetReference,
     ProjectionEquivalence,
     ProjectionEvidence,
-    PublicationCrosswalk,
+    PublicationCrosswalkV1_1,
     StorageReference,
 )
 from fabric_kg_builder.contracts.receipts import (
@@ -46,6 +47,8 @@ from fabric_kg_builder.contracts.resources import (
     StageResourceMetrics,
     validate_receipt_resources,
 )
+from fabric_kg_builder.domain.models import DomainContractV2
+from fabric_kg_builder.domain.service import compute_contract_hash
 from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
 
 L5A_STAGE_NAME = "schema2-structured-publication"
@@ -92,7 +95,7 @@ L5A_ACCEPTED_VERSIONS = {
     "c0.artifact_manifest": "1.0.0",
     "c0.governed_asset_reference": "1.0.0",
     "c0.projection_equivalence": "1.0.0",
-    "c0.publication_crosswalk": "1.0.0",
+    "c0.publication_crosswalk": "1.1.0",
     "c0.required_member_manifest": "1.1.0",
     "c0.semantic_serving_projection": "1.0.0",
     "c0.stage_receipt": "1.0.0",
@@ -100,6 +103,7 @@ L5A_ACCEPTED_VERSIONS = {
 }
 
 _SOURCE_TABLES = (
+    "semantic_publication_authority",
     "semantic_asserted_entities",
     "semantic_entity_type_assertions",
     "semantic_asserted_relationships",
@@ -116,6 +120,145 @@ _FIXED_FILES = {
     Path("resource-metrics.json"),
     Path("stage-receipt.json"),
 }
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_EPOCH_DATE = date(1970, 1, 1)
+_EPOCH_DATETIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _typed_value_error(data_type: str, detail: str) -> L5aPublicationError:
+    return L5aPublicationError(
+        "L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+        f"value does not match canonical property type {data_type!r}: {detail}",
+    )
+
+
+def _normalize_string(value: Any) -> str:
+    if not isinstance(value, str):
+        raise _typed_value_error("string", "expected str")
+    return value
+
+
+def _normalize_integer(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise _typed_value_error("integer", "expected non-boolean int")
+    if not _INT64_MIN <= value <= _INT64_MAX:
+        raise _typed_value_error("integer", "outside signed int64 range")
+    return value
+
+
+def _normalize_number(value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise _typed_value_error("number", "expected non-boolean int or float")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise _typed_value_error("number", "not representable as float64") from exc
+    if not math.isfinite(normalized):
+        raise _typed_value_error("number", "float64 value must be finite")
+    return normalized
+
+
+def _normalize_boolean(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise _typed_value_error("boolean", "expected bool")
+    return value
+
+
+def _normalize_date(value: Any) -> date:
+    if not isinstance(value, date) or isinstance(value, datetime):
+        raise _typed_value_error("date", "expected date without time")
+    days = (value - _EPOCH_DATE).days
+    if not -(2**31) <= days <= 2**31 - 1:
+        raise _typed_value_error("date", "outside Arrow date32 range")
+    try:
+        pa.scalar(value, type=pa.date32())
+    except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError) as exc:
+        raise _typed_value_error("date", "not representable as Arrow date32") from exc
+    return value
+
+
+def _normalize_datetime(value: Any) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise _typed_value_error("datetime", "expected timezone-aware datetime")
+    try:
+        offset = value.utcoffset()
+    except Exception as exc:
+        raise _typed_value_error("datetime", "timezone offset is invalid") from exc
+    if offset is None:
+        raise _typed_value_error("datetime", "timezone offset is undefined")
+    try:
+        normalized = value.astimezone(timezone.utc)
+        delta = normalized - _EPOCH_DATETIME
+        micros = (
+            delta.days * 86_400_000_000
+            + delta.seconds * 1_000_000
+            + delta.microseconds
+        )
+        if not _INT64_MIN <= micros <= _INT64_MAX:
+            raise _typed_value_error(
+                "datetime",
+                "outside Arrow timestamp[us] range",
+            )
+        pa.scalar(normalized, type=pa.timestamp("us", tz="UTC"))
+    except L5aPublicationError:
+        raise
+    except Exception as exc:
+        raise _typed_value_error(
+            "datetime",
+            "not representable as UTC Arrow timestamp[us]",
+        ) from exc
+    return normalized
+
+
+_CANONICAL_TYPE_RULES = {
+    "string": (
+        pa.string(),
+        _normalize_string,
+    ),
+    "integer": (
+        pa.int64(),
+        _normalize_integer,
+    ),
+    "number": (
+        pa.float64(),
+        _normalize_number,
+    ),
+    "boolean": (
+        pa.bool_(),
+        _normalize_boolean,
+    ),
+    "date": (
+        pa.date32(),
+        _normalize_date,
+    ),
+    "datetime": (
+        pa.timestamp("us", tz="UTC"),
+        _normalize_datetime,
+    ),
+}
+
+
+def _canonical_arrow_type(data_type: str) -> pa.DataType:
+    try:
+        arrow_type, _normalizer = _CANONICAL_TYPE_RULES[data_type]
+        return arrow_type
+    except KeyError as exc:
+        raise L5aPublicationError(
+            "L5A_PROPERTY_TYPE_UNSUPPORTED",
+            f"unsupported canonical property type {data_type!r}",
+        ) from exc
+
+
+def _canonical_typed_value(data_type: str, value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        _arrow_type, normalizer = _CANONICAL_TYPE_RULES[data_type]
+    except KeyError:
+        _canonical_arrow_type(data_type)
+        raise AssertionError("unreachable")
+    return normalizer(value)
 
 
 def _budget_snapshot_hash() -> str:
@@ -308,7 +451,7 @@ class L5aTargetClient(Protocol):
 class L5aCompiledPublication:
     source: SealedL4ServingSource
     fingerprint: str
-    crosswalks: tuple[PublicationCrosswalk, ...]
+    crosswalks: tuple[PublicationCrosswalkV1_1, ...]
     access_policy: AccessPolicy
     governed_assets: tuple[GovernedAssetReference, ...]
     target_ids: Mapping[L5ATargetKind, str]
@@ -578,6 +721,57 @@ def _schema_descriptor(schema: pa.Schema) -> list[dict[str, Any]]:
     ]
 
 
+def _typed_fingerprint_scalar(data_type: pa.DataType, value: Any) -> Any:
+    if value is None:
+        return None
+    if pa.types.is_date32(data_type):
+        normalized = _normalize_date(value)
+        return {
+            "$l5a_arrow_scalar": {
+                "type": "date32",
+                "days_since_epoch": (normalized - _EPOCH_DATE).days,
+            }
+        }
+    if pa.types.is_timestamp(data_type):
+        if data_type.unit != "us" or data_type.tz != "UTC":
+            raise L5aPublicationError(
+                "L5A_TYPED_FINGERPRINT_UNSUPPORTED",
+                f"unsupported Arrow timestamp type {data_type}",
+            )
+        normalized = _normalize_datetime(value)
+        delta = normalized - _EPOCH_DATETIME
+        return {
+            "$l5a_arrow_scalar": {
+                "type": "timestamp[us,UTC]",
+                "microseconds_since_epoch": (
+                    delta.days * 86_400_000_000
+                    + delta.seconds * 1_000_000
+                    + delta.microseconds
+                ),
+            }
+        }
+    if pa.types.is_floating(data_type):
+        return _normalize_number(value)
+    if pa.types.is_integer(data_type):
+        return _normalize_integer(value)
+    if pa.types.is_boolean(data_type):
+        return _normalize_boolean(value)
+    if pa.types.is_string(data_type):
+        return _normalize_string(value)
+    return value
+
+
+def _typed_table_fingerprint_rows(table: pa.Table) -> list[dict[str, Any]]:
+    rows = table.to_pylist()
+    return [
+        {
+            field.name: _typed_fingerprint_scalar(field.type, row[field.name])
+            for field in table.schema
+        }
+        for row in rows
+    ]
+
+
 def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
     id_column = "__canonical_id" if "__canonical_id" in table.column_names else None
     if id_column is None:
@@ -597,6 +791,8 @@ def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
                     strict=True,
                 )
             ]
+        elif table_id == "l4_semantic_publication_authority":
+            ids = [str(value) for value in table["authority_id"].to_pylist()]
         elif "required_member_manifest_id" not in table.column_names:
             raise L5aPublicationError(
                 "L5A_TABLE_IDENTITY_MISSING",
@@ -618,13 +814,14 @@ def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
             ]
     else:
         ids = [str(value) for value in table[id_column].to_pylist()]
-    rows = table.to_pylist()
     return L5aTableSnapshot(
         table_id=table_id,
         schema_hash=canonical_sha256(_schema_descriptor(table.schema)),
         row_count=table.num_rows,
         canonical_id_set_hash=canonical_sha256(sorted(ids)),
-        row_fingerprint=canonical_sha256(rows),
+        row_fingerprint=canonical_sha256(
+            _typed_table_fingerprint_rows(table)
+        ),
     )
 
 
@@ -656,12 +853,69 @@ def _single_hash(
     return next(iter(values))
 
 
+def _publication_authority(
+    tables: Mapping[str, pa.Table],
+) -> tuple[DomainContractV2, Mapping[str, Any]]:
+    rows = tables["semantic_publication_authority"].to_pylist()
+    if len(rows) != 1:
+        raise L5aPublicationError(
+            "L5A_PUBLICATION_AUTHORITY_MISSING",
+            "sealed L4 must carry exactly one publication authority",
+        )
+    row = rows[0]
+    try:
+        contract = DomainContractV2.model_validate_json(
+            str(row["domain_contract_json"])
+        )
+    except (ValueError, TypeError) as exc:
+        raise L5aPublicationError(
+            "L5A_PUBLICATION_AUTHORITY_INVALID",
+            "sealed L4 publication authority is not a canonical DomainContractV2",
+        ) from exc
+    relationship_payload = [
+        item.model_dump(mode="json")
+        for item in contract.candidate_model.relationship_types
+    ]
+    graph_policy_payload = {
+        "reasoning_policy": contract.reasoning_policy.model_dump(mode="json"),
+        "question_plans": [
+            item.model_dump(mode="json") for item in contract.question_plans
+        ],
+    }
+    if (
+        canonical_json(contract) != row["domain_contract_json"]
+        or compute_contract_hash(contract) != row["domain_contract_hash"]
+        or contract.hierarchy_closure.hierarchy_hash != row["hierarchy_hash"]
+        or contract.identity_policy_hash != row["identity_policy_hash"]
+        or canonical_sha256(relationship_payload)
+        != row["relationship_vocabulary_hash"]
+        or canonical_sha256(graph_policy_payload) != row["graph_policy_hash"]
+        or contract.reasoning_policy.max_hops != row["graph_max_hops"]
+    ):
+        raise L5aPublicationError(
+            "L5A_PUBLICATION_AUTHORITY_HASH_MISMATCH",
+            "sealed L4 publication authority payload differs from its hashes",
+        )
+    return contract, row
+
+
 def _validate_publish_authority(
     source: SealedL4ServingSource,
     tables: Mapping[str, pa.Table],
-    crosswalks: Sequence[PublicationCrosswalk],
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
     access_policy: AccessPolicy,
-) -> None:
+) -> DomainContractV2:
+    contract, authority_row = _publication_authority(tables)
+    if (
+        authority_row["domain_contract_hash"]
+        != source.projection.sealed_domain_contract_hash
+        or authority_row["domain_contract_hash"]
+        != source.projection.sealed_semantic_contract_hash
+    ):
+        raise L5aPublicationError(
+            "L5A_DOMAIN_AUTHORITY_MISMATCH",
+            "sealed publication authority differs from the L4 projection",
+        )
     manifest_rows = tables["semantic_required_member_manifests"].to_pylist()
     if not manifest_rows:
         raise L5aPublicationError(
@@ -715,16 +969,21 @@ def _validate_publish_authority(
         code="L5A_IDENTITY_POLICY_AUTHORITY_MISMATCH",
     )
     member_rows = tables["semantic_required_members"].to_pylist()
+    if (
+        hierarchy_hash != authority_row["hierarchy_hash"]
+        or identity_policy_hash != authority_row["identity_policy_hash"]
+    ):
+        raise L5aPublicationError(
+            "L5A_PUBLICATION_AUTHORITY_MISMATCH",
+            "materialized L4 assertions differ from the canonical authority",
+        )
     observed_type_ids = {
-        str(row["semantic_type_id"]) for row in type_rows
-    } | {
-        str(row["member_semantic_type_id"]) for row in member_rows
+        item.type_id for item in contract.candidate_model.entity_types
+        if not item.tombstoned
     }
     observed_relationship_ids = {
-        str(row["semantic_relationship_id"]) for row in relationship_rows
-    } | {
-        str(row["membership_semantic_relationship_id"])
-        for row in manifest_rows
+        item.relationship_type_id
+        for item in contract.candidate_model.relationship_types
     }
     observed_property_ids = {
         str(row["semantic_property_id"]) for row in property_rows
@@ -737,6 +996,10 @@ def _validate_publish_authority(
         )
 
     expected_lineage = _identity_lineage(source.receipt.identity)
+    expected_crosswalk_lineage = {
+        **expected_lineage,
+        "contract_version": "1.1.0",
+    }
     for crosswalk in crosswalks:
         authority = crosswalk.authority
         manifest_row = manifest_by_id[authority.required_member_manifest_id]
@@ -767,7 +1030,8 @@ def _validate_publish_authority(
             != source.projection.sealed_semantic_contract_hash
             or crosswalk.hierarchy_hash != hierarchy_hash
             or crosswalk.identity_policy_hash != identity_policy_hash
-            or _identity_lineage(crosswalk.identity) != expected_lineage
+            or _identity_lineage(crosswalk.identity)
+            != expected_crosswalk_lineage
         ):
             raise L5aPublicationError(
                 "L5A_PUBLICATION_CROSSWALK_STALE",
@@ -782,9 +1046,8 @@ def _validate_publish_authority(
             for item in crosswalk.relationship_mappings
         }
         mapped_property_ids = {
-            prop.canonical_property_id
-            for item in crosswalk.semantic_type_mappings
-            for prop in item.property_mappings
+            item.canonical_property_id
+            for item in crosswalk.semantic_property_ownership_mappings
         }
         if mapped_type_ids != observed_type_ids:
             raise L5aPublicationError(
@@ -796,7 +1059,153 @@ def _validate_publish_authority(
                 "L5A_RELATIONSHIP_MAPPING_SET_MISMATCH",
                 "crosswalk relationship IDs differ from sealed L4 relationships",
             )
-        if not observed_property_ids.issubset(mapped_property_ids):
+        entity_by_id = {
+            item.type_id: item
+            for item in contract.candidate_model.entity_types
+            if not item.tombstoned
+        }
+        relationship_by_id = {
+            item.relationship_type_id: item
+            for item in contract.candidate_model.relationship_types
+        }
+        roots = {
+            item.type_id: item
+            for item in entity_by_id.values()
+            if item.parent_type_id is None
+        }
+        authority_properties_by_type = {
+            item.type_id: {
+                prop.property_id for prop in item.declared_properties
+            }
+            for item in entity_by_id.values()
+        }
+        authority_property_by_id = {
+            prop.property_id: (item.type_id, prop)
+            for item in entity_by_id.values()
+            for prop in item.declared_properties
+        }
+        authority_property_ids = {
+            property_id
+            for property_ids in authority_properties_by_type.values()
+            for property_id in property_ids
+        }
+        if mapped_property_ids != authority_property_ids:
+            raise L5aPublicationError(
+                "L5A_PROPERTY_MAPPING_SET_MISMATCH",
+                "crosswalk property IDs must exactly equal canonical declared properties",
+            )
+        ownership_by_id = {
+            item.canonical_property_id: item
+            for item in crosswalk.semantic_property_ownership_mappings
+        }
+        for property_id, (owner_id, prop) in authority_property_by_id.items():
+            ownership = ownership_by_id[property_id]
+            if (
+                ownership.owner_semantic_type_id != owner_id
+                or ownership.data_type != prop.value_type
+                or ownership.value_semantics_id
+                != f"value-semantics:{property_id}"
+            ):
+                raise L5aPublicationError(
+                    "L5A_PROPERTY_AUTHORITY_MISMATCH",
+                    f"semantic property authority differs for {property_id}",
+                )
+        for mapping in crosswalk.semantic_type_mappings:
+            definition = entity_by_id[mapping.canonical_semantic_type_id]
+            root = roots.get(definition.identity_root_type_id)
+            if root is None or root.identity_key_policy is None:
+                raise L5aPublicationError(
+                    "L5A_IDENTITY_POLICY_AUTHORITY_MISMATCH",
+                    f"type {definition.type_id} has no canonical root key policy",
+                )
+            key_policy = root.identity_key_policy
+            expected_keys = set(key_policy.business_key_fields)
+            local_properties = set(
+                mapping.locally_owned_canonical_property_ids
+            )
+            inherited_properties = {
+                item.canonical_property_id
+                for item in mapping.inherited_property_references
+            }
+            expected_properties = authority_properties_by_type[definition.type_id]
+            expected_effective = set(
+                contract.hierarchy_closure.effective_property_ids_by_type[
+                    definition.type_id
+                ]
+            )
+            expected_inherited = expected_effective - expected_properties
+            if (
+                mapping.canonical_parent_semantic_type_id
+                != definition.parent_type_id
+                or set(mapping.canonical_instance_key_property_ids)
+                != expected_keys
+                or local_properties != expected_properties
+                or inherited_properties != expected_inherited
+                or {
+                    item.canonical_property_id
+                    for item in mapping.physical_property_bindings
+                } != expected_effective
+            ):
+                raise L5aPublicationError(
+                    "L5A_TYPE_AUTHORITY_MISMATCH",
+                    f"crosswalk semantic definition differs for {definition.type_id}",
+                )
+            for reference in mapping.inherited_property_references:
+                owner_id, prop = authority_property_by_id[
+                    reference.canonical_property_id
+                ]
+                if (
+                    reference.owner_semantic_type_id != owner_id
+                    or reference.data_type != prop.value_type
+                    or reference.value_semantics_id
+                    != f"value-semantics:{prop.property_id}"
+                ):
+                    raise L5aPublicationError(
+                        "L5A_TYPE_AUTHORITY_MISMATCH",
+                        f"inherited property authority differs for "
+                        f"{reference.canonical_property_id}",
+                    )
+            for binding in mapping.physical_property_bindings:
+                owner_id, prop = authority_property_by_id[
+                    binding.canonical_property_id
+                ]
+                if (
+                    binding.owner_semantic_type_id != owner_id
+                    or binding.data_type != prop.value_type
+                    or binding.value_semantics_id
+                    != f"value-semantics:{prop.property_id}"
+                ):
+                    raise L5aPublicationError(
+                        "L5A_TYPE_AUTHORITY_MISMATCH",
+                        f"physical property authority differs for "
+                        f"{binding.canonical_property_id}",
+                    )
+        for mapping in crosswalk.relationship_mappings:
+            definition = relationship_by_id[
+                mapping.canonical_semantic_relationship_id
+            ]
+            compatible_sources = set(
+                contract.hierarchy_closure
+                .compatible_source_type_ids_by_relationship[
+                    definition.relationship_type_id
+                ]
+            )
+            compatible_targets = set(
+                contract.hierarchy_closure
+                .compatible_target_type_ids_by_relationship[
+                    definition.relationship_type_id
+                ]
+            )
+            if (
+                mapping.source_semantic_type_id not in compatible_sources
+                or mapping.target_semantic_type_id not in compatible_targets
+            ):
+                raise L5aPublicationError(
+                    "L5A_RELATIONSHIP_AUTHORITY_MISMATCH",
+                    f"crosswalk endpoint semantics differ for "
+                    f"{definition.relationship_type_id}",
+                )
+        if not observed_property_ids.issubset(authority_property_ids):
             raise L5aPublicationError(
                 "L5A_PROPERTY_MAPPING_SET_MISMATCH",
                 "crosswalk omits a sealed L4 property assertion",
@@ -816,17 +1225,24 @@ def _validate_publish_authority(
         if any(
             prop.physical_column_id in reserved_entity_columns
             for item in crosswalk.semantic_type_mappings
-            for prop in item.property_mappings
+            for prop in item.physical_property_bindings
         ) or any(
             field.physical_column_id in reserved_relationship_columns
             for item in crosswalk.relationship_mappings
-            for field in (*item.source_key_fields, *item.target_key_fields)
+            for field in (*item.source_key_bindings, *item.target_key_bindings)
         ):
             raise L5aPublicationError(
                 "L5A_RESERVED_COLUMN_COLLISION",
                 "crosswalk physical columns collide with L5a identity columns",
             )
-        type_ids = {item.canonical_semantic_type_id for item in crosswalk.semantic_type_mappings}
+        type_ids = {
+            item.canonical_semantic_type_id
+            for item in crosswalk.semantic_type_mappings
+        }
+        materialized_entity_type = {
+            str(row["entity_id"]): str(row["most_specific_type_id"])
+            for row in entity_rows
+        }
         for relationship in crosswalk.relationship_mappings:
             if (
                 relationship.source_semantic_type_id not in type_ids
@@ -837,6 +1253,21 @@ def _validate_publish_authority(
                     f"relationship {relationship.canonical_semantic_relationship_id} "
                     "has an unknown endpoint type",
                 )
+            definition = relationship_by_id[
+                relationship.canonical_semantic_relationship_id
+            ]
+            compatible_sources = set(
+                contract.hierarchy_closure
+                .compatible_source_type_ids_by_relationship[
+                    definition.relationship_type_id
+                ]
+            )
+            compatible_targets = set(
+                contract.hierarchy_closure
+                .compatible_target_type_ids_by_relationship[
+                    definition.relationship_type_id
+                ]
+            )
             for row in relationship_rows:
                 if (
                     row["semantic_relationship_id"]
@@ -844,10 +1275,10 @@ def _validate_publish_authority(
                 ):
                     continue
                 if (
-                    relationship.source_semantic_type_id
-                    not in row["source_inheritance_path"]
-                    or relationship.target_semantic_type_id
-                    not in row["target_inheritance_path"]
+                    materialized_entity_type[str(row["source_entity_id"])]
+                    not in compatible_sources
+                    or materialized_entity_type[str(row["target_entity_id"])]
+                    not in compatible_targets
                 ):
                     raise L5aPublicationError(
                         "L5A_RELATIONSHIP_ENDPOINT_MISMATCH",
@@ -860,13 +1291,18 @@ def _validate_publish_authority(
             "L5A_ACCESS_POLICY_AUTHORITY_MISMATCH",
             "access policy identity differs from the sealed L4 source",
         )
+    return contract
+
+
 def _canonical_crosswalk(
-    crosswalks: Sequence[PublicationCrosswalk],
-) -> PublicationCrosswalk:
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
+) -> PublicationCrosswalkV1_1:
     first = crosswalks[0]
     for item in crosswalks[1:]:
         if (
-            item.semantic_type_mappings != first.semantic_type_mappings
+            item.semantic_property_ownership_mappings
+            != first.semantic_property_ownership_mappings
+            or item.semantic_type_mappings != first.semantic_type_mappings
             or item.relationship_mappings != first.relationship_mappings
             or item.semantic_contract_hash != first.semantic_contract_hash
             or item.stable_id_lock_id != first.stable_id_lock_id
@@ -885,7 +1321,7 @@ def _canonical_crosswalk(
 
 def _entity_tables(
     source_tables: Mapping[str, pa.Table],
-    crosswalk: PublicationCrosswalk,
+    crosswalk: PublicationCrosswalkV1_1,
 ) -> dict[str, pa.Table]:
     entities = {
         str(row["entity_id"]): row
@@ -902,10 +1338,10 @@ def _entity_tables(
             pa.field("__most_specific_type_id", pa.string(), nullable=False),
             pa.field("__hierarchy_depth", pa.int32(), nullable=False),
         ]
-        for prop in mapping.property_mappings:
+        for prop in mapping.physical_property_bindings:
             fields.append(pa.field(
                 prop.physical_column_id,
-                pa.string(),
+                _canonical_arrow_type(prop.data_type),
                 nullable=True,
             ))
         rows: list[dict[str, Any]] = []
@@ -926,8 +1362,11 @@ def _entity_tables(
                 "__most_specific_type_id": entity["most_specific_type_id"],
                 "__hierarchy_depth": assertion["hierarchy_depth"],
             }
-            for prop in mapping.property_mappings:
-                row[prop.physical_column_id] = None
+            for prop in mapping.physical_property_bindings:
+                row[prop.physical_column_id] = _canonical_typed_value(
+                    prop.data_type,
+                    None,
+                )
             rows.append(row)
         result[mapping.physical_table_id] = pa.Table.from_pylist(
             rows,
@@ -938,7 +1377,7 @@ def _entity_tables(
 
 def _relationship_tables(
     source_tables: Mapping[str, pa.Table],
-    crosswalk: PublicationCrosswalk,
+    crosswalk: PublicationCrosswalkV1_1,
 ) -> dict[str, pa.Table]:
     rows_by_type: dict[str, list[dict[str, Any]]] = {}
     for row in source_tables["semantic_asserted_relationships"].to_pylist():
@@ -947,6 +1386,10 @@ def _relationship_tables(
             [],
         ).append(row)
     result: dict[str, pa.Table] = {}
+    ownership_by_id = {
+        item.canonical_property_id: item
+        for item in crosswalk.semantic_property_ownership_mappings
+    }
     for mapping in crosswalk.relationship_mappings:
         fields = [
             pa.field("__canonical_id", pa.string(), nullable=False),
@@ -954,8 +1397,18 @@ def _relationship_tables(
             pa.field("__source_entity_id", pa.string(), nullable=False),
             pa.field("__target_entity_id", pa.string(), nullable=False),
         ]
-        for key in (*mapping.source_key_fields, *mapping.target_key_fields):
-            fields.append(pa.field(key.physical_column_id, pa.string(), nullable=True))
+        for key in (*mapping.source_key_bindings, *mapping.target_key_bindings):
+            ownership = ownership_by_id.get(key.canonical_property_id)
+            if ownership is None:
+                raise L5aPublicationError(
+                    "L5A_ENDPOINT_KEY_AUTHORITY_MISSING",
+                    f"endpoint key {key.canonical_property_id} has no owner",
+                )
+            fields.append(pa.field(
+                key.physical_column_id,
+                _canonical_arrow_type(ownership.data_type),
+                nullable=True,
+            ))
         table_rows = []
         for relationship in sorted(
             rows_by_type.get(mapping.canonical_semantic_relationship_id, []),
@@ -968,12 +1421,18 @@ def _relationship_tables(
                 "__target_entity_id": relationship["target_entity_id"],
             }
             row.update({
-                key.physical_column_id: None
-                for key in mapping.source_key_fields
+                key.physical_column_id: _canonical_typed_value(
+                    ownership_by_id[key.canonical_property_id].data_type,
+                    None,
+                )
+                for key in mapping.source_key_bindings
             })
             row.update({
-                key.physical_column_id: None
-                for key in mapping.target_key_fields
+                key.physical_column_id: _canonical_typed_value(
+                    ownership_by_id[key.canonical_property_id].data_type,
+                    None,
+                )
+                for key in mapping.target_key_bindings
             })
             table_rows.append(row)
         result[mapping.physical_table_id] = pa.Table.from_pylist(
@@ -985,7 +1444,7 @@ def _relationship_tables(
 
 def _all_tables(
     source_tables: Mapping[str, pa.Table],
-    crosswalk: PublicationCrosswalk,
+    crosswalk: PublicationCrosswalkV1_1,
 ) -> dict[str, pa.Table]:
     typed = {
         **_entity_tables(source_tables, crosswalk),
@@ -1079,10 +1538,11 @@ def _required_member_snapshots_from_rows(
     return tuple(snapshots)
 
 
-def _ancestor_paths(crosswalk: PublicationCrosswalk) -> dict[str, tuple[str, ...]]:
+def _ancestor_paths(contract: DomainContractV2) -> dict[str, tuple[str, ...]]:
     parents = {
-        item.canonical_semantic_type_id: item.canonical_parent_semantic_type_id
-        for item in crosswalk.semantic_type_mappings
+        item.type_id: item.parent_type_id
+        for item in contract.candidate_model.entity_types
+        if not item.tombstoned
     }
     paths: dict[str, tuple[str, ...]] = {}
     for type_id in sorted(parents):
@@ -1096,13 +1556,24 @@ def _ancestor_paths(crosswalk: PublicationCrosswalk) -> dict[str, tuple[str, ...
                 )
             path.append(current)
             current = parents[current]
-        paths[type_id] = tuple(path)
+        sealed_ancestors = tuple(
+            contract.hierarchy_closure.ancestors_by_type[type_id]
+        )
+        if set(path) != set(sealed_ancestors) or len(path) != len(
+            sealed_ancestors
+        ):
+            raise L5aPublicationError(
+                "L5A_HIERARCHY_AUTHORITY_MISMATCH",
+                f"sealed ancestors differ from parent reachability for {type_id}",
+            )
+        paths[type_id] = sealed_ancestors
     return paths
 
 
 def _definitions(
     source: SealedL4ServingSource,
-    crosswalks: Sequence[PublicationCrosswalk],
+    contract: DomainContractV2,
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
     table_snapshots: Sequence[L5aTableSnapshot],
     required_member_snapshots: Sequence[L5aRequiredMemberSnapshot],
     target_ids: Mapping[L5ATargetKind, str],
@@ -1136,31 +1607,111 @@ def _definitions(
         "required_member_snapshots": [
             item.as_dict() for item in required_member_snapshots
         ],
+        "canonical_authority": {
+            "domain_contract_hash": source.projection.sealed_domain_contract_hash,
+            "hierarchy_hash": contract.hierarchy_closure.hierarchy_hash,
+            "identity_policy_hash": contract.identity_policy_hash,
+            "relationship_vocabulary_hash": canonical_sha256([
+                item.model_dump(mode="json")
+                for item in contract.candidate_model.relationship_types
+            ]),
+            "graph_policy_hash": canonical_sha256({
+                "reasoning_policy": contract.reasoning_policy.model_dump(mode="json"),
+                "question_plans": [
+                    item.model_dump(mode="json")
+                    for item in contract.question_plans
+                ],
+            }),
+        },
     }
     type_by_id = {
         item.canonical_semantic_type_id: item
         for item in crosswalk.semantic_type_mappings
     }
-    ancestors = _ancestor_paths(crosswalk)
+    authority_type_by_id = {
+        item.type_id: item
+        for item in contract.candidate_model.entity_types
+        if not item.tombstoned
+    }
+    authority_relationship_by_id = {
+        item.relationship_type_id: item
+        for item in contract.candidate_model.relationship_types
+    }
+    identity_policy_by_root = {
+        item.type_id: item.identity_key_policy
+        for item in contract.candidate_model.entity_types
+        if item.parent_type_id is None and item.identity_key_policy is not None
+    }
+    ownership_by_id = {
+        item.canonical_property_id: item
+        for item in crosswalk.semantic_property_ownership_mappings
+    }
+    property_binding_by_type_and_id = {
+        (mapping.canonical_semantic_type_id, binding.canonical_property_id): binding
+        for mapping in crosswalk.semantic_type_mappings
+        for binding in mapping.physical_property_bindings
+    }
+    ancestors = _ancestor_paths(contract)
     semantic_types = [
         {
             "canonical_semantic_type_id": item.canonical_semantic_type_id,
-            "canonical_parent_semantic_type_id": (
-                item.canonical_parent_semantic_type_id
+            "canonical_parent_semantic_type_id": authority_type_by_id[
+                item.canonical_semantic_type_id
+            ].parent_type_id,
+            "flattened_ancestor_type_ids": list(
+                ancestors[item.canonical_semantic_type_id]
             ),
+            "abstract": authority_type_by_id[
+                item.canonical_semantic_type_id
+            ].abstract,
+            "instantiable": not authority_type_by_id[
+                item.canonical_semantic_type_id
+            ].abstract,
+            "identity_root_type_id": authority_type_by_id[
+                item.canonical_semantic_type_id
+            ].identity_root_type_id,
+            "identity_key_policy": identity_policy_by_root[
+                authority_type_by_id[
+                    item.canonical_semantic_type_id
+                ].identity_root_type_id
+            ].model_dump(mode="json"),
             "physical_table_id": item.physical_table_id,
             "instance_key_property_ids": list(
-                item.canonical_instance_key_property_ids
+                identity_policy_by_root[
+                    authority_type_by_id[
+                        item.canonical_semantic_type_id
+                    ].identity_root_type_id
+                ].business_key_fields
             ),
             "physical_identity_source": "stable_canonical_entity_id",
             "physical_identity_column": "__canonical_id",
+            "physical_surrogate_keys": [
+                {
+                    **binding.model_dump(mode="json"),
+                    "semantic_role": "non_semantic",
+                }
+                for binding in item.physical_surrogate_key_bindings
+            ],
             "properties": [
                 {
-                    "canonical_property_id": prop.canonical_property_id,
+                    "canonical_property_id": property_id,
+                    "declaring_semantic_type_id": owner.owner_semantic_type_id,
+                    "data_type": owner.data_type,
+                    "physical_table_id": item.physical_table_id,
                     "physical_column_id": prop.physical_column_id,
                     "materialization": "schema_only",
                 }
-                for prop in item.property_mappings
+                for property_id in (
+                    contract.hierarchy_closure.effective_property_ids_by_type[
+                        item.canonical_semantic_type_id
+                    ]
+                )
+                for owner in (ownership_by_id[property_id],)
+                for prop in (
+                    property_binding_by_type_and_id[
+                        (item.canonical_semantic_type_id, property_id)
+                    ],
+                )
             ],
         }
         for item in crosswalk.semantic_type_mappings
@@ -1170,24 +1721,59 @@ def _definitions(
             "canonical_semantic_relationship_id": (
                 item.canonical_semantic_relationship_id
             ),
-            "source_semantic_type_id": item.source_semantic_type_id,
-            "target_semantic_type_id": item.target_semantic_type_id,
+            "source_semantic_type_ids": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].source_type_ids,
+            "target_semantic_type_ids": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].target_type_ids,
+            "compatible_source_semantic_type_ids": (
+                contract.hierarchy_closure
+                .compatible_source_type_ids_by_relationship[
+                    item.canonical_semantic_relationship_id
+                ]
+            ),
+            "compatible_target_semantic_type_ids": (
+                contract.hierarchy_closure
+                .compatible_target_type_ids_by_relationship[
+                    item.canonical_semantic_relationship_id
+                ]
+            ),
+            "direction": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].direction,
+            "endpoint_policy": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].endpoint_policy,
+            "publication_policy": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].publication_policy,
+            "approved_question_ids": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].competency_question_ids,
+            "identity_policy": authority_relationship_by_id[
+                item.canonical_semantic_relationship_id
+            ].identity_policy.model_dump(mode="json"),
             "physical_table_id": item.physical_table_id,
+            "physical_source_type_representative": item.source_semantic_type_id,
+            "physical_target_type_representative": item.target_semantic_type_id,
             "source_identity_column": "__source_entity_id",
             "target_identity_column": "__target_entity_id",
             "source_key_fields": [
                 {
-                    **field.model_dump(mode="json"),
+                    "physical_column_id": field.physical_column_id,
+                    "semantic_role": "physical_projection_only",
                     "materialization": "schema_only",
                 }
-                for field in item.source_key_fields
+                for field in item.source_key_bindings
             ],
             "target_key_fields": [
                 {
-                    **field.model_dump(mode="json"),
+                    "physical_column_id": field.physical_column_id,
+                    "semantic_role": "physical_projection_only",
                     "materialization": "schema_only",
                 }
-                for field in item.target_key_fields
+                for field in item.target_key_bindings
             ],
         }
         for item in crosswalk.relationship_mappings
@@ -1227,14 +1813,37 @@ def _definitions(
                     "physical_table_id": item.physical_table_id,
                     "physical_identity_source": "stable_canonical_entity_id",
                     "physical_identity_column": "__canonical_id",
+                    "physical_surrogate_keys": [
+                        {
+                            **binding.model_dump(mode="json"),
+                            "semantic_role": "non_semantic",
+                        }
+                        for binding in item.physical_surrogate_key_bindings
+                    ],
                     "properties": [
                         {
-                            "id": str(prop.ontology_bigint_id),
-                            "canonical_property_id": prop.canonical_property_id,
+                            "id": str(owner.ontology_bigint_id),
+                            "canonical_property_id": property_id,
+                            "declaring_semantic_type_id": (
+                                owner.owner_semantic_type_id
+                            ),
+                            "data_type": owner.data_type,
+                            "physical_table_id": item.physical_table_id,
                             "physical_column_id": prop.physical_column_id,
                             "materialization": "schema_only",
                         }
-                        for prop in item.property_mappings
+                        for property_id in (
+                            contract.hierarchy_closure
+                            .effective_property_ids_by_type[
+                                item.canonical_semantic_type_id
+                            ]
+                        )
+                        for owner in (ownership_by_id[property_id],)
+                        for prop in (
+                            property_binding_by_type_and_id[
+                                (item.canonical_semantic_type_id, property_id)
+                            ],
+                        )
                     ],
                 }
                 for item in crosswalk.semantic_type_mappings
@@ -1245,16 +1854,41 @@ def _definitions(
                     "canonical_semantic_relationship_id": (
                         item.canonical_semantic_relationship_id
                     ),
-                    "source_entity_type_id": str(
+                    "declared_source_semantic_type_ids": (
+                        authority_relationship_by_id[
+                            item.canonical_semantic_relationship_id
+                        ].source_type_ids
+                    ),
+                    "declared_target_semantic_type_ids": (
+                        authority_relationship_by_id[
+                            item.canonical_semantic_relationship_id
+                        ].target_type_ids
+                    ),
+                    "physical_source_entity_type_representative_id": str(
                         type_by_id[
                             item.source_semantic_type_id
                         ].ontology_bigint_id
                     ),
-                    "target_entity_type_id": str(
+                    "physical_target_entity_type_representative_id": str(
                         type_by_id[
                             item.target_semantic_type_id
                         ].ontology_bigint_id
                     ),
+                    "allowed_source_semantic_type_ids": (
+                        contract.hierarchy_closure
+                        .compatible_source_type_ids_by_relationship[
+                            item.canonical_semantic_relationship_id
+                        ]
+                    ),
+                    "allowed_target_semantic_type_ids": (
+                        contract.hierarchy_closure
+                        .compatible_target_type_ids_by_relationship[
+                            item.canonical_semantic_relationship_id
+                        ]
+                    ),
+                    "direction": authority_relationship_by_id[
+                        item.canonical_semantic_relationship_id
+                    ].direction,
                     "physical_table_id": item.physical_table_id,
                     "source_identity_column": "__source_entity_id",
                     "target_identity_column": "__target_entity_id",
@@ -1266,6 +1900,14 @@ def _definitions(
             **common,
             "target_kind": "graph",
             "target_id": target_ids["graph"],
+            "max_hops": contract.reasoning_policy.max_hops,
+            "absolute_max_hops": contract.reasoning_policy.absolute_max_hops,
+            "max_relations_per_work_unit": (
+                contract.reasoning_policy.max_relations_per_work_unit
+            ),
+            "approved_question_paths": [
+                item.model_dump(mode="json") for item in contract.question_plans
+            ],
             "node_types": [
                 {
                     "canonical_semantic_type_id": (
@@ -1276,15 +1918,38 @@ def _definitions(
                     "physical_table_id": item.physical_table_id,
                     "physical_identity_source": "stable_canonical_entity_id",
                     "physical_identity_column": "__canonical_id",
+                    "physical_surrogate_keys": [
+                        {
+                            **binding.model_dump(mode="json"),
+                            "semantic_role": "non_semantic",
+                        }
+                        for binding in item.physical_surrogate_key_bindings
+                    ],
                     "key_properties": ["__canonical_id"],
                     "properties": [
                         {
-                            "canonical_property_id": prop.canonical_property_id,
-                            "graph_property": prop.graph_property,
+                            "canonical_property_id": property_id,
+                            "declaring_semantic_type_id": (
+                                owner.owner_semantic_type_id
+                            ),
+                            "data_type": owner.data_type,
+                            "physical_table_id": item.physical_table_id,
+                            "graph_property": owner.graph_property,
                             "physical_column_id": prop.physical_column_id,
                             "materialization": "schema_only",
                         }
-                        for prop in item.property_mappings
+                        for property_id in (
+                            contract.hierarchy_closure
+                            .effective_property_ids_by_type[
+                                item.canonical_semantic_type_id
+                            ]
+                        )
+                        for owner in (ownership_by_id[property_id],)
+                        for prop in (
+                            property_binding_by_type_and_id[
+                                (item.canonical_semantic_type_id, property_id)
+                            ],
+                        )
                     ],
                 }
                 for item in crosswalk.semantic_type_mappings
@@ -1296,28 +1961,67 @@ def _definitions(
                     ),
                     "label": item.graph_label,
                     "aliases": list(item.graph_aliases),
-                    "source_label": type_by_id[
+                    "source_labels": [
+                        type_by_id[type_id].graph_label
+                        for type_id in authority_relationship_by_id[
+                            item.canonical_semantic_relationship_id
+                        ].source_type_ids
+                    ],
+                    "target_labels": [
+                        type_by_id[type_id].graph_label
+                        for type_id in authority_relationship_by_id[
+                            item.canonical_semantic_relationship_id
+                        ].target_type_ids
+                    ],
+                    "direction": authority_relationship_by_id[
+                        item.canonical_semantic_relationship_id
+                    ].direction,
+                    "declared_source_semantic_type_ids": (
+                        authority_relationship_by_id[
+                            item.canonical_semantic_relationship_id
+                        ].source_type_ids
+                    ),
+                    "declared_target_semantic_type_ids": (
+                        authority_relationship_by_id[
+                            item.canonical_semantic_relationship_id
+                        ].target_type_ids
+                    ),
+                    "physical_source_type_representative": (
                         item.source_semantic_type_id
-                    ].graph_label,
-                    "target_label": type_by_id[
+                    ),
+                    "physical_target_type_representative": (
                         item.target_semantic_type_id
-                    ].graph_label,
+                    ),
+                    "allowed_source_semantic_type_ids": (
+                        contract.hierarchy_closure
+                        .compatible_source_type_ids_by_relationship[
+                            item.canonical_semantic_relationship_id
+                        ]
+                    ),
+                    "allowed_target_semantic_type_ids": (
+                        contract.hierarchy_closure
+                        .compatible_target_type_ids_by_relationship[
+                            item.canonical_semantic_relationship_id
+                        ]
+                    ),
                     "physical_table_id": item.physical_table_id,
                     "source_identity_column": "__source_entity_id",
                     "target_identity_column": "__target_entity_id",
                     "source_key_fields": [
                         {
-                            **field.model_dump(mode="json"),
+                            "physical_column_id": field.physical_column_id,
+                            "semantic_role": "physical_projection_only",
                             "materialization": "schema_only",
                         }
-                        for field in item.source_key_fields
+                        for field in item.source_key_bindings
                     ],
                     "target_key_fields": [
                         {
-                            **field.model_dump(mode="json"),
+                            "physical_column_id": field.physical_column_id,
+                            "semantic_role": "physical_projection_only",
                             "materialization": "schema_only",
                         }
-                        for field in item.target_key_fields
+                        for field in item.target_key_bindings
                     ],
                 }
                 for item in crosswalk.relationship_mappings
@@ -1402,7 +2106,7 @@ def _validate_governed_assets(
 def build_l5a_governed_assets(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalk],
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
     access_policy: AccessPolicy,
     target_ids: Mapping[L5ATargetKind, str],
     storage_references: Mapping[L5ATargetKind, StorageReference],
@@ -1424,7 +2128,7 @@ def build_l5a_governed_assets(
         key=lambda item: item.authority.required_member_manifest_id,
     ))
     source_tables = _load_source_tables(source)
-    _validate_publish_authority(
+    authority = _validate_publish_authority(
         source,
         source_tables,
         ordered_crosswalks,
@@ -1438,6 +2142,7 @@ def build_l5a_governed_assets(
     required_member_snapshots = _required_member_snapshots(source, tables)
     definitions = _definitions(
         source,
+        authority,
         ordered_crosswalks,
         snapshots,
         required_member_snapshots,
@@ -1495,7 +2200,7 @@ def build_l5a_governed_assets(
 def l5a_input_fingerprint(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalk],
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
@@ -1521,7 +2226,7 @@ def l5a_input_fingerprint(
 def compile_l5a_publication(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalk],
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
@@ -1552,7 +2257,7 @@ def compile_l5a_publication(
         key=lambda item: item.governed_asset_reference_id,
     ))
     source_tables = _load_source_tables(source)
-    _validate_publish_authority(
+    authority = _validate_publish_authority(
         source,
         source_tables,
         ordered_crosswalks,
@@ -1580,6 +2285,7 @@ def compile_l5a_publication(
     }
     definitions = _definitions(
         source,
+        authority,
         ordered_crosswalks,
         snapshots,
         required_member_snapshots,
@@ -1891,12 +2597,13 @@ def _artifact_entry(
     row_count: int | None,
     canonical_id_set_hash: str | None,
     partition_count: int = 1,
+    contract_version: str = "1.0.0",
 ) -> ArtifactEntry:
     payload = path.read_bytes()
     return ArtifactEntry(
         artifact_id=artifact_id,
         contract_kind=contract_kind,
-        contract_version="1.0.0",
+        contract_version=contract_version,
         schema_hash=schema_hash,
         content_hash=hashlib.sha256(payload).hexdigest(),
         canonical_id_set_hash=canonical_id_set_hash,
@@ -1953,9 +2660,10 @@ def _output_manifest(
             root / "publication-crosswalks.json",
             canonical_sha256({
                 "type": "array",
-                "items": PublicationCrosswalk.model_json_schema(),
+                "items": PublicationCrosswalkV1_1.model_json_schema(),
             }),
             len(compiled.crosswalks),
+            "1.1.0",
         ),
         (
             "l5a-access-policy",
@@ -1963,6 +2671,7 @@ def _output_manifest(
             root / "access-policy.json",
             canonical_sha256(AccessPolicy.model_json_schema()),
             1,
+            "1.0.0",
         ),
         (
             "l5a-governed-assets",
@@ -1973,6 +2682,7 @@ def _output_manifest(
                 "items": GovernedAssetReference.model_json_schema(),
             }),
             len(compiled.governed_assets),
+            "1.0.0",
         ),
         (
             "l5a-projection-equivalence",
@@ -1983,9 +2693,17 @@ def _output_manifest(
                 "items": ProjectionEquivalence.model_json_schema(),
             }),
             len(equivalences),
+            "1.0.0",
         ),
     )
-    for artifact_id, kind, path, schema_hash, row_count in json_artifacts:
+    for (
+        artifact_id,
+        kind,
+        path,
+        schema_hash,
+        row_count,
+        contract_version,
+    ) in json_artifacts:
         entries.append(_artifact_entry(
             artifact_id=artifact_id,
             contract_kind=kind,
@@ -1993,6 +2711,7 @@ def _output_manifest(
             path=path,
             row_count=row_count,
             canonical_id_set_hash=None,
+            contract_version=contract_version,
         ))
     ordered = tuple(sorted(entries, key=lambda item: item.artifact_id))
     values = {
@@ -2018,6 +2737,7 @@ def _metrics(
     compiled: L5aCompiledPublication,
     *,
     started: float,
+    cpu_started: float,
     accounting: _CallAccounting,
     storage_write_bytes: int,
     fabric_rows_read: int,
@@ -2045,7 +2765,7 @@ def _metrics(
         "stage_id": "L5",
         "stage_name": L5A_STAGE_NAME,
         "wall_ms": max(0, int((time.perf_counter() - started) * 1000)),
-        "cpu_ms": max(0, int(time.process_time() * 1000)),
+        "cpu_ms": max(0, int((time.process_time() - cpu_started) * 1000)),
         "peak_rss_bytes": peak_rss,
         "storage_read_bytes": compiled.source.manifest.total_byte_count,
         "storage_write_bytes": storage_write_bytes,
@@ -2390,7 +3110,7 @@ def _receipt_publication_token(receipt: StageReceipt) -> str:
 def run_l5a(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalk],
+    crosswalks: Sequence[PublicationCrosswalkV1_1],
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
@@ -2400,6 +3120,7 @@ def run_l5a(
     """Persist, publish, and read back all four L5a structured targets."""
 
     started = time.perf_counter()
+    cpu_started = time.process_time()
     started_at_utc = datetime.now(timezone.utc)
     compiled = compile_l5a_publication(
         source,
@@ -2456,6 +3177,7 @@ def run_l5a(
             metrics = _metrics(
                 compiled,
                 started=started,
+                cpu_started=cpu_started,
                 accounting=accounting,
                 storage_write_bytes=0,
                 fabric_rows_read=(
@@ -2614,6 +3336,7 @@ def run_l5a(
         metrics = _metrics(
             compiled,
             started=started,
+            cpu_started=cpu_started,
             accounting=accounting,
             storage_write_bytes=storage_write_bytes,
             fabric_rows_read=(
@@ -2764,6 +3487,7 @@ def run_l5a(
         metrics = _metrics(
             compiled,
             started=started,
+            cpu_started=cpu_started,
             accounting=accounting,
             storage_write_bytes=storage_write_bytes,
             fabric_rows_read=(

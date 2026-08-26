@@ -72,6 +72,7 @@ def resolve_semantic_source_parquet(
 
 
 _SEALED_L4_TABLES = frozenset({
+    "semantic_publication_authority",
     "semantic_asserted_entities",
     "semantic_entity_type_assertions",
     "semantic_asserted_relationships",
@@ -154,6 +155,7 @@ def _table_canonical_id_set_hash(
 ) -> str:
     id_columns = {
         "audit_candidates": ("input_candidate_id",),
+        "semantic_publication_authority": ("authority_id",),
         "semantic_asserted_entities": ("entity_id",),
         "semantic_entity_type_assertions": (
             "entity_id",
@@ -452,6 +454,52 @@ class SealedL4ServingSource:
                     )
 
         entity_rows = tables["semantic_asserted_entities"]
+        authority_rows = tables["semantic_publication_authority"]
+        if len(authority_rows) != 1:
+            raise ValueError("sealed L4 publication authority must have exactly one row")
+        authority_row = authority_rows[0]
+        try:
+            from fabric_kg_builder.domain.models import DomainContractV2
+            from fabric_kg_builder.domain.service import compute_contract_hash
+
+            domain_contract = DomainContractV2.model_validate_json(
+                str(authority_row["domain_contract_json"])
+            )
+        except (ValueError, TypeError) as exc:
+            raise ValueError("sealed L4 publication authority is invalid") from exc
+        relationship_payload = [
+            item.model_dump(mode="json")
+            for item in domain_contract.candidate_model.relationship_types
+        ]
+        graph_policy_payload = {
+            "reasoning_policy": domain_contract.reasoning_policy.model_dump(mode="json"),
+            "question_plans": [
+                item.model_dump(mode="json")
+                for item in domain_contract.question_plans
+            ],
+        }
+        if (
+            canonical_json(domain_contract) != authority_row["domain_contract_json"]
+            or compute_contract_hash(domain_contract)
+            != authority_row["domain_contract_hash"]
+            or authority_row["domain_contract_hash"]
+            != serving.sealed_domain_contract_hash
+            or authority_row["domain_contract_hash"]
+            != self.receipt.identity.domain_contract_hash
+            or authority_row["domain_contract_hash"]
+            != self.input_manifest.identity.domain_contract_hash
+            or domain_contract.hierarchy_closure.hierarchy_hash
+            != authority_row["hierarchy_hash"]
+            or domain_contract.identity_policy_hash
+            != authority_row["identity_policy_hash"]
+            or canonical_sha256(relationship_payload)
+            != authority_row["relationship_vocabulary_hash"]
+            or canonical_sha256(graph_policy_payload)
+            != authority_row["graph_policy_hash"]
+            or domain_contract.reasoning_policy.max_hops
+            != authority_row["graph_max_hops"]
+        ):
+            raise ValueError("sealed L4 publication authority hashes differ")
         relationship_rows = tables["semantic_asserted_relationships"]
         property_rows = tables["semantic_asserted_properties"]
         serving_specs = {

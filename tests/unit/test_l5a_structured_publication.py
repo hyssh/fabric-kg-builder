@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
+import copy
 import json
 import shutil
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -15,18 +18,22 @@ from fabric_kg_builder.contracts.identity import (
 )
 from fabric_kg_builder.contracts.publication import (
     AccessPolicy,
-    EndpointKeyProjectionMapping,
+    EndpointPhysicalKeyBindingV1_1,
     GovernedAssetReference,
+    InheritedPropertyReferenceV1_1,
+    PhysicalPropertyBindingV1_1,
     PrincipalScope,
-    PropertyProjectionMapping,
     PublicationAuthorityReferences,
-    PublicationCrosswalk,
-    RelationshipProjectionMapping,
-    SemanticTypeProjectionMapping,
+    PublicationCrosswalkIdentityV1_1,
+    PublicationCrosswalkV1_1,
+    RelationshipProjectionMappingV1_1,
+    SemanticPropertyOwnershipMappingV1_1,
+    SemanticTypeProjectionMappingV1_1,
     StorageReference,
 )
 from fabric_kg_builder.contracts.receipts import StageReceipt
 from fabric_kg_builder.contracts.resources import StageResourceMetrics
+from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.serving.lifecycle_projection import run_l4
 from fabric_kg_builder.semantic.source_tables import require_l5_publication_receipt
 from fabric_kg_builder.serving.structured_publication import (
@@ -43,11 +50,15 @@ from fabric_kg_builder.serving.structured_publication import (
     require_l5a_publication_receipt,
     run_l5a,
     _CallAccounting,
+    _canonical_arrow_type,
+    _canonical_typed_value,
     _equivalences,
     _expected_state,
     _required_member_snapshots,
+    _table_snapshot,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
+from tests.unit.test_schema2_validation_stage import _subtypes
 
 
 class _FakeClient:
@@ -57,6 +68,7 @@ class _FakeClient:
         self.fail_publish: str | None = None
         self.raise_after_create: str | None = None
         self.tamper_read_back: str | None = None
+        self.tamper_schema_read_back: str | None = None
         self.raise_read_back: str | None = None
         self.tamper_required_members: str | None = None
         self.remote_sequence = 0
@@ -161,6 +173,16 @@ class _FakeClient:
             definition = dict(state.definition)
             definition["source_projection_hash"] = "f" * 64
             state = dataclasses.replace(state, definition=definition)
+        if state is not None and self.tamper_schema_read_back == target_kind:
+            snapshots = list(state.table_snapshots)
+            snapshots[0] = dataclasses.replace(
+                snapshots[0],
+                schema_hash="f" * 64,
+            )
+            state = dataclasses.replace(
+                state,
+                table_snapshots=tuple(snapshots),
+            )
         if state is not None and self.tamper_required_members == target_kind:
             changed_rows = [dict(row) for row in state.required_member_rows]
             changed_rows[0]["member_canonical_id"] = "entity:wrong"
@@ -288,49 +310,97 @@ def _assets(source, crosswalk, policy, target_ids):
     )
 
 
-def _crosswalk(source) -> PublicationCrosswalk:
+def _crosswalk(source) -> PublicationCrosswalkV1_1:
     manifest = pq.read_table(
         source.resolve("semantic_required_member_manifests")
     ).to_pylist()[0]
-    types = sorted({
-        row["semantic_type_id"]
-        for row in pq.read_table(
-            source.resolve("semantic_entity_type_assertions")
-        ).to_pylist()
-    } | {
-        row["member_semantic_type_id"]
-        for row in pq.read_table(
-            source.resolve("semantic_required_members")
-        ).to_pylist()
-    })
+    authority_row = pq.read_table(
+        source.resolve("semantic_publication_authority")
+    ).to_pylist()[0]
+    contract = DomainContractV2.model_validate_json(
+        authority_row["domain_contract_json"]
+    )
+    ownership_mappings = []
+    property_by_id = {}
+    for definition in contract.candidate_model.entity_types:
+        for prop in definition.declared_properties:
+            property_by_id[prop.property_id] = (definition.type_id, prop)
+            ownership_mappings.append(SemanticPropertyOwnershipMappingV1_1(
+                canonical_property_id=prop.property_id,
+                owner_semantic_type_id=definition.type_id,
+                data_type=prop.value_type,
+                value_semantics_id=f"value-semantics:{prop.property_id}",
+                ontology_bigint_id=2001 + len(ownership_mappings),
+                graph_property=(
+                    f"graph_{prop.property_id.replace(':', '_')}"
+                ),
+                data_agent_selected_property_id=None,
+            ))
     type_mappings = []
-    for ordinal, type_id in enumerate(types, start=1):
+    for ordinal, definition in enumerate(
+        contract.candidate_model.entity_types,
+        start=1,
+    ):
+        type_id = definition.type_id
         suffix = type_id.rsplit(".", 1)[-1].replace("-", "_")
-        property_id = f"property:{suffix}:canonical-id"
-        type_mappings.append(SemanticTypeProjectionMapping(
+        effective_ids = contract.hierarchy_closure.effective_property_ids_by_type[
+            type_id
+        ]
+        local_ids = tuple(prop.property_id for prop in definition.declared_properties)
+        inherited_ids = tuple(
+            property_id for property_id in effective_ids
+            if property_id not in local_ids
+        )
+        inherited_refs = tuple(
+            InheritedPropertyReferenceV1_1(
+                canonical_property_id=property_id,
+                owner_semantic_type_id=property_by_id[property_id][0],
+                data_type=property_by_id[property_id][1].value_type,
+                value_semantics_id=f"value-semantics:{property_id}",
+            )
+            for property_id in inherited_ids
+        )
+        physical_bindings = tuple(
+            PhysicalPropertyBindingV1_1(
+                canonical_property_id=property_id,
+                owner_semantic_type_id=property_by_id[property_id][0],
+                data_type=property_by_id[property_id][1].value_type,
+                value_semantics_id=f"value-semantics:{property_id}",
+                physical_column_id=f"{suffix}_{index}",
+                search_index_field=f"{suffix}_{index}",
+                search_filter_field=f"{suffix}_{index}",
+                search_vector_field=None,
+            )
+            for index, property_id in enumerate(effective_ids, start=1)
+        )
+        assert physical_bindings
+        root = next(
+            item for item in contract.candidate_model.entity_types
+            if item.type_id == definition.identity_root_type_id
+        )
+        type_mappings.append(SemanticTypeProjectionMappingV1_1(
             canonical_semantic_type_id=type_id,
-            canonical_parent_semantic_type_id=None,
+            canonical_parent_semantic_type_id=definition.parent_type_id,
             physical_table_id=f"l5a_{suffix}",
             ontology_bigint_id=1000 + ordinal,
             graph_label=f"L5A_{suffix.upper()}",
             graph_aliases=(),
-            canonical_instance_key_property_ids=(property_id,),
-            property_mappings=(
-                PropertyProjectionMapping(
-                    canonical_property_id=property_id,
-                    physical_column_id=f"{suffix}_id",
-                    ontology_bigint_id=2000 + ordinal,
-                    graph_property=f"{suffix}_id",
-                    search_index_field=f"{suffix}_id",
-                    search_filter_field=f"{suffix}_id",
-                    search_vector_field=None,
-                    data_agent_selected_property_id=None,
-                ),
+            locally_owned_canonical_property_ids=local_ids,
+            inherited_property_references=inherited_refs,
+            canonical_instance_key_property_ids=tuple(
+                root.identity_key_policy.business_key_fields
             ),
+            physical_property_bindings=physical_bindings,
+            physical_surrogate_key_bindings=(),
         ))
-    source_type, target_type = types
-    relationship_id = manifest["membership_semantic_relationship_id"]
-    relationship = RelationshipProjectionMapping(
+    relationship_definition = contract.candidate_model.relationship_types[0]
+    source_type = relationship_definition.source_type_ids[0]
+    target_type = relationship_definition.target_type_ids[0]
+    relationship_id = relationship_definition.relationship_type_id
+    type_mapping_by_id = {
+        item.canonical_semantic_type_id: item for item in type_mappings
+    }
+    relationship = RelationshipProjectionMappingV1_1(
         canonical_semantic_relationship_id=relationship_id,
         source_semantic_type_id=source_type,
         target_semantic_type_id=target_type,
@@ -338,17 +408,35 @@ def _crosswalk(source) -> PublicationCrosswalk:
         ontology_bigint_id=3001,
         graph_label="L5A_MEMBER",
         graph_aliases=(),
-        source_key_fields=(
-            EndpointKeyProjectionMapping(
-                canonical_property_id=type_mappings[0].canonical_instance_key_property_ids[0],
-                physical_column_id="source_id",
-            ),
+        source_canonical_key_property_ids=type_mapping_by_id[
+            source_type
+        ].canonical_instance_key_property_ids,
+        target_canonical_key_property_ids=type_mapping_by_id[
+            target_type
+        ].canonical_instance_key_property_ids,
+        source_key_bindings=tuple(
+            EndpointPhysicalKeyBindingV1_1(
+                canonical_property_id=property_id,
+                physical_column_id=f"source_{index}",
+            )
+            for index, property_id in enumerate(
+                type_mapping_by_id[
+                    source_type
+                ].canonical_instance_key_property_ids,
+                start=1,
+            )
         ),
-        target_key_fields=(
-            EndpointKeyProjectionMapping(
-                canonical_property_id=type_mappings[1].canonical_instance_key_property_ids[0],
-                physical_column_id="target_id",
-            ),
+        target_key_bindings=tuple(
+            EndpointPhysicalKeyBindingV1_1(
+                canonical_property_id=property_id,
+                physical_column_id=f"target_{index}",
+            )
+            for index, property_id in enumerate(
+                type_mapping_by_id[
+                    target_type
+                ].canonical_instance_key_property_ids,
+                start=1,
+            )
         ),
         search_index_field=None,
     )
@@ -365,33 +453,80 @@ def _crosswalk(source) -> PublicationCrosswalk:
         source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
         source_artifact_manifest_hash=source.input_manifest.manifest_hash,
     )
-    entity_rows = pq.read_table(
-        source.resolve("semantic_asserted_entities")
-    ).to_pylist()
     values = {
-        "identity": _identity(source, "c0.publication_crosswalk"),
+        "identity": PublicationCrosswalkIdentityV1_1.model_validate({
+            **_identity(
+                source,
+                "c0.publication_crosswalk",
+            ).model_dump(mode="python"),
+            "contract_version": "1.1.0",
+        }),
         "publication_crosswalk_id": "publication-crosswalk:l5a",
         "authority": authority,
         "semantic_contract_hash": source.projection.sealed_semantic_contract_hash,
         "stable_id_lock_id": "stable-id-lock:l5a",
         "stable_id_lock_hash": "b" * 64,
-        "hierarchy_hash": entity_rows[0]["hierarchy_hash"],
-        "identity_policy_hash": entity_rows[0]["identity_policy_hash"],
+        "hierarchy_hash": authority_row["hierarchy_hash"],
+        "identity_policy_hash": authority_row["identity_policy_hash"],
         "source_projection_id": source.projection.projection_id,
         "source_projection_hash": source.projection.projection_hash,
-        "semantic_type_mappings": tuple(type_mappings),
+        "semantic_property_ownership_mappings": tuple(sorted(
+            ownership_mappings,
+            key=lambda item: item.canonical_property_id,
+        )),
+        "semantic_type_mappings": tuple(sorted(
+            type_mappings,
+            key=lambda item: item.canonical_semantic_type_id,
+        )),
         "relationship_mappings": (relationship,),
     }
-    return PublicationCrosswalk(
+    return PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
 
 
-def _inputs(tmp_path: Path, *, member_count: int = 1):
+def _inputs(
+    tmp_path: Path,
+    *,
+    member_count: int = 1,
+    extra_types=(),
+    extra_type_properties=None,
+    extra_relationship_targets=False,
+    identity_business_keys=None,
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     l4 = run_l4(
-        _l3_with_sealed_manifest(tmp_path, member_count=member_count),
+        _l3_with_sealed_manifest(
+            tmp_path,
+            member_count=member_count,
+            type_properties={
+                "semantic-type:manufacturing.record": ({
+                    "property_id": "property:record:canonical-id",
+                    "display_name": "Record ID",
+                    "value_type": "string",
+                    "required": True,
+                },),
+                "semantic-type:manufacturing.subject": ({
+                    "property_id": "property:subject:canonical-id",
+                    "display_name": "Subject ID",
+                    "value_type": "string",
+                    "required": True,
+                },),
+                **(extra_type_properties or {}),
+            },
+            extra_types=extra_types,
+            extra_relationship_targets=extra_relationship_targets,
+            identity_business_keys=identity_business_keys or {
+                "semantic-type:manufacturing.record": (
+                    "property:record:canonical-id",
+                ),
+                "semantic-type:manufacturing.subject": (
+                    "property:subject:canonical-id",
+                ),
+            },
+            inject_identity_keys=True,
+        ),
         state_root=tmp_path / ".fkg" / "l4",
     )
     source = l4.sealed_source()
@@ -415,6 +550,88 @@ def _inputs(tmp_path: Path, *, member_count: int = 1):
         ),
         "target_ids": target_ids,
     }
+
+
+def _nontrivial_inputs(tmp_path: Path, *, root_key_type: str = "string"):
+    extra_types = list(copy.deepcopy(_subtypes("manufacturing")))
+    intermediate_id = "semantic-type:manufacturing.record-b"
+    grandchild = extra_types[0]["proposed_type"]
+    grandchild["parent_type_id"] = intermediate_id
+    grandchild["identity_root_type_id"] = "semantic-type:manufacturing.record"
+    return _inputs(
+        tmp_path,
+        extra_types=tuple(extra_types),
+        extra_relationship_targets=True,
+        extra_type_properties={
+            "semantic-type:manufacturing.record": (
+                {
+                    "property_id": "property:record:canonical-id",
+                    "display_name": "Record ID",
+                    "value_type": root_key_type,
+                    "required": True,
+                },
+                {
+                    "property_id": "property:record:status",
+                    "display_name": "Record Status",
+                    "value_type": "string",
+                    "required": False,
+                },
+            ),
+            "semantic-type:manufacturing.record-a": ({
+                "property_id": "property:record-a:detail",
+                "display_name": "Record A Detail",
+                "value_type": "string",
+                "required": False,
+            },),
+            "semantic-type:manufacturing.record-b": ({
+                "property_id": "property:record-b:detail",
+                "display_name": "Record B Detail",
+                "value_type": "string",
+                "required": False,
+            },),
+        },
+    )
+
+
+def _all_property_types_inputs(tmp_path: Path):
+    return _inputs(
+        tmp_path,
+        extra_type_properties={
+            "semantic-type:manufacturing.record": tuple(
+                [
+                    {
+                    "property_id": "property:record:canonical-id",
+                    "display_name": "Record ID",
+                    "value_type": "string",
+                    "required": True,
+                    }
+                ]
+                + [
+                    {
+                        "property_id": f"property:record:{data_type}",
+                        "display_name": f"Record {data_type}",
+                        "value_type": data_type,
+                        "required": data_type == "integer",
+                    }
+                    for data_type in (
+                        "string",
+                        "integer",
+                        "number",
+                        "boolean",
+                        "date",
+                        "datetime",
+                    )
+                ]
+            ),
+        },
+    )
+
+
+def _integer_endpoint_key_inputs(tmp_path: Path):
+    return _nontrivial_inputs(
+        tmp_path,
+        root_key_type="integer",
+    )
 
 
 @pytest.mark.unit
@@ -467,6 +684,475 @@ def test_l5a_persists_and_reads_back_all_structured_targets(tmp_path: Path) -> N
         )
         if proof.projection_kind == "parquet":
             assert proof.expected.row_fingerprint == required.row_fingerprint
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("data_type", "arrow_type", "valid_value"),
+    (
+        ("string", pa.string(), "value"),
+        ("integer", pa.int64(), 7),
+        ("number", pa.float64(), 7.5),
+        ("boolean", pa.bool_(), True),
+        ("date", pa.date32(), date(2026, 8, 25)),
+        (
+            "datetime",
+            pa.timestamp("us", tz="UTC"),
+            datetime(2026, 8, 25, 12, 30, tzinfo=timezone.utc),
+        ),
+    ),
+)
+def test_l5a_canonical_arrow_types_and_values(
+    data_type: str,
+    arrow_type: pa.DataType,
+    valid_value,
+) -> None:
+    assert _canonical_arrow_type(data_type) == arrow_type
+    assert _canonical_typed_value(data_type, valid_value) == valid_value
+    assert _canonical_typed_value(data_type, None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("data_type", "invalid_value"),
+    (
+        ("string", 1),
+        ("integer", True),
+        ("number", False),
+        ("boolean", 1),
+        ("date", datetime(2026, 8, 25, tzinfo=timezone.utc)),
+        ("datetime", datetime(2026, 8, 25)),
+    ),
+)
+def test_l5a_rejects_invalid_runtime_property_values(
+    data_type: str,
+    invalid_value,
+) -> None:
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+    ):
+        _canonical_typed_value(data_type, invalid_value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invalid_value",
+    (float("nan"), float("inf"), float("-inf"), 10**400),
+)
+def test_l5a_rejects_nonfinite_or_overflowing_float64(
+    invalid_value,
+) -> None:
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+    ):
+        _canonical_typed_value("number", invalid_value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid_value", (-(2**63) - 1, 2**63))
+def test_l5a_rejects_integer_outside_int64(invalid_value: int) -> None:
+    with pytest.raises(
+        L5aPublicationError,
+        match="outside signed int64 range",
+    ):
+        _canonical_typed_value("integer", invalid_value)
+
+
+class _UndefinedOffset(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+
+@pytest.mark.unit
+def test_l5a_rejects_datetime_with_undefined_offset() -> None:
+    value = datetime(2026, 8, 25, tzinfo=_UndefinedOffset())
+    with pytest.raises(
+        L5aPublicationError,
+        match="timezone offset is undefined",
+    ):
+        _canonical_typed_value("datetime", value)
+
+
+@pytest.mark.unit
+def test_l5a_typed_date_datetime_fingerprint_survives_parquet_roundtrip(
+    tmp_path: Path,
+) -> None:
+    schema = pa.schema([
+        pa.field("__canonical_id", pa.string(), nullable=False),
+        pa.field("event_date", pa.date32(), nullable=False),
+        pa.field(
+            "event_time",
+            pa.timestamp("us", tz="UTC"),
+            nullable=False,
+        ),
+    ])
+    table = pa.Table.from_pylist(
+        [{
+            "__canonical_id": "entity:one",
+            "event_date": date(2026, 8, 25),
+            "event_time": datetime(
+                2026,
+                8,
+                25,
+                18,
+                27,
+                32,
+                123456,
+                tzinfo=timezone.utc,
+            ),
+        }],
+        schema=schema,
+    )
+    path = tmp_path / "typed.parquet"
+    pq.write_table(table, path)
+    read_back = pq.read_table(path)
+
+    expected = _table_snapshot("typed", table)
+    actual = _table_snapshot("typed", read_back)
+    assert actual == expected
+
+    tampered = pa.Table.from_pylist(
+        [{
+            "__canonical_id": "entity:one",
+            "event_date": date(2026, 8, 26),
+            "event_time": read_back.to_pylist()[0]["event_time"],
+        }],
+        schema=schema,
+    )
+    assert _table_snapshot("typed", tampered).row_fingerprint != (
+        expected.row_fingerprint
+    )
+
+
+@pytest.mark.unit
+def test_l5a_uses_authoritative_types_for_all_physical_columns(
+    tmp_path: Path,
+) -> None:
+    compiled = compile_l5a_publication(**_all_property_types_inputs(tmp_path))
+    record = compiled.tables["l5a_record"]
+    expected = {
+        "record_1": pa.bool_(),
+        "record_2": pa.string(),
+        "record_3": pa.date32(),
+        "record_4": pa.timestamp("us", tz="UTC"),
+        "record_5": pa.int64(),
+        "record_6": pa.float64(),
+        "record_7": pa.string(),
+    }
+    for column, arrow_type in expected.items():
+        assert record.schema.field(column).type == arrow_type
+
+    relationship = compiled.tables["l5a_membership"]
+    assert relationship.schema.field("source_1").type == pa.string()
+    assert relationship.schema.field("target_1").type == pa.string()
+
+
+@pytest.mark.unit
+def test_l5a_preserves_authoritative_inherited_endpoint_key_type(
+    tmp_path: Path,
+) -> None:
+    compiled = compile_l5a_publication(
+        **_integer_endpoint_key_inputs(tmp_path)
+    )
+    relationship = compiled.tables["l5a_membership"]
+    assert relationship.schema.field("source_1").type == pa.int64()
+    assert relationship.schema.field("target_1").type == pa.int64()
+
+
+@pytest.mark.unit
+def test_l5a_normalizes_aware_datetime_to_utc() -> None:
+    value = datetime(
+        2026,
+        8,
+        25,
+        14,
+        30,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    assert _canonical_typed_value("datetime", value) == datetime(
+        2026,
+        8,
+        25,
+        12,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+
+@pytest.mark.unit
+def test_l5a_derives_inherited_properties_and_full_endpoint_sets(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    compiled = compile_l5a_publication(**inputs)
+    contract = DomainContractV2.model_validate_json(
+        pq.read_table(
+            inputs["source"].resolve("semantic_publication_authority")
+        ).to_pylist()[0]["domain_contract_json"]
+    )
+    child_id = "semantic-type:manufacturing.record-a"
+    child = next(
+        item
+        for item in compiled.definitions["parquet"]["semantic_types"]
+        if item["canonical_semantic_type_id"] == child_id
+    )
+    assert child["flattened_ancestor_type_ids"] == (
+        contract.hierarchy_closure.ancestors_by_type[child_id]
+    )
+    assert child["flattened_ancestor_type_ids"] != [
+        "semantic-type:manufacturing.record-b",
+        "semantic-type:manufacturing.record",
+    ]
+    assert {
+        item["canonical_property_id"] for item in child["properties"]
+    } == set(
+        contract.hierarchy_closure.effective_property_ids_by_type[child_id]
+    )
+    assert {
+        item["declaring_semantic_type_id"] for item in child["properties"]
+    } == {
+        "semantic-type:manufacturing.record",
+        "semantic-type:manufacturing.record-a",
+        "semantic-type:manufacturing.record-b",
+    }
+    relationship = compiled.definitions["parquet"]["relationships"][0]
+    authority = contract.candidate_model.relationship_types[0]
+    assert relationship["source_semantic_type_ids"] == authority.source_type_ids
+    assert relationship["target_semantic_type_ids"] == authority.target_type_ids
+    assert len(relationship["source_semantic_type_ids"]) > 1
+    assert len(relationship["target_semantic_type_ids"]) > 1
+    ontology_relationship = compiled.definitions["ontology"][
+        "relationship_types"
+    ][0]
+    graph_relationship = compiled.definitions["graph"]["edge_types"][0]
+    for published in (ontology_relationship, graph_relationship):
+        assert published["declared_source_semantic_type_ids"] == (
+            authority.source_type_ids
+        )
+        assert published["declared_target_semantic_type_ids"] == (
+            authority.target_type_ids
+        )
+        assert published["allowed_source_semantic_type_ids"] == (
+            contract.hierarchy_closure
+            .compatible_source_type_ids_by_relationship[
+                authority.relationship_type_id
+            ]
+        )
+        assert published["allowed_target_semantic_type_ids"] == (
+            contract.hierarchy_closure
+            .compatible_target_type_ids_by_relationship[
+                authority.relationship_type_id
+            ]
+        )
+    assert "source_entity_type_id" not in ontology_relationship
+    assert "target_entity_type_id" not in ontology_relationship
+    assert ontology_relationship[
+        "physical_source_entity_type_representative_id"
+    ]
+    assert ontology_relationship[
+        "physical_target_entity_type_representative_id"
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", ("omit", "extra"))
+def test_l5a_rejects_nonexact_canonical_property_ownership(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    values["semantic_property_ownership_mappings"] = list(
+        values["semantic_property_ownership_mappings"]
+    )
+    record = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.record"
+    )
+    record["locally_owned_canonical_property_ids"] = list(
+        record["locally_owned_canonical_property_ids"]
+    )
+    record["physical_property_bindings"] = list(
+        record["physical_property_bindings"]
+    )
+    property_id = "property:record:status"
+    if mutation == "omit":
+        values["semantic_property_ownership_mappings"] = [
+            item for item in values["semantic_property_ownership_mappings"]
+            if item["canonical_property_id"] != property_id
+        ]
+        record["locally_owned_canonical_property_ids"] = [
+            item for item in record["locally_owned_canonical_property_ids"]
+            if item != property_id
+        ]
+        for mapping in values["semantic_type_mappings"]:
+            mapping["inherited_property_references"] = [
+                item for item in mapping["inherited_property_references"]
+                if item["canonical_property_id"] != property_id
+            ]
+            mapping["physical_property_bindings"] = [
+                item for item in mapping["physical_property_bindings"]
+                if item["canonical_property_id"] != property_id
+            ]
+    else:
+        forged_id = "property:forged:shadow"
+        values["semantic_property_ownership_mappings"].append({
+            "canonical_property_id": forged_id,
+            "owner_semantic_type_id": record["canonical_semantic_type_id"],
+            "data_type": "string",
+            "value_semantics_id": f"value-semantics:{forged_id}",
+            "ontology_bigint_id": 2999,
+            "graph_property": "graph_property_forged_shadow",
+            "data_agent_selected_property_id": None,
+        })
+        record["locally_owned_canonical_property_ids"].append(forged_id)
+        record["physical_property_bindings"].append({
+            "canonical_property_id": forged_id,
+            "owner_semantic_type_id": record["canonical_semantic_type_id"],
+            "data_type": "string",
+            "value_semantics_id": f"value-semantics:{forged_id}",
+            "physical_column_id": "forged_shadow",
+            "search_index_field": "forged_shadow",
+            "search_filter_field": None,
+            "search_vector_field": None,
+        })
+    values["semantic_property_ownership_mappings"] = sorted(
+        values["semantic_property_ownership_mappings"],
+        key=lambda item: item["canonical_property_id"],
+    )
+    record["locally_owned_canonical_property_ids"] = sorted(
+        record["locally_owned_canonical_property_ids"]
+    )
+    record["physical_property_bindings"] = sorted(
+        record["physical_property_bindings"],
+        key=lambda item: item["canonical_property_id"],
+    )
+    forged = PublicationCrosswalkV1_1(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PROPERTY_MAPPING_SET_MISMATCH",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (forged,)},
+        )
+
+
+@pytest.mark.unit
+def test_crosswalk_rejects_duplicate_inherited_physical_property_owner(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    child = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.record-a"
+    )
+    child["locally_owned_canonical_property_ids"] = [
+        *child["locally_owned_canonical_property_ids"],
+        "property:record:canonical-id",
+    ]
+
+    with pytest.raises(ValueError, match="both local and inherited"):
+        PublicationCrosswalkV1_1(
+            **values,
+            crosswalk_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_arbitrary_descendant_semantic_instance_key(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    child = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.record-a"
+    )
+    child["canonical_instance_key_property_ids"] = [
+        "property:record-a:detail"
+    ]
+    relationship = values["relationship_mappings"][0]
+    assert relationship["target_semantic_type_id"] == child[
+        "canonical_semantic_type_id"
+    ]
+    relationship["target_canonical_key_property_ids"] = [
+        "property:record-a:detail"
+    ]
+    relationship["target_key_bindings"] = [{
+        "canonical_property_id": "property:record-a:detail",
+        "physical_column_id": "target_1",
+    }]
+    forged = PublicationCrosswalkV1_1(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_TYPE_AUTHORITY_MISMATCH",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (forged,)},
+        )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_physical_relationship_representative_outside_authority(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    relationship = values["relationship_mappings"][0]
+    subject = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.subject"
+    )
+    relationship["source_semantic_type_id"] = (
+        "semantic-type:manufacturing.subject"
+    )
+    relationship["source_canonical_key_property_ids"] = list(
+        subject["canonical_instance_key_property_ids"]
+    )
+    relationship["source_key_bindings"] = [{
+        "canonical_property_id": subject[
+            "canonical_instance_key_property_ids"
+        ][0],
+        "physical_column_id": "source_id",
+    }]
+    forged = PublicationCrosswalkV1_1(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_RELATIONSHIP_AUTHORITY_MISMATCH",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (forged,)},
+        )
 
 
 @pytest.mark.unit
@@ -553,7 +1239,7 @@ def test_l5a_multi_manifest_proofs_are_unique_and_manifest_specific(
     second_crosswalk_values["publication_crosswalk_id"] = (
         "publication-crosswalk:l5a:second"
     )
-    second_crosswalk = PublicationCrosswalk(
+    second_crosswalk = PublicationCrosswalkV1_1(
         **second_crosswalk_values,
         crosswalk_hash=canonical_sha256(second_crosswalk_values),
     )
@@ -750,7 +1436,7 @@ def test_l5a_rejects_authority_and_policy_drift(tmp_path: Path) -> None:
         exclude={"crosswalk_hash"},
     )
     stale_values["hierarchy_hash"] = "f" * 64
-    stale = PublicationCrosswalk(
+    stale = PublicationCrosswalkV1_1(
         **stale_values,
         crosswalk_hash=canonical_sha256(stale_values),
     )
@@ -806,6 +1492,24 @@ def test_l5a_rejects_misassigned_required_member_readback(
 
     assert raised.value.receipt is not None
     assert raised.value.receipt.status == "failed"
+
+
+@pytest.mark.unit
+def test_l5a_typed_schema_readback_drift_fails_closed(tmp_path: Path) -> None:
+    inputs = _all_property_types_inputs(tmp_path)
+    client = _FakeClient()
+    client.tamper_schema_read_back = "parquet"
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert raised.value.receipt.status == "failed"
+    assert not client.states
 
 
 @pytest.mark.unit
@@ -1505,8 +2209,10 @@ def test_l5a_rejects_reserved_physical_column_collision(tmp_path: Path) -> None:
     crosswalk = inputs["crosswalks"][0]
     values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
     first_type = values["semantic_type_mappings"][0]
-    first_type["property_mappings"][0]["physical_column_id"] = "__canonical_id"
-    changed = PublicationCrosswalk(
+    first_type["physical_property_bindings"][0][
+        "physical_column_id"
+    ] = "__canonical_id"
+    changed = PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1518,6 +2224,98 @@ def test_l5a_rejects_reserved_physical_column_collision(tmp_path: Path) -> None:
         compile_l5a_publication(
             **{**inputs, "crosswalks": (changed,)},
         )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_forged_parent_with_coordinated_caller_reseals(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    child = crosswalk.semantic_type_mappings[1]
+    forged_child = child.model_copy(update={
+        "canonical_parent_semantic_type_id": (
+            crosswalk.semantic_type_mappings[0].canonical_semantic_type_id
+        ),
+    })
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    values["semantic_type_mappings"] = (
+        crosswalk.semantic_type_mappings[0],
+        forged_child,
+    )
+    forged = PublicationCrosswalkV1_1(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_TYPE_AUTHORITY_MISMATCH",
+    ):
+        _assets(
+            inputs["source"],
+            forged,
+            inputs["access_policy"],
+            inputs["target_ids"],
+        )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_physical_name_shadow_of_carried_authority(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    values["semantic_type_mappings"][0]["physical_table_id"] = (
+        "l4_semantic_publication_authority"
+    )
+    changed = PublicationCrosswalkV1_1(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PHYSICAL_TABLE_COLLISION",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (changed,)},
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("outcome", ("success", "reuse", "failure"))
+def test_l5a_cpu_metrics_are_stage_elapsed_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    inputs = _inputs(tmp_path)
+    client = _FakeClient()
+    state_root = tmp_path / ".fkg" / "l5a"
+    if outcome == "reuse":
+        run_l5a(**inputs, client=client, state_root=state_root)
+    elif outcome == "failure":
+        client.fail_publish = "ontology"
+    process_times = iter((10_000.0, 10_000.012))
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.structured_publication.time.process_time",
+        lambda: next(process_times),
+    )
+
+    if outcome == "failure":
+        with pytest.raises(L5aPublicationError) as raised:
+            run_l5a(**inputs, client=client, state_root=state_root)
+        metrics = raised.value.metrics
+        assert metrics is not None
+    else:
+        metrics = run_l5a(
+            **inputs,
+            client=client,
+            state_root=state_root,
+        ).metrics
+
+    assert metrics.cpu_ms == 12
 
 
 @pytest.mark.unit

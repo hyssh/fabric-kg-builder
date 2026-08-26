@@ -7,6 +7,7 @@ import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 import pytest
 from click.testing import CliRunner
@@ -123,7 +124,10 @@ def _approved_l1(
     fact_set: dict | None = None,
     fact_set_from_design_evidence=None,
     member_properties: tuple[dict, ...] = (),
+    type_properties: Mapping[str, tuple[dict, ...]] | None = None,
     extra_types: tuple[dict, ...] = (),
+    extra_relationship_targets: bool = False,
+    identity_business_keys: Mapping[str, tuple[str, ...]] | None = None,
     include_visual: bool = False,
 ) -> tuple[Path, Path]:
     source = tmp_path / "source"
@@ -153,6 +157,10 @@ def _approved_l1(
         relationship["source_type_ids"] = list(relationship["source_type_ids"]) + (
             extra_ids
         )
+        if extra_relationship_targets:
+            relationship["target_type_ids"] = list(
+                relationship["target_type_ids"]
+            ) + extra_ids
         for index, type_id in enumerate(extra_ids, start=1):
             candidates["question_routes"][index]["start_type_id"] = type_id
     if member_properties:
@@ -161,6 +169,22 @@ def _approved_l1(
                 candidate["proposed_type"]["declared_properties"] = list(
                     member_properties
                 )
+    if type_properties:
+        for candidate in candidates["semantic_type_candidates"]:
+            type_id = candidate["proposed_type"]["type_id"]
+            if type_id in type_properties:
+                candidate["proposed_type"]["declared_properties"] = list(
+                    type_properties[type_id]
+                )
+    if identity_business_keys:
+        for candidate in candidates["semantic_type_candidates"]:
+            proposed = candidate["proposed_type"]
+            type_id = proposed["type_id"]
+            if type_id in identity_business_keys:
+                proposed["identity_key_policy"].update({
+                    "key_mode": "business_key",
+                    "business_key_fields": list(identity_business_keys[type_id]),
+                })
     if fact_set is not None:
         candidates["completeness_candidates"] = [
             {
@@ -208,7 +232,10 @@ def _approved_l1(
             domain,
             fact_set=fact_set_from_design_evidence(design_evidence_ids),
             member_properties=member_properties,
+            type_properties=type_properties,
             extra_types=extra_types,
+            extra_relationship_targets=extra_relationship_targets,
+            identity_business_keys=identity_business_keys,
             include_visual=include_visual,
         )
     state_root = tmp_path / ".fkg" / "l1"
@@ -368,6 +395,10 @@ def _pipeline(
     fact_set_from_design_evidence=None,
     mutate=None,
     member_properties: tuple[dict, ...] = (),
+    type_properties: Mapping[str, tuple[dict, ...]] | None = None,
+    extra_types: tuple[dict, ...] = (),
+    extra_relationship_targets: bool = False,
+    identity_business_keys: Mapping[str, tuple[str, ...]] | None = None,
 ):
     l1_state_root, domain_path = _approved_l1(
         tmp_path,
@@ -375,6 +406,10 @@ def _pipeline(
         fact_set=fact_set,
         fact_set_from_design_evidence=fact_set_from_design_evidence,
         member_properties=member_properties,
+        type_properties=type_properties,
+        extra_types=extra_types,
+        extra_relationship_targets=extra_relationship_targets,
+        identity_business_keys=identity_business_keys,
     )
     service = _Service(domain, mutate=mutate)
     l2 = _run_l2(tmp_path, domain, service, l1_state_root, domain_path)
