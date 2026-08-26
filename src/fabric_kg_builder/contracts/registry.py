@@ -42,7 +42,7 @@ from .publication import (
 )
 from .receipts import ArtifactManifest, StageReceipt
 from .rdf import (
-    RdfProjectionAcceptanceBundle,
+    RdfProjectionCandidateBundle,
     RdfProjectionManifest,
     RdfSerializationArtifact,
     RdfValidationReceipt,
@@ -94,7 +94,7 @@ REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
     "c0.rdf_projection_manifest": RdfProjectionManifest,
     "c0.rdf_serialization_artifact": RdfSerializationArtifact,
     "c0.rdf_validation_receipt": RdfValidationReceipt,
-    "c0.rdf_projection_acceptance_bundle": RdfProjectionAcceptanceBundle,
+    "c0.rdf_projection_candidate_bundle": RdfProjectionCandidateBundle,
 }
 SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
     kind: (CONTRACT_VERSION,) for kind in REGISTERED_CONTRACTS

@@ -769,7 +769,7 @@ def test_publish_schemas_are_generated_and_existing_hashes_are_unchanged(
             "c0.governed_asset_reference",
             "c0.access_policy",
             "c0.rdf_projection_manifest",
-            "c0.rdf_projection_acceptance_bundle",
+            "c0.rdf_projection_candidate_bundle",
             "c0.rdf_serialization_artifact",
             "c0.rdf_validation_receipt",
         } | RUNTIME_CONTRACT_KINDS

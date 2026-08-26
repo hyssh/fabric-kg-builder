@@ -49,7 +49,7 @@ defaults, or content to this contract.
 | Contract | Version | Role |
 |---|---:|---|
 | `c0.rdf_projection_manifest` / `RdfProjectionManifest` | `1.0.0` | Declares exact source authority, governed IRIs, graph layers, vocabulary, and alignments |
-| `c0.rdf_projection_acceptance_bundle` / `RdfProjectionAcceptanceBundle` | `1.0.0` | Self-contained accepted manifest/artifact/receipt proof |
+| `c0.rdf_projection_candidate_bundle` / `RdfProjectionCandidateBundle` | `1.0.0` | Self-consistent manifest/artifact/receipt metadata candidate |
 | `c0.rdf_serialization_artifact` / `RdfSerializationArtifact` | `1.0.0` | Describes one serialized artifact and its canonical dataset equivalence |
 | `c0.rdf_validation_receipt` / `RdfValidationReceipt` | `1.0.0` | Records SHACL and exact serialization round-trip outcomes |
 
@@ -79,7 +79,7 @@ lists, canonical authority, access principals, or projection behavior.
 The manifest's `authority_reference_set_hash` is computed from the exact sorted
 reference tuples: stable reference name, ID, optional contract version,
 optional schema hash, and content/policy hash. Artifacts, observations,
-receipts, and the acceptance bundle must equal that manifest value; downstream
+receipts, and the candidate bundle must equal that manifest value; downstream
 agreement is never authority.
 
 ## 5. IRI and identity policy
@@ -183,7 +183,7 @@ It also rejects graph canonical-ID swaps, subsets, or coordinated downstream
 reseals that differ from the manifest. The binding hash is intentionally not
 described as a raw union hash because only hash commitments, not all raw
 instance IDs, are required.
-The receipt and acceptance bundle require both partitions for every format, so
+The receipt and candidate bundle require both partitions for every format, so
 public-only artifacts, a missing protected format, duplicate graph coverage,
 or omitted provenance/instances fail.
 The receipt declares two RDFC-1.0 authorities:
@@ -218,19 +218,27 @@ infer, default, or recompute membership.
 
 ## 9A. Acceptance boundary
 
-`RdfProjectionAcceptanceBundle` is the only successful-publication acceptance
-surface. It embeds the exact manifest, complete serialization artifact metadata
-objects, and validation receipt, then validates all manifest/artifact/receipt
+`RdfProjectionCandidateBundle` embeds the exact manifest, complete
+serialization artifact metadata objects, and validation receipt, then validates all manifest/artifact/receipt
 set, hash, format, authority, exposure, graph, dataset, round-trip, SHACL, and
-identity invariants in one model-level validator. It requires conforming SHACL
-and exact round-trip equivalence, carries the manifest
-`authority_reference_set_hash`, and seals an accepted bundle hash.
+identity metadata invariants. It seals `candidate_status="candidate"` and is
+not payload acceptance.
 
-L5c MUST emit and consume this bundle. Individual
+L5c may persist the candidate. Individual
 `RdfProjectionManifest`, `RdfSerializationArtifact`, and
 `RdfValidationReceipt.model_validate` calls establish syntax and local
-integrity only; they MUST NOT be interpreted as accepted or successfully
-published RDF.
+integrity only. Neither those calls nor candidate model validation may be
+interpreted as successful publication.
+
+L5c MUST call `RdfProjectionCandidateBundle.accept_payloads` with the exact
+bytes for every artifact and a trusted parser/verifier callback for canonical
+N-Quads. C0 recomputes every byte SHA-256 and byte count. For each
+manifest-designated public/protected canonical N-Quads artifact, the callback
+must independently recompute RDFC-1.0 hash, named graph inventory, and triple
+count from parsed bytes. Exact comparison returns the distinct non-persisted
+`AcceptedRdfProjection`; only that result may authorize a successful L5c
+`StageReceipt`. The callback implementation is the explicit RDF parser trust
+root; C0 does not pretend metadata signatures can replace actual bytes.
 
 ## 10. External alignment
 
@@ -303,10 +311,11 @@ A later behavior PR may adopt these contracts in this order:
 7. run approved SHACL shapes without recomputing membership;
 8. parse every serialization and compare exact dataset, graph, triple,
    authority, and base-IRI equality;
-9. emit `RdfValidationReceipt`, assemble `RdfProjectionAcceptanceBundle`, and
-   fail publication unless bundle validation proves conformance and exact
-   round-trip equivalence;
-10. consume only the accepted bundle as successful-publication proof; and
+9. emit `RdfValidationReceipt` and assemble
+   `RdfProjectionCandidateBundle`;
+10. call `accept_payloads` with actual bytes and the trusted RDFC/parser
+    verifier, and permit StageReceipt success only from
+    `AcceptedRdfProjection`; and
 11. store public schema and protected dataset artifacts under their existing
     governed asset/access policies.
 

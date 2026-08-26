@@ -1,0 +1,3 @@
+<https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://www.w3.org/2000/01/rdf-schema#label> "Asset" <https://ontology.contoso.test/kg/graph/common-schema> .
+<https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://www.w3.org/2000/01/rdf-schema#subClassOf> <https://ontology.contoso.test/kg/semantic-type%3Afacility> <https://ontology.contoso.test/kg/graph/domain-schema> .
+<https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://www.w3.org/ns/shacl#targetClass> <https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://ontology.contoso.test/kg/graph/shapes> .

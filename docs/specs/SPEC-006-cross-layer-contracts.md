@@ -113,7 +113,7 @@ readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 | `c0.governed_asset_reference` | `GovernedAssetReference` | Generic immutable delivery-asset reference |
 | `c0.access_policy` | `AccessPolicy` | Credential-free authorization and retention policy |
 | `c0.rdf_projection_manifest` | `RdfProjectionManifest` | Exact authority, namespace, graph, vocabulary, and alignment declaration |
-| `c0.rdf_projection_acceptance_bundle` | `RdfProjectionAcceptanceBundle` | Self-contained manifest/artifact/receipt acceptance proof |
+| `c0.rdf_projection_candidate_bundle` | `RdfProjectionCandidateBundle` | Self-consistent manifest/artifact/receipt metadata candidate |
 | `c0.rdf_serialization_artifact` | `RdfSerializationArtifact` | One format artifact bound to the canonical RDF dataset |
 | `c0.rdf_validation_receipt` | `RdfValidationReceipt` | SHACL and exact cross-serialization round-trip proof |
 | `c0.query_budget` | `QueryBudget` | Agent-selected request ceilings with separate hierarchy depth and relationship K |
@@ -530,10 +530,10 @@ reference an `AccessPolicy` by exact ID/hash.
 The artifact's `canonical_id_binding_hash` is not a claimed raw union hash; it
 hashes exact sorted graph ID, role, per-graph canonical-ID-set hash, and count
 tuples. Artifact bindings must equal manifest graph commitments. Observations,
-receipts, and acceptance bundles copy and validate that same
+receipts, and candidate bundles copy and validate that same
 manifest-derived binding, so coordinated downstream reseals cannot substitute
 `ffff` commitments or swap/subset public and protected graph semantics.
-Receipt observations and the acceptance bundle require both partitions for
+Receipt observations and the candidate bundle require both partitions for
 every format. Public-only artifacts, a missing protected format, duplicate
 graphs across partitions, or incomplete provenance/instance coverage cannot
 be accepted.
@@ -598,13 +598,22 @@ sorting. Scalars, nulls, lists, and wrong objects defer to strict element
 validation or raise constant sanitized errors; no attribute/type exception
 escapes.
 
-`RdfProjectionAcceptanceBundle` embeds one exact manifest, the complete
+`RdfProjectionCandidateBundle` embeds one exact manifest, the complete
 serialization artifact metadata set, and one validation receipt. Its model
 validator invokes every graph, manifest, authority, format, artifact-hash,
-dataset, round-trip, and SHACL cross-invariant and seals the accepted bundle.
-L5c MUST emit and consume this registered bundle for successful publication.
+dataset, round-trip, and SHACL metadata cross-invariant and seals a candidate.
 Validating an individual manifest, artifact, or receipt proves syntax and local
-integrity only and MUST NOT be treated as successful publication.
+integrity only. Candidate model validation, including
+`candidate_status="candidate"`, MUST NOT be treated as successful publication.
+
+Final payload acceptance is the non-persisted
+`RdfProjectionCandidateBundle.accept_payloads` result. L5c supplies the exact
+artifact bytes and a trusted canonical N-Quads parser/verifier callback. C0
+independently hashes every payload byte sequence and compares byte count/hash;
+for each manifest-designated canonical artifact it also compares the callback's
+RDFC-1.0 hash, named graph inventory, and triple count. Only the distinct
+`AcceptedRdfProjection` return value may authorize an L5c successful
+`StageReceipt`. The callback is the explicit unavoidable RDF parser trust root.
 
 ## 11. Manifests, receipts, and resource evidence
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import hashlib
+from dataclasses import dataclass
 from ipaddress import ip_address
 from collections.abc import Mapping, Sequence
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal, Mapping
 from urllib.parse import ParseResult, parse_qsl, quote, unquote, urlparse
 
 from pydantic import (
@@ -1026,6 +1028,8 @@ class RdfProjectionManifest(RdfContractModel):
     rdf_projection_manifest_id: RequiredText
     source_authority: RdfSourceAuthorityTuple
     authority_reference_set_hash: Sha256
+    public_schema_canonical_n_quads_artifact_id: RequiredText
+    protected_dataset_canonical_n_quads_artifact_id: RequiredText
     iri_policy: RdfIriPolicy
     named_graphs: tuple[RdfNamedGraph, ...]
     vocabulary: RdfVocabularyInventory
@@ -1347,6 +1351,13 @@ class RdfSerializationArtifact(RdfContractModel):
         expected_profile = _FORMAT_PROFILE[self.serialization_format]
         if (self.media_type, self.w3c_syntax_version) != expected_profile:
             raise ValueError("media type or W3C syntax version does not match format")
+        if (
+            self.serialization_format == "canonical_n_quads"
+            and self.content_hash != self.canonical_dataset_hash
+        ):
+            raise ValueError(
+                "canonical N-Quads content hash must equal RDFC-1.0 dataset hash"
+            )
         binding_ids = tuple(item.graph_id for item in self.graph_bindings)
         if self.named_graph_ids != binding_ids:
             raise ValueError("named graph IDs must exactly equal sealed graph bindings")
@@ -1428,6 +1439,19 @@ class RdfSerializationArtifact(RdfContractModel):
             raise ValueError("artifact canonical ID binding differs from manifest")
         if self.serialization_format not in manifest.required_serialization_formats:
             raise ValueError("serialization format is not declared by the manifest")
+        if self.serialization_format == "canonical_n_quads":
+            expected_id = {
+                "public_schema": (
+                    manifest.public_schema_canonical_n_quads_artifact_id
+                ),
+                "protected_dataset": (
+                    manifest.protected_dataset_canonical_n_quads_artifact_id
+                ),
+            }[self.exposure]
+            if self.rdf_serialization_artifact_id != expected_id:
+                raise ValueError(
+                    "canonical N-Quads artifact ID differs from manifest designation"
+                )
         expected_graphs = tuple(
             graph
             for graph in manifest.named_graphs
@@ -1782,18 +1806,35 @@ class RdfValidationReceipt(RdfContractModel):
             raise ValueError("SHACL shapes hash differs from manifest shapes graph")
 
 
-class RdfProjectionAcceptanceBundle(RdfContractModel):
-    """Self-contained proof that a complete RDF projection is accepted."""
+@dataclass(frozen=True)
+class RdfVerifiedPayloadObservation:
+    """Trusted L5c parser/verifier output for actual canonical N-Quads bytes."""
+
+    canonical_dataset_hash: str
+    named_graph_ids: tuple[str, ...]
+    triple_count: int
+
+
+@dataclass(frozen=True)
+class AcceptedRdfProjection:
+    """Non-persisted result produced only after actual payload verification."""
+
+    candidate_bundle_hash: str
+    verified_artifact_content_hashes: tuple[tuple[str, str], ...]
+
+
+class RdfProjectionCandidateBundle(RdfContractModel):
+    """Self-consistent metadata candidate; never payload acceptance by itself."""
 
     identity: CanonicalIdentityEnvelope
-    rdf_projection_acceptance_bundle_id: RequiredText
+    rdf_projection_candidate_bundle_id: RequiredText
     authority_reference_set_hash: Sha256
     canonical_id_partition_binding_hash: Sha256
     manifest: RdfProjectionManifest
     serialization_artifacts: tuple[RdfSerializationArtifact, ...]
     validation_receipt: RdfValidationReceipt
-    acceptance_status: Literal["accepted"] = "accepted"
-    acceptance_bundle_hash: Sha256
+    candidate_status: Literal["candidate"] = "candidate"
+    candidate_bundle_hash: Sha256
 
     @field_validator("serialization_artifacts", mode="before")
     @classmethod
@@ -1805,10 +1846,10 @@ class RdfProjectionAcceptanceBundle(RdfContractModel):
         )
 
     @model_validator(mode="after")
-    def _accepted_bundle(self) -> "RdfProjectionAcceptanceBundle":
+    def _candidate_bundle(self) -> "RdfProjectionCandidateBundle":
         _reject_sensitive_in(self)
-        if self.identity.contract_kind != "c0.rdf_projection_acceptance_bundle":
-            raise ValueError("invalid RDF projection acceptance bundle contract_kind")
+        if self.identity.contract_kind != "c0.rdf_projection_candidate_bundle":
+            raise ValueError("invalid RDF projection candidate bundle contract_kind")
         if (
             self.authority_reference_set_hash
             != self.manifest.authority_reference_set_hash
@@ -1844,10 +1885,52 @@ class RdfProjectionAcceptanceBundle(RdfContractModel):
         if not self.validation_receipt.shacl_validation.conforms:
             raise ValueError("accepted RDF bundle requires SHACL conformance")
         if not self.validation_receipt.exact_round_trip_equivalent:
-            raise ValueError("accepted RDF bundle requires exact round-trip equivalence")
+            raise ValueError("RDF candidate requires exact round-trip equivalence metadata")
         expected = canonical_sha256(
-            self.model_dump(mode="json", exclude={"acceptance_bundle_hash"})
+            self.model_dump(mode="json", exclude={"candidate_bundle_hash"})
         )
-        if self.acceptance_bundle_hash != expected:
-            raise ValueError("acceptance_bundle_hash does not match accepted RDF bundle")
+        if self.candidate_bundle_hash != expected:
+            raise ValueError("candidate_bundle_hash does not match RDF candidate")
         return self
+
+    def accept_payloads(
+        self,
+        payloads: Mapping[str, bytes],
+        *,
+        canonical_n_quads_verifier: Callable[
+            [RdfSerializationArtifact, bytes],
+            RdfVerifiedPayloadObservation,
+        ],
+    ) -> AcceptedRdfProjection:
+        artifacts = {
+            item.rdf_serialization_artifact_id: item
+            for item in self.serialization_artifacts
+        }
+        if set(payloads) != set(artifacts):
+            raise ValueError("actual payload set must equal candidate artifact set")
+        verified_hashes: list[tuple[str, str]] = []
+        canonical_ids = {
+            self.manifest.public_schema_canonical_n_quads_artifact_id,
+            self.manifest.protected_dataset_canonical_n_quads_artifact_id,
+        }
+        for artifact_id, artifact in sorted(artifacts.items()):
+            payload = payloads[artifact_id]
+            actual_content_hash = hashlib.sha256(payload).hexdigest()
+            if actual_content_hash != artifact.content_hash:
+                raise ValueError("actual artifact byte hash mismatch")
+            if len(payload) != artifact.byte_count:
+                raise ValueError("actual artifact byte count mismatch")
+            verified_hashes.append((artifact_id, actual_content_hash))
+            if artifact_id not in canonical_ids:
+                continue
+            verified = canonical_n_quads_verifier(artifact, payload)
+            if verified.canonical_dataset_hash != artifact.canonical_dataset_hash:
+                raise ValueError("actual canonical dataset hash mismatch")
+            if verified.named_graph_ids != artifact.named_graph_ids:
+                raise ValueError("actual canonical named graph inventory mismatch")
+            if verified.triple_count != artifact.triple_count:
+                raise ValueError("actual canonical triple count mismatch")
+        return AcceptedRdfProjection(
+            candidate_bundle_hash=self.candidate_bundle_hash,
+            verified_artifact_content_hashes=tuple(verified_hashes),
+        )
