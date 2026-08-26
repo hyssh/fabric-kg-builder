@@ -1,8 +1,8 @@
 # SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, C0.Publish, and C0.Runtime)
 
 **Status:** Approved foundation
-**Version:** 1.5.0
-**Date:** 2026-08-25
+**Version:** 1.6.0
+**Date:** 2026-08-26
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
 
@@ -483,10 +483,13 @@ identity may be named as hard dimensions.
 
 ## 12. C0.Runtime contracts
 
-C0.Runtime is exclusively owned by the C0 Contract Owner. Its registered
-contracts are strict, frozen `1.0.0` schemas. They define data-plane boundaries
-only; they perform no Ontology/Graph request, Search request, agentic
-decomposition, retry, synthesis, deployment, or live acceptance.
+C0.Runtime is exclusively owned by the C0 Contract Owner. Its original
+contracts remain strict, frozen `1.0.0` schemas. The additive
+`QueryBudget`, `AgenticRetrievalRequestContext`, and
+`AgenticRetrievalCoverageReceipt` successors are registered at `1.1.0`; every
+other C0.Runtime carrier remains `1.0.0`. These contracts define data-plane
+boundaries only; they perform no Ontology/Graph request, Search request,
+agentic decomposition, retry, synthesis, deployment, or live acceptance.
 
 `OntologyScopeEnvelope` uses only approved canonical semantic type, entity,
 relationship, role, path, and policy identities. Its modes are `exact_type`,
@@ -537,6 +540,16 @@ every declared ceiling to its exact budget and reconciles observed invocation,
 subquery, source-call, direct-request, document, and Search-result counts. The
 contract contains no synthesis or hidden retry field.
 
+`QueryBudget@1.1.0` retains every `1.0.0` ceiling and adds the bounded
+observations already present in L5b accounting or C0 resource metrics: Search
+candidate records (distinct from returned Search result records and output
+documents), vector Search requests, embedding calls and embedding items, retry
+count, and retry wait milliseconds. Zero disables an optional vector,
+embedding, or retry path. Embedding calls and items are enabled or disabled
+together. Agentic modes cannot declare client vector or embedding request
+ceilings; direct mode may enable them. These are provider-neutral request
+ceilings and observations, not performance targets or permission to retry.
+
 `AgenticRetrievalRequestContext` seals knowledge-base, knowledge-source, Search
 index, capability, static base-policy, ACL, publication, hierarchy, scope,
 filter, and budget identities. Preview mode requires API
@@ -556,6 +569,13 @@ and binds its own direct-mode budget. Capability loss selects only the declared
 fallback or a typed fail-closed result; a scope filter is never silently removed.
 Search document ID is delivery identity only and never substitutes for canonical
 keys.
+
+`AgenticRetrievalRequestContext@1.1.0` binds the exact
+`QueryBudget@1.1.0` ID, contract version, model-schema hash, budget hash, and
+retrieval mode. A `1.0.0` context accepts only a `1.0.0` budget, and a `1.1.0`
+context accepts only a `1.1.0` budget. Fallback origin and execution contexts
+must use the same contract version; no implicit cross-version projection is
+defined.
 
 Every cross-contract acceptance hook conserves canonical identity authority,
 including project, asset/version, run, source, content, Domain, Semantic,
@@ -579,6 +599,30 @@ fact in a corpus. Missing
 members or roles, duplicates, collection mismatch, warning, truncation, source
 failure, missing reference, unsupported capability, or budget exhaustion cannot
 produce `complete`.
+
+`AgenticRetrievalCoverageReceipt@1.1.0` records every `QueryBudget@1.1.0`
+ceiling and its exact observed counterpart. Its sorted
+`budget_exhausted_dimensions` is derived exactly: a dimension is present if and
+only if observed use exceeds its ceiling. Missing, extra, duplicate, or
+undeclared names fail validation. Provider over-execution is preserved as
+observed and is never clamped to the request ceiling. Any exhausted dimension
+requires `partial` or `abstain`, a typed `retrieval_budget_exhausted` failure,
+and never `complete`. Mode-inapplicable observations are zero. Search candidate
+records equal matched candidates, while Search result records and output
+documents equal returned documents; these quantities are not interchangeable.
+The same exact rule covers Ontology/Graph scope requests and result records,
+agentic invocations/subqueries/source calls, direct requests, vector/embedding
+operations, output tokens/bytes/documents, runtime, retries, and retry waits.
+
+L5b adoption is explicit and behavior-preserving: construct and enforce a
+`QueryBudget@1.1.0` before provider calls; emit a
+`AgenticRetrievalRequestContext@1.1.0` with the exact budget schema/hash
+binding; preserve provider counters without normalization; emit one source-call
+record per observed source call and one planned-subquery record per observed
+subquery; derive exhaustion from exact observed-versus-ceiling comparisons; and
+select `partial` or `abstain` with typed failure when any dimension is
+exhausted. Existing `1.0.0` artifacts remain readable without reinterpretation,
+rewriting, or hash changes.
 
 `SearchCitationEnvelope` and `CitationPresentation` preserve original document
 name, source/file/unit/chunk/evidence IDs, canonical entity/relationship/assertion
