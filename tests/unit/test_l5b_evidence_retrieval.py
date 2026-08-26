@@ -41,6 +41,7 @@ from fabric_kg_builder.serving.evidence_retrieval import (
     run_l5b,
     _agentic_runtime_seconds,
     _assertion_documents,
+    _parse_immutable_locator,
     _safe_source_display_name,
     _safe_section_path,
     _scope_keys,
@@ -528,6 +529,10 @@ def test_applicable_evidence_requires_exact_governed_source_asset(
         "report_api key=supersecret.pdf",
         "report(api key=supersecret).pdf",
         "prefixapikey=supersecret.pdf",
+        "refresh-token-value=supersecret.pdf",
+        "api-key-name=supersecret.pdf",
+        "credential label: supersecret.pdf",
+        "api\u00a0key = supersecret.pdf",
     ),
 )
 def test_source_display_name_rejects_urls_paths_and_credentials(
@@ -543,6 +548,10 @@ def test_source_display_name_allows_safe_unicode_filename() -> None:
         "製造 マニュアル 2026.pdf",
         source_file_id="source-file:manual",
     ) == "製造 マニュアル 2026.pdf"
+    assert _safe_source_display_name(
+        "Tokenization guide.pdf",
+        source_file_id="source-file:manual",
+    ) == "Tokenization guide.pdf"
 
 
 @pytest.mark.unit
@@ -553,9 +562,17 @@ def test_section_path_uses_shared_display_policy() -> None:
             source_unit_id="source-unit:manual",
         )
     assert _safe_section_path(
-        ("section:maintenance", "バッテリー 取り外し"),
+        (
+            "section:maintenance",
+            "バッテリー 取り外し",
+            "Tokenization: overview",
+        ),
         source_unit_id="source-unit:manual",
-    ) == ("section:maintenance", "バッテリー 取り外し")
+    ) == (
+        "section:maintenance",
+        "バッテリー 取り外し",
+        "Tokenization: overview",
+    )
 
 
 @pytest.mark.unit
@@ -1548,6 +1565,43 @@ def _reference_document(context, entity_id: str, index: int) -> dict:
     return values
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("scalar", ("[]", '"text"', "1", "null"))
+def test_locator_rejects_nonobject_json(scalar: str) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _parse_immutable_locator(scalar)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mutation",
+    ("duplicate", "extra", "missing", "section-string", "section-object", "section-mixed"),
+)
+def test_locator_rejects_schema_and_section_shape_drift(mutation: str) -> None:
+    document = _reference_document(request_context()[0], "entity:member-0", 0)
+    raw = json.loads(document["immutable_locator_json"])
+    if mutation == "duplicate":
+        locator_json = document["immutable_locator_json"].replace(
+            '"page":4',
+            '"page":4,"page":4',
+            1,
+        )
+    else:
+        if mutation == "extra":
+            raw["unexpected"] = "value"
+        elif mutation == "missing":
+            raw.pop("locator_hash")
+        elif mutation == "section-string":
+            raw["section_path"] = "section:maintenance"
+        elif mutation == "section-object":
+            raw["section_path"] = {"label": "maintenance"}
+        else:
+            raw["section_path"] = ["maintenance", 3]
+        locator_json = canonical_json(raw)
+    with pytest.raises((TypeError, ValueError)):
+        _parse_immutable_locator(locator_json)
+
+
 def _runtime_publication(context, documents):
     policy = SimpleNamespace(
         access_policy_id="access-policy:evidence",
@@ -1581,6 +1635,7 @@ def _runtime_publication(context, documents):
                 (document["id"], document["document_hash"])
                 for document in documents
             ),
+            documents=tuple(documents),
             access_policy=policy,
             governed_assets=(asset,),
         )
@@ -1622,6 +1677,143 @@ def _retrieval_accounting(count: int) -> L5bRemoteAccounting:
         latency_ms=25,
         candidate_count=count,
         output_tokens=0,
+    )
+
+
+def _mutate_returned_document(document: dict, surface: str) -> None:
+    if surface == "locator":
+        locator_values = json.loads(document["immutable_locator_json"])
+        locator_values["page"] = 5
+        locator_values["locator_hash"] = canonical_sha256({
+            key: value
+            for key, value in locator_values.items()
+            if key != "locator_hash"
+        })
+        document["immutable_locator_json"] = canonical_json(locator_values)
+        document["immutable_locator_hash"] = locator_values["locator_hash"]
+        document["page"] = 5
+    elif surface == "quote":
+        document["content"] = "SPOOFED QUOTE"
+        document["source_quote"] = "SPOOFED QUOTE"
+        document["quote_hash"] = canonical_sha256("SPOOFED QUOTE")
+    elif surface == "acl":
+        document["acl_scope_keys"] = ["scope:spoofed"]
+    elif surface == "scope":
+        document["canonical_entity_ids"] = ["entity:spoofed"]
+    elif surface == "display":
+        document["original_document_name"] = "Spoofed Manual.pdf"
+    elif surface == "evidence":
+        document["evidence_span_ids"] = ["evidence:spoofed"]
+        document["evidence_span_hashes"] = [HASH_B]
+    elif surface == "hash":
+        document["document_hash"] = "f" * 64
+    elif surface == "missing":
+        document.pop("source_unit_hash")
+    elif surface == "extra":
+        document["unexpected_field"] = "spoofed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "surface",
+    ("locator", "quote", "acl", "scope", "display", "evidence", "hash", "missing", "extra"),
+)
+@pytest.mark.parametrize("coordinated_hash", (False, True))
+def test_returned_document_spoof_never_reaches_citation(
+    surface: str,
+    coordinated_hash: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    sealed_documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    returned_documents = [dict(item) for item in sealed_documents]
+    _mutate_returned_document(returned_documents[0], surface)
+    if coordinated_hash and surface != "hash":
+        returned_documents[0]["document_hash"] = canonical_sha256({
+            key: value
+            for key, value in returned_documents[0].items()
+            if key != "document_hash"
+        })
+    publication = _runtime_publication(context, sealed_documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response=_agentic_response(context, returned_documents),
+        accounting=_retrieval_accounting(len(returned_documents)),
+    )
+
+    assert result.coverage.coverage_status == "partial"
+    assert len(result.citations) == len(returned_documents) - 1
+    assert all(
+        citation.search_document_id != sealed_documents[0]["id"]
+        for citation in result.citations
+    )
+    assert any(
+        failure.reason_code == "citation_invalid"
+        for failure in result.coverage.failures
+    )
+    assert all(
+        citation.exact_authorized_quote != "SPOOFED QUOTE"
+        for citation in result.citations
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("duplicate_kind", ("reference", "document"))
+def test_duplicate_search_response_identity_is_quarantined(
+    duplicate_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    sealed_documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    response = _agentic_response(context, sealed_documents)
+    duplicate = dict(response["references"][0])
+    if duplicate_kind == "document":
+        duplicate["id"] = "search-reference:duplicate"
+    response["references"].append(duplicate)
+    response["activity"][0]["count"] += 1
+    publication = _runtime_publication(context, sealed_documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response=response,
+        accounting=_retrieval_accounting(len(response["references"])),
+    )
+
+    assert result.coverage.coverage_status == "partial"
+    assert all(
+        citation.search_document_id != sealed_documents[0]["id"]
+        for citation in result.citations
     )
 
 

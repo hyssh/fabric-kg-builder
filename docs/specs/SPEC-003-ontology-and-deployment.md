@@ -1756,6 +1756,12 @@ Credential stems are detected before an assignment delimiter even when embedded
 after punctuation or inside another filename token. The same shared policy
 validates every user-displayable citation section-path component before
 construction; a malicious section quarantines the complete document.
+For each raw and bounded-decoded display form, the complete assignment-key
+prefix is reduced to a case-folded alphanumeric skeleton. API/access/account
+key, client secret, refresh-token/token, credential, password, connection
+string, SAS, and signature stems anywhere in that skeleton are forbidden;
+ordinary text such as `Tokenization: overview` remains valid because it has no
+credential assignment stem.
 Assertions without exact evidence are not indexed; required-member authority
 without a quote remains a retrieval coverage requirement and therefore cannot
 produce complete coverage unless another valid assertion document supplies its
@@ -1814,6 +1820,16 @@ source/governed-asset, publication, and ACL dimensions must be identical to or
 narrower than the resolved scope. A sealed but unrelated document is
 quarantined: no quote or display metadata is returned, coverage is partial or
 abstaining, and typed failure evidence carries exact unexpected canonical IDs.
+Before scope inspection, L5b requires the returned field set to equal the exact
+Search select/index document schema, recomputes `document_hash` from every
+returned field except that hash, and compares both canonical payload and hash
+with the immutable compiled document selected by ID. Missing, extra, duplicate,
+or modified fields and duplicate reference/document IDs quarantine the result,
+including coordinated quote/locator/ACL/scope/display/evidence/hash changes.
+`immutable_locator_json` is parsed as a duplicate-free JSON object with the
+exact `ImmutableSourceLocator` field set and strict field types; non-objects,
+extra/missing/duplicate keys, malformed section arrays, or mismatched duplicate
+page/section/hash fields fail before citation construction.
 
 L5b does not activate CLI/Data Agent behavior, L6 answer synthesis, live Search
 or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.

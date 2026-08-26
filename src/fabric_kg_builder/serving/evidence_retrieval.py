@@ -38,6 +38,7 @@ from fabric_kg_builder.contracts.base import (
 )
 from fabric_kg_builder.contracts.evidence import EvidenceSpanV1_1, SourceUnit
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
+from fabric_kg_builder.contracts.identity import ImmutableSourceLocator
 from fabric_kg_builder.contracts.publication import (
     AccessPolicy,
     GovernedAssetReference,
@@ -776,6 +777,55 @@ _CREDENTIAL_ASSIGNMENT_RE = re.compile(
 )
 
 
+def _credential_assignment_detected(value: str) -> bool:
+    strong_stems = (
+        "apikey",
+        "accesskey",
+        "accountkey",
+        "clientsecret",
+        "refreshtoken",
+        "credential",
+        "password",
+        "passwd",
+        "connectionstring",
+        "connectionstr",
+        "sharedaccesssignature",
+    )
+    contextual_stems = (
+        "tokenvalue",
+        "tokenkey",
+        "tokensecret",
+        "tokenname",
+        "tokenlabel",
+        "secretvalue",
+        "secretkey",
+        "secretname",
+        "secretlabel",
+        "sastoken",
+        "saskey",
+        "sigvalue",
+        "sigkey",
+        "signaturevalue",
+        "signaturekey",
+    )
+    for index, char in enumerate(value):
+        if char not in "=:":
+            continue
+        key_segment = value[:index]
+        skeleton = "".join(
+            item.casefold()
+            for item in key_segment
+            if item.isalnum()
+        )
+        if (
+            any(stem in skeleton for stem in strong_stems)
+            or any(stem in skeleton for stem in contextual_stems)
+            or skeleton.endswith(("token", "secret", "pwd", "sas", "sig", "signature"))
+        ):
+            return True
+    return False
+
+
 _UNSAFE_URI_SCHEMES = {
     "http",
     "https",
@@ -804,6 +854,7 @@ def _unsafe_display_text(value: str, *, reject_any_scheme: bool) -> bool:
         or any(marker in folded for marker in _CONNECTION_STRING_MARKERS)
         or _CONNECTION_STRING_KEY_RE.search(value)
         or _CREDENTIAL_ASSIGNMENT_RE.search(value)
+        or _credential_assignment_detected(value)
     )
 
 
@@ -1156,6 +1207,11 @@ def _assertion_documents(
                     "vector_state": "unavailable",
                 }
                 values["document_hash"] = canonical_sha256(values)
+                if set(values) != set(_SOURCE_DATA_FIELDS):
+                    raise L5bPublicationError(
+                        "L5B_DOCUMENT_SCHEMA_MISMATCH",
+                        "compiled evidence document fields differ from Search select schema",
+                    )
                 documents.append(values)
     ordered = tuple(sorted(documents, key=lambda item: str(item["id"])))
     ids = [str(item["id"]) for item in ordered]
@@ -2778,7 +2834,13 @@ def _citation_identity(
     contract_kind: str,
 ) -> CanonicalIdentityEnvelope:
     values = context.identity.model_dump(mode="python", round_trip=True)
-    locator = json.loads(str(document["immutable_locator_json"]))
+    locator_model = _parse_immutable_locator(document["immutable_locator_json"])
+    locator = locator_model.model_dump(mode="json")
+    if (
+        document.get("immutable_locator_hash") != locator_model.locator_hash
+        or document.get("page") != locator_model.page
+    ):
+        raise ValueError("Search document locator duplicates differ from authority")
     values.update({
         "contract_kind": contract_kind,
         "contract_version": "1.0.0",
@@ -2973,6 +3035,64 @@ def _response_items(
     return references, activity
 
 
+def _strict_json_object(value: object, *, field_name: str) -> Mapping[str, Any]:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be canonical JSON text")
+
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"{field_name} contains duplicate key {key!r}")
+            result[key] = item
+        return result
+
+    parsed = json.loads(value, object_pairs_hook=object_pairs)
+    if not isinstance(parsed, Mapping):
+        raise TypeError(f"{field_name} must contain a JSON object")
+    return parsed
+
+
+def _parse_immutable_locator(value: object) -> ImmutableSourceLocator:
+    parsed = _strict_json_object(value, field_name="immutable_locator_json")
+    expected_fields = set(ImmutableSourceLocator.model_fields)
+    if set(parsed) != expected_fields:
+        raise ValueError(
+            "immutable_locator_json fields differ from the exact locator schema"
+        )
+    section_path = parsed.get("section_path")
+    if section_path is not None and (
+        not isinstance(section_path, list)
+        or any(not isinstance(item, str) for item in section_path)
+    ):
+        raise TypeError("immutable locator section_path must be an array of strings")
+    locator = ImmutableSourceLocator.model_validate(parsed)
+    if locator.model_dump(mode="json") != parsed:
+        raise ValueError("immutable locator canonical types changed during validation")
+    return locator
+
+
+def _document_matches_sealed_payload(
+    document: Mapping[str, Any],
+    sealed: Mapping[str, Any],
+) -> bool:
+    expected_fields = set(_SOURCE_DATA_FIELDS)
+    if set(document) != expected_fields or set(sealed) != expected_fields:
+        return False
+    returned_hash = document.get("document_hash")
+    recomputed_hash = canonical_sha256({
+        key: value
+        for key, value in document.items()
+        if key != "document_hash"
+    })
+    return (
+        isinstance(returned_hash, str)
+        and returned_hash == recomputed_hash
+        and returned_hash == sealed.get("document_hash")
+        and canonical_json(document) == canonical_json(sealed)
+    )
+
+
 def _document_scope_findings(
     document: Mapping[str, Any],
     context: AgenticRetrievalRequestContext,
@@ -3117,9 +3237,11 @@ def _document_scope_findings(
     except L5bPublicationError:
         add("citation_invalid", dimension="original_document_name")
     try:
-        locator = json.loads(str(document.get("immutable_locator_json")))
+        locator_model = _parse_immutable_locator(
+            document.get("immutable_locator_json")
+        )
         locator_section_path = _safe_section_path(
-            locator.get("section_path") or (),
+            locator_model.section_path or (),
             source_unit_id=str(document.get("source_unit_id") or "missing"),
         )
         document_section_path = _safe_section_path(
@@ -3128,6 +3250,11 @@ def _document_scope_findings(
         )
         if document_section_path != locator_section_path:
             add("citation_invalid", dimension="section_path")
+        if (
+            document.get("immutable_locator_hash") != locator_model.locator_hash
+            or document.get("page") != locator_model.page
+        ):
+            add("citation_invalid", dimension="immutable_locator")
     except (
         L5bPublicationError,
         TypeError,
@@ -3257,7 +3384,19 @@ def interpret_retrieval_response(
         != publication.compiled.index_fingerprint
     ):
         raise ValueError("retrieval context differs from sealed L5b resources")
-    sealed_document_hashes = dict(publication.compiled.document_hashes)
+    sealed_documents = {
+        str(document["id"]): document
+        for document in publication.compiled.documents
+    }
+    if (
+        len(sealed_documents) != len(publication.compiled.documents)
+        or tuple(sorted(
+            (document_id, str(document["document_hash"]))
+            for document_id, document in sealed_documents.items()
+        ))
+        != tuple(sorted(publication.compiled.document_hashes))
+    ):
+        raise ValueError("sealed L5b document authority is internally inconsistent")
     retrieval_scope.validate_resolved_scope(ontology_scope)
     context.validate_scope(retrieval_scope)
     context.validate_budget(budget)
@@ -3277,11 +3416,47 @@ def interpret_retrieval_response(
     quarantined_findings: dict[str, set[str]] = {}
     quarantined_unexpected_ids: set[str] = set()
     returned_document_type_ids: set[str] = set()
+    reference_id_counts: dict[str, int] = {}
+    document_id_counts: dict[str, int] = {}
     for reference in references:
+        if not isinstance(reference, Mapping):
+            continue
+        reference_id = reference.get("id") or reference.get("ref_id")
+        document = reference.get("sourceData") or reference.get("source_data")
+        if isinstance(reference_id, str):
+            reference_id_counts[reference_id] = (
+                reference_id_counts.get(reference_id, 0) + 1
+            )
+        if isinstance(document, Mapping) and isinstance(document.get("id"), str):
+            document_id = str(document["id"])
+            document_id_counts[document_id] = (
+                document_id_counts.get(document_id, 0) + 1
+            )
+    duplicate_reference_ids = {
+        value for value, count in reference_id_counts.items() if count > 1
+    }
+    duplicate_document_ids = {
+        value for value, count in document_id_counts.items() if count > 1
+    }
+    for reference in references:
+        if not isinstance(reference, Mapping):
+            missing_reference_ids.append("reference:malformed")
+            continue
         reference_id = reference.get("id") or reference.get("ref_id")
         document = reference.get("sourceData") or reference.get("source_data")
         if not isinstance(reference_id, str) or not isinstance(document, Mapping):
             missing_reference_ids.append(str(reference_id or "reference:missing"))
+            continue
+        document_id = str(document.get("id") or "document:missing")
+        if (
+            reference_id in duplicate_reference_ids
+            or document_id in duplicate_document_ids
+        ):
+            missing_reference_ids.append(reference_id)
+            quarantined_findings.setdefault("citation_invalid", set()).update({
+                reference_id,
+                document_id,
+            })
             continue
         if (
             context.retrieval_mode.startswith("agentic_")
@@ -3289,10 +3464,15 @@ def interpret_retrieval_response(
         ):
             missing_reference_ids.append(reference_id)
             continue
-        if sealed_document_hashes.get(str(document.get("id"))) != document.get(
-            "document_hash"
+        sealed_document = sealed_documents.get(document_id)
+        if (
+            sealed_document is None
+            or not _document_matches_sealed_payload(document, sealed_document)
         ):
             missing_reference_ids.append(reference_id)
+            quarantined_findings.setdefault("citation_invalid", set()).add(
+                document_id
+            )
             continue
         scope_findings, scope_unexpected_ids = _document_scope_findings(
             document,

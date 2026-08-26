@@ -59,6 +59,13 @@ L4, and hardened L5a authority.
   noncharacters, encoded URL/secret forms, and whitespace-tolerant credential
   assignments (including embedded credential stems) while preserving safe NFC
   Unicode and spaces; citation section-path labels use the same validator;
+- credential assignment keys are checked through a normalized alphanumeric
+  skeleton across raw and bounded-decoded forms, so prefixed/suffixed stems
+  cannot bypass policy while non-credential words remain valid;
+- every Search result must reproduce the exact compiled field set, canonical
+  payload, recomputed document hash, and immutable document ID/hash authority
+  before any quote, locator, or display field is inspected; duplicate
+  references/documents and strict locator-schema drift are quarantined;
 - schema 1, CLI/Data Agent activation, L6 synthesis, live Azure/Fabric
   deployment, and L7 validation remain unchanged or deferred.
 
