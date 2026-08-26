@@ -173,13 +173,19 @@ make the receipt non-equivalent.
 
 Standalone artifact validation enforces exact role sets by exposure:
 `public_schema` contains exactly common/domain/SHACL roles with no ACL policy;
-`protected_dataset` adds mandatory provenance and optional instances, whose
-policies equal the artifact policy. `validate_against_manifest` rejects any
+`protected_dataset` contains mandatory provenance and declared required
+instances only, whose policies equal the artifact policy. Every required
+format carries one public and one protected artifact; the partitions are
+disjoint and their union equals the complete required manifest graph
+inventory. `validate_against_manifest` rejects any
 missing, extra, relabeled, optionalized, or policy-shifted graph binding.
 It also rejects graph canonical-ID swaps, subsets, or coordinated downstream
 reseals that differ from the manifest. The binding hash is intentionally not
 described as a raw union hash because only hash commitments, not all raw
 instance IDs, are required.
+The receipt and acceptance bundle require both partitions for every format, so
+public-only artifacts, a missing protected format, duplicate graph coverage,
+or omitted provenance/instances fail.
 
 ## 9. SHACL boundary
 
@@ -259,6 +265,9 @@ compatibility-only, joiner, symbol, invalid A-label, and bidi hosts fail.
 Unicode IRI characters in path, query, and
 fragment remain persisted unchanged and are not rejected merely because NFKC
 would introduce a delimiter outside the authority.
+Normalized/decoded path text is still scanned for explicit equals assignments
+and colon-plus-whitespace credential headers, while namespace-like colon text
+is allowed. HTTPS IRIs require a nonempty canonical hostname.
 Every RDF-owned model inherits the RDF-local strict base configured to hide
 inputs, preflights nested sensitive values, and returns sanitized structured
 validation errors containing no rejected raw value.
@@ -307,3 +316,6 @@ existing contract remain unchanged.
 The immutable pre-RDF baseline fixture stores path-to-byte-hash mappings and
 exact registry entries, so this proof runs in shallow checkouts and exported
 source trees without consulting Git history.
+Before projection into maps/sets, the test requires exactly 39 raw entries and
+unique kind/version, path, and schema-hash values; duplicate baseline or RDF
+entries fail.

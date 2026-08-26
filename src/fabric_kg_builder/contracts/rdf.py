@@ -107,6 +107,7 @@ def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
     if (
         parsed.scheme != "https"
         or not parsed.netloc
+        or parsed.hostname is None
         or parsed.username is not None
         or parsed.password is not None
         or (base and (parsed.query or parsed.fragment))
@@ -311,6 +312,12 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         if (
             fragment_keys.intersection(normalized_signed | credential_keys)
             or generic_fragment_key
+        ):
+            raise ValueError(f"{field_name} must not contain credentials")
+        normalized_path = unicodedata.normalize("NFKC", parsed.path)
+        if (
+            _EQUALS_ASSIGNMENT_RE.search(normalized_path)
+            or _HEADER_ASSIGNMENT_RE.search(normalized_path)
         ):
             raise ValueError(f"{field_name} must not contain credentials")
     if (
@@ -1249,8 +1256,14 @@ class RdfProjectionManifest(RdfContractModel):
                 "canonical_id_count": graph.canonical_id_count,
             }
             for graph in self.named_graphs
-            if exposure == "protected_dataset"
-            or graph.graph_role in _PUBLIC_GRAPH_ROLES
+            if (
+                exposure == "public_schema"
+                and graph.graph_role in _PUBLIC_GRAPH_ROLES
+            )
+            or (
+                exposure == "protected_dataset"
+                and graph.graph_role in _PROTECTED_GRAPH_ROLES
+            )
         )
         return canonical_sha256(bindings)
 
@@ -1373,12 +1386,12 @@ class RdfSerializationArtifact(RdfContractModel):
                 "public schema artifacts require exactly the three public graph roles"
             )
         if self.exposure == "protected_dataset":
-            mandatory_roles = _PUBLIC_GRAPH_ROLES | {"provenance_authority"}
+            mandatory_roles = {"provenance_authority"}
             if not mandatory_roles.issubset(roles) or not roles.issubset(
-                mandatory_roles | {"instances"}
+                _PROTECTED_GRAPH_ROLES
             ):
                 raise ValueError(
-                    "protected datasets require exact mandatory roles and optional instances"
+                    "protected artifacts require provenance and optional instances only"
                 )
         if any(not item.required for item in self.graph_bindings):
             raise ValueError("every serialized graph binding must be required")
@@ -1418,8 +1431,14 @@ class RdfSerializationArtifact(RdfContractModel):
         expected_graphs = tuple(
             graph
             for graph in manifest.named_graphs
-            if self.exposure == "protected_dataset"
-            or graph.graph_role in _PUBLIC_GRAPH_ROLES
+            if (
+                self.exposure == "public_schema"
+                and graph.graph_role in _PUBLIC_GRAPH_ROLES
+            )
+            or (
+                self.exposure == "protected_dataset"
+                and graph.graph_role in _PROTECTED_GRAPH_ROLES
+            )
         )
         actual = tuple(
             (
@@ -1462,6 +1481,7 @@ class RdfSerializationObservation(RdfContractModel):
     rdf_serialization_artifact_id: RequiredText
     rdf_serialization_artifact_hash: Sha256
     serialization_format: RdfFormat
+    exposure: RdfExposure
     media_type: RequiredText
     content_hash: Sha256
     canonical_dataset_hash: Sha256
@@ -1514,8 +1534,8 @@ class RdfValidationReceipt(RdfContractModel):
     rdf_projection_manifest_hash: Sha256
     source_authority_hash: Sha256
     authority_reference_set_hash: Sha256
-    canonical_id_binding_hash: Sha256
-    canonical_n_quads_artifact_id: RequiredText
+    canonical_id_partition_binding_hash: Sha256
+    canonical_n_quads_artifact_ids: tuple[str, ...]
     canonical_dataset_hash_algorithm: Literal["RDFC-1.0"] = "RDFC-1.0"
     canonical_dataset_hash: Sha256
     required_serialization_formats: tuple[RdfFormat, ...]
@@ -1533,6 +1553,16 @@ class RdfValidationReceipt(RdfContractModel):
             field_name="observations",
         )
 
+    @field_validator("canonical_n_quads_artifact_ids", mode="before")
+    @classmethod
+    def _canonical_artifact_ids(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return sorted_unique(
+                value,
+                field_name="canonical_n_quads_artifact_ids",
+            )
+        return value
+
     @field_validator("required_serialization_formats", mode="before")
     @classmethod
     def _formats(cls, value: object) -> object:
@@ -1545,9 +1575,15 @@ class RdfValidationReceipt(RdfContractModel):
         _reject_sensitive_in(self)
         if self.identity.contract_kind != "c0.rdf_validation_receipt":
             raise ValueError("invalid RDF validation receipt contract_kind")
+        partitions = {
+            (item.serialization_format, item.exposure)
+            for item in self.observations
+        }
+        if len(partitions) != len(self.observations):
+            raise ValueError(
+                "round-trip observations must have unique format/exposure partitions"
+            )
         formats = {item.serialization_format for item in self.observations}
-        if len(formats) != len(self.observations):
-            raise ValueError("round-trip observations must have unique formats")
         if formats != set(self.required_serialization_formats):
             raise ValueError(
                 "observation formats must exactly equal required serialization formats"
@@ -1562,28 +1598,53 @@ class RdfValidationReceipt(RdfContractModel):
             raise ValueError(
                 "observations must equal the receipt authority reference set hash"
             )
-        if any(
-            item.canonical_id_binding_hash != self.canonical_id_binding_hash
-            for item in self.observations
+        expected_partitions = {
+            (rdf_format, exposure)
+            for rdf_format in self.required_serialization_formats
+            for exposure in ("public_schema", "protected_dataset")
+        }
+        if partitions != expected_partitions:
+            raise ValueError(
+                "observations must cover public and protected partitions per format"
+            )
+        expected_partition_hash = canonical_sha256(
+            tuple(
+                {
+                    "rdf_serialization_artifact_id": item.rdf_serialization_artifact_id,
+                    "serialization_format": item.serialization_format,
+                    "exposure": item.exposure,
+                    "canonical_id_binding_hash": item.canonical_id_binding_hash,
+                }
+                for item in self.observations
+            )
+        )
+        if (
+            self.canonical_id_partition_binding_hash
+            != expected_partition_hash
         ):
             raise ValueError(
-                "observations must equal the receipt canonical ID binding hash"
+                "canonical_id_partition_binding_hash does not match observations"
             )
-        canonical = next(
+        canonicals = tuple(
             item
             for item in self.observations
             if item.serialization_format == "canonical_n_quads"
         )
-        if canonical.rdf_serialization_artifact_id != self.canonical_n_quads_artifact_id:
-            raise ValueError("canonical N-Quads artifact ID mismatch")
+        if tuple(
+            item.rdf_serialization_artifact_id for item in canonicals
+        ) != self.canonical_n_quads_artifact_ids:
+            raise ValueError("canonical N-Quads artifact IDs mismatch")
+        canonical_by_exposure = {item.exposure: item for item in canonicals}
         failures = any(
             item.canonical_dataset_hash != self.canonical_dataset_hash
-            or item.named_graph_ids != canonical.named_graph_ids
-            or item.triple_count != canonical.triple_count
+            or item.named_graph_ids
+            != canonical_by_exposure[item.exposure].named_graph_ids
+            or item.triple_count
+            != canonical_by_exposure[item.exposure].triple_count
             or item.missing_triple_count != 0
             or item.extra_triple_count != 0
             or item.authority_reference_set_hash
-            != canonical.authority_reference_set_hash
+            != canonical_by_exposure[item.exposure].authority_reference_set_hash
             or not item.base_iri_matches
             or item.label_identity_detected
             or item.unstable_blank_node_detected
@@ -1627,6 +1688,36 @@ class RdfValidationReceipt(RdfContractModel):
         }
         if set(artifact_by_id) != observation_ids:
             raise ValueError("receipt observations must bind the exact artifact set")
+        artifact_partitions = {
+            (item.serialization_format, item.exposure)
+            for item in artifacts
+        }
+        expected_partitions = {
+            (rdf_format, exposure)
+            for rdf_format in manifest.required_serialization_formats
+            for exposure in ("public_schema", "protected_dataset")
+        }
+        if artifact_partitions != expected_partitions:
+            raise ValueError(
+                "artifact set must contain public and protected partitions per format"
+            )
+        required_graph_ids = {
+            graph.graph_id for graph in manifest.named_graphs if graph.required
+        }
+        for rdf_format in manifest.required_serialization_formats:
+            partitions = {
+                item.exposure: item
+                for item in artifacts
+                if item.serialization_format == rdf_format
+            }
+            public_ids = set(partitions["public_schema"].named_graph_ids)
+            protected_ids = set(partitions["protected_dataset"].named_graph_ids)
+            if public_ids.intersection(protected_ids):
+                raise ValueError("public and protected graph partitions must be disjoint")
+            if public_ids.union(protected_ids) != required_graph_ids:
+                raise ValueError(
+                    "artifact graph partition union must equal required manifest graphs"
+                )
         for observation in self.observations:
             artifact = artifact_by_id[observation.rdf_serialization_artifact_id]
             artifact.validate_against_manifest(manifest)
@@ -1642,6 +1733,7 @@ class RdfValidationReceipt(RdfContractModel):
                     artifact.authority_reference_set_hash,
                 ),
                 ("format", observation.serialization_format, artifact.serialization_format),
+                ("exposure", observation.exposure, artifact.exposure),
                 ("media type", observation.media_type, artifact.media_type),
                 ("content hash", observation.content_hash, artifact.content_hash),
                 (
@@ -1680,7 +1772,7 @@ class RdfProjectionAcceptanceBundle(RdfContractModel):
     identity: CanonicalIdentityEnvelope
     rdf_projection_acceptance_bundle_id: RequiredText
     authority_reference_set_hash: Sha256
-    canonical_id_binding_hash: Sha256
+    canonical_id_partition_binding_hash: Sha256
     manifest: RdfProjectionManifest
     serialization_artifacts: tuple[RdfSerializationArtifact, ...]
     validation_receipt: RdfValidationReceipt
@@ -1707,10 +1799,10 @@ class RdfProjectionAcceptanceBundle(RdfContractModel):
         ):
             raise ValueError("bundle authority reference set hash mismatch")
         if (
-            self.canonical_id_binding_hash
-            != self.validation_receipt.canonical_id_binding_hash
+            self.canonical_id_partition_binding_hash
+            != self.validation_receipt.canonical_id_partition_binding_hash
         ):
-            raise ValueError("bundle canonical ID binding hash mismatch")
+            raise ValueError("bundle canonical ID partition binding hash mismatch")
         authority_identity = self.manifest.identity.model_dump(
             mode="json",
             exclude={"contract_kind", "contract_version"},

@@ -135,6 +135,9 @@ fixtures, and canonical JSON/hash goldens are under
 The committed `baselines/pre-rdf-schema-registry-1.6.0.json` fixture records
 every pre-RDF schema file byte SHA-256 and exact registry entry. Additivity
 tests are history-independent and require no Git objects or fetch-depth.
+The raw current registry must contain exactly 35 baseline plus four RDF entries
+with unique kind/version keys, paths, and schema hashes before any map/set
+projection.
 
 ## 5. Identity and locator invariants
 
@@ -514,9 +517,11 @@ or canonical N-Quads artifact. It fixes media type and W3C syntax version,
 content hash, byte/triple/graph counts, named graph IDs, sealed graph
 ID/IRI/role/required/policy/count/canonical-ID commitments and inventory hash,
 RDFC-1.0 canonical dataset hash, and deterministic no-unstable-blank-node
-policy. Public artifacts contain exactly common/domain/SHACL roles and no
-policy; protected artifacts contain mandatory provenance and optional
-instances with exact policy. `validate_against_manifest` rejects any missing,
+policy. Each required format has exactly one public artifact containing
+common/domain/SHACL roles and one protected artifact containing mandatory
+provenance plus any declared required instances, with exact policy. Their
+graph sets are disjoint and their union equals the complete required manifest
+inventory. `validate_against_manifest` rejects any missing,
 extra, relabeled, optionalized, or policy-shifted graph. Turtle is the human-review form, RDF/XML is the compatibility form,
 JSON-LD is optional, and canonical N-Quads is the equivalence form. Sorted
 N-Triples is not a dataset-canonicalization substitute. Public schema
@@ -528,6 +533,10 @@ tuples. Artifact bindings must equal manifest graph commitments. Observations,
 receipts, and acceptance bundles copy and validate that same
 manifest-derived binding, so coordinated downstream reseals cannot substitute
 `ffff` commitments or swap/subset public and protected graph semantics.
+Receipt observations and the acceptance bundle require both partitions for
+every format. Public-only artifacts, a missing protected format, duplicate
+graphs across partitions, or incomplete provenance/instance coverage cannot
+be accepted.
 
 `RdfValidationReceipt` records SHACL shapes/report hashes, conformance and
 severity counts, validator identity/version, and observations sealed to the
@@ -572,6 +581,10 @@ IP literals. Canonically equivalent decomposed/composed hosts compare equally;
 NFKC-only compatibility, joiner, symbol, invalid A-label, and bidi hosts fail.
 Compatibility characters in valid IRI path/query/fragment text
 are not rejected merely because NFKC introduces a delimiter there.
+Normalized/decoded URL paths are scanned for explicit credential assignments
+and header-like colon-plus-whitespace forms; namespace-like colon text without
+assignment context remains valid. Absolute HTTPS IRIs require a nonempty
+canonical hostname, rejecting empty-host, userinfo-only, and port-only forms.
 Every RDF-owned top-level and nested model uses the RDF-local strict base with
 hidden inputs and sanitized `ValidationError.errors()` details; rejected values
 are never included in exception text or structured error input.
