@@ -60,15 +60,17 @@ def build_ontology_search_connection_guide(build_dir: Path) -> str:
         "",
         "## Responsibility boundary",
         "",
-        "Fabric Ontology is the high-level noun/verb structure. Detailed evidence "
-        "quotes belong to the later Search index and are not embedded in Ontology "
-        "or Graph definitions.",
+        "Fabric Ontology is the layered common/domain high-level noun/verb model. "
+        "Fabric Graph resolves the reliable approved relationship scope. Azure AI "
+        "Search then supplies detailed definitions, descriptions, and exact source "
+        "quotes inside that canonical scope. Search is a delivery projection, not "
+        "relationship or evidence authority.",
         "",
         "| Surface | Role | Reliability rule |",
         "|---|---|---|",
         "| Fabric Ontology | Approved meaning, layered entity nouns, properties, and relationship verb semantics | Required to interpret structured concepts |",
         "| Fabric Graph | Persisted directed entity and relationship instances | Required for reliable structured query execution and proof of relationships |",
-        "| Azure AI Search | Later detailed definitions, descriptions, passages, table text, and source quotations | Supplies supporting detail after Ontology/Graph resolution; it does not prove graph edges |",
+        "| Azure AI Search | Detailed definitions, descriptions, passages, governed assets, and exact source quotations | Supplies evidence data after Ontology/Graph resolution; it does not prove graph edges, membership, or completeness |",
         "",
         "## Ontology layers",
         "",
@@ -158,6 +160,10 @@ def build_ontology_search_connection_guide(build_dir: Path) -> str:
         "distinguishes original source text from derived descriptions. "
         "`source_file_id`, `source_locator_json`, page/section fields, evidence IDs, "
         "and semantic IDs connect the quote back to its source and Graph context.",
+        " Every nontrivial indexed assertion must resolve through "
+        "`EvidenceSpanV1_1` and `SourceUnit` to the immutable source file or governed "
+        "asset version. Access policy and sealed L3/L4/L5 authority hashes travel "
+        "with each document; transient or signed URLs are never persisted.",
         "",
         "| Index | Documents | With source quote | Verbatim source quotes |",
         "|---|---:|---:|---:|",
@@ -177,11 +183,14 @@ def build_ontology_search_connection_guide(build_dir: Path) -> str:
         "2. Execute a bounded query against **Fabric Graph** using only sealed labels, directions, and properties.",
         "3. Treat returned Graph entity IDs, relationship IDs, paths, and evidence IDs as the authoritative structured result.",
         "4. Use those IDs as deterministic filters for **Azure AI Search** to retrieve detailed definitions, descriptions, and source quotations.",
-        "5. Cite Graph evidence and Search source locators together. If Graph returns no verified relationship, do not infer one from text similarity.",
-        "6. Report authentication, timeout, platform, and query failures as failures rather than converting them into no-data answers.",
+        "5. Compare the Graph-required canonical member set with Search-returned canonical IDs; ranked top-k alone never proves completeness.",
+        "6. Cite exact policy-approved Search quotes and stable locators. Missing IDs, evidence, ACLs, warnings, failures, collisions, or truncation require a precise partial result or abstention.",
+        "7. If Graph returns no verified relationship, do not infer one from text similarity. Report authentication, timeout, platform, and query failures rather than converting them into no-data answers.",
         "",
-        "Search may answer unstructured passage questions directly, but it must not "
-        "be used alone to assert structured entity relationships.",
+        "fabric-kg returns evidence data and coverage only. It does not answer, "
+        "summarize, or use Search alone to assert structured entity relationships. "
+        "External ontology enrichment remains a separately governed opt-in and is "
+        "not embedded in this package.",
         "",
     ])
     return "\n".join(lines)

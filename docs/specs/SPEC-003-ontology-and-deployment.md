@@ -1713,6 +1713,137 @@ L5a groups the actual persisted carried manifest/member rows by exact
 IDs, and fingerprints the carried rows. It compares those read-back observations
 to the anchored L3 authority without redefining or recomputing L3 membership.
 
+### 12.13 L5b Evidence Retrieval Publication
+
+L5b consumes only an intact successful L5a publication result/read-back, its
+exact `SealedL4ServingSource`, and the anchored original L3
+`ArtifactManifest`. Verified `EvidenceSpanV1_1` partitions and `SourceUnit`
+objects are materialization witnesses: their partition hashes, IDs, quote
+offsets, source text hashes, source file/asset versions, and immutable locators
+must equal the sealed authority. L5b accepts no raw/L3 bypass, invents no schema
+or membership, and never treats Search as evidence, relationship, or
+completeness authority.
+
+The deterministic evidence index carries exact filterable canonical entity,
+relationship, property, type, assertion, required-member-manifest, source, and
+evidence identities. Every nontrivial indexed assertion resolves:
+
+```text
+canonical assertion
+  -> EvidenceSpanV1_1
+  -> SourceUnit
+  -> source file or governed asset version
+  -> immutable locator and content hash
+  -> exact verbatim quote or governed asset
+```
+
+AccessPolicy principal/scope keys, governed-asset references, lifecycle state,
+and all relevant L3/L4/L5a projection, receipt, manifest, crosswalk, and policy
+hashes travel with the document. Transient and signed URLs are excluded.
+The supplied governed-asset set must exactly equal the sealed L5a set by
+ID/hash/content and policy authority; omission, addition, duplication,
+misassignment, or coordinated reseal fails publication. An evidence document is
+publishable only when its source file, asset/version, content hash, and immutable
+locator resolve exactly one governed asset. Source display filenames are
+URL-free, path-free, credential-free NFC text; locators remain separate
+authority.
+Display filenames also reject Unicode control/format/surrogate characters,
+line/paragraph separators, bidi overrides/isolates, noncharacters, encoded URL
+or secret forms, and whitespace-tolerant API/access/account/client key, token,
+password, credential, connection-string, SAS, and signature assignments.
+Ordinary NFC Unicode filenames and safe internal spaces remain valid.
+Credential stems are detected before an assignment delimiter even when embedded
+after punctuation or inside another filename token. The same shared policy
+validates every user-displayable citation section-path component before
+construction; a malicious section quarantines the complete document.
+For each raw and bounded-decoded display form, the complete assignment-key
+prefix is reduced to a case-folded alphanumeric skeleton. API/access/account
+key, client secret, refresh-token/token, credential, password, connection
+string, SAS, and signature stems anywhere in that skeleton are forbidden;
+ordinary text such as `Tokenization: overview` remains valid because it has no
+credential assignment stem.
+Skeleton detection compatibility-normalizes each raw and bounded-decoded key
+prefix with Unicode NFKC before case folding, so fullwidth and mathematical
+credential letters/delimiters cannot bypass detection. Persisted display text
+remains NFC and is never compatibility-rewritten.
+Assertions without exact evidence are not indexed; required-member authority
+without a quote remains a retrieval coverage requirement and therefore cannot
+produce complete coverage unless another valid assertion document supplies its
+evidence.
+
+Index, knowledge-source, knowledge-base, document IDs/content hashes,
+vector-state hash, and ACL state are persisted before mutation and read back
+exactly. One inspection, one atomic batched publication, and one read-back form
+the three-call success bound. Stale reuse adds one read-back. Ambiguous mutation
+recovery and conditional cleanup or restore remain within the five-call
+worst-case bound. Every remote operation returns positive request/response
+bytes, unique operation references, retry/wait/latency/candidate/truncation/
+warning/error accounting; absent or malformed metadata fails closed. Mutations
+use inspected-state compare-and-swap and a per-attempt ownership token.
+Checkpoint reuse compares every persisted definition, knowledge resource,
+document set, projection proof, manifest, metrics, receipt, and token binding
+directly with immutable compiled values and deterministic authority seals.
+Rebuilding expected truth from current disk bytes is prohibited; coordinated
+local file/manifest/metrics/receipt reseals are cache misses.
+Checkpoint authentication is injected through an opaque protected
+`CheckpointIntegritySigner` and never exposes raw secret bytes to fabric-kg or
+stores them under the L5b state tree, logs, receipts, manifests, or Search
+documents. The signer advertises a supported algorithm plus stable key
+ID/version and implements `sign(canonical_payload)` and timing-safe
+`verify(canonical_payload, persisted_mac)`. Missing or unavailable signers
+disable reuse and force a safe rebuild; unsupported identity/algorithm,
+malformed MACs, and signing failures fail closed. ID/version or protected-key
+rotation invalidates prior checkpoints without cross-run replay.
+
+Runtime is zero-synthesis. C0.Runtime `QueryBudget`, resolved scope, request
+context, coverage receipt, citation envelope, and citation presentation
+contracts are consumed unchanged. Ontology supplies the layered common/domain
+noun/verb meaning, Graph supplies the reliable approved relationship and member
+scope, and Search supplies detailed evidence inside exact canonical filters.
+Graph-required IDs are compared with Search-returned IDs; top-k ranking and
+vectors never establish completeness.
+
+The optional preview adapter is explicitly gated and pinned to
+`2026-05-01-preview`. Its persisted knowledge-source `baseFilter` and request
+`filterAddOn` combine by `AND`; the add-on can only narrow locally validated
+canonical/ACL/publication scope. References, source data, activity, warnings,
+and response hashes are retained in coverage evidence. The stable direct path
+uses a separately budgeted filtered hybrid/vector request with
+`vectorFilterMode=preFilter` and the same or narrower canonical scope.
+Unavailable vectors may degrade only to the same filtered keyword/semantic
+query and must report degradation/partial state.
+
+The preview request emits `retrievalReasoningEffort` as `{ "kind": ... }`.
+Whole-second provider timeouts use the positive floor of the sealed millisecond
+budget and never round up. A budget below one second is not representable and
+fails locally before any provider call.
+
+Every returned document is scope-checked before citation construction. Its
+canonical entity, relationship, property, type, assertion, member-manifest,
+source/governed-asset, publication, and ACL dimensions must be identical to or
+narrower than the resolved scope. A sealed but unrelated document is
+quarantined: no quote or display metadata is returned, coverage is partial or
+abstaining, and typed failure evidence carries exact unexpected canonical IDs.
+Before scope inspection, L5b requires the returned field set to equal the exact
+Search select/index document schema, recomputes `document_hash` from every
+returned field except that hash, and compares both canonical payload and hash
+with the immutable compiled document selected by ID. Missing, extra, duplicate,
+or modified fields and duplicate reference/document IDs quarantine the result,
+including coordinated quote/locator/ACL/scope/display/evidence/hash changes.
+`immutable_locator_json` is parsed as a duplicate-free JSON object with the
+exact `ImmutableSourceLocator` field set and strict field types; non-objects,
+extra/missing/duplicate keys, malformed section arrays, or mismatched duplicate
+page/section/hash fields fail before citation construction.
+Pre-verification response IDs and provider metadata are opaque: local reference,
+activity, source-call, subquery, request, correlation, and warning identifiers
+are generated or hashed without echoing attacker text. Quarantine failures carry
+a document ID only after exact resolution to compiled sealed authority; unknown
+or duplicate attacker IDs remain absent from citations, receipts, failure
+canonical IDs, and other persisted result fields.
+
+L5b does not activate CLI/Data Agent behavior, L6 answer synthesis, live Search
+or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.
+
 ## 13. Revision History
 
 | Date | Author | Summary |
@@ -1725,6 +1856,7 @@ to the anchored L3 authority without redefining or recomputing L3 membership.
 | 2026-06-24T21:46:59.576-07:00 | McManus | §12 bridge — §12.10 added: Table document-element nodes (element_type="table", content_html, blob_url) participate in the evidenced_by / shown_in bridge, enabling graph↔table integration and AI Search indexing of tables as independent documents (coordinator-tables-via-docintel.md, verified 2026-06-24). |
 | 2026-08-23 | Copilot | Added §12.11: schema-2.0 Ontology/Graph publication is semantic-only and requires compile/deploy/persisted hash and count equivalence. |
 | 2026-08-25 | Copilot | Added §12.12: isolated L5a structured publication over sealed L4, persisted-definition lifecycle, exact read-back equivalence, and explicit Search/L6/L7 exclusions. |
+| 2026-08-25 | Copilot | Added §12.13: isolated L5b evidence publication and zero-synthesis Azure AI Search retrieval data plane. |
 
 ---
 

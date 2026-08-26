@@ -9,4 +9,5 @@ competency      : Competency verification for bound counts/path queries (SRV-009
 lineage_verifier: Cross-store lineage verifier (SRV-010)
 orchestrator    : Idempotent full redeploy orchestrator (SRV-011)
 structured_publication: Isolated schema-2 L5a structured publication
+evidence_retrieval: Isolated schema-2 L5b Search evidence publication
 """
