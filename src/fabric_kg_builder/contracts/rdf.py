@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from ipaddress import ip_address
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal
 from urllib.parse import ParseResult, parse_qsl, quote, unquote, urlparse
@@ -134,12 +135,59 @@ def _check_sensitive_size(value: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} exceeds the safe validation size")
 
 
-def _authority_signature(parsed: ParseResult) -> tuple[Any, ...] | None:
+def _canonical_host(hostname: str, *, field_name: str) -> str:
+    try:
+        return ip_address(hostname).compressed.casefold()
+    except ValueError:
+        pass
+    try:
+        nfc_hostname = unicodedata.normalize("NFC", hostname)
+        if unicodedata.normalize("NFKC", nfc_hostname) != nfc_hostname:
+            raise ValueError
+        candidate = nfc_hostname.rstrip(".")
+        if not candidate:
+            raise ValueError
+        for character in candidate:
+            category = unicodedata.category(character)
+            if character not in {".", "-"} and category[0] not in {"L", "M", "N"}:
+                raise ValueError
+        labels = candidate.split(".")
+        if any(not label for label in labels):
+            raise ValueError
+        a_labels: list[str] = []
+        for label in labels:
+            a_label = label.encode("idna").decode("ascii").casefold()
+            if not 1 <= len(a_label.encode("ascii")) <= 63:
+                raise ValueError
+            decoded_label = a_label.encode("ascii").decode("idna")
+            if (
+                decoded_label.encode("idna").decode("ascii").casefold()
+                != a_label
+            ):
+                raise ValueError
+            a_labels.append(a_label)
+        canonical = ".".join(a_labels)
+        if len(canonical.encode("ascii")) > 253:
+            raise ValueError
+        return canonical
+    except (UnicodeError, ValueError):
+        raise ValueError(f"{field_name} contains invalid URL authority") from None
+
+
+def _authority_signature(
+    parsed: ParseResult,
+    *,
+    field_name: str,
+) -> tuple[Any, ...] | None:
     if not parsed.scheme or not parsed.netloc:
         return None
     return (
         parsed.scheme.casefold(),
-        parsed.hostname.casefold() if parsed.hostname is not None else None,
+        (
+            _canonical_host(parsed.hostname, field_name=field_name)
+            if parsed.hostname is not None
+            else None
+        ),
         parsed.port,
         parsed.username,
         parsed.password,
@@ -156,7 +204,7 @@ def _safe_parse_qsl(value: str, *, field_name: str) -> list[tuple[str, str]]:
 def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     _check_sensitive_size(value, field_name=field_name)
     raw_parsed = _safe_urlparse(value, field_name=field_name)
-    raw_authority = _authority_signature(raw_parsed)
+    raw_authority = _authority_signature(raw_parsed, field_name=field_name)
     decoded = unicodedata.normalize("NFKC", value)
     _check_sensitive_size(decoded, field_name=field_name)
     stable = False
@@ -173,7 +221,7 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     decoded = unicodedata.normalize("NFKC", decoded)
     _check_sensitive_size(decoded, field_name=field_name)
     parsed = _safe_urlparse(decoded, field_name=field_name)
-    if _authority_signature(parsed) != raw_authority:
+    if _authority_signature(parsed, field_name=field_name) != raw_authority:
         raise ValueError(f"{field_name} contains unstable URL authority syntax")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError(f"{field_name} must not contain URI credentials")
@@ -340,6 +388,34 @@ def _sanitized_validation_error(
     return ValidationError.from_exception_data(model_name, details)
 
 
+def _is_canonically_equivalent_host_iri(value: str) -> bool:
+    normalized = unicodedata.normalize("NFC", value)
+    if normalized == value:
+        return True
+    try:
+        raw = _safe_urlparse(value, field_name="contract string")
+        nfc = _safe_urlparse(normalized, field_name="contract string")
+        if not raw.scheme or not raw.netloc:
+            return False
+        if (
+            raw.scheme != nfc.scheme
+            or raw.path != nfc.path
+            or raw.params != nfc.params
+            or raw.query != nfc.query
+            or raw.fragment != nfc.fragment
+        ):
+            return False
+        return _authority_signature(
+            raw,
+            field_name="contract string",
+        ) == _authority_signature(
+            nfc,
+            field_name="contract string",
+        )
+    except ValueError:
+        return False
+
+
 class RdfContractModel(ContractModel):
     """RDF-local strict model that never exposes rejected input in errors."""
 
@@ -350,6 +426,35 @@ class RdfContractModel(ContractModel):
     def _reject_sensitive_input(cls, value: Any) -> Any:
         _reject_sensitive_in(value)
         return value
+
+    @model_validator(mode="after")
+    def _require_unicode_nfc(self) -> "RdfContractModel":
+        def check(value: Any) -> None:
+            if isinstance(value, str):
+                if not _is_canonically_equivalent_host_iri(value):
+                    raise ValueError(
+                        "contract strings must be Unicode NFC except for "
+                        "canonically equivalent IRI host spelling"
+                    )
+                return
+            if isinstance(value, BaseModel):
+                for item in value.__dict__.values():
+                    check(item)
+                return
+            if isinstance(value, Mapping):
+                for key, item in value.items():
+                    check(key)
+                    check(item)
+                return
+            if isinstance(value, Sequence) and not isinstance(
+                value,
+                (bytes, bytearray),
+            ):
+                for item in value:
+                    check(item)
+
+        check(self)
+        return self
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -530,6 +635,9 @@ class RdfIriPolicy(RdfContractModel):
     ontology_iri: RequiredText
     version_iri: RequiredText
     ontology_semantic_version: SemVer
+    hostname_normalization_profile: Literal[
+        "c0.rdf.nfc-idna2003-strict-a-label-v1"
+    ] = "c0.rdf.nfc-idna2003-strict-a-label-v1"
     canonical_iri_mapping_version: Literal["1.0"] = "1.0"
     canonical_id_mapping: Literal["utf8_percent_encoded_path_segment"] = (
         "utf8_percent_encoded_path_segment"

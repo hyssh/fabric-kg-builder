@@ -240,7 +240,14 @@ decoded-and-normalized round, and final stable output, so compatibility
 expansion cannot bypass limits. URL parsing and lazy hostname/port/user-info
 validation are wrapped in constant sanitized errors. Raw and decoded/NFKC URL
 authority scheme/host/port/user-info semantics must remain identical; only the
-authority is structurally stable. Unicode IRI characters in path, query, and
+authority is structurally stable. Host comparison uses the explicit
+`c0.rdf.nfc-idna2003-strict-a-label-v1` profile: NFC normalization,
+NFKC-stability, only letters/marks/numbers/hyphen/dot, Python standard-library
+IDNA A-label encode/decode round-trip, lowercase A-labels, label and total-host
+length bounds, and normalized IP literals. Canonically equivalent decomposed
+and composed hosts compare equally without mutating the model field;
+compatibility-only, joiner, symbol, invalid A-label, and bidi hosts fail.
+Unicode IRI characters in path, query, and
 fragment remain persisted unchanged and are not rejected merely because NFKC
 would introduce a delimiter outside the authority.
 Every RDF-owned model inherits the RDF-local strict base configured to hide

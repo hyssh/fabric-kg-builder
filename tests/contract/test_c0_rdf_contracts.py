@@ -1130,6 +1130,49 @@ def test_unicode_iri_path_query_and_fragment_identity_remains_valid(
 
 @pytest.mark.contract
 @pytest.mark.parametrize(
+    "canonical_host_iri",
+    [
+        "https://e\u0301xample.test/path",
+        "https://éxample.test/path",
+    ],
+)
+def test_nfc_equivalent_idna_hosts_compare_by_canonical_a_label(
+    canonical_host_iri: str,
+) -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["target_iri"] = canonical_host_iri
+    validated = RdfExternalAlignment.model_validate(payload)
+    assert validated.target_iri == canonical_host_iri
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "invalid_host",
+    [
+        "https://ｅxample.test/IDNA_MARKER_29",
+        "https://℀.test/IDNA_MARKER_29",
+        "https://a\u200db.test/IDNA_MARKER_29",
+        "https://😀.test/IDNA_MARKER_29",
+        "https://abcא.test/IDNA_MARKER_29",
+        "https://xn--invalid-.test/IDNA_MARKER_29",
+    ],
+)
+def test_compatibility_and_invalid_idna_hosts_fail_input_free(
+    invalid_host: str,
+) -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["target_iri"] = invalid_host
+    with pytest.raises(ValidationError) as captured:
+        RdfExternalAlignment.model_validate(payload)
+    assert "IDNA_MARKER_29" not in str(captured.value)
+    assert "IDNA_MARKER_29" not in json.dumps(
+        captured.value.errors(),
+        default=str,
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
     "invalid_url",
     [
         "https://[::1/path?ref=URL_MARKER_73",

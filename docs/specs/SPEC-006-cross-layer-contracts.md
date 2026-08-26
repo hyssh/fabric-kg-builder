@@ -551,8 +551,14 @@ by assignment whitespace. Stable namespace IDs such as
 Raw, initially normalized, every decoded-and-normalized, and final stable values
 are each limited to 64 KiB. URL parsing and lazy hostname/port/user-info access
 are wrapped in constant input-free errors. Raw and decoded/NFKC URL authority
-scheme/host/port/user-info semantics must remain identical, so encoded authority
-delimiters fail. Compatibility characters in valid IRI path/query/fragment text
+scheme/canonical-host/port/user-info semantics must remain identical, so encoded
+authority delimiters fail. Hosts use the declared
+`c0.rdf.nfc-idna2003-strict-a-label-v1` profile: NFC, NFKC-stability,
+letter/mark/number/hyphen/dot code points, standard-library IDNA A-label
+round-trip, lowercase comparison, label/hostname length limits, and normalized
+IP literals. Canonically equivalent decomposed/composed hosts compare equally;
+NFKC-only compatibility, joiner, symbol, invalid A-label, and bidi hosts fail.
+Compatibility characters in valid IRI path/query/fragment text
 are not rejected merely because NFKC introduces a delimiter there.
 Every RDF-owned top-level and nested model uses the RDF-local strict base with
 hidden inputs and sanitized `ValidationError.errors()` details; rejected values
