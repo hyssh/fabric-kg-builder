@@ -1,0 +1,11 @@
+<https://www.w3.org/2000/01/rdf-schema#Class> <https://www.w3.org/2000/01/rdf-schema#label> "Class" <https://ontology.contoso.test/kg/graph/common-schema> .
+<https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://www.w3.org/2000/01/rdf-schema#Class> <https://ontology.contoso.test/kg/graph/domain-schema> .
+<https://ontology.contoso.test/kg/semantic-type%3Afacility> <https://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://www.w3.org/2000/01/rdf-schema#Class> <https://ontology.contoso.test/kg/graph/domain-schema> .
+<https://ontology.contoso.test/kg/property%3Aasset%3Aid> <https://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://www.w3.org/2002/07/owl#DatatypeProperty> <https://ontology.contoso.test/kg/graph/domain-schema> .
+<https://ontology.contoso.test/kg/property%3Afacility%3Aid> <https://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://www.w3.org/2002/07/owl#DatatypeProperty> <https://ontology.contoso.test/kg/graph/domain-schema> .
+<https://ontology.contoso.test/kg/relationship%3Aasset%3Afacility> <https://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://www.w3.org/2002/07/owl#ObjectProperty> <https://ontology.contoso.test/kg/graph/domain-schema> .
+<https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://www.w3.org/ns/shacl#targetClass> <https://ontology.contoso.test/kg/semantic-type%3Aasset> <https://ontology.contoso.test/kg/graph/shapes> .
+<https://ontology.contoso.test/kg/semantic-type%3Afacility> <https://www.w3.org/ns/shacl#targetClass> <https://ontology.contoso.test/kg/semantic-type%3Afacility> <https://ontology.contoso.test/kg/graph/shapes> .
+<https://ontology.contoso.test/kg/property%3Aasset%3Aid> <https://www.w3.org/ns/shacl#path> <https://ontology.contoso.test/kg/property%3Aasset%3Aid> <https://ontology.contoso.test/kg/graph/shapes> .
+<https://ontology.contoso.test/kg/property%3Afacility%3Aid> <https://www.w3.org/ns/shacl#path> <https://ontology.contoso.test/kg/property%3Afacility%3Aid> <https://ontology.contoso.test/kg/graph/shapes> .
+<https://ontology.contoso.test/kg/relationship%3Aasset%3Afacility> <https://www.w3.org/ns/shacl#path> <https://ontology.contoso.test/kg/relationship%3Aasset%3Afacility> <https://ontology.contoso.test/kg/graph/shapes> .

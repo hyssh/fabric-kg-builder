@@ -41,6 +41,12 @@ from .publication import (
     PublicationCrosswalkV1_1,
 )
 from .receipts import ArtifactManifest, StageReceipt
+from .rdf import (
+    RdfProjectionCandidateBundle,
+    RdfProjectionManifest,
+    RdfSerializationArtifact,
+    RdfValidationReceipt,
+)
 from .resources import StageResourceMetrics
 from .runtime import (
     AgenticRetrievalCoverageReceipt,
@@ -85,6 +91,10 @@ REGISTERED_CONTRACTS: dict[str, type[ContractModel]] = {
     "c0.artifact_manifest": ArtifactManifest,
     "c0.stage_receipt": StageReceipt,
     "c0.stage_resource_metrics": StageResourceMetrics,
+    "c0.rdf_projection_manifest": RdfProjectionManifest,
+    "c0.rdf_serialization_artifact": RdfSerializationArtifact,
+    "c0.rdf_validation_receipt": RdfValidationReceipt,
+    "c0.rdf_projection_candidate_bundle": RdfProjectionCandidateBundle,
 }
 SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
     kind: (CONTRACT_VERSION,) for kind in REGISTERED_CONTRACTS
@@ -207,7 +217,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.6.0",
+        "registry_version": "1.7.0",
         "schemas": [
             {
                 "contract_kind": kind,
