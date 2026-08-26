@@ -50,14 +50,15 @@ from fabric_kg_builder.contracts.resources import StageResourceMetrics
 from fabric_kg_builder.contracts.resources import validate_receipt_resources
 from fabric_kg_builder.contracts.runtime import (
     ActivityReceipt,
-    AgenticRetrievalCoverageReceipt,
-    AgenticRetrievalRequestContext,
+    AgenticRetrievalCoverageReceiptV1_1,
+    AgenticRetrievalCoverageReceiptIdentityV1_1,
+    AgenticRetrievalRequestContextV1_1,
     CitationCanonicalMapping,
     CitationPresentation,
-    CoverageBudgetObservation,
+    CoverageBudgetObservationV1_1,
     CoverageMemberReference,
     PlannedSubqueryReceipt,
-    QueryBudget,
+    QueryBudgetV1_1,
     ResolvedOntologyScope,
     ResolvedRetrievalScope,
     RetrievalFailure,
@@ -329,6 +330,9 @@ class L5bRemoteAccounting:
     retry_wait_ms: int
     latency_ms: int
     candidate_count: int = 0
+    vector_search_requests: int = 0
+    embedding_calls: int = 0
+    embedding_items: int = 0
     output_tokens: int | None = None
     truncated: bool = False
     warning_codes: tuple[str, ...] = ()
@@ -518,6 +522,9 @@ def _validate_remote_accounting(value: object) -> None:
         value.retry_wait_ms,
         value.latency_ms,
         value.candidate_count,
+        value.vector_search_requests,
+        value.embedding_calls,
+        value.embedding_items,
     )
     if (
         not value.operation_refs
@@ -535,6 +542,9 @@ def _validate_remote_accounting(value: object) -> None:
         )
         or value.request_bytes <= 0
         or value.response_bytes <= 0
+        or (value.retry_count == 0 and value.retry_wait_ms != 0)
+        or ((value.embedding_calls == 0) != (value.embedding_items == 0))
+        or value.embedding_items < value.embedding_calls
     ):
         raise L5bPublicationError(
             "L5B_REMOTE_ACCOUNTING_INVALID",
@@ -2701,6 +2711,7 @@ def _agentic_runtime_seconds(max_runtime_milliseconds: int) -> int:
 
 # Azure Search REST request integer fields use signed int32 values.
 _PROVIDER_INT32_MAX = (2 ** 31) - 1
+_PROVIDER_INT32_MIN = -(2 ** 31)
 
 
 def _provider_int32(value: int, *, field_name: str) -> int:
@@ -2712,6 +2723,19 @@ def _provider_int32(value: int, *, field_name: str) -> int:
     return value
 
 
+def _require_runtime_v1_1(
+    context: AgenticRetrievalRequestContextV1_1,
+    budget: QueryBudgetV1_1,
+) -> None:
+    if type(context) is not AgenticRetrievalRequestContextV1_1:
+        raise ValueError(
+            "schema2 L5b requires AgenticRetrievalRequestContext@1.1.0"
+        )
+    if type(budget) is not QueryBudgetV1_1:
+        raise ValueError("schema2 L5b requires QueryBudget@1.1.0")
+    context.validate_budget(budget)
+
+
 @dataclass(frozen=True)
 class _RetrievalBudgetShape:
     output_documents: int
@@ -2720,7 +2744,7 @@ class _RetrievalBudgetShape:
 
 
 def _shape_retrieval_budget(
-    budget: QueryBudget,
+    budget: QueryBudgetV1_1,
     *,
     retrieval_mode: str,
 ) -> _RetrievalBudgetShape:
@@ -2775,8 +2799,8 @@ def _shape_retrieval_budget(
 
 
 def build_agentic_retrieve_payload(
-    context: AgenticRetrievalRequestContext,
-    budget: QueryBudget,
+    context: AgenticRetrievalRequestContextV1_1,
+    budget: QueryBudgetV1_1,
     scope: ResolvedRetrievalScope,
     *,
     query_text: str,
@@ -2784,7 +2808,7 @@ def build_agentic_retrieve_payload(
 ) -> Mapping[str, Any]:
     """Build the pinned preview extractive request; fabric-kg adds no prompt."""
 
-    context.validate_budget(budget)
+    _require_runtime_v1_1(context, budget)
     context.validate_scope(scope)
     if context.retrieval_mode != "agentic_preview":
         raise ValueError("agentic payload requires agentic_preview context")
@@ -2826,19 +2850,19 @@ def build_agentic_retrieve_payload(
 
 
 def build_direct_search_payload(
-    context: AgenticRetrievalRequestContext,
-    budget: QueryBudget,
+    context: AgenticRetrievalRequestContextV1_1,
+    budget: QueryBudgetV1_1,
     scope: ResolvedRetrievalScope,
     *,
     query_text: str,
     vector: Sequence[float] | None,
     vector_available: bool = False,
-    originating_context: AgenticRetrievalRequestContext | None = None,
-    originating_budget: QueryBudget | None = None,
+    originating_context: AgenticRetrievalRequestContextV1_1 | None = None,
+    originating_budget: QueryBudgetV1_1 | None = None,
 ) -> "L5bDirectSearchRequest":
     """Build one stable direct filtered query with explicit vector degradation."""
 
-    context.validate_budget(budget)
+    _require_runtime_v1_1(context, budget)
     context.validate_scope(scope)
     if context.retrieval_mode != "direct_hybrid_prefilter":
         raise ValueError("direct payload requires direct_hybrid_prefilter context")
@@ -2876,6 +2900,11 @@ def build_direct_search_payload(
     }
     degradation_code = None
     if vector is not None and vector_available:
+        if budget.max_vector_search_requests < 1:
+            raise L5bPublicationError(
+                "L5B_VECTOR_SEARCH_BUDGET_UNAVAILABLE",
+                "vector retrieval is unavailable under the sealed request budget",
+            )
         if (
             len(vector) != 1536
             or any(
@@ -2915,11 +2944,11 @@ class L5bDirectSearchRequest:
 class L5bRetrievalResult:
     citations: tuple[SearchCitationEnvelope, ...]
     presentations: tuple[CitationPresentation, ...]
-    coverage: AgenticRetrievalCoverageReceipt
+    coverage: AgenticRetrievalCoverageReceiptV1_1
 
 
 def _citation_identity(
-    context: AgenticRetrievalRequestContext,
+    context: AgenticRetrievalRequestContextV1_1,
     document: Mapping[str, Any],
     contract_kind: str,
 ) -> CanonicalIdentityEnvelope:
@@ -2945,7 +2974,7 @@ def _citation_identity(
 
 
 def build_citation(
-    context: AgenticRetrievalRequestContext,
+    context: AgenticRetrievalRequestContextV1_1,
     *,
     reference_id: str,
     document: Mapping[str, Any],
@@ -3095,8 +3124,18 @@ def _opaque_external_id(prefix: str, value: Any) -> str:
     return f"{prefix}:{canonical_sha256(value)[:32]}"
 
 
+def _provider_activity_key(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        if _PROVIDER_INT32_MIN <= value <= _PROVIDER_INT32_MAX:
+            return f"integer:{value}"
+    raise L5bPublicationError(
+        "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+        "provider Search activity identity is invalid",
+    )
+
+
 def _response_items(
-    context: AgenticRetrievalRequestContext,
+    context: AgenticRetrievalRequestContextV1_1,
     response: Mapping[str, Any],
 ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     if context.retrieval_mode == "direct_hybrid_prefilter":
@@ -3184,7 +3223,7 @@ def _document_matches_sealed_payload(
 
 def _document_scope_findings(
     document: Mapping[str, Any],
-    context: AgenticRetrievalRequestContext,
+    context: AgenticRetrievalRequestContextV1_1,
     ontology_scope: ResolvedOntologyScope,
     publication: L5bStageResult,
 ) -> tuple[Mapping[str, tuple[str, ...]], tuple[str, ...]]:
@@ -3441,8 +3480,8 @@ def _document_scope_findings(
 
 
 def interpret_retrieval_response(
-    context: AgenticRetrievalRequestContext,
-    budget: QueryBudget,
+    context: AgenticRetrievalRequestContextV1_1,
+    budget: QueryBudgetV1_1,
     ontology_scope: ResolvedOntologyScope,
     retrieval_scope: ResolvedRetrievalScope,
     *,
@@ -3450,14 +3489,24 @@ def interpret_retrieval_response(
     response: Mapping[str, Any],
     accounting: L5bRemoteAccounting,
     checkpoint_integrity_signer: CheckpointIntegritySigner | None = None,
-    originating_context: AgenticRetrievalRequestContext | None = None,
-    originating_budget: QueryBudget | None = None,
+    originating_context: AgenticRetrievalRequestContextV1_1 | None = None,
+    originating_budget: QueryBudgetV1_1 | None = None,
     fallback_reason_code: str | None = None,
     degradation_code: str | None = None,
 ) -> L5bRetrievalResult:
     """Return exact evidence and bounded coverage; never answer or summarize."""
 
+    _require_runtime_v1_1(context, budget)
     _validate_remote_accounting(accounting)
+    if context.retrieval_mode.startswith("agentic_") and (
+        accounting.vector_search_requests
+        or accounting.embedding_calls
+        or accounting.embedding_items
+    ):
+        raise L5bPublicationError(
+            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+            "agentic retrieval reported direct vector or embedding observations",
+        )
     require_l5b_publication_receipt(
         publication.compiled.source,
         publication.compiled.l5a_result,
@@ -3488,17 +3537,29 @@ def interpret_retrieval_response(
         raise ValueError("sealed L5b document authority is internally inconsistent")
     retrieval_scope.validate_resolved_scope(ontology_scope)
     context.validate_scope(retrieval_scope)
-    context.validate_budget(budget)
     if originating_context is not None:
+        if originating_budget is None:
+            raise ValueError("fallback retrieval requires its originating 1.1 budget")
+        _require_runtime_v1_1(originating_context, originating_budget)
         context.validate_fallback_origin(originating_context)
     if degradation_code is not None and context.retrieval_mode != "direct_hybrid_prefilter":
         raise ValueError("only direct retrieval can report vector degradation")
     references, activity_raw = _response_items(context, response)
-    search_activity_ids = {
-        str(item.get("id"))
+    search_activities = tuple(
+        item
         for item in activity_raw
-        if item.get("type") == "searchIndex" and item.get("id") is not None
-    }
+        if isinstance(item, Mapping) and item.get("type") == "searchIndex"
+    )
+    search_activity_keys = tuple(
+        _provider_activity_key(item.get("id"))
+        for item in search_activities
+    )
+    if len(search_activity_keys) != len(set(search_activity_keys)):
+        raise L5bPublicationError(
+            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+            "provider response contains duplicate Search activity IDs",
+        )
+    search_activity_ids = set(search_activity_keys)
     citations: list[SearchCitationEnvelope] = []
     presentations: list[CitationPresentation] = []
     missing_reference_ids: list[str] = []
@@ -3558,7 +3619,8 @@ def interpret_retrieval_response(
             continue
         if (
             context.retrieval_mode.startswith("agentic_")
-            and str(reference.get("activitySource")) not in search_activity_ids
+            and _provider_activity_key(reference.get("activitySource"))
+            not in search_activity_ids
         ):
             missing_reference_ids.append(local_reference_id)
             quarantined_findings.setdefault("citation_invalid", set())
@@ -3604,7 +3666,7 @@ def interpret_retrieval_response(
         presentations.append(presentation)
         activity_source = reference.get("activitySource")
         if activity_source is not None:
-            activity_key = str(activity_source)
+            activity_key = _provider_activity_key(activity_source)
             verified_references_by_activity[activity_key] = (
                 verified_references_by_activity.get(activity_key, 0) + 1
             )
@@ -3726,45 +3788,57 @@ def interpret_retrieval_response(
         )
         for index, item in enumerate(activity_raw)
     )
-    search_activities = tuple(
-        item
-        for item in activity_raw
-        if item.get("type") == "searchIndex"
-    )
     if context.retrieval_mode.startswith("agentic_") and not search_activities:
         raise ValueError("agentic response omitted searchIndex activity")
-    search_activity_id_values = [
-        str(item["id"])
-        for item in search_activities
-        if item.get("id") is not None
-    ]
-    if len(search_activity_id_values) != len(set(search_activity_id_values)):
-        raise L5bPublicationError(
-            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
-            "provider response contains duplicate Search activity IDs",
+    if context.retrieval_mode.startswith("agentic_"):
+        candidate_observation = 0
+        for item in search_activities:
+            matched_count = item.get("count")
+            if (
+                not isinstance(matched_count, int)
+                or isinstance(matched_count, bool)
+                or not 0 <= matched_count <= _PROVIDER_INT32_MAX
+                or candidate_observation > _PROVIDER_INT32_MAX - matched_count
+            ):
+                raise L5bPublicationError(
+                    "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                    "provider activity candidate accounting is invalid",
+                )
+            candidate_observation += matched_count
+        if candidate_observation != accounting.candidate_count:
+            raise L5bPublicationError(
+                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                "provider activity and adapter candidate accounting disagree",
+            )
+    else:
+        direct_provider_count = response.get(
+            "@odata.count",
+            accounting.candidate_count,
         )
+        if (
+            not isinstance(direct_provider_count, int)
+            or isinstance(direct_provider_count, bool)
+            or not 0 <= direct_provider_count <= _PROVIDER_INT32_MAX
+            or direct_provider_count != accounting.candidate_count
+        ):
+            raise L5bPublicationError(
+                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                "direct provider and adapter candidate accounting disagree",
+            )
+        candidate_observation = direct_provider_count
     verified_document_count = len(citations)
-    if accounting.candidate_count < verified_document_count:
+    if candidate_observation < verified_document_count:
         raise L5bPublicationError(
             "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
             "provider candidate count is below verified returned documents",
         )
     source_calls_list: list[SourceCallReceipt] = []
-    for index, item in enumerate(search_activities):
-        matched_count = item.get("count", accounting.candidate_count)
-        if (
-            not isinstance(matched_count, int)
-            or isinstance(matched_count, bool)
-            or matched_count < 0
-        ):
-            raise L5bPublicationError(
-                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
-                "provider activity matched count is invalid",
-            )
+    for item, activity_key in zip(search_activities, search_activity_keys, strict=True):
+        matched_count = item["count"]
         returned_count = (
             0
             if item.get("error") is not None
-            else verified_references_by_activity.get(str(item.get("id")), 0)
+            else verified_references_by_activity.get(activity_key, 0)
         )
         if returned_count > matched_count:
             raise L5bPublicationError(
@@ -3772,13 +3846,13 @@ def interpret_retrieval_response(
                 "provider activity matched count is below verified returns",
             )
         source_calls_list.append(SourceCallReceipt(
-            source_call_id=f"source-call:{index}",
+            source_call_id=_opaque_external_id("source-call", activity_key),
             knowledge_source_id=context.knowledge_source_id,
             request_hash=canonical_sha256(
                 item.get("searchIndexArguments")
                 or {
                     "context": context.request_context_hash,
-                    "index": index,
+                    "activity": activity_key,
                 }
             ),
             response_hash=(
@@ -3803,24 +3877,28 @@ def interpret_retrieval_response(
                 request_hash=context.request_context_hash,
                 response_hash=canonical_sha256(response),
                 status="partial" if accounting.warning_codes else "succeeded",
-                matched_count=accounting.candidate_count,
+                matched_count=candidate_observation,
                 returned_count=verified_document_count,
             ),
         )
     planned = tuple(
         PlannedSubqueryReceipt(
-            subquery_id=f"subquery:{index}",
+            subquery_id=_opaque_external_id("subquery", activity_key),
             subquery_hash=canonical_sha256(item),
             executed=item.get("error") is None,
             knowledge_source_ids=(
                 context.knowledge_source_id,
             ),
             returned_reference_count=verified_references_by_activity.get(
-                str(item.get("id")),
+                activity_key,
                 0,
             ),
         )
-        for index, item in enumerate(search_activities)
+        for item, activity_key in zip(
+            search_activities,
+            search_activity_keys,
+            strict=True,
+        )
     )
     warnings = tuple(sorted({
         *_warning_codes(accounting.warning_codes),
@@ -3993,64 +4071,100 @@ def interpret_retrieval_response(
     agentic_mode = context.retrieval_mode.startswith("agentic_")
     direct_mode = context.retrieval_mode == "direct_hybrid_prefilter"
     observed_search_records = verified_document_count
-    observed_direct_requests = 1 if direct_mode else 0
-    exhausted = tuple(sorted({
-        *(
-            ("max_runtime_milliseconds",)
-            if runtime_ms > budget.max_runtime_milliseconds
-            else ()
+    observed_graph_requests = 1
+    observed_graph_records = len(set(ontology_scope.included_canonical_ids))
+    observed_agentic_invocations = 1 if agentic_mode else 0
+    observed_agentic_subqueries = len(planned) if agentic_mode else 0
+    observed_agentic_source_calls = len(source_calls) if agentic_mode else 0
+    observed_direct_requests = len(source_calls) if direct_mode else 0
+    observed_vector_requests = (
+        accounting.vector_search_requests if direct_mode else 0
+    )
+    observed_embedding_calls = accounting.embedding_calls if direct_mode else 0
+    observed_embedding_items = accounting.embedding_items if direct_mode else 0
+    observed_retry_count = accounting.retry_count
+    observed_retry_wait = accounting.retry_wait_ms
+    observations = (
+        (
+            "max_ontology_graph_scope_requests",
+            observed_graph_requests,
+            budget.max_ontology_graph_scope_requests,
         ),
-        *(
-            ("max_search_result_records",)
-            if accounting.candidate_count > budget.max_search_result_records
-            else ()
+        (
+            "max_agentic_retrieval_invocations",
+            observed_agentic_invocations,
+            budget.max_agentic_retrieval_invocations,
         ),
-        *(
-            ("max_output_documents",)
-            if observed_search_records > budget.max_output_documents
-            else ()
+        (
+            "max_agentic_internal_subqueries",
+            observed_agentic_subqueries,
+            budget.max_agentic_internal_subqueries,
         ),
-        *(
-            ("max_output_tokens",)
-            if output_tokens > budget.max_output_tokens
-            else ()
+        (
+            "max_agentic_source_calls",
+            observed_agentic_source_calls,
+            budget.max_agentic_source_calls,
         ),
-        *(
-            ("max_output_bytes",)
-            if output_bytes > budget.max_output_bytes
-            else ()
+        (
+            "max_direct_search_requests",
+            observed_direct_requests,
+            budget.max_direct_search_requests,
         ),
-        *(
-            ("max_agentic_retrieval_invocations",)
-            if agentic_mode and 1 > budget.max_agentic_retrieval_invocations
-            else ()
+        ("max_output_documents", observed_search_records, budget.max_output_documents),
+        ("max_output_tokens", output_tokens, budget.max_output_tokens),
+        ("max_output_bytes", output_bytes, budget.max_output_bytes),
+        ("max_runtime_milliseconds", runtime_ms, budget.max_runtime_milliseconds),
+        (
+            "max_graph_result_records",
+            observed_graph_records,
+            budget.max_graph_result_records,
         ),
-        *(
-            ("max_agentic_internal_subqueries",)
-            if agentic_mode
-            and len(planned) > budget.max_agentic_internal_subqueries
-            else ()
+        (
+            "max_search_result_records",
+            observed_search_records,
+            budget.max_search_result_records,
         ),
-        *(
-            ("max_agentic_source_calls",)
-            if agentic_mode
-            and len(source_calls) > budget.max_agentic_source_calls
-            else ()
+        (
+            "max_search_candidate_records",
+            candidate_observation,
+            budget.max_search_candidate_records,
         ),
-        *(
-            ("max_direct_search_requests",)
-            if direct_mode
-            and observed_direct_requests > budget.max_direct_search_requests
-            else ()
+        (
+            "max_vector_search_requests",
+            observed_vector_requests,
+            budget.max_vector_search_requests,
         ),
-    }))
+        (
+            "max_embedding_calls",
+            observed_embedding_calls,
+            budget.max_embedding_calls,
+        ),
+        (
+            "max_embedding_items",
+            observed_embedding_items,
+            budget.max_embedding_items,
+        ),
+        ("max_retry_count", observed_retry_count, budget.max_retry_count),
+        (
+            "max_retry_wait_milliseconds",
+            observed_retry_wait,
+            budget.max_retry_wait_milliseconds,
+        ),
+    )
+    exhausted = tuple(sorted(
+        name for name, observed, ceiling in observations if observed > ceiling
+    ))
     if exhausted:
-        failures.append(RetrievalFailure(
-            reason_code="retrieval_budget_exhausted",
-            remediation="downstream_abstention_required",
-        ))
+        if not any(
+            failure.reason_code == "retrieval_budget_exhausted"
+            for failure in failures
+        ):
+            failures.append(RetrievalFailure(
+                reason_code="retrieval_budget_exhausted",
+                remediation="downstream_abstention_required",
+            ))
         partial = True
-    budget_observation = CoverageBudgetObservation(
+    budget_observation = CoverageBudgetObservationV1_1(
         max_ontology_graph_scope_requests=budget.max_ontology_graph_scope_requests,
         max_agentic_retrieval_invocations=budget.max_agentic_retrieval_invocations,
         max_agentic_internal_subqueries=budget.max_agentic_internal_subqueries,
@@ -4062,31 +4176,40 @@ def interpret_retrieval_response(
         max_runtime_milliseconds=budget.max_runtime_milliseconds,
         max_graph_result_records=budget.max_graph_result_records,
         max_search_result_records=budget.max_search_result_records,
-        observed_ontology_graph_scope_requests=1,
-        observed_agentic_retrieval_invocations=(
-            1 if agentic_mode else 0
-        ),
-        observed_agentic_internal_subqueries=(
-            len(planned) if agentic_mode else 0
-        ),
-        observed_agentic_source_calls=(
-            len(source_calls) if agentic_mode else 0
-        ),
+        max_search_candidate_records=budget.max_search_candidate_records,
+        max_vector_search_requests=budget.max_vector_search_requests,
+        max_embedding_calls=budget.max_embedding_calls,
+        max_embedding_items=budget.max_embedding_items,
+        max_retry_count=budget.max_retry_count,
+        max_retry_wait_milliseconds=budget.max_retry_wait_milliseconds,
+        observed_ontology_graph_scope_requests=observed_graph_requests,
+        observed_agentic_retrieval_invocations=observed_agentic_invocations,
+        observed_agentic_internal_subqueries=observed_agentic_subqueries,
+        observed_agentic_source_calls=observed_agentic_source_calls,
         observed_direct_search_requests=observed_direct_requests,
         observed_output_documents=observed_search_records,
         observed_output_tokens=output_tokens,
         observed_output_bytes=output_bytes,
         observed_runtime_milliseconds=runtime_ms,
-        observed_graph_result_records=len(required_ids),
+        observed_graph_result_records=observed_graph_records,
         observed_search_result_records=observed_search_records,
+        observed_search_candidate_records=candidate_observation,
+        observed_vector_search_requests=observed_vector_requests,
+        observed_embedding_calls=observed_embedding_calls,
+        observed_embedding_items=observed_embedding_items,
+        observed_retry_count=observed_retry_count,
+        observed_retry_wait_milliseconds=observed_retry_wait,
         budget_exhausted_dimensions=exhausted,
     )
     returned_collection_hash = canonical_sha256(
         [item.model_dump(mode="json") for item in returned_member_tuple]
     )
     coverage_values = {
-        "identity": context.identity.model_copy(
-            update={"contract_kind": "c0.agentic_retrieval_coverage_receipt"}
+        "identity": AgenticRetrievalCoverageReceiptIdentityV1_1.model_validate(
+            {
+                **context.identity.model_dump(mode="python", round_trip=True),
+                "contract_kind": "c0.agentic_retrieval_coverage_receipt",
+            }
         ),
         "coverage_receipt_id": deterministic_contract_id(
             "agentic-retrieval-coverage",
@@ -4121,7 +4244,7 @@ def interpret_retrieval_response(
         "planned_subqueries": planned,
         "activity": activity,
         "source_calls": source_calls,
-        "matched_document_count": accounting.candidate_count,
+        "matched_document_count": candidate_observation,
         "returned_document_count": observed_search_records,
         "reference_count": verified_document_count,
         "unique_canonical_id_count": len(returned_ids),
@@ -4184,10 +4307,14 @@ def interpret_retrieval_response(
         "budget": budget_observation,
         "retrieval_reasoning_effort": context.retrieval_reasoning_effort,
         "coverage_semantics": "bounded_maximal",
-        "coverage_status": "partial" if partial else "complete",
+        "coverage_status": (
+            "abstain" if exhausted and not citations else
+            "partial" if partial else
+            "complete"
+        ),
         "failures": tuple(failures),
     }
-    coverage = AgenticRetrievalCoverageReceipt(
+    coverage = AgenticRetrievalCoverageReceiptV1_1(
         **coverage_values,
         coverage_receipt_hash=canonical_sha256(coverage_values),
     )
