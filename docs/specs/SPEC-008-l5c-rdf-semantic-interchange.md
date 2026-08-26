@@ -304,3 +304,6 @@ This change is additive. Existing schema files and contract bytes remain
 identical; only the registry receives four new `1.0.0` entries and advances to
 registry version `1.7.0`. Package version remains `0.2.3`. Schema 1 and every
 existing contract remain unchanged.
+The immutable pre-RDF baseline fixture stores path-to-byte-hash mappings and
+exact registry entries, so this proof runs in shallow checkouts and exported
+source trees without consulting Git history.

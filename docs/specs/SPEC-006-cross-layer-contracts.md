@@ -132,6 +132,9 @@ Generated schemas and their registry are under
 `src/fabric_kg_builder/contracts/schemas/`. JSON/YAML examples, invalid
 fixtures, and canonical JSON/hash goldens are under
 `tests/fixtures/contracts/`.
+The committed `baselines/pre-rdf-schema-registry-1.6.0.json` fixture records
+every pre-RDF schema file byte SHA-256 and exact registry entry. Additivity
+tests are history-independent and require no Git objects or fetch-depth.
 
 ## 5. Identity and locator invariants
 

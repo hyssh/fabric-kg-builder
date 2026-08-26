@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
-import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
@@ -38,7 +38,13 @@ from fabric_kg_builder.contracts import (
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "contracts"
 ADVERSARIAL = FIXTURES / "adversarial"
 SCHEMAS = Path(__file__).parents[2] / "src" / "fabric_kg_builder" / "contracts" / "schemas"
-BASELINE_COMMIT = "1d1db5ac0dd3bcbf0534a502c7277ab939f9a03e"
+PRE_RDF_BASELINE = json.loads(
+    (
+        FIXTURES
+        / "baselines"
+        / "pre-rdf-schema-registry-1.6.0.json"
+    ).read_text(encoding="utf-8")
+)
 SECRET_VALUES = json.loads(
     (ADVERSARIAL / "rdf-secret-values.json").read_text(encoding="utf-8")
 )
@@ -50,6 +56,29 @@ BINDING_MUTATIONS = json.loads(
         encoding="utf-8"
     )
 )
+
+
+def assert_pre_rdf_baseline(
+    *,
+    schema_dir: Path,
+    current_registry: dict[str, object],
+    baseline: dict[str, object],
+) -> None:
+    expected_files = baseline["files"]
+    assert isinstance(expected_files, dict)
+    for filename, expected_hash in expected_files.items():
+        content = (schema_dir / filename).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == expected_hash
+
+    expected_entries = baseline["registry_entries"]
+    assert isinstance(expected_entries, list)
+    current_entries = {
+        (entry["contract_kind"], entry["contract_version"]): entry
+        for entry in current_registry["schemas"]
+    }
+    for entry in expected_entries:
+        key = (entry["contract_kind"], entry["contract_version"])
+        assert current_entries[key] == entry
 H = {
     letter: letter * 64
     for letter in "abcdef0123456789"
@@ -1494,51 +1523,60 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         committed = SCHEMAS / generated.name
         assert committed.read_bytes() == generated.read_bytes()
 
-    baseline_paths = subprocess.run(
-        [
-            "git",
-            "ls-tree",
-            "-r",
-            "--name-only",
-            BASELINE_COMMIT,
-            "src/fabric_kg_builder/contracts/schemas",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    for path in baseline_paths:
-        if path.endswith("/registry.json"):
-            continue
-        baseline = subprocess.run(
-            ["git", "show", f"{BASELINE_COMMIT}:{path}"],
-            check=True,
-            capture_output=True,
-        ).stdout
-        assert (Path(__file__).parents[2] / path).read_bytes() == baseline
-
-    baseline_registry = json.loads(
-        subprocess.run(
-            [
-                "git",
-                "show",
-                f"{BASELINE_COMMIT}:src/fabric_kg_builder/contracts/schemas/registry.json",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    )
     current_registry = json.loads((SCHEMAS / "registry.json").read_text(encoding="utf-8"))
-    current_entries = {
-        (entry["contract_kind"], entry["contract_version"]): entry
-        for entry in current_registry["schemas"]
-    }
-    for entry in baseline_registry["schemas"]:
-        key = (entry["contract_kind"], entry["contract_version"])
-        assert current_entries[key] == entry
-    assert baseline_registry["registry_version"] == "1.6.0"
+    assert_pre_rdf_baseline(
+        schema_dir=SCHEMAS,
+        current_registry=current_registry,
+        baseline=PRE_RDF_BASELINE,
+    )
+    assert PRE_RDF_BASELINE["registry_version"] == "1.6.0"
     assert current_registry["registry_version"] == "1.7.0"
+    baseline_keys = {
+        (entry["contract_kind"], entry["contract_version"])
+        for entry in PRE_RDF_BASELINE["registry_entries"]
+    }
+    additive_keys = {
+        (entry["contract_kind"], entry["contract_version"])
+        for entry in current_registry["schemas"]
+    } - baseline_keys
+    assert additive_keys == {
+        ("c0.rdf_projection_acceptance_bundle", "1.0.0"),
+        ("c0.rdf_projection_manifest", "1.0.0"),
+        ("c0.rdf_serialization_artifact", "1.0.0"),
+        ("c0.rdf_validation_receipt", "1.0.0"),
+    }
+
+
+@pytest.mark.contract
+def test_pre_rdf_baseline_detects_file_and_registry_tampering(
+    tmp_path: Path,
+) -> None:
+    copied_schemas = tmp_path / "schemas"
+    copied_schemas.mkdir()
+    for filename in PRE_RDF_BASELINE["files"]:
+        (copied_schemas / filename).write_bytes((SCHEMAS / filename).read_bytes())
+    current_registry = json.loads((SCHEMAS / "registry.json").read_text(encoding="utf-8"))
+
+    first_filename = next(iter(PRE_RDF_BASELINE["files"]))
+    (copied_schemas / first_filename).write_bytes(b"tampered\n")
+    with pytest.raises(AssertionError):
+        assert_pre_rdf_baseline(
+            schema_dir=copied_schemas,
+            current_registry=current_registry,
+            baseline=PRE_RDF_BASELINE,
+        )
+
+    (copied_schemas / first_filename).write_bytes(
+        (SCHEMAS / first_filename).read_bytes()
+    )
+    tampered_registry = copy.deepcopy(current_registry)
+    tampered_registry["schemas"][0]["schema_hash"] = "f" * 64
+    with pytest.raises(AssertionError):
+        assert_pre_rdf_baseline(
+            schema_dir=copied_schemas,
+            current_registry=tampered_registry,
+            baseline=PRE_RDF_BASELINE,
+        )
 
 
 @pytest.mark.contract
