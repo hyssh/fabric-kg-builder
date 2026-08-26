@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Mapping
 from urllib.parse import urlparse
 
 from pydantic import Field, PrivateAttr, field_validator, model_validator
@@ -43,6 +43,7 @@ RetrievalMode = Literal[
     "direct_hybrid_prefilter",
 ]
 CoverageStatus = Literal["complete", "partial", "invalid"]
+CoverageStatusV1_1 = Literal["complete", "partial", "abstain", "invalid"]
 RemediationClass = Literal[
     "retry_same_scope",
     "new_scope_required",
@@ -103,6 +104,9 @@ FailureReasonCode = Literal[
 ]
 REQUIRED_MEMBER_MANIFEST_V1_1_SCHEMA_HASH = (
     "e33003e128746f09c77ba44b4b4802510eadbdf000eb60430f16a4d2654a3c4c"
+)
+QUERY_BUDGET_V1_1_SCHEMA_HASH = (
+    "2d744838296209d78da2e2c8b7df7ab5f030af400d45a3d04d62b7d763f92b52"
 )
 _URL_ALLOWED_TEXT_FIELDS = frozenset(
     {
@@ -175,12 +179,13 @@ def _validate_identity(
     identity: CanonicalIdentityEnvelope,
     *,
     kind: str,
+    version: str = "1.0.0",
     semantic_contract_hash: str | None = None,
 ) -> None:
     if identity.contract_kind != kind:
         raise ValueError(f"identity contract_kind must be {kind}")
-    if identity.contract_version != "1.0.0":
-        raise ValueError("C0.Runtime contract version must be 1.0.0")
+    if identity.contract_version != version:
+        raise ValueError(f"C0.Runtime contract version must be {version}")
     if (
         semantic_contract_hash is not None
         and identity.semantic_contract_hash != semantic_contract_hash
@@ -534,6 +539,8 @@ class SafeCanonicalFilterSpec(ContractModel):
 class QueryBudget(ContractModel):
     """Agent-selected request ceilings; never retry or performance policy."""
 
+    _contract_version: ClassVar[str] = "1.0.0"
+
     identity: CanonicalIdentityEnvelope
     query_budget_id: RequiredText
     max_ontology_graph_scope_requests: Annotated[int, Field(ge=0, le=1)]
@@ -556,7 +563,11 @@ class QueryBudget(ContractModel):
 
     @model_validator(mode="after")
     def _invariants(self) -> "QueryBudget":
-        _validate_identity(self.identity, kind="c0.query_budget")
+        _validate_identity(
+            self.identity,
+            kind="c0.query_budget",
+            version=self._contract_version,
+        )
         _reject_secrets_and_urls(self)
         if self.relationship_k == 4 and self.relationship_k_4_justification is None:
             raise ValueError("relationship K=4 requires reviewed justification")
@@ -582,6 +593,46 @@ class QueryBudget(ContractModel):
                 "direct mode requires zero agentic invocations and one direct request"
             )
         _validate_hash(self, "budget_hash")
+        return self
+
+
+class QueryBudgetIdentityV1_1(CanonicalIdentityEnvelope):
+    """Versioned identity for the additive runtime budget successor."""
+
+    contract_kind: Literal["c0.query_budget"] = "c0.query_budget"
+    contract_version: Literal["1.1.0"] = "1.1.0"
+
+
+class QueryBudgetV1_1(QueryBudget):
+    """Provider-neutral ceilings for every bounded L5b retrieval observation."""
+
+    identity: QueryBudgetIdentityV1_1
+    _contract_version: ClassVar[str] = "1.1.0"
+    max_search_candidate_records: NonNegativeInt
+    max_vector_search_requests: NonNegativeInt
+    max_embedding_calls: NonNegativeInt
+    max_embedding_items: NonNegativeInt
+    max_retry_count: NonNegativeInt
+    max_retry_wait_milliseconds: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _v1_1_invariants(self) -> "QueryBudgetV1_1":
+        if (self.max_embedding_calls == 0) != (self.max_embedding_items == 0):
+            raise ValueError(
+                "embedding calls and items must both be zero or both be enabled"
+            )
+        if self.retrieval_mode.startswith("agentic_") and (
+            self.max_vector_search_requests
+            or self.max_embedding_calls
+            or self.max_embedding_items
+        ):
+            raise ValueError(
+                "agentic mode cannot declare client vector or embedding request ceilings"
+            )
+        if self.max_retry_count == 0 and self.max_retry_wait_milliseconds != 0:
+            raise ValueError(
+                "retry wait ceiling must be zero when retry count ceiling is zero"
+            )
         return self
 
 
@@ -1703,6 +1754,8 @@ class RetrievalCapability(ContractModel):
 class AgenticRetrievalRequestContext(ContractModel):
     """Safe canonical request configuration for one selected retrieval mode."""
 
+    _contract_version: ClassVar[str] = "1.0.0"
+
     identity: CanonicalIdentityEnvelope
     request_context_id: RequiredText
     resolved_retrieval_scope_id: RequiredText
@@ -1765,6 +1818,7 @@ class AgenticRetrievalRequestContext(ContractModel):
         _validate_identity(
             self.identity,
             kind="c0.agentic_retrieval_request_context",
+            version=self._contract_version,
         )
         _reject_secrets_and_urls(self)
         if (self.fallback_for_request_context_id is None) != (
@@ -1835,6 +1889,8 @@ class AgenticRetrievalRequestContext(ContractModel):
         return self
 
     def validate_budget(self, budget: QueryBudget) -> None:
+        if type(budget) is not QueryBudget:
+            raise ValueError("1.0 request context requires QueryBudget@1.0.0")
         _validate_identity_authority(
             self.identity,
             budget.identity,
@@ -1974,6 +2030,54 @@ class AgenticRetrievalRequestContext(ContractModel):
         )
         if any(getattr(self, field) != getattr(origin, field) for field in invariant_fields):
             raise ValueError("direct fallback context differs from originating scope")
+
+
+class AgenticRetrievalRequestContextIdentityV1_1(CanonicalIdentityEnvelope):
+    """Versioned identity for the QueryBudget 1.1 request-context binding."""
+
+    contract_kind: Literal["c0.agentic_retrieval_request_context"] = (
+        "c0.agentic_retrieval_request_context"
+    )
+    contract_version: Literal["1.1.0"] = "1.1.0"
+
+
+class AgenticRetrievalRequestContextV1_1(AgenticRetrievalRequestContext):
+    """Request context bound losslessly to one QueryBudget@1.1.0."""
+
+    identity: AgenticRetrievalRequestContextIdentityV1_1
+    _contract_version: ClassVar[str] = "1.1.0"
+    query_budget_contract_version: Literal["1.1.0"] = "1.1.0"
+    query_budget_schema_hash: Sha256
+
+    def validate_budget(self, budget: QueryBudget) -> None:
+        if type(budget) is not QueryBudgetV1_1:
+            raise ValueError("1.1 request context requires QueryBudget@1.1.0")
+        _validate_identity_authority(
+            self.identity,
+            budget.identity,
+            relationship="request/query budget",
+        )
+        checks = (
+            ("query budget ID", self.query_budget_id, budget.query_budget_id),
+            ("query budget hash", self.query_budget_hash, budget.budget_hash),
+            (
+                "query budget schema hash",
+                self.query_budget_schema_hash,
+                QUERY_BUDGET_V1_1_SCHEMA_HASH,
+            ),
+            ("query budget retrieval mode", self.retrieval_mode, budget.retrieval_mode),
+        )
+        for name, requested, authoritative in checks:
+            if requested != authoritative:
+                raise ValueError(f"{name} mismatch")
+
+    def validate_fallback_origin(
+        self,
+        origin: "AgenticRetrievalRequestContext",
+    ) -> None:
+        if type(origin) is not AgenticRetrievalRequestContextV1_1:
+            raise ValueError("1.1 fallback requires a 1.1 originating request context")
+        super().validate_fallback_origin(origin)
 
 
 class RetrievalFailure(ContractModel):
@@ -2124,6 +2228,128 @@ class CoverageBudgetObservation(ContractModel):
         return self
 
 
+class CoverageBudgetObservationV1_1(CoverageBudgetObservation):
+    """Exact ceilings, observations, and derived exhaustion for QueryBudget 1.1."""
+
+    max_search_candidate_records: NonNegativeInt
+    max_vector_search_requests: NonNegativeInt
+    max_embedding_calls: NonNegativeInt
+    max_embedding_items: NonNegativeInt
+    max_retry_count: NonNegativeInt
+    max_retry_wait_milliseconds: NonNegativeInt
+    observed_search_candidate_records: NonNegativeInt
+    observed_vector_search_requests: NonNegativeInt
+    observed_embedding_calls: NonNegativeInt
+    observed_embedding_items: NonNegativeInt
+    observed_retry_count: NonNegativeInt
+    observed_retry_wait_milliseconds: NonNegativeInt
+
+    @field_validator("budget_exhausted_dimensions", mode="before")
+    @classmethod
+    def _dimensions(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            if len(value) != len(set(value)):
+                raise ValueError("budget exhausted dimensions must not contain duplicates")
+            return _sorted_set(value, field_name="budget_exhausted_dimensions")
+        return value
+
+    @model_validator(mode="after")
+    def _invariants(self) -> "CoverageBudgetObservationV1_1":
+        if (
+            self.observed_retry_count == 0
+            and self.observed_retry_wait_milliseconds != 0
+        ):
+            raise ValueError(
+                "observed retry wait must be zero when observed retry count is zero"
+            )
+        comparisons = (
+            (
+                "max_ontology_graph_scope_requests",
+                self.observed_ontology_graph_scope_requests,
+                self.max_ontology_graph_scope_requests,
+            ),
+            (
+                "max_agentic_retrieval_invocations",
+                self.observed_agentic_retrieval_invocations,
+                self.max_agentic_retrieval_invocations,
+            ),
+            (
+                "max_agentic_internal_subqueries",
+                self.observed_agentic_internal_subqueries,
+                self.max_agentic_internal_subqueries,
+            ),
+            (
+                "max_agentic_source_calls",
+                self.observed_agentic_source_calls,
+                self.max_agentic_source_calls,
+            ),
+            (
+                "max_direct_search_requests",
+                self.observed_direct_search_requests,
+                self.max_direct_search_requests,
+            ),
+            (
+                "max_output_documents",
+                self.observed_output_documents,
+                self.max_output_documents,
+            ),
+            ("max_output_tokens", self.observed_output_tokens, self.max_output_tokens),
+            ("max_output_bytes", self.observed_output_bytes, self.max_output_bytes),
+            (
+                "max_runtime_milliseconds",
+                self.observed_runtime_milliseconds,
+                self.max_runtime_milliseconds,
+            ),
+            (
+                "max_graph_result_records",
+                self.observed_graph_result_records,
+                self.max_graph_result_records,
+            ),
+            (
+                "max_search_result_records",
+                self.observed_search_result_records,
+                self.max_search_result_records,
+            ),
+            (
+                "max_search_candidate_records",
+                self.observed_search_candidate_records,
+                self.max_search_candidate_records,
+            ),
+            (
+                "max_vector_search_requests",
+                self.observed_vector_search_requests,
+                self.max_vector_search_requests,
+            ),
+            (
+                "max_embedding_calls",
+                self.observed_embedding_calls,
+                self.max_embedding_calls,
+            ),
+            (
+                "max_embedding_items",
+                self.observed_embedding_items,
+                self.max_embedding_items,
+            ),
+            ("max_retry_count", self.observed_retry_count, self.max_retry_count),
+            (
+                "max_retry_wait_milliseconds",
+                self.observed_retry_wait_milliseconds,
+                self.max_retry_wait_milliseconds,
+            ),
+        )
+        expected = {
+            name for name, observed, ceiling in comparisons if observed > ceiling
+        }
+        exhausted = set(self.budget_exhausted_dimensions)
+        if exhausted != expected:
+            missing = sorted(expected - exhausted)
+            extra = sorted(exhausted - expected)
+            raise ValueError(
+                f"budget exhausted dimensions must be exact; missing={missing}, extra={extra}"
+            )
+        return self
+
+
 class CitationCanonicalMapping(ContractModel):
     canonical_entity_id: RequiredText
     search_reference_id: RequiredText
@@ -2160,6 +2386,9 @@ class CoverageMemberReference(ContractModel):
 
 class AgenticRetrievalCoverageReceipt(ContractModel):
     """Bounded maximal structural coverage, never exhaustive discovery proof."""
+
+    _allow_provider_overexecution: ClassVar[bool] = False
+    _contract_version: ClassVar[str] = "1.0.0"
 
     identity: CanonicalIdentityEnvelope
     coverage_receipt_id: RequiredText
@@ -2272,6 +2501,7 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
         _validate_identity(
             self.identity,
             kind="c0.agentic_retrieval_coverage_receipt",
+            version=self._contract_version,
         )
         _reject_secrets_and_urls(self)
         required = set(self.required_canonical_ids)
@@ -2361,26 +2591,44 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
             if self.retrieval_mode == "direct_hybrid_prefilter"
             else 0
         )
-        if (
-            self.budget.observed_agentic_retrieval_invocations
-            != expected_agentic_invocations
-            or self.budget.observed_agentic_source_calls
-            != expected_agentic_source_calls
-            or self.budget.observed_direct_search_requests
-            != expected_direct_requests
-        ):
+        if self._allow_provider_overexecution:
+            if self.retrieval_mode.startswith("agentic_"):
+                request_counts_valid = (
+                    self.budget.observed_agentic_retrieval_invocations >= 1
+                    and self.budget.observed_agentic_source_calls
+                    == expected_agentic_source_calls
+                    and self.budget.observed_direct_search_requests == 0
+                )
+            else:
+                request_counts_valid = (
+                    self.budget.observed_agentic_retrieval_invocations == 0
+                    and self.budget.observed_agentic_source_calls == 0
+                    and self.budget.observed_direct_search_requests
+                    == expected_direct_requests
+                )
+        else:
+            request_counts_valid = (
+                self.budget.observed_agentic_retrieval_invocations
+                == expected_agentic_invocations
+                and self.budget.observed_agentic_source_calls
+                == expected_agentic_source_calls
+                and self.budget.observed_direct_search_requests
+                == expected_direct_requests
+            )
+        if not request_counts_valid:
             raise ValueError("observed retrieval request counts differ from receipt")
-        if (
-            self.retrieval_mode.startswith("agentic_")
-            and len(self.planned_subqueries)
-            > self.budget.max_agentic_internal_subqueries
-        ):
-            raise ValueError("planned subqueries exceed declared request ceiling")
-        if (
-            self.retrieval_mode.startswith("agentic_")
-            and len(self.source_calls) > self.budget.max_agentic_source_calls
-        ):
-            raise ValueError("source calls exceed declared request ceiling")
+        if not self._allow_provider_overexecution:
+            if (
+                self.retrieval_mode.startswith("agentic_")
+                and len(self.planned_subqueries)
+                > self.budget.max_agentic_internal_subqueries
+            ):
+                raise ValueError("planned subqueries exceed declared request ceiling")
+            if (
+                self.retrieval_mode.startswith("agentic_")
+                and len(self.source_calls) > self.budget.max_agentic_source_calls
+            ):
+                raise ValueError("source calls exceed declared request ceiling")
         mapped_ids = {item.canonical_entity_id for item in self.citation_mappings}
         mapping_keys = [
             (
@@ -2506,6 +2754,17 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
         originating_context: AgenticRetrievalRequestContext | None = None,
         originating_budget: QueryBudget | None = None,
     ) -> None:
+        if self._allow_provider_overexecution:
+            if (
+                type(context) is not AgenticRetrievalRequestContextV1_1
+                or type(budget) is not QueryBudgetV1_1
+            ):
+                raise ValueError("1.1 coverage receipt requires 1.1 context and budget")
+        elif (
+            type(context) is not AgenticRetrievalRequestContext
+            or type(budget) is not QueryBudget
+        ):
+            raise ValueError("1.0 coverage receipt requires 1.0 context and budget")
         context.validate_budget(budget)
         _validate_identity_authority(
             self.identity,
@@ -2666,6 +2925,23 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
             ),
             ("API version", self.api_version, context.capability.api_version),
         )
+        if self._allow_provider_overexecution:
+            budget_fields = (
+                "max_search_candidate_records",
+                "max_vector_search_requests",
+                "max_embedding_calls",
+                "max_embedding_items",
+                "max_retry_count",
+                "max_retry_wait_milliseconds",
+            )
+            checks += tuple(
+                (
+                    field_name,
+                    getattr(self.budget, field_name),
+                    getattr(budget, field_name),
+                )
+                for field_name in budget_fields
+            )
         for name, observed, authoritative in checks:
             if observed != authoritative:
                 raise ValueError(f"{name} differs from request context or budget")
@@ -2729,6 +3005,83 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
                     raise ValueError(f"{name} differs from Search citation envelope")
             if mapping.canonical_entity_id not in citation.canonical_entity_ids:
                 raise ValueError("citation mapping entity is absent from citation envelope")
+
+
+class AgenticRetrievalCoverageReceiptIdentityV1_1(CanonicalIdentityEnvelope):
+    """Versioned identity for exact QueryBudget 1.1 observations."""
+
+    contract_kind: Literal["c0.agentic_retrieval_coverage_receipt"] = (
+        "c0.agentic_retrieval_coverage_receipt"
+    )
+    contract_version: Literal["1.1.0"] = "1.1.0"
+
+
+class AgenticRetrievalCoverageReceiptV1_1(AgenticRetrievalCoverageReceipt):
+    """Observed provider execution, including coherent typed budget overrun."""
+
+    _allow_provider_overexecution: ClassVar[bool] = True
+    _contract_version: ClassVar[str] = "1.1.0"
+
+    identity: AgenticRetrievalCoverageReceiptIdentityV1_1
+    budget: CoverageBudgetObservationV1_1
+    coverage_status: CoverageStatusV1_1
+
+    @model_validator(mode="after")
+    def _v1_1_invariants(self) -> "AgenticRetrievalCoverageReceiptV1_1":
+        if (
+            self.budget.observed_search_candidate_records
+            != self.matched_document_count
+        ):
+            raise ValueError(
+                "observed Search candidate records must equal matched documents"
+            )
+        agentic_mode = self.retrieval_mode.startswith("agentic_")
+        if agentic_mode and (
+            self.budget.observed_direct_search_requests
+            or self.budget.observed_vector_search_requests
+            or self.budget.observed_embedding_calls
+            or self.budget.observed_embedding_items
+        ):
+            raise ValueError(
+                "agentic mode has nonzero mode-inapplicable direct/vector/embedding observations"
+            )
+        if not agentic_mode and (
+            self.budget.observed_agentic_retrieval_invocations
+            or self.budget.observed_agentic_internal_subqueries
+            or self.budget.observed_agentic_source_calls
+        ):
+            raise ValueError(
+                "direct mode has nonzero mode-inapplicable agentic observations"
+            )
+        source_call_ids = [call.source_call_id for call in self.source_calls]
+        if len(source_call_ids) != len(set(source_call_ids)):
+            raise ValueError("source call IDs must be unique")
+        failure_keys = [
+            (failure.reason_code, failure.remediation, failure.canonical_ids)
+            for failure in self.failures
+        ]
+        if len(failure_keys) != len(set(failure_keys)):
+            raise ValueError("retrieval failures must be unique")
+        if (
+            self.budget.budget_exhausted_dimensions
+            and self.coverage_status not in {"partial", "abstain"}
+        ):
+            raise ValueError(
+                "budget exhaustion requires partial or abstain coverage status"
+            )
+        budget_failure_count = sum(
+            failure.reason_code == "retrieval_budget_exhausted"
+            for failure in self.failures
+        )
+        if self.budget.budget_exhausted_dimensions and budget_failure_count != 1:
+            raise ValueError(
+                "budget exhaustion requires exactly one retrieval_budget_exhausted failure"
+            )
+        if not self.budget.budget_exhausted_dimensions and budget_failure_count:
+            raise ValueError(
+                "retrieval_budget_exhausted failure requires exhausted dimensions"
+            )
+        return self
 
 
 class SearchCitationEnvelope(ContractModel):

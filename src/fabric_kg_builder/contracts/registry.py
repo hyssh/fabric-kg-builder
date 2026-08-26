@@ -44,10 +44,13 @@ from .receipts import ArtifactManifest, StageReceipt
 from .resources import StageResourceMetrics
 from .runtime import (
     AgenticRetrievalCoverageReceipt,
+    AgenticRetrievalCoverageReceiptV1_1,
     AgenticRetrievalRequestContext,
+    AgenticRetrievalRequestContextV1_1,
     CitationPresentation,
     OntologyScopeEnvelope,
     QueryBudget,
+    QueryBudgetV1_1,
     ResolvedOntologyScope,
     ResolvedRetrievalScope,
     SearchCitationEnvelope,
@@ -90,6 +93,9 @@ SUPPORTED_VERSIONS["c0.evidence_span"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.required_member_set_proposal"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.required_member_manifest"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.publication_crosswalk"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.query_budget"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.agentic_retrieval_request_context"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.agentic_retrieval_coverage_receipt"] = ("1.0.0", "1.1.0")
 
 REGISTERED_CONTRACT_VERSIONS: dict[tuple[str, str], type[ContractModel]] = {
     (kind, CONTRACT_VERSION): model for kind, model in REGISTERED_CONTRACTS.items()
@@ -104,6 +110,13 @@ REGISTERED_CONTRACT_VERSIONS[
 REGISTERED_CONTRACT_VERSIONS[
     ("c0.publication_crosswalk", "1.1.0")
 ] = PublicationCrosswalkV1_1
+REGISTERED_CONTRACT_VERSIONS[("c0.query_budget", "1.1.0")] = QueryBudgetV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.agentic_retrieval_request_context", "1.1.0")
+] = AgenticRetrievalRequestContextV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.agentic_retrieval_coverage_receipt", "1.1.0")
+] = AgenticRetrievalCoverageReceiptV1_1
 
 
 def negotiate_contract(kind: str, version: str) -> type[ContractModel]:
@@ -159,6 +172,9 @@ def schema_catalog() -> dict[tuple[str, str], dict[str, Any]]:
                     "RequiredMemberManifestIdentityV1_1",
                     "RequiredMemberSetProposalIdentityV1_1",
                     "PublicationCrosswalkIdentityV1_1",
+                    "QueryBudgetIdentityV1_1",
+                    "AgenticRetrievalRequestContextIdentityV1_1",
+                    "AgenticRetrievalCoverageReceiptIdentityV1_1",
                 }
             )
         identity_schema["properties"]["contract_kind"] = {
@@ -191,7 +207,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.5.0",
+        "registry_version": "1.6.0",
         "schemas": [
             {
                 "contract_kind": kind,

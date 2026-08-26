@@ -15,18 +15,26 @@ from fabric_kg_builder.contracts import (
     ActivityReceipt,
     AdjacencyEdge,
     AgenticRetrievalCoverageReceipt,
+    AgenticRetrievalCoverageReceiptIdentityV1_1,
+    AgenticRetrievalCoverageReceiptV1_1,
     AgenticRetrievalRequestContext,
+    AgenticRetrievalRequestContextIdentityV1_1,
+    AgenticRetrievalRequestContextV1_1,
     AuthoritativeReceiptReference,
     CanonicalIdentityEnvelope,
     CitationCanonicalMapping,
     CitationPresentation,
     CoverageBudgetObservation,
+    CoverageBudgetObservationV1_1,
     CoverageMemberReference,
     ExtractionAuthorityReferences,
     ImmutableSourceLocator,
     OntologyScopeEnvelope,
     PlannedSubqueryReceipt,
     QueryBudget,
+    QueryBudgetIdentityV1_1,
+    QueryBudgetV1_1,
+    QUERY_BUDGET_V1_1_SCHEMA_HASH,
     RequiredMemberManifestReference,
     RequiredMemberOrderingPolicyV1_1,
     RequiredMemberReferenceV1_1,
@@ -911,6 +919,258 @@ def coverage_receipt(
     )
     receipt.validate_citations(citations)
     return receipt
+
+
+def request_context_v1_1(
+    mode: str = "agentic_preview",
+    *,
+    entity_ids: tuple[str, ...] = GENERIC_MEMBER_IDS,
+    vector_search_requests: int = 0,
+    embedding_calls: int = 0,
+    embedding_items: int = 0,
+) -> tuple[
+    AgenticRetrievalRequestContextV1_1,
+    QueryBudgetV1_1,
+    AgenticRetrievalRequestContextV1_1 | None,
+    QueryBudgetV1_1 | None,
+]:
+    origin_context = None
+    origin_budget = None
+    old_origin = None
+    if mode == "direct_hybrid_prefilter":
+        old_origin, _ = request_context(entity_ids=entity_ids)
+        old_context, old_budget = request_context(
+            mode,
+            entity_ids=entity_ids,
+            fallback_for=old_origin,
+        )
+        origin_context, origin_budget, _, _ = request_context_v1_1(
+            entity_ids=entity_ids
+        )
+    else:
+        old_context, old_budget = request_context(mode, entity_ids=entity_ids)
+
+    budget_values = old_budget.model_dump(
+        mode="python",
+        exclude={"budget_hash"},
+        round_trip=True,
+    )
+    budget_values["identity"] = QueryBudgetIdentityV1_1.model_validate(
+        {
+            **budget_values["identity"],
+            "contract_version": "1.1.0",
+        }
+    )
+    budget_values.update(
+        {
+            "max_search_candidate_records": 50,
+            "max_vector_search_requests": vector_search_requests,
+            "max_embedding_calls": embedding_calls,
+            "max_embedding_items": embedding_items,
+            "max_retry_count": 2,
+            "max_retry_wait_milliseconds": 1000,
+        }
+    )
+    budget = seal(QueryBudgetV1_1, "budget_hash", budget_values)
+
+    context_values = old_context.model_dump(
+        mode="python",
+        exclude={"request_context_hash"},
+        round_trip=True,
+    )
+    context_values["identity"] = (
+        AgenticRetrievalRequestContextIdentityV1_1.model_validate(
+            {
+                **context_values["identity"],
+                "contract_version": "1.1.0",
+            }
+        )
+    )
+    context_values.update(
+        {
+            "query_budget_hash": budget.budget_hash,
+            "query_budget_contract_version": "1.1.0",
+            "query_budget_schema_hash": QUERY_BUDGET_V1_1_SCHEMA_HASH,
+        }
+    )
+    if origin_context is not None:
+        context_values.update(
+            {
+                "fallback_for_request_context_id": origin_context.request_context_id,
+                "fallback_for_request_context_hash": origin_context.request_context_hash,
+            }
+        )
+    context = seal(
+        AgenticRetrievalRequestContextV1_1,
+        "request_context_hash",
+        context_values,
+    )
+    context.validate_budget(budget)
+    return context, budget, origin_context, origin_budget
+
+
+def coverage_receipt_v1_1(
+    *,
+    mode: str = "agentic_preview",
+    status: str = "complete",
+    observed: dict[str, int] | None = None,
+    vector_search_requests: int = 0,
+    embedding_calls: int = 0,
+    embedding_items: int = 0,
+) -> tuple[
+    AgenticRetrievalCoverageReceiptV1_1,
+    AgenticRetrievalRequestContextV1_1,
+    QueryBudgetV1_1,
+    AgenticRetrievalRequestContextV1_1 | None,
+    QueryBudgetV1_1 | None,
+]:
+    fallback = mode == "direct_hybrid_prefilter"
+    old_receipt = coverage_receipt(fallback=fallback)
+    context, budget, origin_context, origin_budget = request_context_v1_1(
+        mode,
+        vector_search_requests=vector_search_requests,
+        embedding_calls=embedding_calls,
+        embedding_items=embedding_items,
+    )
+    receipt_values = old_receipt.model_dump(
+        mode="python",
+        exclude={"coverage_receipt_hash"},
+        round_trip=True,
+    )
+    receipt_values["identity"] = (
+        AgenticRetrievalCoverageReceiptIdentityV1_1.model_validate(
+            {
+                **receipt_values["identity"],
+                "contract_version": "1.1.0",
+            }
+        )
+    )
+    receipt_values.update(
+        {
+            "request_context_id": context.request_context_id,
+            "request_context_hash": context.request_context_hash,
+            "coverage_status": status,
+        }
+    )
+    observation_values = old_receipt.budget.model_dump(
+        mode="python",
+        round_trip=True,
+    )
+    for field_name in (
+        "max_ontology_graph_scope_requests",
+        "max_agentic_retrieval_invocations",
+        "max_agentic_internal_subqueries",
+        "max_agentic_source_calls",
+        "max_direct_search_requests",
+        "max_output_documents",
+        "max_output_tokens",
+        "max_output_bytes",
+        "max_runtime_milliseconds",
+        "max_graph_result_records",
+        "max_search_result_records",
+        "max_search_candidate_records",
+        "max_vector_search_requests",
+        "max_embedding_calls",
+        "max_embedding_items",
+        "max_retry_count",
+        "max_retry_wait_milliseconds",
+    ):
+        observation_values[field_name] = getattr(budget, field_name)
+    observation_values.update(
+        {
+            "observed_search_candidate_records": old_receipt.matched_document_count,
+            "observed_vector_search_requests": 0,
+            "observed_embedding_calls": 0,
+            "observed_embedding_items": 0,
+            "observed_retry_count": 0,
+            "observed_retry_wait_milliseconds": 0,
+        }
+    )
+    observation_values.update(observed or {})
+    receipt_values["matched_document_count"] = observation_values[
+        "observed_search_candidate_records"
+    ]
+    observed_to_ceiling = {
+        "observed_ontology_graph_scope_requests": "max_ontology_graph_scope_requests",
+        "observed_agentic_retrieval_invocations": "max_agentic_retrieval_invocations",
+        "observed_agentic_internal_subqueries": "max_agentic_internal_subqueries",
+        "observed_agentic_source_calls": "max_agentic_source_calls",
+        "observed_direct_search_requests": "max_direct_search_requests",
+        "observed_output_documents": "max_output_documents",
+        "observed_output_tokens": "max_output_tokens",
+        "observed_output_bytes": "max_output_bytes",
+        "observed_runtime_milliseconds": "max_runtime_milliseconds",
+        "observed_graph_result_records": "max_graph_result_records",
+        "observed_search_result_records": "max_search_result_records",
+        "observed_search_candidate_records": "max_search_candidate_records",
+        "observed_vector_search_requests": "max_vector_search_requests",
+        "observed_embedding_calls": "max_embedding_calls",
+        "observed_embedding_items": "max_embedding_items",
+        "observed_retry_count": "max_retry_count",
+        "observed_retry_wait_milliseconds": "max_retry_wait_milliseconds",
+    }
+    exhausted = tuple(
+        sorted(
+            ceiling
+            for observed_name, ceiling in observed_to_ceiling.items()
+            if observation_values[observed_name] > observation_values[ceiling]
+        )
+    )
+    observation_values["budget_exhausted_dimensions"] = exhausted
+
+    if mode.startswith("agentic_"):
+        planned_count = observation_values["observed_agentic_internal_subqueries"]
+        receipt_values["planned_subqueries"] = tuple(
+            PlannedSubqueryReceipt(
+                subquery_id=f"subquery:{index}",
+                subquery_hash=canonical_sha256({"subquery": index}),
+                executed=True,
+                knowledge_source_ids=(context.knowledge_source_id,),
+                returned_reference_count=0,
+            )
+            for index in range(planned_count)
+        )
+        source_call_count = observation_values["observed_agentic_source_calls"]
+    else:
+        source_call_count = observation_values["observed_direct_search_requests"]
+    existing_call = receipt_values["source_calls"][0]
+    receipt_values["source_calls"] = tuple(
+        SourceCallReceipt.model_validate(
+            {
+                **existing_call,
+                "source_call_id": f"source-call:search:{index}",
+                "request_hash": canonical_sha256({"source-call": index}),
+            }
+        )
+        for index in range(source_call_count)
+    )
+    if exhausted:
+        receipt_values.update(
+            {
+                "coverage_status": status,
+                "failures": (
+                    RetrievalFailure(
+                        reason_code="retrieval_budget_exhausted",
+                        remediation="downstream_abstention_required",
+                    ),
+                ),
+            }
+        )
+    receipt_values["budget"] = CoverageBudgetObservationV1_1.model_validate(
+        observation_values
+    )
+    receipt = seal(
+        AgenticRetrievalCoverageReceiptV1_1,
+        "coverage_receipt_hash",
+        receipt_values,
+    )
+    receipt.validate_request_context(
+        context,
+        budget,
+        originating_context=origin_context,
+        originating_budget=origin_budget,
+    )
+    return receipt, context, budget, origin_context, origin_budget
 
 
 def locator() -> ImmutableSourceLocator:
@@ -2013,7 +2273,7 @@ def test_generated_runtime_schemas_preserve_every_prior_schema_hash(
     previous_hashes = {
         (item["contract_kind"], item["contract_version"]): item["schema_hash"]
         for item in previous["schemas"]
-        if item["contract_kind"] not in RUNTIME_KINDS
+        if item["contract_version"] == "1.0.0"
     }
     generated = write_registered_schemas(tmp_path)
     current = json.loads(
@@ -2025,6 +2285,8 @@ def test_generated_runtime_schemas_preserve_every_prior_schema_hash(
     }
     for key, digest in previous_hashes.items():
         assert current_hashes[key] == digest
+        filename = f"{key[0].replace('.', '-')}-{key[1]}.schema.json"
+        assert (tmp_path / filename).read_bytes() == (schema_dir / filename).read_bytes()
     assert current_hashes[
         ("c0.required_member_manifest", "1.1.0")
     ] == REQUIRED_MEMBER_MANIFEST_V1_1_SCHEMA_HASH
@@ -2034,6 +2296,435 @@ def test_generated_runtime_schemas_preserve_every_prior_schema_hash(
         if kind in RUNTIME_KINDS and version == "1.0.0"
     } == RUNTIME_KINDS
     assert generated["c0.query_budget"] == generated["c0.query_budget@1.0.0"]
+    assert current_hashes[("c0.query_budget", "1.1.0")] == (
+        "2d744838296209d78da2e2c8b7df7ab5f030af400d45a3d04d62b7d763f92b52"
+    )
+    assert current_hashes[
+        ("c0.agentic_retrieval_request_context", "1.1.0")
+    ] == "dfed8fe3449b824cffa1570c278d3e476712987cb8d2e8cb2c903ac480bd8868"
+    assert current_hashes[
+        ("c0.agentic_retrieval_coverage_receipt", "1.1.0")
+    ] == "92d39c05d33a360bd542386af022a382ba18788efe4a1fe5b0728c42b5aec652"
+
+
+@pytest.mark.contract
+def test_runtime_1_1_versions_are_exact_and_cross_version_isolated() -> None:
+    assert negotiate_contract("c0.query_budget", "1.1.0") is QueryBudgetV1_1
+    assert (
+        negotiate_contract("c0.agentic_retrieval_request_context", "1.1.0")
+        is AgenticRetrievalRequestContextV1_1
+    )
+    assert (
+        negotiate_contract("c0.agentic_retrieval_coverage_receipt", "1.1.0")
+        is AgenticRetrievalCoverageReceiptV1_1
+    )
+    receipt, context, budget, _, _ = coverage_receipt_v1_1()
+    old_context, old_budget = request_context()
+    old_receipt = coverage_receipt()
+    with pytest.raises(ValueError, match="1.0 request context"):
+        old_context.validate_budget(budget)
+    with pytest.raises(ValueError, match="1.1 request context"):
+        context.validate_budget(old_budget)
+    with pytest.raises(ValueError, match="1.0 coverage receipt"):
+        old_receipt.validate_request_context(context, budget)
+    with pytest.raises(ValueError, match="1.1 coverage receipt"):
+        receipt.validate_request_context(old_context, old_budget)
+    with pytest.raises(ValueError, match="not registered"):
+        negotiate_contract("c0.query_budget", "1.2.0")
+
+
+@pytest.mark.contract
+def test_runtime_1_1_within_budget_complete_and_optional_paths_disabled() -> None:
+    receipt, context, budget, _, _ = coverage_receipt_v1_1()
+    assert receipt.coverage_status == "complete"
+    assert receipt.budget.budget_exhausted_dimensions == ()
+    assert budget.max_vector_search_requests == 0
+    assert budget.max_embedding_calls == 0
+    assert budget.max_embedding_items == 0
+    assert receipt.budget.observed_vector_search_requests == 0
+    assert receipt.budget.observed_embedding_calls == 0
+    assert receipt.budget.observed_embedding_items == 0
+    assert context.query_budget_contract_version == "1.1.0"
+    assert context.query_budget_schema_hash == QUERY_BUDGET_V1_1_SCHEMA_HASH
+
+
+@pytest.mark.contract
+def test_runtime_1_1_records_agentic_provider_overexecution_without_clamping() -> None:
+    receipt, _, budget, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={
+            "observed_agentic_retrieval_invocations": 2,
+            "observed_agentic_internal_subqueries": 5,
+            "observed_agentic_source_calls": 5,
+            "observed_search_candidate_records": 51,
+        },
+    )
+    assert receipt.budget.observed_agentic_retrieval_invocations == 2
+    assert len(receipt.planned_subqueries) == 5
+    assert len(receipt.source_calls) == 5
+    assert receipt.matched_document_count == 51
+    assert receipt.returned_document_count == 10
+    assert set(receipt.budget.budget_exhausted_dimensions) == {
+        "max_agentic_retrieval_invocations",
+        "max_agentic_internal_subqueries",
+        "max_agentic_source_calls",
+        "max_search_candidate_records",
+    }
+    assert budget.max_agentic_retrieval_invocations == 1
+    assert budget.max_agentic_internal_subqueries == 4
+    assert budget.max_agentic_source_calls == 4
+
+
+@pytest.mark.contract
+def test_runtime_1_1_graph_scope_and_result_overrun_can_abstain() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="abstain",
+        observed={
+            "observed_ontology_graph_scope_requests": 2,
+            "observed_graph_result_records": 101,
+        },
+    )
+    assert receipt.coverage_status == "abstain"
+    assert receipt.budget.budget_exhausted_dimensions == (
+        "max_graph_result_records",
+        "max_ontology_graph_scope_requests",
+    )
+
+
+@pytest.mark.contract
+def test_runtime_1_1_direct_vector_embedding_retry_overrun_is_exact() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        mode="direct_hybrid_prefilter",
+        status="abstain",
+        vector_search_requests=1,
+        embedding_calls=1,
+        embedding_items=1,
+        observed={
+            "observed_vector_search_requests": 2,
+            "observed_embedding_calls": 2,
+            "observed_embedding_items": 3,
+            "observed_retry_count": 3,
+            "observed_retry_wait_milliseconds": 1001,
+        },
+    )
+    assert receipt.budget.budget_exhausted_dimensions == (
+        "max_embedding_calls",
+        "max_embedding_items",
+        "max_retry_count",
+        "max_retry_wait_milliseconds",
+        "max_vector_search_requests",
+    )
+    assert receipt.budget.observed_direct_search_requests == 1
+    assert receipt.budget.observed_agentic_retrieval_invocations == 0
+
+
+@pytest.mark.contract
+def test_runtime_1_1_direct_request_overrun_reconciles_exact_source_calls() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        mode="direct_hybrid_prefilter",
+        status="partial",
+        observed={"observed_direct_search_requests": 2},
+    )
+    assert receipt.budget.observed_direct_search_requests == 2
+    assert len(receipt.source_calls) == 2
+    assert len({call.source_call_id for call in receipt.source_calls}) == 2
+    assert receipt.budget.budget_exhausted_dimensions == (
+        "max_direct_search_requests",
+    )
+
+    payload = receipt.model_dump(mode="python")
+    payload["budget"]["observed_direct_search_requests"] = 1
+    payload["budget"]["budget_exhausted_dimensions"] = ()
+    payload["coverage_status"] = "complete"
+    payload["failures"] = ()
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="request counts differ"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+    payload = receipt.model_dump(mode="python")
+    payload["source_calls"][1]["source_call_id"] = payload["source_calls"][0][
+        "source_call_id"
+    ]
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="source call IDs must be unique"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_runtime_1_1_retry_count_and_wait_coupling() -> None:
+    _, _, budget, _, _ = coverage_receipt_v1_1()
+    values = budget.model_dump(
+        mode="python",
+        exclude={"budget_hash"},
+        round_trip=True,
+    )
+    values.update({"max_retry_count": 0, "max_retry_wait_milliseconds": 0})
+    disabled = seal(QueryBudgetV1_1, "budget_hash", values)
+    assert disabled.max_retry_count == disabled.max_retry_wait_milliseconds == 0
+
+    values.update({"max_retry_count": 1, "max_retry_wait_milliseconds": 0})
+    immediate = seal(QueryBudgetV1_1, "budget_hash", values)
+    assert immediate.max_retry_count == 1
+    assert immediate.max_retry_wait_milliseconds == 0
+
+    values.update({"max_retry_count": 0, "max_retry_wait_milliseconds": 1})
+    with pytest.raises(ValidationError, match="retry wait ceiling must be zero"):
+        seal(QueryBudgetV1_1, "budget_hash", values)
+
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={"observed_retry_count": 3},
+    )
+    observation = receipt.budget.model_dump(mode="python")
+    observation.update(
+        {
+            "observed_retry_count": 0,
+            "observed_retry_wait_milliseconds": 1,
+            "budget_exhausted_dimensions": (),
+        }
+    )
+    with pytest.raises(ValidationError, match="observed retry wait must be zero"):
+        CoverageBudgetObservationV1_1.model_validate(observation)
+
+    observation.update(
+        {
+            "observed_retry_count": 1,
+            "observed_retry_wait_milliseconds": 0,
+        }
+    )
+    assert (
+        CoverageBudgetObservationV1_1.model_validate(
+            observation
+        ).observed_retry_wait_milliseconds
+        == 0
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        (
+            lambda payload: payload.update(
+                {"budget_exhausted_dimensions": ()}
+            ),
+            "must be exact",
+        ),
+        (
+            lambda payload: payload.update(
+                {
+                    "budget_exhausted_dimensions": (
+                        "max_output_tokens",
+                        "max_retry_count",
+                    )
+                }
+            ),
+            "must be exact",
+        ),
+        (
+            lambda payload: payload.update(
+                {
+                    "budget_exhausted_dimensions": (
+                        "max_retry_count",
+                        "max_retry_count",
+                    )
+                }
+            ),
+            "must not contain duplicates",
+        ),
+    ),
+)
+def test_runtime_1_1_rejects_missing_extra_or_duplicate_exhaustion(
+    mutation: Any,
+    match: str,
+) -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={"observed_retry_count": 3},
+    )
+    payload = receipt.budget.model_dump(mode="python")
+    mutation(payload)
+    with pytest.raises(ValidationError, match=match):
+        CoverageBudgetObservationV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_runtime_1_1_rejects_complete_exhausted_clamped_and_mismatched_counts() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={"observed_retry_count": 3},
+    )
+    payload = receipt.model_dump(mode="python")
+    payload["coverage_status"] = "complete"
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="exact bounded structural"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+    observation = receipt.budget.model_dump(mode="python")
+    observation["observed_retry_count"] = observation["max_retry_count"]
+    with pytest.raises(ValidationError, match="must be exact"):
+        CoverageBudgetObservationV1_1.model_validate(observation)
+
+    payload = receipt.model_dump(mode="python")
+    payload["failures"] = (
+        RetrievalFailure(
+            reason_code="output_truncated",
+            remediation="downstream_abstention_required",
+        ),
+    )
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="exactly one retrieval_budget_exhausted"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+    complete, _, _, _, _ = coverage_receipt_v1_1()
+    payload = complete.model_dump(mode="python")
+    payload["budget"]["observed_search_candidate_records"] = 9
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="candidate records"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_runtime_1_1_rejects_mode_inapplicable_observations() -> None:
+    complete, _, _, _, _ = coverage_receipt_v1_1()
+    payload = complete.model_dump(mode="python")
+    payload["budget"]["observed_vector_search_requests"] = 1
+    payload["budget"]["budget_exhausted_dimensions"] = (
+        "max_vector_search_requests",
+    )
+    payload["coverage_status"] = "partial"
+    payload["failures"] = (
+        RetrievalFailure(
+            reason_code="retrieval_budget_exhausted",
+            remediation="downstream_abstention_required",
+        ),
+    )
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="mode-inapplicable"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_runtime_1_1_budget_failure_is_exactly_iff_exhaustion() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={"observed_retry_count": 3},
+    )
+    payload = receipt.model_dump(mode="python")
+    payload["failures"] = (*payload["failures"], payload["failures"][0])
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="retrieval failures must be unique"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+    complete, _, _, _, _ = coverage_receipt_v1_1()
+    payload = complete.model_dump(mode="python")
+    payload["coverage_status"] = "abstain"
+    payload["failures"] = (
+        RetrievalFailure(
+            reason_code="retrieval_budget_exhausted",
+            remediation="downstream_abstention_required",
+        ),
+    )
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(
+        ValidationError,
+        match="failure requires exhausted dimensions",
+    ):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_runtime_1_1_generic_fixtures_are_canonical_and_adversarial() -> None:
+    valid_names = (
+        "query-budget-v1.1-optional-disabled",
+        "agentic-coverage-receipt-v1.1-complete",
+        "agentic-coverage-receipt-v1.1-provider-overrun-partial",
+        "agentic-coverage-receipt-v1.1-multi-overrun-abstain",
+        "agentic-coverage-receipt-v1.1-graph-overrun-abstain",
+        "agentic-coverage-receipt-v1.1-direct-request-overrun-partial",
+        "query-budget-v1.1-immediate-retry",
+    )
+    for name in valid_names:
+        parsed = parse_contract(
+            (FIXTURES / "valid" / f"{name}.json").read_text(encoding="utf-8")
+        )
+        expected_json = (
+            FIXTURES / "golden" / f"{name}.canonical.json"
+        ).read_text(encoding="utf-8").rstrip("\n")
+        expected_hash = (
+            FIXTURES / "golden" / f"{name}.sha256"
+        ).read_text(encoding="utf-8").strip()
+        assert canonical_json(parsed) == expected_json
+        assert canonical_sha256(parsed) == expected_hash
+
+    invalid_names = (
+        "agentic-coverage-receipt-v1.1-missing-exhausted",
+        "agentic-coverage-receipt-v1.1-extra-exhausted",
+        "agentic-coverage-receipt-v1.1-duplicate-exhausted",
+        "agentic-coverage-receipt-v1.1-complete-exhausted",
+        "agentic-coverage-receipt-v1.1-clamped-observation",
+        "agentic-coverage-receipt-v1.1-mismatched-candidates",
+        "agentic-coverage-receipt-v1.1-wrong-exhaustion-failure",
+        "agentic-coverage-receipt-v1.1-direct-call-mismatch",
+        "agentic-coverage-receipt-v1.1-duplicate-source-call-id",
+        "query-budget-v1.1-retry-wait-without-count",
+        "agentic-coverage-receipt-v1.1-retry-wait-without-retry",
+        "agentic-coverage-receipt-v1.1-duplicate-budget-failure",
+        "agentic-coverage-receipt-v1.1-false-budget-failure",
+    )
+    for name in invalid_names:
+        with pytest.raises(ValidationError):
+            parse_contract(
+                (FIXTURES / "invalid" / f"{name}.json").read_text(encoding="utf-8")
+            )
 
 
 @pytest.mark.contract
