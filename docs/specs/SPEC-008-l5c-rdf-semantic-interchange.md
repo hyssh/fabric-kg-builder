@@ -238,7 +238,11 @@ assignment context remain valid.
 The 64 KiB bound is checked on raw input, initial NFKC output, every
 decoded-and-normalized round, and final stable output, so compatibility
 expansion cannot bypass limits. URL parsing and lazy hostname/port/user-info
-validation are wrapped in constant sanitized errors.
+validation are wrapped in constant sanitized errors. Raw and decoded/NFKC URL
+authority scheme/host/port/user-info semantics must remain identical; only the
+authority is structurally stable. Unicode IRI characters in path, query, and
+fragment remain persisted unchanged and are not rejected merely because NFKC
+would introduce a delimiter outside the authority.
 Every RDF-owned model inherits the RDF-local strict base configured to hide
 inputs, preflights nested sensitive values, and returns sanitized structured
 validation errors containing no rejected raw value.

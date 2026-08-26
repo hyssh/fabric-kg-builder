@@ -1046,7 +1046,10 @@ def test_signed_url_families_and_nested_encodings_fail_closed(
     payload["source_authority"]["l5a_projection_manifest_id"] = encoded
     with pytest.raises(
         ValidationError,
-        match="secret|credential|signed|transient|nested URL encoding",
+        match=(
+            "secret|credential|signed|transient|nested URL encoding|"
+            "unstable URL authority"
+        ),
     ):
         RdfProjectionManifest.model_validate(payload)
 
@@ -1105,6 +1108,28 @@ def test_benign_namespace_query_values_remain_valid_metadata() -> None:
 
 @pytest.mark.contract
 @pytest.mark.parametrize(
+    "stable_unicode_iri",
+    [
+        "https://metadata.contoso.test/path℀item",
+        "https://metadata.contoso.test/path/℁",
+        "https://metadata.contoso.test/path?ref=℅",
+        "https://metadata.contoso.test/path#⁇",
+        "https://metadata.contoso.test/path⁇item",
+    ],
+)
+def test_unicode_iri_path_query_and_fragment_identity_remains_valid(
+    stable_unicode_iri: str,
+) -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["target_iri"] = stable_unicode_iri
+    assert (
+        RdfExternalAlignment.model_validate(payload).target_iri
+        == stable_unicode_iri
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
     "invalid_url",
     [
         "https://[::1/path?ref=URL_MARKER_73",
@@ -1112,6 +1137,9 @@ def test_benign_namespace_query_values_remain_valid_metadata() -> None:
         "https://user:URL_MARKER_73@storage.test/path",
         "https://storage.test／URL_MARKER_73/path",
         "https://storage.test%EF%BC%8FURL_MARKER_73/path",
+        "https%3A%2F%2Fstorage.test/URL_MARKER_73",
+        "ｈｔｔｐｓ://storage.test/URL_MARKER_73",
+        "https://user%EF%BC%A0URL_MARKER_73@storage.test/path",
     ],
 )
 def test_url_parser_failures_never_expose_rejected_input(

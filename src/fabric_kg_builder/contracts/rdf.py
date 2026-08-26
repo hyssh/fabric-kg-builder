@@ -108,8 +108,7 @@ def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
         or not parsed.netloc
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.query
-        or (base and parsed.fragment)
+        or (base and (parsed.query or parsed.fragment))
     ):
         raise ValueError(f"{field_name} must be an absolute credential-free HTTPS IRI")
     if base and not value.endswith(("/", "#")):
@@ -135,15 +134,16 @@ def _check_sensitive_size(value: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} exceeds the safe validation size")
 
 
-def _check_nfkc_url_delimiters(value: str, *, field_name: str) -> None:
-    if "://" not in value:
-        return
-    for character in value:
-        normalized_character = unicodedata.normalize("NFKC", character)
-        if character != normalized_character and any(
-            delimiter in normalized_character for delimiter in "/?#[]@"
-        ):
-            raise ValueError(f"{field_name} contains invalid URL syntax")
+def _authority_signature(parsed: ParseResult) -> tuple[Any, ...] | None:
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return (
+        parsed.scheme.casefold(),
+        parsed.hostname.casefold() if parsed.hostname is not None else None,
+        parsed.port,
+        parsed.username,
+        parsed.password,
+    )
 
 
 def _safe_parse_qsl(value: str, *, field_name: str) -> list[tuple[str, str]]:
@@ -155,13 +155,13 @@ def _safe_parse_qsl(value: str, *, field_name: str) -> list[tuple[str, str]]:
 
 def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     _check_sensitive_size(value, field_name=field_name)
-    _check_nfkc_url_delimiters(value, field_name=field_name)
+    raw_parsed = _safe_urlparse(value, field_name=field_name)
+    raw_authority = _authority_signature(raw_parsed)
     decoded = unicodedata.normalize("NFKC", value)
     _check_sensitive_size(decoded, field_name=field_name)
     stable = False
     for _ in range(_MAX_DECODE_ROUNDS):
         unescaped = unquote(decoded)
-        _check_nfkc_url_delimiters(unescaped, field_name=field_name)
         expanded = unicodedata.normalize("NFKC", unescaped)
         if expanded == decoded:
             stable = True
@@ -173,6 +173,8 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     decoded = unicodedata.normalize("NFKC", decoded)
     _check_sensitive_size(decoded, field_name=field_name)
     parsed = _safe_urlparse(decoded, field_name=field_name)
+    if _authority_signature(parsed) != raw_authority:
+        raise ValueError(f"{field_name} contains unstable URL authority syntax")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError(f"{field_name} must not contain URI credentials")
     if _BEARER_RE.search(decoded):
