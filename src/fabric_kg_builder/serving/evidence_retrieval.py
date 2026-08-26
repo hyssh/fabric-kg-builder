@@ -2699,6 +2699,71 @@ def _agentic_runtime_seconds(max_runtime_milliseconds: int) -> int:
     return seconds
 
 
+@dataclass(frozen=True)
+class _RetrievalBudgetShape:
+    output_documents: int
+    output_size: int
+    runtime_seconds: int | None
+
+
+def _shape_retrieval_budget(
+    budget: QueryBudget,
+    *,
+    retrieval_mode: str,
+) -> _RetrievalBudgetShape:
+    """Map sealed C0 ceilings to provider-enforceable request values."""
+
+    output_documents = min(
+        budget.max_output_documents,
+        budget.max_search_result_records,
+    )
+    if output_documents < 1:
+        raise L5bPublicationError(
+            "L5B_OUTPUT_DOCUMENT_BUDGET_UNAVAILABLE",
+            "retrieval requires a positive output-document ceiling",
+        )
+    if retrieval_mode == "agentic_preview":
+        if budget.max_agentic_retrieval_invocations < 1:
+            raise L5bPublicationError(
+                "L5B_AGENTIC_INVOCATION_BUDGET_UNAVAILABLE",
+                "agentic retrieval is unavailable under the sealed invocation budget",
+            )
+        # 2026-05-01-preview exposes no independent source-call or subquery
+        # limit. One explicit intent targeted to one source is the exact
+        # provider-enforceable minimum and bypasses model query planning.
+        if budget.max_agentic_internal_subqueries < 1:
+            raise L5bPublicationError(
+                "L5B_AGENTIC_SUBQUERY_BUDGET_UNAVAILABLE",
+                "agentic retrieval requires exactly one explicit subquery, but "
+                "the sealed subquery budget is zero",
+            )
+        if budget.max_agentic_source_calls < 1:
+            raise L5bPublicationError(
+                "L5B_AGENTIC_SOURCE_CALL_BUDGET_UNAVAILABLE",
+                "agentic retrieval requires exactly one targeted source call, but "
+                "the sealed source-call budget is zero",
+            )
+        return _RetrievalBudgetShape(
+            output_documents=output_documents,
+            output_size=budget.max_output_tokens,
+            runtime_seconds=_agentic_runtime_seconds(
+                budget.max_runtime_milliseconds
+            ),
+        )
+    if retrieval_mode == "direct_hybrid_prefilter":
+        if budget.max_direct_search_requests < 1:
+            raise L5bPublicationError(
+                "L5B_DIRECT_SEARCH_BUDGET_UNAVAILABLE",
+                "direct retrieval is unavailable under the sealed request budget",
+            )
+        return _RetrievalBudgetShape(
+            output_documents=output_documents,
+            output_size=budget.max_output_tokens,
+            runtime_seconds=None,
+        )
+    raise ValueError(f"unsupported retrieval mode: {retrieval_mode}")
+
+
 def build_agentic_retrieve_payload(
     context: AgenticRetrievalRequestContext,
     budget: QueryBudget,
@@ -2724,6 +2789,10 @@ def build_agentic_retrieve_payload(
     )
     if filter_add_on != expected_filter:
         raise ValueError("filterAddOn differs from locally hashed canonical scope")
+    shape = _shape_retrieval_budget(
+        budget,
+        retrieval_mode=context.retrieval_mode,
+    )
     return {
         "intents": [{"type": "semantic", "search": query_text}],
         "knowledgeSourceParams": [{
@@ -2732,18 +2801,16 @@ def build_agentic_retrieve_payload(
             "filterAddOn": filter_add_on,
             "includeReferences": True,
             "includeReferenceSourceData": True,
-            "maxOutputDocuments": budget.max_output_documents,
+            "maxOutputDocuments": shape.output_documents,
             "failOnError": True,
         }],
         "outputMode": "extractiveData",
         "retrievalReasoningEffort": {
             "kind": context.retrieval_reasoning_effort,
         },
-        "maxRuntimeInSeconds": _agentic_runtime_seconds(
-            budget.max_runtime_milliseconds
-        ),
-        "maxOutputSize": budget.max_output_tokens,
-        "maxOutputDocuments": budget.max_output_documents,
+        "maxRuntimeInSeconds": shape.runtime_seconds,
+        "maxOutputSize": shape.output_size,
+        "maxOutputDocuments": shape.output_documents,
         "includeActivity": context.request_activity,
     }
 
@@ -2756,6 +2823,8 @@ def build_direct_search_payload(
     query_text: str,
     vector: Sequence[float] | None,
     vector_available: bool = False,
+    originating_context: AgenticRetrievalRequestContext | None = None,
+    originating_budget: QueryBudget | None = None,
 ) -> "L5bDirectSearchRequest":
     """Build one stable direct filtered query with explicit vector degradation."""
 
@@ -2763,6 +2832,22 @@ def build_direct_search_payload(
     context.validate_scope(scope)
     if context.retrieval_mode != "direct_hybrid_prefilter":
         raise ValueError("direct payload requires direct_hybrid_prefilter context")
+    fallback_declared = context.fallback_for_request_context_id is not None
+    fallback_supplied = (
+        originating_context is not None or originating_budget is not None
+    )
+    if fallback_declared or fallback_supplied:
+        if originating_context is None or originating_budget is None:
+            raise L5bPublicationError(
+                "L5B_DIRECT_FALLBACK_UNAUTHORIZED",
+                "direct fallback requires its originating context and budget",
+            )
+        originating_context.validate_budget(originating_budget)
+        context.validate_fallback_origin(originating_context)
+    shape = _shape_retrieval_budget(
+        budget,
+        retrieval_mode=context.retrieval_mode,
+    )
     filter_text = canonical_scope_filter(
         canonical_entity_ids=context.canonical_entity_ids,
         canonical_type_ids=context.exact_type_ids,
@@ -2775,10 +2860,7 @@ def build_direct_search_payload(
         "filter": filter_text,
         "queryType": "semantic",
         "semanticConfiguration": "evidence-semantic",
-        "top": min(
-            budget.max_output_documents,
-            budget.max_search_result_records,
-        ),
+        "top": shape.output_documents,
         "select": ",".join(_SOURCE_DATA_FIELDS),
         "count": True,
     }
@@ -2801,10 +2883,7 @@ def build_direct_search_payload(
             "kind": "vector",
             "vector": list(vector),
             "fields": "vector",
-            "k": min(
-                budget.max_output_documents,
-                budget.max_search_result_records,
-            ),
+            "k": shape.output_documents,
         }]
     else:
         degradation_code = "vector_unavailable_keyword_semantic_filtered"
@@ -3876,7 +3955,8 @@ def interpret_retrieval_response(
         ),
         *(
             ("max_search_result_records",)
-            if len(references) > budget.max_search_result_records
+            if max(accounting.candidate_count, len(references))
+            > budget.max_search_result_records
             else ()
         ),
         *(

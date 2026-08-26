@@ -1351,7 +1351,10 @@ def test_canonical_filters_escape_injection_and_preview_is_exact_and_narrow() ->
             "filterAddOn": filter_text,
             "includeReferences": True,
             "includeReferenceSourceData": True,
-            "maxOutputDocuments": budget.max_output_documents,
+            "maxOutputDocuments": min(
+                budget.max_output_documents,
+                budget.max_search_result_records,
+            ),
             "failOnError": True,
         }],
         "outputMode": "extractiveData",
@@ -1360,7 +1363,10 @@ def test_canonical_filters_escape_injection_and_preview_is_exact_and_narrow() ->
         },
         "maxRuntimeInSeconds": 30,
         "maxOutputSize": budget.max_output_tokens,
-        "maxOutputDocuments": budget.max_output_documents,
+        "maxOutputDocuments": min(
+            budget.max_output_documents,
+            budget.max_search_result_records,
+        ),
         "includeActivity": True,
     }
     assert L5B_AGENTIC_API_VERSION == "2026-05-01-preview"
@@ -1385,13 +1391,13 @@ def test_canonical_filters_escape_injection_and_preview_is_exact_and_narrow() ->
         )
 
 
-def _request_with_runtime(milliseconds: int):
-    context, budget = request_context()
+def _request_with_budget_changes(mode: str = "agentic_preview", **changes):
+    context, budget = request_context(mode)
     budget_values = budget.model_dump(
         mode="python",
         exclude={"budget_hash"},
     )
-    budget_values["max_runtime_milliseconds"] = milliseconds
+    budget_values.update(changes)
     revised_budget = QueryBudget(
         **budget_values,
         budget_hash=canonical_sha256(budget_values),
@@ -1406,6 +1412,135 @@ def _request_with_runtime(milliseconds: int):
         request_context_hash=canonical_sha256(context_values),
     )
     return revised_context, revised_budget
+
+
+def _preview_payload(context, budget):
+    scope = resolved_retrieval_scope()
+    filter_text = canonical_scope_filter(
+        canonical_entity_ids=context.filter_add_on.canonical_entity_ids,
+        canonical_type_ids=context.filter_add_on.exact_type_ids,
+        canonical_relationship_ids=(
+            context.filter_add_on.canonical_relationship_ids
+        ),
+        access_policy_hash=context.acl_scope_hash,
+        asserted_publication_hash=context.asserted_publication_hash,
+    )
+    return build_agentic_retrieve_payload(
+        context,
+        budget,
+        scope,
+        query_text="evidence",
+        filter_add_on=filter_text,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("configured", "records", "expected"),
+    ((1, 1, 1), (25, 1, 1), (1, 25, 1), (25, 25, 25)),
+)
+def test_preview_document_limits_are_exact_and_never_round_up(
+    configured: int,
+    records: int,
+    expected: int,
+) -> None:
+    context, budget = _request_with_budget_changes(
+        max_output_documents=configured,
+        max_search_result_records=records,
+    )
+
+    payload = _preview_payload(context, budget)
+
+    assert payload["maxOutputDocuments"] == expected
+    assert payload["knowledgeSourceParams"][0]["maxOutputDocuments"] == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dimension", "error_code"),
+    (
+        (
+            "max_agentic_source_calls",
+            "L5B_AGENTIC_SOURCE_CALL_BUDGET_UNAVAILABLE",
+        ),
+        (
+            "max_agentic_internal_subqueries",
+            "L5B_AGENTIC_SUBQUERY_BUDGET_UNAVAILABLE",
+        ),
+    ),
+)
+def test_preview_zero_activity_budget_fails_before_provider_call(
+    dimension: str,
+    error_code: str,
+) -> None:
+    context, budget = _request_with_budget_changes(**{dimension: 0})
+    provider_calls: list[str] = []
+
+    with pytest.raises(L5bPublicationError, match=error_code):
+        _preview_payload(context, budget)
+
+    assert provider_calls == []
+
+
+@pytest.mark.unit
+def test_validator_zero_source_one_record_case_fails_closed() -> None:
+    context, budget = _request_with_budget_changes(
+        max_agentic_source_calls=0,
+        max_search_result_records=1,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_AGENTIC_SOURCE_CALL_BUDGET_UNAVAILABLE",
+    ):
+        _preview_payload(context, budget)
+
+
+@pytest.mark.unit
+def test_preview_one_source_and_subquery_budget_emits_one_of_each() -> None:
+    context, budget = _request_with_budget_changes(
+        max_agentic_source_calls=1,
+        max_agentic_internal_subqueries=1,
+        max_search_result_records=1,
+    )
+
+    payload = _preview_payload(context, budget)
+
+    assert len(payload["intents"]) == 1
+    assert len(payload["knowledgeSourceParams"]) == 1
+    assert payload["maxOutputDocuments"] == 1
+
+
+@pytest.mark.unit
+def test_query_budget_boundary_matrix_shapes_all_outgoing_preview_limits() -> None:
+    context, budget = _request_with_budget_changes(
+        max_agentic_internal_subqueries=1,
+        max_agentic_source_calls=1,
+        max_output_documents=25,
+        max_output_tokens=17,
+        max_output_bytes=19,
+        max_runtime_milliseconds=1999,
+        max_search_result_records=1,
+    )
+
+    payload = _preview_payload(context, budget)
+
+    assert len(payload["intents"]) <= budget.max_agentic_internal_subqueries
+    assert len(payload["knowledgeSourceParams"]) <= budget.max_agentic_source_calls
+    assert payload["maxOutputDocuments"] == 1
+    assert payload["knowledgeSourceParams"][0]["maxOutputDocuments"] == 1
+    assert payload["maxOutputSize"] == 17
+    assert payload["maxRuntimeInSeconds"] * 1000 <= (
+        budget.max_runtime_milliseconds
+    )
+    assert "maxOutputSizeInTokens" not in payload
+    assert "vectorQueries" not in payload
+
+
+def _request_with_runtime(milliseconds: int):
+    return _request_with_budget_changes(
+        max_runtime_milliseconds=milliseconds,
+    )
 
 
 @pytest.mark.unit
@@ -1513,6 +1648,115 @@ def test_direct_fallback_is_prefiltered_and_vector_degradation_is_explicit() -> 
             vector=(0.0, 1.0),
             vector_available=True,
         )
+
+
+@pytest.mark.unit
+def test_direct_fallback_requires_authorized_origin_and_separate_budget() -> None:
+    origin, origin_budget = request_context("agentic_preview")
+    context, budget = request_context(
+        "direct_hybrid_prefilter",
+        fallback_for=origin,
+    )
+    scope = resolved_retrieval_scope()
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_DIRECT_FALLBACK_UNAUTHORIZED",
+    ):
+        build_direct_search_payload(
+            context,
+            budget,
+            scope,
+            query_text="evidence",
+            vector=None,
+        )
+
+    request = build_direct_search_payload(
+        context,
+        budget,
+        scope,
+        query_text="evidence",
+        vector=None,
+        originating_context=origin,
+        originating_budget=origin_budget,
+    )
+    assert request.payload["top"] == min(
+        budget.max_output_documents,
+        budget.max_search_result_records,
+    )
+
+
+@pytest.mark.unit
+def test_direct_vector_and_record_candidates_share_one_budget_shape() -> None:
+    context, budget = _request_with_budget_changes(
+        "direct_hybrid_prefilter",
+        max_output_documents=25,
+        max_search_result_records=1,
+    )
+
+    request = build_direct_search_payload(
+        context,
+        budget,
+        resolved_retrieval_scope(),
+        query_text="evidence",
+        vector=(0.0,) * 1536,
+        vector_available=True,
+    )
+
+    assert request.payload["top"] == 1
+    assert request.payload["vectorQueries"][0]["k"] == 1
+
+
+@pytest.mark.unit
+def test_candidate_accounting_remains_budget_defense_in_depth(
+    monkeypatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = _request_with_budget_changes(
+        max_search_result_records=1,
+    )
+    document = _reference_document(
+        context,
+        retrieval_scope.canonical_member_ids[0],
+        0,
+    )
+    publication = _runtime_publication(context, [document])
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response=_agentic_response(context, [document]),
+        accounting=L5bRemoteAccounting(
+            operation_refs=("retrieve:candidate-overage",),
+            request_bytes=100,
+            response_bytes=1000,
+            retry_count=0,
+            retry_wait_ms=0,
+            latency_ms=25,
+            candidate_count=2,
+            output_tokens=0,
+        ),
+    )
+
+    assert result.coverage.coverage_status == "partial"
+    assert result.coverage.budget.observed_search_result_records == 1
+    assert result.coverage.budget.budget_exhausted_dimensions == (
+        "max_search_result_records",
+    )
+    assert any(
+        failure.reason_code == "retrieval_budget_exhausted"
+        for failure in result.coverage.failures
+    )
 
 
 def _reference_document(context, entity_id: str, index: int) -> dict:
