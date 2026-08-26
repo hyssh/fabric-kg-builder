@@ -483,7 +483,10 @@ boundary and adoption sequence are specified in
   identity;
 - exact common-schema, domain-schema, SHACL-shapes, optional-instance, and
   provenance/authority named graphs, with schema triples separated from
-  instance/evidence triples and access-policy IDs/hashes on protected graphs;
+  instance/evidence triples and access-policy IDs/hashes on protected graphs.
+  Every graph carries an exact canonical-ID-set hash/count: common is the empty
+  canonical set, domain and SHACL derive from exact vocabulary inventories, and
+  instances/provenance copy sealed upstream commitments;
 - exact class, property, relationship, hierarchy, key, endpoint, range, and
   value-type inventory under a conservative OWL 2 RL-compatible derived
   vocabulary. Every term IRI is the injective canonical uppercase
@@ -505,8 +508,8 @@ remains completeness authority; neither RDF nor SHACL recomputes membership.
 
 `RdfSerializationArtifact` records one exact Turtle, RDF/XML, optional JSON-LD,
 or canonical N-Quads artifact. It fixes media type and W3C syntax version,
-content hash, byte/triple/graph counts, named graph IDs, canonical ID-set hash,
-sealed graph ID/IRI/role/required/policy/count bindings and inventory hash,
+content hash, byte/triple/graph counts, named graph IDs, sealed graph
+ID/IRI/role/required/policy/count/canonical-ID commitments and inventory hash,
 RDFC-1.0 canonical dataset hash, and deterministic no-unstable-blank-node
 policy. Public artifacts contain exactly common/domain/SHACL roles and no
 policy; protected artifacts contain mandatory provenance and optional
@@ -516,6 +519,12 @@ JSON-LD is optional, and canonical N-Quads is the equivalence form. Sorted
 N-Triples is not a dataset-canonicalization substitute. Public schema
 artifacts cannot carry ACL principal policy; protected dataset artifacts must
 reference an `AccessPolicy` by exact ID/hash.
+The artifact's `canonical_id_binding_hash` is not a claimed raw union hash; it
+hashes exact sorted graph ID, role, per-graph canonical-ID-set hash, and count
+tuples. Artifact bindings must equal manifest graph commitments. Observations,
+receipts, and acceptance bundles copy and validate that same
+manifest-derived binding, so coordinated downstream reseals cannot substitute
+`ffff` commitments or swap/subset public and protected graph semantics.
 
 `RdfValidationReceipt` records SHACL shapes/report hashes, conformance and
 severity counts, validator identity/version, and observations sealed to the
@@ -563,6 +572,10 @@ are not rejected merely because NFKC introduces a delimiter there.
 Every RDF-owned top-level and nested model uses the RDF-local strict base with
 hidden inputs and sanitized `ValidationError.errors()` details; rejected values
 are never included in exception text or structured error input.
+All collection before-validators type-check model or mapping entries before
+sorting. Scalars, nulls, lists, and wrong objects defer to strict element
+validation or raise constant sanitized errors; no attribute/type exception
+escapes.
 
 `RdfProjectionAcceptanceBundle` embeds one exact manifest, the complete
 serialization artifact metadata set, and one validation receipt. Its model

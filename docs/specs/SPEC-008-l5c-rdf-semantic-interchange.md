@@ -116,7 +116,11 @@ The dataset inventory has these named graph roles:
 Every mandatory role exists exactly once and declares `required=true`. An
 instances graph is optional in the manifest, but when present it is required by
 the represented dataset. Graph IDs and IRIs are unique. Every graph also
-declares its expected graph hash and triple count.
+declares its expected graph hash, triple count, canonical-ID-set hash, and
+canonical-ID count. Common schema commits to the empty canonical set; domain
+schema and SHACL shapes derive from the exact class/property/relationship
+inventories; optional instances and provenance copy explicit sealed upstream
+canonical-ID commitments.
 
 Schema graphs contain schema triples only. Instance and provenance graphs
 contain instance/evidence triples only and carry exact access-policy IDs/hashes.
@@ -156,7 +160,8 @@ optional. Each artifact records:
 - triple count, graph count, and exact named graph IDs;
 - sealed graph ID/IRI/role/required/policy/triple-count bindings and exact
   graph-inventory hash;
-- canonical ID-set hash;
+- per-graph canonical-ID-set hash/count and a
+  `canonical_id_binding_hash` over sorted graph ID/role/hash/count tuples;
 - `canonical_dataset_hash_algorithm="RDFC-1.0"` and canonical dataset hash; and
 - `blank_node_policy="none_after_deterministic_skolemization"`.
 
@@ -171,6 +176,10 @@ Standalone artifact validation enforces exact role sets by exposure:
 `protected_dataset` adds mandatory provenance and optional instances, whose
 policies equal the artifact policy. `validate_against_manifest` rejects any
 missing, extra, relabeled, optionalized, or policy-shifted graph binding.
+It also rejects graph canonical-ID swaps, subsets, or coordinated downstream
+reseals that differ from the manifest. The binding hash is intentionally not
+described as a raw union hash because only hash commitments, not all raw
+instance IDs, are required.
 
 ## 9. SHACL boundary
 
@@ -253,6 +262,9 @@ would introduce a delimiter outside the authority.
 Every RDF-owned model inherits the RDF-local strict base configured to hide
 inputs, preflights nested sensitive values, and returns sanitized structured
 validation errors containing no rejected raw value.
+Collection canonicalizers inspect only typed model or mapping entries before
+sorting; malformed scalar/null/list entries reach strict sanitized validation
+without leaking `AttributeError`, `TypeError`, or input content.
 
 ## 11. Access boundary
 

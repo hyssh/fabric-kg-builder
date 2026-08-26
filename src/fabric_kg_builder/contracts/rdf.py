@@ -361,20 +361,28 @@ def _canonical_union_node_iri(
 def _sorted_unique_models(value: object, *, key: str, field_name: str) -> object:
     if not isinstance(value, (list, tuple)):
         return value
+    if any(
+        not isinstance(item, (BaseModel, Mapping))
+        or (
+            isinstance(item, BaseModel)
+            and not hasattr(item, key)
+        )
+        for item in value
+    ):
+        return tuple(value)
+
+    def key_value(item: BaseModel | Mapping[Any, Any]) -> str:
+        if isinstance(item, BaseModel):
+            return str(getattr(item, key))
+        return str(item.get(key, ""))
+
     items = tuple(
         sorted(
             value,
-            key=lambda item: (
-                str(getattr(item, key))
-                if hasattr(item, key)
-                else str(item.get(key, ""))
-            ),
+            key=key_value,
         )
     )
-    keys = [
-        str(getattr(item, key)) if hasattr(item, key) else str(item.get(key, ""))
-        for item in items
-    ]
+    keys = [key_value(item) for item in items]
     if len(keys) != len(set(keys)):
         raise ValueError(f"{field_name} must contain unique {key} values")
     return items
@@ -501,6 +509,10 @@ class RdfSourceAuthorityTuple(RdfContractModel):
     identity_policy_hash: Sha256
     relationship_policy_hash: Sha256
     k_policy_hash: Sha256
+    instance_canonical_id_set_hash: Sha256
+    instance_canonical_id_count: NonNegativeInt
+    provenance_canonical_id_set_hash: Sha256
+    provenance_canonical_id_count: NonNegativeInt
     publication_authority: PublicationAuthorityReferences
 
     def reference_set_hash(self) -> str:
@@ -581,6 +593,22 @@ class RdfSourceAuthorityTuple(RdfContractModel):
                 "contract_version": None,
                 "schema_hash": None,
                 "content_hash": self.k_policy_hash,
+            },
+            {
+                "reference_name": "instance_canonical_id_set",
+                "reference_id": "authority:instance-canonical-id-set",
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.instance_canonical_id_set_hash,
+                "canonical_id_count": self.instance_canonical_id_count,
+            },
+            {
+                "reference_name": "provenance_canonical_id_set",
+                "reference_id": "authority:provenance-canonical-id-set",
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.provenance_canonical_id_set_hash,
+                "canonical_id_count": self.provenance_canonical_id_count,
             },
             {
                 "reference_name": "required_member_manifest",
@@ -680,6 +708,8 @@ class RdfNamedGraph(RdfContractModel):
     contains_instance_or_evidence_triples: bool
     expected_graph_hash: Sha256
     expected_triple_count: NonNegativeInt
+    canonical_id_set_hash: Sha256
+    canonical_id_count: NonNegativeInt
     access_policy_id: RequiredText | None = None
     access_policy_hash: Sha256 | None = None
 
@@ -1156,6 +1186,48 @@ class RdfProjectionManifest(RdfContractModel):
                     raise ValueError(
                         "endpoint union IRI must use the deterministic governed mapping"
                     )
+        vocabulary_ids = sorted(
+            [
+                item.canonical_class_id
+                for item in self.vocabulary.class_definitions
+            ]
+            + [
+                item.canonical_property_id
+                for item in self.vocabulary.property_definitions
+            ]
+            + [
+                item.canonical_relationship_id
+                for item in self.vocabulary.relationship_definitions
+            ]
+        )
+        expected_graph_commitments = {
+            "common_schema": (canonical_sha256(()), 0),
+            "domain_schema": (
+                canonical_sha256(vocabulary_ids),
+                len(vocabulary_ids),
+            ),
+            "shacl_shapes": (
+                canonical_sha256(vocabulary_ids),
+                len(vocabulary_ids),
+            ),
+            "instances": (
+                self.source_authority.instance_canonical_id_set_hash,
+                self.source_authority.instance_canonical_id_count,
+            ),
+            "provenance_authority": (
+                self.source_authority.provenance_canonical_id_set_hash,
+                self.source_authority.provenance_canonical_id_count,
+            ),
+        }
+        for graph in self.named_graphs:
+            expected_commitment = expected_graph_commitments[graph.graph_role]
+            if (
+                graph.canonical_id_set_hash,
+                graph.canonical_id_count,
+            ) != expected_commitment:
+                raise ValueError(
+                    "graph canonical ID commitment differs from manifest authority"
+                )
         formats = set(self.required_serialization_formats)
         if not {"turtle", "rdf_xml", "canonical_n_quads"}.issubset(formats):
             raise ValueError("Turtle, RDF/XML, and canonical N-Quads are required")
@@ -1168,6 +1240,20 @@ class RdfProjectionManifest(RdfContractModel):
             raise ValueError("projection_manifest_hash does not match manifest")
         return self
 
+    def canonical_id_binding_hash(self, exposure: RdfExposure) -> str:
+        bindings = tuple(
+            {
+                "graph_id": graph.graph_id,
+                "graph_role": graph.graph_role,
+                "canonical_id_set_hash": graph.canonical_id_set_hash,
+                "canonical_id_count": graph.canonical_id_count,
+            }
+            for graph in self.named_graphs
+            if exposure == "protected_dataset"
+            or graph.graph_role in _PUBLIC_GRAPH_ROLES
+        )
+        return canonical_sha256(bindings)
+
 
 class RdfSerializedGraphBinding(RdfContractModel):
     graph_id: RequiredText
@@ -1176,6 +1262,8 @@ class RdfSerializedGraphBinding(RdfContractModel):
     required: bool
     triple_count: NonNegativeInt
     graph_hash: Sha256
+    canonical_id_set_hash: Sha256
+    canonical_id_count: NonNegativeInt
     access_policy_id: RequiredText | None = None
     access_policy_hash: Sha256 | None = None
 
@@ -1212,7 +1300,7 @@ class RdfSerializationArtifact(RdfContractModel):
     named_graph_ids: tuple[str, ...]
     graph_bindings: tuple[RdfSerializedGraphBinding, ...]
     graph_inventory_hash: Sha256
-    canonical_id_set_hash: Sha256
+    canonical_id_binding_hash: Sha256
     canonical_dataset_hash_algorithm: Literal["RDFC-1.0"] = "RDFC-1.0"
     canonical_dataset_hash: Sha256
     blank_node_policy: Literal["none_after_deterministic_skolemization"] = (
@@ -1256,6 +1344,21 @@ class RdfSerializationArtifact(RdfContractModel):
         expected_graph_hash = canonical_sha256(self.graph_bindings)
         if self.graph_inventory_hash != expected_graph_hash:
             raise ValueError("graph_inventory_hash does not match graph bindings")
+        expected_id_binding_hash = canonical_sha256(
+            tuple(
+                {
+                    "graph_id": item.graph_id,
+                    "graph_role": item.graph_role,
+                    "canonical_id_set_hash": item.canonical_id_set_hash,
+                    "canonical_id_count": item.canonical_id_count,
+                }
+                for item in self.graph_bindings
+            )
+        )
+        if self.canonical_id_binding_hash != expected_id_binding_hash:
+            raise ValueError(
+                "canonical_id_binding_hash does not match graph commitments"
+            )
         if (self.access_policy_id is None) != (self.access_policy_hash is None):
             raise ValueError("access policy ID and hash must be paired")
         if self.exposure == "protected_dataset" and self.access_policy_id is None:
@@ -1305,6 +1408,11 @@ class RdfSerializationArtifact(RdfContractModel):
             raise ValueError("RDF projection manifest hash mismatch")
         if self.authority_reference_set_hash != manifest.authority_reference_set_hash:
             raise ValueError("artifact authority reference set hash mismatch")
+        if (
+            self.canonical_id_binding_hash
+            != manifest.canonical_id_binding_hash(self.exposure)
+        ):
+            raise ValueError("artifact canonical ID binding differs from manifest")
         if self.serialization_format not in manifest.required_serialization_formats:
             raise ValueError("serialization format is not declared by the manifest")
         expected_graphs = tuple(
@@ -1323,6 +1431,8 @@ class RdfSerializationArtifact(RdfContractModel):
                 item.access_policy_hash,
                 item.graph_hash,
                 item.triple_count,
+                item.canonical_id_set_hash,
+                item.canonical_id_count,
             )
             for item in self.graph_bindings
         )
@@ -1336,6 +1446,8 @@ class RdfSerializationArtifact(RdfContractModel):
                 item.access_policy_hash,
                 item.expected_graph_hash,
                 item.expected_triple_count,
+                item.canonical_id_set_hash,
+                item.canonical_id_count,
             )
             for item in expected_graphs
         )
@@ -1355,6 +1467,7 @@ class RdfSerializationObservation(RdfContractModel):
     canonical_dataset_hash: Sha256
     named_graph_ids: tuple[str, ...]
     graph_inventory_hash: Sha256
+    canonical_id_binding_hash: Sha256
     triple_count: NonNegativeInt
     missing_triple_count: NonNegativeInt
     extra_triple_count: NonNegativeInt
@@ -1401,6 +1514,7 @@ class RdfValidationReceipt(RdfContractModel):
     rdf_projection_manifest_hash: Sha256
     source_authority_hash: Sha256
     authority_reference_set_hash: Sha256
+    canonical_id_binding_hash: Sha256
     canonical_n_quads_artifact_id: RequiredText
     canonical_dataset_hash_algorithm: Literal["RDFC-1.0"] = "RDFC-1.0"
     canonical_dataset_hash: Sha256
@@ -1447,6 +1561,13 @@ class RdfValidationReceipt(RdfContractModel):
         ):
             raise ValueError(
                 "observations must equal the receipt authority reference set hash"
+            )
+        if any(
+            item.canonical_id_binding_hash != self.canonical_id_binding_hash
+            for item in self.observations
+        ):
+            raise ValueError(
+                "observations must equal the receipt canonical ID binding hash"
             )
         canonical = next(
             item
@@ -1533,6 +1654,11 @@ class RdfValidationReceipt(RdfContractModel):
                     observation.graph_inventory_hash,
                     artifact.graph_inventory_hash,
                 ),
+                (
+                    "canonical ID binding hash",
+                    observation.canonical_id_binding_hash,
+                    artifact.canonical_id_binding_hash,
+                ),
                 ("named graph IDs", observation.named_graph_ids, artifact.named_graph_ids),
                 ("triple count", observation.triple_count, artifact.triple_count),
             )
@@ -1554,6 +1680,7 @@ class RdfProjectionAcceptanceBundle(RdfContractModel):
     identity: CanonicalIdentityEnvelope
     rdf_projection_acceptance_bundle_id: RequiredText
     authority_reference_set_hash: Sha256
+    canonical_id_binding_hash: Sha256
     manifest: RdfProjectionManifest
     serialization_artifacts: tuple[RdfSerializationArtifact, ...]
     validation_receipt: RdfValidationReceipt
@@ -1579,6 +1706,11 @@ class RdfProjectionAcceptanceBundle(RdfContractModel):
             != self.manifest.authority_reference_set_hash
         ):
             raise ValueError("bundle authority reference set hash mismatch")
+        if (
+            self.canonical_id_binding_hash
+            != self.validation_receipt.canonical_id_binding_hash
+        ):
+            raise ValueError("bundle canonical ID binding hash mismatch")
         authority_identity = self.manifest.identity.model_dump(
             mode="json",
             exclude={"contract_kind", "contract_version"},

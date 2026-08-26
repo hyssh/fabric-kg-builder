@@ -115,6 +115,10 @@ def source_authority() -> RdfSourceAuthorityTuple:
         identity_policy_hash=H["2"],
         relationship_policy_hash=H["3"],
         k_policy_hash=H["4"],
+        instance_canonical_id_set_hash=H["6"],
+        instance_canonical_id_count=12,
+        provenance_canonical_id_set_hash=H["7"],
+        provenance_canonical_id_count=14,
         publication_authority=publication_authority,
     )
 
@@ -194,6 +198,16 @@ def vocabulary() -> RdfVocabularyInventory:
 
 
 def manifest() -> RdfProjectionManifest:
+    vocab = vocabulary()
+    vocabulary_ids = sorted(
+        [item.canonical_class_id for item in vocab.class_definitions]
+        + [item.canonical_property_id for item in vocab.property_definitions]
+        + [
+            item.canonical_relationship_id
+            for item in vocab.relationship_definitions
+        ]
+    )
+    vocabulary_id_hash = canonical_sha256(vocabulary_ids)
     graphs = (
         RdfNamedGraph(
             graph_id="graph:common-schema",
@@ -204,6 +218,8 @@ def manifest() -> RdfProjectionManifest:
             contains_instance_or_evidence_triples=False,
             expected_graph_hash=H["1"],
             expected_triple_count=10,
+            canonical_id_set_hash=canonical_sha256(()),
+            canonical_id_count=0,
         ),
         RdfNamedGraph(
             graph_id="graph:domain-schema",
@@ -214,6 +230,8 @@ def manifest() -> RdfProjectionManifest:
             contains_instance_or_evidence_triples=False,
             expected_graph_hash=H["2"],
             expected_triple_count=10,
+            canonical_id_set_hash=vocabulary_id_hash,
+            canonical_id_count=len(vocabulary_ids),
         ),
         RdfNamedGraph(
             graph_id="graph:provenance",
@@ -224,6 +242,8 @@ def manifest() -> RdfProjectionManifest:
             contains_instance_or_evidence_triples=True,
             expected_graph_hash=H["3"],
             expected_triple_count=12,
+            canonical_id_set_hash=H["7"],
+            canonical_id_count=14,
             access_policy_id="access-policy:rdf-protected",
             access_policy_hash=H["5"],
         ),
@@ -236,6 +256,8 @@ def manifest() -> RdfProjectionManifest:
             contains_instance_or_evidence_triples=False,
             expected_graph_hash=H["4"],
             expected_triple_count=10,
+            canonical_id_set_hash=vocabulary_id_hash,
+            canonical_id_count=len(vocabulary_ids),
         ),
     )
     authority = source_authority()
@@ -254,7 +276,7 @@ def manifest() -> RdfProjectionManifest:
             ontology_semantic_version="1.0.0",
         ),
         "named_graphs": graphs,
-        "vocabulary": vocabulary(),
+        "vocabulary": vocab,
         "external_alignments": (
             RdfExternalAlignment(
                 target_iri="https://standards.contoso.test/vocabulary/asset",
@@ -305,6 +327,8 @@ def artifact(
             required=graph.required,
             triple_count=graph.expected_triple_count,
             graph_hash=graph.expected_graph_hash,
+            canonical_id_set_hash=graph.canonical_id_set_hash,
+            canonical_id_count=graph.canonical_id_count,
             access_policy_id=graph.access_policy_id,
             access_policy_hash=graph.access_policy_hash,
         )
@@ -330,7 +354,17 @@ def artifact(
         "named_graph_ids": named_graph_ids,
         "graph_bindings": graph_bindings,
         "graph_inventory_hash": canonical_sha256(graph_bindings),
-        "canonical_id_set_hash": H["a"],
+        "canonical_id_binding_hash": canonical_sha256(
+            tuple(
+                {
+                    "graph_id": item.graph_id,
+                    "graph_role": item.graph_role,
+                    "canonical_id_set_hash": item.canonical_id_set_hash,
+                    "canonical_id_count": item.canonical_id_count,
+                }
+                for item in graph_bindings
+            )
+        ),
         "canonical_dataset_hash_algorithm": "RDFC-1.0",
         "canonical_dataset_hash": dataset_hash,
         "blank_node_policy": "none_after_deterministic_skolemization",
@@ -365,6 +399,9 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
             canonical_dataset_hash=H["7"] if drift and rdf_format == "turtle" else H["8"],
             named_graph_ids=artifacts[rdf_format].named_graph_ids,
             graph_inventory_hash=artifacts[rdf_format].graph_inventory_hash,
+            canonical_id_binding_hash=artifacts[
+                rdf_format
+            ].canonical_id_binding_hash,
             triple_count=artifacts[rdf_format].triple_count,
             missing_triple_count=0,
             extra_triple_count=0,
@@ -385,6 +422,9 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
         "rdf_projection_manifest_hash": projection.projection_manifest_hash,
         "source_authority_hash": canonical_sha256(source_authority()),
         "authority_reference_set_hash": projection.authority_reference_set_hash,
+        "canonical_id_binding_hash": artifacts[
+            "canonical_n_quads"
+        ].canonical_id_binding_hash,
         "canonical_n_quads_artifact_id": "rdf-artifact:canonical_n_quads",
         "canonical_dataset_hash_algorithm": "RDFC-1.0",
         "canonical_dataset_hash": H["8"],
@@ -419,6 +459,7 @@ def acceptance_bundle() -> RdfProjectionAcceptanceBundle:
         "identity": identity("c0.rdf_projection_acceptance_bundle"),
         "rdf_projection_acceptance_bundle_id": "rdf-acceptance-bundle:generic",
         "authority_reference_set_hash": projection.authority_reference_set_hash,
+        "canonical_id_binding_hash": receipt.canonical_id_binding_hash,
         "manifest": projection,
         "serialization_artifacts": artifacts,
         "validation_receipt": receipt,
@@ -706,6 +747,17 @@ def test_public_artifact_cannot_relabel_or_include_protected_graphs() -> None:
     payload["graph_count"] += 1
     payload["triple_count"] += protected.triple_count
     payload["graph_inventory_hash"] = canonical_sha256(payload["graph_bindings"])
+    payload["canonical_id_binding_hash"] = canonical_sha256(
+        tuple(
+            {
+                "graph_id": item["graph_id"],
+                "graph_role": item["graph_role"],
+                "canonical_id_set_hash": item["canonical_id_set_hash"],
+                "canonical_id_count": item["canonical_id_count"],
+            }
+            for item in payload["graph_bindings"]
+        )
+    )
     payload["serialization_artifact_hash"] = canonical_sha256(
         {
             key: value
@@ -721,6 +773,17 @@ def test_public_artifact_cannot_relabel_or_include_protected_graphs() -> None:
     payload["graph_bindings"][2]["access_policy_id"] = None
     payload["graph_bindings"][2]["access_policy_hash"] = None
     payload["graph_inventory_hash"] = canonical_sha256(payload["graph_bindings"])
+    payload["canonical_id_binding_hash"] = canonical_sha256(
+        tuple(
+            {
+                "graph_id": item["graph_id"],
+                "graph_role": item["graph_role"],
+                "canonical_id_set_hash": item["canonical_id_set_hash"],
+                "canonical_id_count": item["canonical_id_count"],
+            }
+            for item in payload["graph_bindings"]
+        )
+    )
     payload["serialization_artifact_hash"] = canonical_sha256(
         {
             key: value
@@ -823,6 +886,7 @@ def test_acceptance_bundle_binds_manifest_shacl_shapes_graph_hash() -> None:
         "identity": identity("c0.rdf_projection_acceptance_bundle"),
         "rdf_projection_acceptance_bundle_id": "rdf-acceptance-bundle:forged-shapes",
         "authority_reference_set_hash": projection.authority_reference_set_hash,
+        "canonical_id_binding_hash": receipt.canonical_id_binding_hash,
         "manifest": projection,
         "serialization_artifacts": tuple(artifacts),
         "validation_receipt": receipt,
@@ -886,6 +950,118 @@ def test_authority_reference_set_cannot_be_self_agreed_downstream() -> None:
     with pytest.raises(
         ValidationError,
         match="authority reference set hash mismatch",
+    ):
+        RdfProjectionAcceptanceBundle.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_canonical_id_graph_commitments_are_manifest_authority() -> None:
+    projection = manifest()
+    public = artifact("turtle", exposure="public_schema")
+    protected = artifact("turtle", exposure="protected_dataset")
+    assert public.canonical_id_binding_hash == projection.canonical_id_binding_hash(
+        "public_schema"
+    )
+    assert protected.canonical_id_binding_hash == projection.canonical_id_binding_hash(
+        "protected_dataset"
+    )
+    assert public.canonical_id_binding_hash != protected.canonical_id_binding_hash
+
+    manifest_payload = projection.model_dump(mode="json")
+    manifest_payload["named_graphs"][0]["canonical_id_set_hash"] = H["f"]
+    manifest_payload["projection_manifest_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in manifest_payload.items()
+            if key != "projection_manifest_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="canonical ID commitment"):
+        RdfProjectionManifest.model_validate(manifest_payload)
+
+    artifact_payload = protected.model_dump(mode="json")
+    artifact_payload["graph_bindings"][0]["canonical_id_set_hash"] = H["f"]
+    artifact_payload["graph_bindings"][1]["canonical_id_set_hash"] = (
+        protected.graph_bindings[0].canonical_id_set_hash
+    )
+    artifact_payload["graph_inventory_hash"] = canonical_sha256(
+        artifact_payload["graph_bindings"]
+    )
+    artifact_payload["canonical_id_binding_hash"] = canonical_sha256(
+        tuple(
+            {
+                "graph_id": item["graph_id"],
+                "graph_role": item["graph_role"],
+                "canonical_id_set_hash": item["canonical_id_set_hash"],
+                "canonical_id_count": item["canonical_id_count"],
+            }
+            for item in artifact_payload["graph_bindings"]
+        )
+    )
+    artifact_payload["serialization_artifact_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in artifact_payload.items()
+            if key != "serialization_artifact_hash"
+        }
+    )
+    swapped = RdfSerializationArtifact.model_validate(artifact_payload)
+    with pytest.raises(ValueError, match="binding differs from manifest"):
+        swapped.validate_against_manifest(projection)
+
+    payload = acceptance_bundle().model_dump(mode="json")
+    forged_binding_hash = None
+    artifact_hashes: dict[str, str] = {}
+    for item in payload["serialization_artifacts"]:
+        item["graph_bindings"][2]["canonical_id_set_hash"] = H["f"]
+        item["graph_inventory_hash"] = canonical_sha256(item["graph_bindings"])
+        item["canonical_id_binding_hash"] = canonical_sha256(
+            tuple(
+                {
+                    "graph_id": graph["graph_id"],
+                    "graph_role": graph["graph_role"],
+                    "canonical_id_set_hash": graph["canonical_id_set_hash"],
+                    "canonical_id_count": graph["canonical_id_count"],
+                }
+                for graph in item["graph_bindings"]
+            )
+        )
+        forged_binding_hash = item["canonical_id_binding_hash"]
+        item["serialization_artifact_hash"] = canonical_sha256(
+            {
+                key: value
+                for key, value in item.items()
+                if key != "serialization_artifact_hash"
+            }
+        )
+        artifact_hashes[item["rdf_serialization_artifact_id"]] = item[
+            "serialization_artifact_hash"
+        ]
+    assert forged_binding_hash is not None
+    payload["canonical_id_binding_hash"] = forged_binding_hash
+    payload["validation_receipt"]["canonical_id_binding_hash"] = forged_binding_hash
+    for observation in payload["validation_receipt"]["observations"]:
+        observation["canonical_id_binding_hash"] = forged_binding_hash
+        observation["rdf_serialization_artifact_hash"] = artifact_hashes[
+            observation["rdf_serialization_artifact_id"]
+        ]
+    payload["validation_receipt"]["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload["validation_receipt"].items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    payload["acceptance_bundle_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "acceptance_bundle_hash"
+        }
+    )
+    with pytest.raises(
+        ValidationError,
+        match="canonical ID binding differs from manifest",
     ):
         RdfProjectionAcceptanceBundle.model_validate(payload)
 
@@ -1375,3 +1551,84 @@ def test_invalid_fixture_has_no_accidental_unrelated_change() -> None:
     invalid = copy.deepcopy(valid)
     invalid["blank_node_policy"] = "labels_are_identity"
     assert payload == invalid
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("model_type", "payload_factory", "collection_path"),
+    [
+        (
+            RdfProjectionManifest,
+            lambda: manifest().model_dump(mode="json"),
+            ("named_graphs",),
+        ),
+        (
+            RdfProjectionManifest,
+            lambda: manifest().model_dump(mode="json"),
+            ("external_alignments",),
+        ),
+        (
+            RdfProjectionManifest,
+            lambda: manifest().model_dump(mode="json"),
+            ("vocabulary", "class_definitions"),
+        ),
+        (
+            RdfProjectionManifest,
+            lambda: manifest().model_dump(mode="json"),
+            ("vocabulary", "property_definitions"),
+        ),
+        (
+            RdfProjectionManifest,
+            lambda: manifest().model_dump(mode="json"),
+            ("vocabulary", "relationship_definitions"),
+        ),
+        (
+            RdfSerializationArtifact,
+            lambda: artifact("turtle").model_dump(mode="json"),
+            ("graph_bindings",),
+        ),
+        (
+            RdfSerializationArtifact,
+            lambda: artifact("turtle").model_dump(mode="json"),
+            ("named_graph_ids",),
+        ),
+        (
+            RdfValidationReceipt,
+            lambda: validation_receipt().model_dump(mode="json"),
+            ("observations",),
+        ),
+        (
+            RdfProjectionAcceptanceBundle,
+            lambda: acceptance_bundle().model_dump(mode="json"),
+            ("serialization_artifacts",),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "malformed_collection",
+    [
+        None,
+        42,
+        [None],
+        [[]],
+        ["MALFORMED_COLLECTION_MARKER"],
+    ],
+)
+def test_malformed_collection_entries_raise_sanitized_validation_errors(
+    model_type: object,
+    payload_factory: object,
+    collection_path: tuple[str, ...],
+    malformed_collection: object,
+) -> None:
+    payload = payload_factory()
+    target = payload
+    for segment in collection_path[:-1]:
+        target = target[segment]
+    target[collection_path[-1]] = malformed_collection
+    with pytest.raises(ValidationError) as captured:
+        model_type.model_validate(payload)
+    assert "MALFORMED_COLLECTION_MARKER" not in str(captured.value)
+    assert "MALFORMED_COLLECTION_MARKER" not in json.dumps(
+        captured.value.errors(),
+        default=str,
+    )
