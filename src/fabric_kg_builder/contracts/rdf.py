@@ -1807,12 +1807,55 @@ class RdfValidationReceipt(RdfContractModel):
 
 
 @dataclass(frozen=True)
-class RdfVerifiedPayloadObservation:
-    """Trusted L5c parser/verifier output for actual canonical N-Quads bytes."""
+class RdfPayloadVerificationContext:
+    """Minimal parsing context; deliberately contains no expected result."""
 
-    canonical_dataset_hash: str
-    named_graph_ids: tuple[str, ...]
-    triple_count: int
+    serialization_format: str
+    media_type: str
+    exposure: str
+    ontology_base_iri: str
+    instance_base_iri: str
+
+
+class RdfVerifiedGraph(RdfContractModel):
+    """One graph independently derived by the trusted L5c payload verifier."""
+
+    graph_id: RequiredText
+    graph_iri: RequiredText
+    graph_hash: Sha256
+    triple_count: NonNegativeInt
+    canonical_id_set_hash: Sha256
+    canonical_id_count: NonNegativeInt
+
+    @field_validator("graph_iri")
+    @classmethod
+    def _iri(cls, value: str) -> str:
+        return _https_iri(value, field_name="graph_iri")
+
+
+class RdfVerifiedPayload(RdfContractModel):
+    """Strict independent result derived from actual canonical N-Quads bytes."""
+
+    canonical_dataset_hash: Sha256
+    triple_count: NonNegativeInt
+    graphs: tuple[RdfVerifiedGraph, ...]
+
+    @field_validator("graphs", mode="before")
+    @classmethod
+    def _graphs(cls, value: object) -> object:
+        return _sorted_unique_models(value, key="graph_id", field_name="graphs")
+
+    @model_validator(mode="after")
+    def _invariants(self) -> "RdfVerifiedPayload":
+        if not self.graphs:
+            raise ValueError("verified payload requires per-graph observations")
+        ids = [item.graph_id for item in self.graphs]
+        iris = [item.graph_iri for item in self.graphs]
+        if len(ids) != len(set(ids)) or len(iris) != len(set(iris)):
+            raise ValueError("verified graph IDs and IRIs must be unique")
+        if self.triple_count != sum(item.triple_count for item in self.graphs):
+            raise ValueError("verified payload triple count must equal graph totals")
+        return self
 
 
 @dataclass(frozen=True)
@@ -1898,8 +1941,8 @@ class RdfProjectionCandidateBundle(RdfContractModel):
         payloads: Mapping[str, bytes],
         *,
         canonical_n_quads_verifier: Callable[
-            [RdfSerializationArtifact, bytes],
-            RdfVerifiedPayloadObservation,
+            [bytes, RdfPayloadVerificationContext],
+            RdfVerifiedPayload | Mapping[str, Any],
         ],
     ) -> AcceptedRdfProjection:
         artifacts = {
@@ -1923,13 +1966,46 @@ class RdfProjectionCandidateBundle(RdfContractModel):
             verified_hashes.append((artifact_id, actual_content_hash))
             if artifact_id not in canonical_ids:
                 continue
-            verified = canonical_n_quads_verifier(artifact, payload)
+            context = RdfPayloadVerificationContext(
+                serialization_format=artifact.serialization_format,
+                media_type=artifact.media_type,
+                exposure=artifact.exposure,
+                ontology_base_iri=self.manifest.iri_policy.ontology_base_iri,
+                instance_base_iri=self.manifest.iri_policy.instance_base_iri,
+            )
+            try:
+                raw_verified = canonical_n_quads_verifier(payload, context)
+                verified = RdfVerifiedPayload.model_validate(raw_verified)
+            except Exception:
+                raise ValueError("trusted RDF payload verification failed") from None
             if verified.canonical_dataset_hash != artifact.canonical_dataset_hash:
                 raise ValueError("actual canonical dataset hash mismatch")
-            if verified.named_graph_ids != artifact.named_graph_ids:
-                raise ValueError("actual canonical named graph inventory mismatch")
             if verified.triple_count != artifact.triple_count:
                 raise ValueError("actual canonical triple count mismatch")
+            actual_graphs = tuple(
+                (
+                    item.graph_id,
+                    item.graph_iri,
+                    item.graph_hash,
+                    item.triple_count,
+                    item.canonical_id_set_hash,
+                    item.canonical_id_count,
+                )
+                for item in verified.graphs
+            )
+            expected_graphs = tuple(
+                (
+                    item.graph_id,
+                    item.graph_iri,
+                    item.graph_hash,
+                    item.triple_count,
+                    item.canonical_id_set_hash,
+                    item.canonical_id_count,
+                )
+                for item in artifact.graph_bindings
+            )
+            if actual_graphs != expected_graphs:
+                raise ValueError("actual per-graph payload observations mismatch")
         return AcceptedRdfProjection(
             candidate_bundle_hash=self.candidate_bundle_hash,
             verified_artifact_content_hashes=tuple(verified_hashes),

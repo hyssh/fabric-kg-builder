@@ -234,8 +234,13 @@ L5c MUST call `RdfProjectionCandidateBundle.accept_payloads` with the exact
 bytes for every artifact and a trusted parser/verifier callback for canonical
 N-Quads. C0 recomputes every byte SHA-256 and byte count. For each
 manifest-designated public/protected canonical N-Quads artifact, the callback
-must independently recompute RDFC-1.0 hash, named graph inventory, and triple
-count from parsed bytes. Exact comparison returns the distinct non-persisted
+must independently return strict `RdfVerifiedPayload` metadata derived from
+bytes: aggregate RDFC-1.0 hash/count plus each graph's ID/IRI, graph hash,
+triple count, and canonical-ID-set hash/count. C0 compares every field to the
+artifact/manifest bindings. The callback receives only raw bytes and
+`RdfPayloadVerificationContext` containing format, media type, exposure, and
+governed bases—not expected answers. Incomplete results and parser exceptions
+are replaced by constant input-free errors. Exact comparison returns the distinct non-persisted
 `AcceptedRdfProjection`; only that result may authorize a successful L5c
 `StageReceipt`. The callback implementation is the explicit RDF parser trust
 root; C0 does not pretend metadata signatures can replace actual bytes.

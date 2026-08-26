@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import pytest
 from pydantic import ValidationError
@@ -21,6 +21,7 @@ from fabric_kg_builder.contracts import (
     RdfNamedGraph,
     AcceptedRdfProjection,
     RdfProjectionCandidateBundle,
+    RdfPayloadVerificationContext,
     RdfProjectionManifest,
     RdfPropertyDefinition,
     RdfRelationshipDefinition,
@@ -30,7 +31,8 @@ from fabric_kg_builder.contracts import (
     RdfShaclValidationSummary,
     RdfSourceAuthorityTuple,
     RdfValidationReceipt,
-    RdfVerifiedPayloadObservation,
+    RdfVerifiedGraph,
+    RdfVerifiedPayload,
     RdfVocabularyInventory,
     canonical_json,
     canonical_sha256,
@@ -98,6 +100,85 @@ H = {
     letter: letter * 64
     for letter in "abcdef0123456789"
 }
+PAYLOAD_FIXTURES = FIXTURES / "payloads"
+
+
+def verify_canonical_n_quads(
+    payload: bytes,
+    context: RdfPayloadVerificationContext,
+) -> RdfVerifiedPayload:
+    text = payload.decode("utf-8")
+    lines = tuple(line for line in text.splitlines() if line)
+    graph_lines: dict[str, list[str]] = {}
+    for line in lines:
+        iris = re.findall(r"<([^>]+)>", line)
+        graph_lines.setdefault(iris[-1], []).append(line)
+    graph_id_by_iri = {
+        f"{context.ontology_base_iri}graph/common-schema": "graph:common-schema",
+        f"{context.ontology_base_iri}graph/domain-schema": "graph:domain-schema",
+        f"{context.ontology_base_iri}graph/shapes": "graph:shapes",
+        f"{context.ontology_base_iri}graph/provenance": "graph:provenance",
+    }
+    graphs = []
+    for graph_iri, items in sorted(
+        graph_lines.items(),
+        key=lambda pair: graph_id_by_iri[pair[0]],
+    ):
+        graph_bytes = ("\n".join(items) + "\n").encode("utf-8")
+        canonical_ids: set[str] = set()
+        for line in items:
+            for iri in re.findall(r"<([^>]+)>", line):
+                for base in (
+                    context.ontology_base_iri,
+                    context.instance_base_iri,
+                ):
+                    if not iri.startswith(base):
+                        continue
+                    suffix = iri.removeprefix(base)
+                    if suffix.startswith("graph/"):
+                        continue
+                    canonical_ids.add(unquote(suffix))
+        graphs.append(
+            RdfVerifiedGraph(
+                graph_id=graph_id_by_iri[graph_iri],
+                graph_iri=graph_iri,
+                graph_hash=hashlib.sha256(graph_bytes).hexdigest(),
+                triple_count=len(items),
+                canonical_id_set_hash=canonical_sha256(sorted(canonical_ids)),
+                canonical_id_count=len(canonical_ids),
+            )
+        )
+    return RdfVerifiedPayload(
+        canonical_dataset_hash=hashlib.sha256(payload).hexdigest(),
+        triple_count=len(lines),
+        graphs=tuple(graphs),
+    )
+
+
+PUBLIC_PAYLOAD = (PAYLOAD_FIXTURES / "public-schema.canonical.nq").read_bytes()
+PROTECTED_PAYLOAD = (
+    PAYLOAD_FIXTURES / "protected-dataset.canonical.nq"
+).read_bytes()
+PUBLIC_VERIFIED = verify_canonical_n_quads(
+    PUBLIC_PAYLOAD,
+    RdfPayloadVerificationContext(
+        serialization_format="canonical_n_quads",
+        media_type="application/n-quads",
+        exposure="public_schema",
+        ontology_base_iri="https://ontology.contoso.test/kg/",
+        instance_base_iri="https://data.contoso.test/kg/",
+    ),
+)
+PROTECTED_VERIFIED = verify_canonical_n_quads(
+    PROTECTED_PAYLOAD,
+    RdfPayloadVerificationContext(
+        serialization_format="canonical_n_quads",
+        media_type="application/n-quads",
+        exposure="protected_dataset",
+        ontology_base_iri="https://ontology.contoso.test/kg/",
+        instance_base_iri="https://data.contoso.test/kg/",
+    ),
+)
 
 
 def identity(kind: str) -> CanonicalIdentityEnvelope:
@@ -161,8 +242,12 @@ def source_authority() -> RdfSourceAuthorityTuple:
         k_policy_hash=H["4"],
         instance_canonical_id_set_hash=H["6"],
         instance_canonical_id_count=12,
-        provenance_canonical_id_set_hash=H["7"],
-        provenance_canonical_id_count=14,
+        provenance_canonical_id_set_hash=PROTECTED_VERIFIED.graphs[
+            0
+        ].canonical_id_set_hash,
+        provenance_canonical_id_count=PROTECTED_VERIFIED.graphs[
+            0
+        ].canonical_id_count,
         publication_authority=publication_authority,
     )
 
@@ -252,6 +337,10 @@ def manifest() -> RdfProjectionManifest:
         ]
     )
     vocabulary_id_hash = canonical_sha256(vocabulary_ids)
+    public_graphs = {item.graph_id: item for item in PUBLIC_VERIFIED.graphs}
+    protected_graphs = {
+        item.graph_id: item for item in PROTECTED_VERIFIED.graphs
+    }
     graphs = (
         RdfNamedGraph(
             graph_id="graph:common-schema",
@@ -260,8 +349,8 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=True,
             contains_instance_or_evidence_triples=False,
-            expected_graph_hash=H["1"],
-            expected_triple_count=1,
+            expected_graph_hash=public_graphs["graph:common-schema"].graph_hash,
+            expected_triple_count=public_graphs["graph:common-schema"].triple_count,
             canonical_id_set_hash=canonical_sha256(()),
             canonical_id_count=0,
         ),
@@ -272,8 +361,8 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=True,
             contains_instance_or_evidence_triples=False,
-            expected_graph_hash=H["2"],
-            expected_triple_count=1,
+            expected_graph_hash=public_graphs["graph:domain-schema"].graph_hash,
+            expected_triple_count=public_graphs["graph:domain-schema"].triple_count,
             canonical_id_set_hash=vocabulary_id_hash,
             canonical_id_count=len(vocabulary_ids),
         ),
@@ -284,10 +373,14 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=False,
             contains_instance_or_evidence_triples=True,
-            expected_graph_hash=H["3"],
-            expected_triple_count=1,
-            canonical_id_set_hash=H["7"],
-            canonical_id_count=14,
+            expected_graph_hash=protected_graphs["graph:provenance"].graph_hash,
+            expected_triple_count=protected_graphs["graph:provenance"].triple_count,
+            canonical_id_set_hash=protected_graphs[
+                "graph:provenance"
+            ].canonical_id_set_hash,
+            canonical_id_count=protected_graphs[
+                "graph:provenance"
+            ].canonical_id_count,
             access_policy_id="access-policy:rdf-protected",
             access_policy_hash=H["5"],
         ),
@@ -298,8 +391,8 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=True,
             contains_instance_or_evidence_triples=False,
-            expected_graph_hash=H["4"],
-            expected_triple_count=1,
+            expected_graph_hash=public_graphs["graph:shapes"].graph_hash,
+            expected_triple_count=public_graphs["graph:shapes"].triple_count,
             canonical_id_set_hash=vocabulary_id_hash,
             canonical_id_count=len(vocabulary_ids),
         ),
@@ -518,7 +611,11 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
         "required_serialization_formats": projection.required_serialization_formats,
         "observations": observations,
         "shacl_validation": RdfShaclValidationSummary(
-            shapes_hash=H["4"],
+            shapes_hash=next(
+                item.expected_graph_hash
+                for item in projection.named_graphs
+                if item.graph_role == "shacl_shapes"
+            ),
             conforms=True,
             violation_count=0,
             warning_count=0,
@@ -634,27 +731,6 @@ def payload_candidate_bundle() -> tuple[RdfProjectionCandidateBundle, dict[str, 
         }
     )
     return RdfProjectionCandidateBundle.model_validate(payload), actual_payloads
-
-
-def verify_canonical_n_quads(
-    artifact: RdfSerializationArtifact,
-    payload: bytes,
-) -> RdfVerifiedPayloadObservation:
-    text = payload.decode("utf-8")
-    lines = tuple(line for line in text.splitlines() if line)
-    graph_iris = tuple(
-        re.findall(r"<([^>]+)>", line)[-1]
-        for line in lines
-    )
-    graph_id_by_iri = {
-        item.graph_iri: item.graph_id for item in artifact.graph_bindings
-    }
-    return RdfVerifiedPayloadObservation(
-        canonical_dataset_hash=hashlib.sha256(payload).hexdigest(),
-        named_graph_ids=tuple(sorted(graph_id_by_iri[item] for item in graph_iris)),
-        triple_count=len(lines),
-    )
-
 
 def reseal_manifest_payload(payload: dict[str, object]) -> None:
     payload["required_serialization_formats"] = sorted(
@@ -883,6 +959,112 @@ def test_coordinated_metadata_swap_is_not_payload_acceptance() -> None:
             payloads,
             canonical_n_quads_verifier=verify_canonical_n_quads,
         )
+
+
+@pytest.mark.contract
+def test_payload_verifier_interface_has_no_expected_answers() -> None:
+    candidate, payloads = payload_candidate_bundle()
+    contexts = []
+
+    def capture_context(
+        payload: bytes,
+        context: RdfPayloadVerificationContext,
+    ) -> RdfVerifiedPayload:
+        contexts.append(context)
+        return verify_canonical_n_quads(payload, context)
+
+    candidate.accept_payloads(
+        payloads,
+        canonical_n_quads_verifier=capture_context,
+    )
+    assert contexts
+    assert set(contexts[0].__dict__) == {
+        "serialization_format",
+        "media_type",
+        "exposure",
+        "ontology_base_iri",
+        "instance_base_iri",
+    }
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("mutation", ["missing", "extra", "swapped", "same_count"])
+def test_per_graph_payload_verification_rejects_mutations(mutation: str) -> None:
+    candidate, payloads = payload_candidate_bundle()
+
+    def malicious_verifier(
+        payload: bytes,
+        context: RdfPayloadVerificationContext,
+    ) -> RdfVerifiedPayload:
+        verified = verify_canonical_n_quads(payload, context).model_dump(mode="json")
+        if context.exposure != "public_schema":
+            return RdfVerifiedPayload.model_validate(verified)
+        if mutation == "missing":
+            verified["graphs"].pop()
+            verified["triple_count"] = sum(
+                item["triple_count"] for item in verified["graphs"]
+            )
+        elif mutation == "extra":
+            extra = copy.deepcopy(verified["graphs"][0])
+            extra["graph_id"] = "graph:extra"
+            extra["graph_iri"] = "https://ontology.contoso.test/kg/graph/extra"
+            verified["graphs"].append(extra)
+            verified["triple_count"] += extra["triple_count"]
+        elif mutation == "swapped":
+            verified["graphs"][0]["graph_id"], verified["graphs"][1]["graph_id"] = (
+                verified["graphs"][1]["graph_id"],
+                verified["graphs"][0]["graph_id"],
+            )
+        else:
+            verified["graphs"][0]["graph_hash"] = H["f"]
+        return RdfVerifiedPayload.model_validate(verified)
+
+    with pytest.raises(
+        ValueError,
+        match="triple count mismatch|per-graph payload observations mismatch",
+    ):
+        candidate.accept_payloads(
+            payloads,
+            canonical_n_quads_verifier=malicious_verifier,
+        )
+
+
+@pytest.mark.contract
+def test_payload_verifier_incomplete_result_and_exception_are_sanitized() -> None:
+    candidate, payloads = payload_candidate_bundle()
+
+    def aggregate_only(
+        payload: bytes,
+        context: RdfPayloadVerificationContext,
+    ) -> dict[str, object]:
+        del context
+        return {
+            "canonical_dataset_hash": hashlib.sha256(payload).hexdigest(),
+            "triple_count": len(payload.splitlines()),
+        }
+
+    with pytest.raises(ValueError, match="verification failed") as invalid:
+        candidate.accept_payloads(
+            payloads,
+            canonical_n_quads_verifier=aggregate_only,
+        )
+    assert "graphs" not in str(invalid.value)
+
+    marker = "PROTECTED_TRIPLE_SECRET_93"
+
+    def leaking_parser(
+        payload: bytes,
+        context: RdfPayloadVerificationContext,
+    ) -> RdfVerifiedPayload:
+        del payload, context
+        raise RuntimeError(f"parser failed on {marker}")
+
+    with pytest.raises(ValueError, match="verification failed") as captured:
+        candidate.accept_payloads(
+            payloads,
+            canonical_n_quads_verifier=leaking_parser,
+        )
+    assert marker not in str(captured.value)
 
 
 @pytest.mark.contract

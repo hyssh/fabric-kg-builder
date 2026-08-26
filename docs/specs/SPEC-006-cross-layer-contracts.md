@@ -611,7 +611,12 @@ Final payload acceptance is the non-persisted
 artifact bytes and a trusted canonical N-Quads parser/verifier callback. C0
 independently hashes every payload byte sequence and compares byte count/hash;
 for each manifest-designated canonical artifact it also compares the callback's
-RDFC-1.0 hash, named graph inventory, and triple count. Only the distinct
+strict `RdfVerifiedPayload` result: aggregate RDFC-1.0 hash/count plus every
+`RdfVerifiedGraph` ID/IRI, graph hash, triple count, and canonical-ID-set
+hash/count. The callback receives only bytes and minimal format/media/exposure
+plus governed-base parsing context, never expected hashes, counts, or graph
+sets. Missing/extra/swapped/same-count-mutated graphs fail. Callback exceptions
+and invalid results become constant input-free verification failures. Only the distinct
 `AcceptedRdfProjection` return value may authorize an L5c successful
 `StageReceipt`. The callback is the explicit unavoidable RDF parser trust root.
 
