@@ -1713,6 +1713,69 @@ L5a groups the actual persisted carried manifest/member rows by exact
 IDs, and fingerprints the carried rows. It compares those read-back observations
 to the anchored L3 authority without redefining or recomputing L3 membership.
 
+### 12.13 L5b Evidence Retrieval Publication
+
+L5b consumes only an intact successful L5a publication result/read-back, its
+exact `SealedL4ServingSource`, and the anchored original L3
+`ArtifactManifest`. Verified `EvidenceSpanV1_1` partitions and `SourceUnit`
+objects are materialization witnesses: their partition hashes, IDs, quote
+offsets, source text hashes, source file/asset versions, and immutable locators
+must equal the sealed authority. L5b accepts no raw/L3 bypass, invents no schema
+or membership, and never treats Search as evidence, relationship, or
+completeness authority.
+
+The deterministic evidence index carries exact filterable canonical entity,
+relationship, property, type, assertion, required-member-manifest, source, and
+evidence identities. Every nontrivial indexed assertion resolves:
+
+```text
+canonical assertion
+  -> EvidenceSpanV1_1
+  -> SourceUnit
+  -> source file or governed asset version
+  -> immutable locator and content hash
+  -> exact verbatim quote or governed asset
+```
+
+AccessPolicy principal/scope keys, governed-asset references, lifecycle state,
+and all relevant L3/L4/L5a projection, receipt, manifest, crosswalk, and policy
+hashes travel with the document. Transient and signed URLs are excluded.
+Assertions without exact evidence are not indexed; required-member authority
+without a quote remains a retrieval coverage requirement and therefore cannot
+produce complete coverage unless another valid assertion document supplies its
+evidence.
+
+Index, knowledge-source, knowledge-base, document IDs/content hashes,
+vector-state hash, and ACL state are persisted before mutation and read back
+exactly. One inspection, one atomic batched publication, and one read-back form
+the three-call success bound. Stale reuse adds one read-back. Ambiguous mutation
+recovery and conditional cleanup or restore remain within the five-call
+worst-case bound. Every remote operation returns positive request/response
+bytes, unique operation references, retry/wait/latency/candidate/truncation/
+warning/error accounting; absent or malformed metadata fails closed. Mutations
+use inspected-state compare-and-swap and a per-attempt ownership token.
+
+Runtime is zero-synthesis. C0.Runtime `QueryBudget`, resolved scope, request
+context, coverage receipt, citation envelope, and citation presentation
+contracts are consumed unchanged. Ontology supplies the layered common/domain
+noun/verb meaning, Graph supplies the reliable approved relationship and member
+scope, and Search supplies detailed evidence inside exact canonical filters.
+Graph-required IDs are compared with Search-returned IDs; top-k ranking and
+vectors never establish completeness.
+
+The optional preview adapter is explicitly gated and pinned to
+`2026-05-01-preview`. Its persisted knowledge-source `baseFilter` and request
+`filterAddOn` combine by `AND`; the add-on can only narrow locally validated
+canonical/ACL/publication scope. References, source data, activity, warnings,
+and response hashes are retained in coverage evidence. The stable direct path
+uses a separately budgeted filtered hybrid/vector request with
+`vectorFilterMode=preFilter` and the same or narrower canonical scope.
+Unavailable vectors may degrade only to the same filtered keyword/semantic
+query and must report degradation/partial state.
+
+L5b does not activate CLI/Data Agent behavior, L6 answer synthesis, live Search
+or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.
+
 ## 13. Revision History
 
 | Date | Author | Summary |
@@ -1725,6 +1788,7 @@ to the anchored L3 authority without redefining or recomputing L3 membership.
 | 2026-06-24T21:46:59.576-07:00 | McManus | §12 bridge — §12.10 added: Table document-element nodes (element_type="table", content_html, blob_url) participate in the evidenced_by / shown_in bridge, enabling graph↔table integration and AI Search indexing of tables as independent documents (coordinator-tables-via-docintel.md, verified 2026-06-24). |
 | 2026-08-23 | Copilot | Added §12.11: schema-2.0 Ontology/Graph publication is semantic-only and requires compile/deploy/persisted hash and count equivalence. |
 | 2026-08-25 | Copilot | Added §12.12: isolated L5a structured publication over sealed L4, persisted-definition lifecycle, exact read-back equivalence, and explicit Search/L6/L7 exclusions. |
+| 2026-08-25 | Copilot | Added §12.13: isolated L5b evidence publication and zero-synthesis Azure AI Search retrieval data plane. |
 
 ---
 

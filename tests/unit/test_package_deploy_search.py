@@ -232,6 +232,9 @@ class TestPackageCmd:
         assert "Fabric Ontology" in guide
         assert "Fabric Graph" in guide
         assert "source_quote" in guide
+        assert "partial result or abstention" in guide
+        assert "fabric-kg returns evidence data and coverage only" in guide
+        assert "layered common/domain" in guide
         assert "| `kg-chunks` | 1 | 1 | 1 |" in guide
         manifest = json.loads(
             (
