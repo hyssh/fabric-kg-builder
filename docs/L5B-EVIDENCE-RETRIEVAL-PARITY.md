@@ -40,8 +40,34 @@ L4, and hardened L5a authority.
 - stable direct fallback uses the same canonical scope with
   `vectorFilterMode=preFilter`; unavailable vectors can degrade only to the
   same filtered keyword/semantic path and must be reported;
-- C0.Runtime contracts are consumed unchanged to return citations and bounded
-  structural coverage only; fabric-kg performs no answer synthesis;
+- schema-2 L5b exclusively emits the registered C0.Runtime successors
+  `c0.query_budget@1.1.0`
+  (`2d744838296209d78da2e2c8b7df7ab5f030af400d45a3d04d62b7d763f92b52`),
+  `c0.agentic_retrieval_request_context@1.1.0`
+  (`dfed8fe3449b824cffa1570c278d3e476712987cb8d2e8cb2c903ac480bd8868`),
+  and `c0.agentic_retrieval_coverage_receipt@1.1.0`
+  (`92d39c05d33a360bd542386af022a382ba18788efe4a1fe5b0728c42b5aec652`);
+  mixed 1.0/1.1 request and budget pairs are rejected before provider calls,
+  while non-schema-2 compatibility remains unchanged;
+- the sealed QueryBudget 1.1 carries all 17 ceilings: Graph scope requests and
+  admitted canonical records; agentic invocations, subqueries, and source
+  calls; direct requests; output documents, tokens, bytes, and runtime; Search
+  candidates and verified returned records; vector requests; embedding calls
+  and items; and retry count and wait;
+- coverage records exact observations without clamping: the upstream resolved
+  scope establishes one Graph resolver request and its exact admitted canonical
+  ID count, Search matched candidates remain distinct from verified returned
+  documents, direct and agentic source-call accounting remains mode-specific,
+  and fallback preserves separate origin and direct budgets;
+- exhausted dimensions are derived exactly when observation exceeds ceiling;
+  provider overexecution produces one typed `retrieval_budget_exhausted`
+  failure with `partial` or `abstain` coverage instead of validation failure or
+  false completeness;
+- zero optional vector, embedding, source-call, subquery, and retry paths do
+  not widen or clamp a request; unrepresentable provider integers and disabled
+  requested paths fail before the provider call;
+- C0.Runtime citations and bounded structural coverage remain answer-free;
+  fabric-kg performs no answer synthesis;
 - exact Graph-required canonical IDs, not display names or ranked top-k, define
   completeness; missing IDs, warnings, truncation, source failures, collisions,
   stale hashes, or ACL gaps yield partial/abstain behavior; and
