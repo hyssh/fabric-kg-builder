@@ -381,6 +381,7 @@ def test_registry_contains_only_registered_c0_kinds() -> None:
         "c0.stage_receipt",
         "c0.stage_resource_metrics",
         "c0.rdf_projection_manifest",
+        "c0.rdf_projection_acceptance_bundle",
         "c0.rdf_serialization_artifact",
         "c0.rdf_validation_receipt",
     }

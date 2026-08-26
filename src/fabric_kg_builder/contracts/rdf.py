@@ -59,12 +59,20 @@ _SIGNED_QUERY_KEYS = {
     "client_secret",
     "accountkey",
     "sharedaccesssignature",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "x-amz-algorithm",
+    "x-goog-signature",
+    "x-goog-credential",
 }
 _SECRET_VALUE_RE = re.compile(
     r"(?i)(?:authorization\s*[:=]\s*bearer|bearer\s+\S+|"
-    r"(?:api[_-]?key|x-api-key|sig|token|secret|client_secret|"
-    r"accountkey|sharedaccesssignature)\s*[:=]\s*\S+)"
+    r"(?:api[_-]?key|x-api-key|sig(?:nature)?|token|secret|credential|"
+    r"client_secret|accountkey|sharedaccesssignature)\s*[:=]\s*\S+)"
 )
+_MAX_DECODE_ROUNDS = 12
+_MAX_SENSITIVE_TEXT_BYTES = 65_536
 
 
 def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
@@ -85,12 +93,20 @@ def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
 
 
 def _reject_sensitive_text(value: str, *, field_name: str) -> None:
+    if len(value.encode("utf-8")) > _MAX_SENSITIVE_TEXT_BYTES:
+        raise ValueError(f"{field_name} exceeds the safe validation size")
     decoded = value
-    for _ in range(3):
+    stable = False
+    for _ in range(_MAX_DECODE_ROUNDS):
         expanded = unquote(decoded)
         if expanded == decoded:
+            stable = True
             break
+        if len(expanded.encode("utf-8")) > _MAX_SENSITIVE_TEXT_BYTES:
+            raise ValueError(f"{field_name} exceeds the safe validation size")
         decoded = expanded
+    if not stable:
+        raise ValueError(f"{field_name} contains excessive nested URL encoding")
     reject_secret_text(decoded, field_name=field_name)
     if _SECRET_VALUE_RE.search(decoded):
         raise ValueError(f"{field_name} must not contain secrets or credentials")
@@ -98,7 +114,24 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     if parsed.username is not None or parsed.password is not None:
         raise ValueError(f"{field_name} must not contain URI credentials")
     query_keys = {key.casefold() for key, _ in parse_qsl(parsed.query)}
-    if query_keys.intersection(_SIGNED_QUERY_KEYS):
+    normalized_keys = {
+        re.sub(r"[-_]", "", key.casefold())
+        for key in query_keys
+    }
+    normalized_signed = {
+        re.sub(r"[-_]", "", key.casefold())
+        for key in _SIGNED_QUERY_KEYS
+    }
+    generic_signed = any(
+        "signature" in key
+        or "credential" in key
+        or "securitytoken" in key
+        or key.endswith("token")
+        for key in normalized_keys
+    )
+    if query_keys.intersection(_SIGNED_QUERY_KEYS) or normalized_keys.intersection(
+        normalized_signed
+    ) or generic_signed:
         raise ValueError(f"{field_name} must not contain a signed or transient URL")
 
 
@@ -124,6 +157,20 @@ def _canonical_term_iri(base_iri: str, canonical_id: str) -> str:
     if re.search(r"(^|[\\/])\.{1,2}([\\/]|$)", canonical_id):
         raise ValueError("canonical IDs used for RDF IRIs must not contain path traversal")
     return base_iri + quote(canonical_id, safe="", encoding="utf-8", errors="strict")
+
+
+def _canonical_union_node_iri(
+    base_iri: str,
+    *,
+    term_id: str,
+    side: str,
+    endpoint_ids: Sequence[str],
+) -> str:
+    endpoint_set_hash = canonical_sha256(sorted(endpoint_ids))
+    return _canonical_term_iri(
+        base_iri,
+        f"endpoint-union:{term_id}:{side}:{endpoint_set_hash}",
+    )
 
 
 def _sorted_unique_models(value: object, *, key: str, field_name: str) -> object:
@@ -275,7 +322,8 @@ class RdfPropertyDefinition(ContractModel):
     range_canonical_ids: tuple[str, ...]
     value_type_iris: tuple[str, ...]
     endpoint_encoding: EndpointEncoding
-    deterministic_endpoint_node_iri: RequiredText | None = None
+    deterministic_domain_union_node_iri: RequiredText | None = None
+    deterministic_range_union_node_iri: RequiredText | None = None
 
     @field_validator(
         "domain_canonical_class_ids",
@@ -289,7 +337,11 @@ class RdfPropertyDefinition(ContractModel):
             return sorted_unique(value, field_name=info.field_name)
         return value
 
-    @field_validator("property_iri", "deterministic_endpoint_node_iri")
+    @field_validator(
+        "property_iri",
+        "deterministic_domain_union_node_iri",
+        "deterministic_range_union_node_iri",
+    )
     @classmethod
     def _iri(cls, value: str | None, info: Any) -> str | None:
         if value is None:
@@ -309,18 +361,40 @@ class RdfPropertyDefinition(ContractModel):
             raise ValueError("property domain set must not be empty")
         if not self.range_canonical_ids and not self.value_type_iris:
             raise ValueError("property requires a canonical range or value type")
-        endpoint_count = max(
-            len(self.domain_canonical_class_ids),
-            len(self.range_canonical_ids),
-            len(self.value_type_iris),
-        )
-        if endpoint_count > 1 and self.endpoint_encoding == "single_rdfs_term":
+        range_ids = (*self.range_canonical_ids, *self.value_type_iris)
+        has_multi_domain = len(self.domain_canonical_class_ids) > 1
+        has_multi_range = len(range_ids) > 1
+        if (has_multi_domain or has_multi_range) and self.endpoint_encoding == (
+            "single_rdfs_term"
+        ):
             raise ValueError("multiple endpoints cannot use repeated RDFS domain/range")
-        if self.endpoint_encoding == "named_owl_union":
-            if self.deterministic_endpoint_node_iri is None:
-                raise ValueError("named OWL union requires a deterministic node IRI")
-        elif self.deterministic_endpoint_node_iri is not None:
-            raise ValueError("deterministic endpoint node is only valid for named OWL union")
+        if not has_multi_domain and not has_multi_range and self.endpoint_encoding != (
+            "single_rdfs_term"
+        ):
+            raise ValueError("single endpoints must use direct RDFS class/value IRIs")
+        for side, has_multiple, node_iri in (
+            (
+                "domain",
+                has_multi_domain,
+                self.deterministic_domain_union_node_iri,
+            ),
+            (
+                "range",
+                has_multi_range,
+                self.deterministic_range_union_node_iri,
+            ),
+        ):
+            if has_multiple != (node_iri is not None):
+                raise ValueError(
+                    f"deterministic {side} union node is required iff {side} has "
+                    "multiple endpoints"
+                )
+        if (
+            self.deterministic_domain_union_node_iri is not None
+            and self.deterministic_domain_union_node_iri
+            == self.deterministic_range_union_node_iri
+        ):
+            raise ValueError("domain and range union nodes must be distinct")
         if self.term_kind == "object_property" and self.value_type_iris:
             raise ValueError("object properties cannot declare literal value types")
         if self.term_kind == "datatype_property" and self.range_canonical_ids:
@@ -334,7 +408,8 @@ class RdfRelationshipDefinition(ContractModel):
     source_canonical_class_ids: tuple[str, ...]
     target_canonical_class_ids: tuple[str, ...]
     endpoint_encoding: EndpointEncoding
-    deterministic_endpoint_node_iri: RequiredText | None = None
+    deterministic_source_union_node_iri: RequiredText | None = None
+    deterministic_target_union_node_iri: RequiredText | None = None
 
     @field_validator(
         "source_canonical_class_ids",
@@ -347,7 +422,11 @@ class RdfRelationshipDefinition(ContractModel):
             return sorted_unique(value, field_name=info.field_name)
         return value
 
-    @field_validator("relationship_iri", "deterministic_endpoint_node_iri")
+    @field_validator(
+        "relationship_iri",
+        "deterministic_source_union_node_iri",
+        "deterministic_target_union_node_iri",
+    )
     @classmethod
     def _iri(cls, value: str | None, info: Any) -> str | None:
         if value is None:
@@ -358,19 +437,39 @@ class RdfRelationshipDefinition(ContractModel):
     def _endpoints(self) -> "RdfRelationshipDefinition":
         if not self.source_canonical_class_ids or not self.target_canonical_class_ids:
             raise ValueError("relationship source and target sets must not be empty")
-        endpoint_count = max(
-            len(self.source_canonical_class_ids),
-            len(self.target_canonical_class_ids),
-        )
-        if endpoint_count > 1 and self.endpoint_encoding == "single_rdfs_term":
+        has_multi_source = len(self.source_canonical_class_ids) > 1
+        has_multi_target = len(self.target_canonical_class_ids) > 1
+        if (has_multi_source or has_multi_target) and self.endpoint_encoding == (
+            "single_rdfs_term"
+        ):
             raise ValueError("multiple endpoints cannot use repeated RDFS domain/range")
-        if self.endpoint_encoding == "named_owl_union":
-            if self.deterministic_endpoint_node_iri is None:
-                raise ValueError("named OWL union requires a deterministic node IRI")
-        elif self.deterministic_endpoint_node_iri is not None:
-            raise ValueError(
-                "deterministic endpoint node is only valid for named OWL union"
-            )
+        if not has_multi_source and not has_multi_target and self.endpoint_encoding != (
+            "single_rdfs_term"
+        ):
+            raise ValueError("single endpoints must use direct class IRIs")
+        for side, has_multiple, node_iri in (
+            (
+                "source",
+                has_multi_source,
+                self.deterministic_source_union_node_iri,
+            ),
+            (
+                "target",
+                has_multi_target,
+                self.deterministic_target_union_node_iri,
+            ),
+        ):
+            if has_multiple != (node_iri is not None):
+                raise ValueError(
+                    f"deterministic {side} union node is required iff {side} has "
+                    "multiple endpoints"
+                )
+        if (
+            self.deterministic_source_union_node_iri is not None
+            and self.deterministic_source_union_node_iri
+            == self.deterministic_target_union_node_iri
+        ):
+            raise ValueError("source and target union nodes must be distinct")
         return self
 
 
@@ -590,22 +689,52 @@ class RdfProjectionManifest(ContractModel):
                     "canonical-ID mapping"
                 )
         for prop in self.vocabulary.property_definitions:
-            if prop.deterministic_endpoint_node_iri is not None:
-                expected_node_iri = _canonical_term_iri(
+            for side, endpoint_ids, node_iri in (
+                (
+                    "domain",
+                    prop.domain_canonical_class_ids,
+                    prop.deterministic_domain_union_node_iri,
+                ),
+                (
+                    "range",
+                    (*prop.range_canonical_ids, *prop.value_type_iris),
+                    prop.deterministic_range_union_node_iri,
+                ),
+            ):
+                if node_iri is None:
+                    continue
+                expected_node_iri = _canonical_union_node_iri(
                     self.iri_policy.ontology_base_iri,
-                    f"endpoint-union:{prop.canonical_property_id}",
+                    term_id=prop.canonical_property_id,
+                    side=side,
+                    endpoint_ids=endpoint_ids,
                 )
-                if prop.deterministic_endpoint_node_iri != expected_node_iri:
+                if node_iri != expected_node_iri:
                     raise ValueError(
                         "endpoint union IRI must use the deterministic governed mapping"
                     )
         for relationship in self.vocabulary.relationship_definitions:
-            if relationship.deterministic_endpoint_node_iri is not None:
-                expected_node_iri = _canonical_term_iri(
+            for side, endpoint_ids, node_iri in (
+                (
+                    "source",
+                    relationship.source_canonical_class_ids,
+                    relationship.deterministic_source_union_node_iri,
+                ),
+                (
+                    "target",
+                    relationship.target_canonical_class_ids,
+                    relationship.deterministic_target_union_node_iri,
+                ),
+            ):
+                if node_iri is None:
+                    continue
+                expected_node_iri = _canonical_union_node_iri(
                     self.iri_policy.ontology_base_iri,
-                    f"endpoint-union:{relationship.canonical_relationship_id}",
+                    term_id=relationship.canonical_relationship_id,
+                    side=side,
+                    endpoint_ids=endpoint_ids,
                 )
-                if relationship.deterministic_endpoint_node_iri != expected_node_iri:
+                if node_iri != expected_node_iri:
                     raise ValueError(
                         "endpoint union IRI must use the deterministic governed mapping"
                     )
@@ -969,3 +1098,62 @@ class RdfValidationReceipt(ContractModel):
             for name, observed, sealed in checks:
                 if observed != sealed:
                     raise ValueError(f"receipt observation {name} mismatch")
+
+
+class RdfProjectionAcceptanceBundle(ContractModel):
+    """Self-contained proof that a complete RDF projection is accepted."""
+
+    identity: CanonicalIdentityEnvelope
+    rdf_projection_acceptance_bundle_id: RequiredText
+    manifest: RdfProjectionManifest
+    serialization_artifacts: tuple[RdfSerializationArtifact, ...]
+    validation_receipt: RdfValidationReceipt
+    acceptance_status: Literal["accepted"] = "accepted"
+    acceptance_bundle_hash: Sha256
+
+    @field_validator("serialization_artifacts", mode="before")
+    @classmethod
+    def _artifacts(cls, value: object) -> object:
+        return _sorted_unique_models(
+            value,
+            key="rdf_serialization_artifact_id",
+            field_name="serialization_artifacts",
+        )
+
+    @model_validator(mode="after")
+    def _accepted_bundle(self) -> "RdfProjectionAcceptanceBundle":
+        _reject_sensitive_in(self)
+        if self.identity.contract_kind != "c0.rdf_projection_acceptance_bundle":
+            raise ValueError("invalid RDF projection acceptance bundle contract_kind")
+        authority_identity = self.manifest.identity.model_dump(
+            mode="json",
+            exclude={"contract_kind", "contract_version"},
+        )
+        for name, candidate in (
+            ("bundle", self.identity),
+            *(
+                (f"artifact {item.rdf_serialization_artifact_id}", item.identity)
+                for item in self.serialization_artifacts
+            ),
+            ("receipt", self.validation_receipt.identity),
+        ):
+            candidate_identity = candidate.model_dump(
+                mode="json",
+                exclude={"contract_kind", "contract_version"},
+            )
+            if candidate_identity != authority_identity:
+                raise ValueError(f"{name} identity differs from manifest authority")
+        self.validation_receipt.validate_against_manifest_and_artifacts(
+            self.manifest,
+            self.serialization_artifacts,
+        )
+        if not self.validation_receipt.shacl_validation.conforms:
+            raise ValueError("accepted RDF bundle requires SHACL conformance")
+        if not self.validation_receipt.exact_round_trip_equivalent:
+            raise ValueError("accepted RDF bundle requires exact round-trip equivalence")
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"acceptance_bundle_hash"})
+        )
+        if self.acceptance_bundle_hash != expected:
+            raise ValueError("acceptance_bundle_hash does not match accepted RDF bundle")
+        return self

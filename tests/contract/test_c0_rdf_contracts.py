@@ -6,6 +6,7 @@ import copy
 import json
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ from fabric_kg_builder.contracts import (
     RdfExternalAlignment,
     RdfIriPolicy,
     RdfNamedGraph,
+    RdfProjectionAcceptanceBundle,
     RdfProjectionManifest,
     RdfPropertyDefinition,
     RdfRelationshipDefinition,
@@ -141,7 +143,8 @@ def vocabulary() -> RdfVocabularyInventory:
             range_canonical_ids=(),
             value_type_iris=("https://www.w3.org/2001/XMLSchema#string",),
             endpoint_encoding="single_rdfs_term",
-            deterministic_endpoint_node_iri=None,
+            deterministic_domain_union_node_iri=None,
+            deterministic_range_union_node_iri=None,
         ),
         RdfPropertyDefinition(
             canonical_property_id="property:facility:id",
@@ -151,7 +154,8 @@ def vocabulary() -> RdfVocabularyInventory:
             range_canonical_ids=(),
             value_type_iris=("https://www.w3.org/2001/XMLSchema#string",),
             endpoint_encoding="single_rdfs_term",
-            deterministic_endpoint_node_iri=None,
+            deterministic_domain_union_node_iri=None,
+            deterministic_range_union_node_iri=None,
         ),
     )
     relationships = (
@@ -163,7 +167,8 @@ def vocabulary() -> RdfVocabularyInventory:
             source_canonical_class_ids=("semantic-type:asset",),
             target_canonical_class_ids=("semantic-type:facility",),
             endpoint_encoding="single_rdfs_term",
-            deterministic_endpoint_node_iri=None,
+            deterministic_source_union_node_iri=None,
+            deterministic_target_union_node_iri=None,
         ),
     )
     values = {
@@ -401,6 +406,27 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
     )
 
 
+def acceptance_bundle() -> RdfProjectionAcceptanceBundle:
+    projection = manifest()
+    artifacts = tuple(
+        artifact(rdf_format)
+        for rdf_format in projection.required_serialization_formats
+    )
+    receipt = validation_receipt()
+    values = {
+        "identity": identity("c0.rdf_projection_acceptance_bundle"),
+        "rdf_projection_acceptance_bundle_id": "rdf-acceptance-bundle:generic",
+        "manifest": projection,
+        "serialization_artifacts": artifacts,
+        "validation_receipt": receipt,
+        "acceptance_status": "accepted",
+    }
+    return RdfProjectionAcceptanceBundle(
+        **values,
+        acceptance_bundle_hash=canonical_sha256(values),
+    )
+
+
 def reseal_manifest_payload(payload: dict[str, object]) -> None:
     payload["required_serialization_formats"] = sorted(
         set(payload["required_serialization_formats"])
@@ -463,6 +489,82 @@ def test_rdf_contracts_are_strict_derived_views() -> None:
             for rdf_format in projection.required_serialization_formats
         ),
     )
+    accepted = acceptance_bundle()
+    assert parse_contract(canonical_json(accepted)) == accepted
+
+
+@pytest.mark.contract
+def test_acceptance_bundle_rejects_coordinated_forged_children() -> None:
+    accepted = acceptance_bundle()
+
+    payload = accepted.model_dump(mode="json")
+    payload["validation_receipt"]["observations"][0][
+        "rdf_serialization_artifact_hash"
+    ] = BINDING_MUTATIONS["artifact_hash"]
+    payload["validation_receipt"]["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload["validation_receipt"].items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    payload["acceptance_bundle_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "acceptance_bundle_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="artifact hash mismatch"):
+        RdfProjectionAcceptanceBundle.model_validate(payload)
+
+    payload = accepted.model_dump(mode="json")
+    forged_artifact = payload["serialization_artifacts"][0]
+    forged_artifact["rdf_projection_manifest_hash"] = H["0"]
+    forged_artifact["serialization_artifact_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in forged_artifact.items()
+            if key != "serialization_artifact_hash"
+        }
+    )
+    for observation in payload["validation_receipt"]["observations"]:
+        if (
+            observation["rdf_serialization_artifact_id"]
+            == forged_artifact["rdf_serialization_artifact_id"]
+        ):
+            observation["rdf_serialization_artifact_hash"] = forged_artifact[
+                "serialization_artifact_hash"
+            ]
+    payload["validation_receipt"]["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload["validation_receipt"].items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    payload["acceptance_bundle_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "acceptance_bundle_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="manifest hash mismatch"):
+        RdfProjectionAcceptanceBundle.model_validate(payload)
+
+    payload = accepted.model_dump(mode="json")
+    payload["manifest"]["required_serialization_formats"].append("json_ld")
+    reseal_manifest_payload(payload["manifest"])
+    payload["acceptance_bundle_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "acceptance_bundle_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="manifest hash mismatch"):
+        RdfProjectionAcceptanceBundle.model_validate(payload)
 
 
 @pytest.mark.contract
@@ -474,6 +576,68 @@ def test_multi_endpoint_rdfs_intersection_encoding_fails_closed() -> None:
     ]
     with pytest.raises(ValidationError, match="multiple endpoints"):
         RdfPropertyDefinition.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_endpoint_union_nodes_are_side_specific_and_deterministic() -> None:
+    payload = manifest().model_dump(mode="json")
+    relationship = payload["vocabulary"]["relationship_definitions"][0]
+    relationship["source_canonical_class_ids"] = [
+        "semantic-type:asset",
+        "semantic-type:facility",
+    ]
+    relationship["endpoint_encoding"] = "named_owl_union"
+    endpoint_hash = canonical_sha256(relationship["source_canonical_class_ids"])
+    source_seed = (
+        "endpoint-union:relationship:asset:facility:source:"
+        f"{endpoint_hash}"
+    )
+    relationship["deterministic_source_union_node_iri"] = (
+        "https://ontology.contoso.test/kg/" + quote(source_seed, safe="")
+    )
+    reseal_manifest_payload(payload)
+    projection = RdfProjectionManifest.model_validate(payload)
+    sealed = projection.vocabulary.relationship_definitions[0]
+    assert sealed.deterministic_source_union_node_iri is not None
+    assert sealed.deterministic_target_union_node_iri is None
+
+    missing = copy.deepcopy(payload)
+    missing["vocabulary"]["relationship_definitions"][0][
+        "deterministic_source_union_node_iri"
+    ] = None
+    with pytest.raises(ValidationError, match="required iff"):
+        RdfProjectionManifest.model_validate(missing)
+
+    swapped = copy.deepcopy(payload)
+    target_seed = (
+        "endpoint-union:relationship:asset:facility:target:"
+        f"{endpoint_hash}"
+    )
+    swapped["vocabulary"]["relationship_definitions"][0][
+        "deterministic_source_union_node_iri"
+    ] = "https://ontology.contoso.test/kg/" + quote(target_seed, safe="")
+    reseal_manifest_payload(swapped)
+    with pytest.raises(ValidationError, match="deterministic governed mapping"):
+        RdfProjectionManifest.model_validate(swapped)
+
+    extra = copy.deepcopy(payload)
+    extra["vocabulary"]["relationship_definitions"][0][
+        "deterministic_target_union_node_iri"
+    ] = "https://ontology.contoso.test/kg/" + quote(target_seed, safe="")
+    with pytest.raises(ValidationError, match="required iff"):
+        RdfProjectionManifest.model_validate(extra)
+
+    reused = copy.deepcopy(payload)
+    reused_relationship = reused["vocabulary"]["relationship_definitions"][0]
+    reused_relationship["target_canonical_class_ids"] = [
+        "semantic-type:asset",
+        "semantic-type:facility",
+    ]
+    reused_relationship["deterministic_target_union_node_iri"] = (
+        reused_relationship["deterministic_source_union_node_iri"]
+    )
+    with pytest.raises(ValidationError, match="must be distinct"):
+        RdfProjectionManifest.model_validate(reused)
 
 
 @pytest.mark.contract
@@ -737,6 +901,25 @@ def test_recursive_secret_rejection_across_top_level_rdf_contracts(
 
 
 @pytest.mark.contract
+@pytest.mark.parametrize("secret_value", SECRET_VALUES[4:])
+@pytest.mark.parametrize("encoding_depth", [0, 1, 4, 8, 12])
+def test_signed_url_families_and_nested_encodings_fail_closed(
+    secret_value: str,
+    encoding_depth: int,
+) -> None:
+    encoded = secret_value
+    for _ in range(encoding_depth):
+        encoded = quote(encoded, safe="")
+    payload = manifest().model_dump(mode="json")
+    payload["source_authority"]["l5a_projection_manifest_id"] = encoded
+    with pytest.raises(
+        ValidationError,
+        match="secret|credential|signed|transient|nested URL encoding",
+    ):
+        RdfProjectionManifest.model_validate(payload)
+
+
+@pytest.mark.contract
 def test_round_trip_drift_is_recorded_as_failure() -> None:
     receipt = validation_receipt(drift=True)
     assert not receipt.exact_round_trip_equivalent
@@ -781,6 +964,7 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
 ) -> None:
     write_registered_schemas(tmp_path)
     new_paths = {
+        "c0-rdf_projection_acceptance_bundle-1.0.0.schema.json",
         "c0-rdf_projection_manifest-1.0.0.schema.json",
         "c0-rdf_serialization_artifact-1.0.0.schema.json",
         "c0-rdf_validation_receipt-1.0.0.schema.json",

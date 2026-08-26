@@ -49,6 +49,7 @@ defaults, or content to this contract.
 | Contract | Version | Role |
 |---|---:|---|
 | `c0.rdf_projection_manifest` / `RdfProjectionManifest` | `1.0.0` | Declares exact source authority, governed IRIs, graph layers, vocabulary, and alignments |
+| `c0.rdf_projection_acceptance_bundle` / `RdfProjectionAcceptanceBundle` | `1.0.0` | Self-contained accepted manifest/artifact/receipt proof |
 | `c0.rdf_serialization_artifact` / `RdfSerializationArtifact` | `1.0.0` | Describes one serialized artifact and its canonical dataset equivalence |
 | `c0.rdf_validation_receipt` / `RdfValidationReceipt` | `1.0.0` | Records SHACL and exact serialization round-trip outcomes |
 
@@ -126,8 +127,12 @@ exact ID set is sealed.
 The declared vocabulary is a conservative OWL 2 RL-compatible derived
 vocabulary. For one domain or range, a single RDFS term is permitted. Multiple
 domains or ranges must not be represented by repeated `rdfs:domain` or
-`rdfs:range`, because repeated statements mean intersection. The selected
-encoding is either:
+`rdfs:range`, because repeated statements mean intersection. Each source/domain and target/range side with more than one endpoint has a
+separate deterministic union node IRI derived from the term ID, side name, and
+sorted sealed endpoint-set hash. The source/domain and target/range nodes are
+always side-distinct; swaps, reuse, missing, extra, or noncanonical nodes fail.
+A side with one endpoint uses its direct class/value IRI and has no union node.
+The selected encoding is either:
 
 - a deterministic named `owl:unionOf` node; or
 - a SHACL `sh:or` endpoint constraint.
@@ -179,6 +184,21 @@ binds the exact manifest, authority, and artifact set.
 that the RDF projection matches the sealed membership; it does not discover,
 infer, default, or recompute membership.
 
+## 9A. Acceptance boundary
+
+`RdfProjectionAcceptanceBundle` is the only successful-publication acceptance
+surface. It embeds the exact manifest, complete serialization artifact metadata
+objects, and validation receipt, then validates all manifest/artifact/receipt
+set, hash, format, authority, exposure, graph, dataset, round-trip, SHACL, and
+identity invariants in one model-level validator. It requires conforming SHACL
+and exact round-trip equivalence and seals an accepted bundle hash.
+
+L5c MUST emit and consume this bundle. Individual
+`RdfProjectionManifest`, `RdfSerializationArtifact`, and
+`RdfValidationReceipt.model_validate` calls establish syntax and local
+integrity only; they MUST NOT be interpreted as accepted or successfully
+published RDF.
+
 ## 10. External alignment
 
 External alignment is opt-in governed metadata only. Each alignment records a
@@ -190,9 +210,11 @@ copied third-party ontology content. Approval of metadata does not authorize
 network retrieval or semantic adoption.
 
 Manifest, artifact, and receipt validation recursively rejects bearer tokens,
-API keys, URI credentials, SAS/signed query parameters, secret-looking values,
-and percent-encoded variants from nested IDs, references, metadata, and
-alignment values. Stable governed and W3C vocabulary IRIs remain permitted.
+API keys, URI credentials, Azure SAS, AWS SigV4, Google signed URL, generic
+signature/credential query parameters, secret-looking values, and repeatedly
+percent-encoded variants from nested IDs, references, metadata, and alignment
+values. Decoding is size-bounded and depth-bounded and fails closed if not
+stable. Stable governed and W3C vocabulary IRIs remain permitted.
 
 ## 11. Access boundary
 
@@ -215,9 +237,11 @@ A later behavior PR may adopt these contracts in this order:
 7. run approved SHACL shapes without recomputing membership;
 8. parse every serialization and compare exact dataset, graph, triple,
    authority, and base-IRI equality;
-9. emit `RdfValidationReceipt` and fail publication unless it conforms and is
-   exactly round-trip equivalent; and
-10. store public schema and protected dataset artifacts under their existing
+9. emit `RdfValidationReceipt`, assemble `RdfProjectionAcceptanceBundle`, and
+   fail publication unless bundle validation proves conformance and exact
+   round-trip equivalence;
+10. consume only the accepted bundle as successful-publication proof; and
+11. store public schema and protected dataset artifacts under their existing
     governed asset/access policies.
 
 That PR must separately select and review an RDF library, add dependencies,
@@ -227,6 +251,6 @@ those decisions or behaviors are part of this contract foundation.
 ## 13. Compatibility
 
 This change is additive. Existing schema files and contract bytes remain
-identical; only the registry receives three new `1.0.0` entries and advances to
+identical; only the registry receives four new `1.0.0` entries and advances to
 registry version `1.7.0`. Package version remains `0.2.3`. Schema 1 and every
 existing contract remain unchanged.

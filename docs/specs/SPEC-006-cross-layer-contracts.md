@@ -113,6 +113,7 @@ readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 | `c0.governed_asset_reference` | `GovernedAssetReference` | Generic immutable delivery-asset reference |
 | `c0.access_policy` | `AccessPolicy` | Credential-free authorization and retention policy |
 | `c0.rdf_projection_manifest` | `RdfProjectionManifest` | Exact authority, namespace, graph, vocabulary, and alignment declaration |
+| `c0.rdf_projection_acceptance_bundle` | `RdfProjectionAcceptanceBundle` | Self-contained manifest/artifact/receipt acceptance proof |
 | `c0.rdf_serialization_artifact` | `RdfSerializationArtifact` | One format artifact bound to the canonical RDF dataset |
 | `c0.rdf_validation_receipt` | `RdfValidationReceipt` | SHACL and exact cross-serialization round-trip proof |
 | `c0.query_budget` | `QueryBudget` | Agent-selected request ceilings with separate hierarchy depth and relationship K |
@@ -460,7 +461,7 @@ contract-derived logs.
 
 ## 10A. C0.RDF contracts
 
-C0.RDF registers three strict, frozen `1.0.0` contracts. They are semantic
+C0.RDF registers four strict, frozen `1.0.0` contracts. They are semantic
 interchange metadata only. They do not serialize, parse, canonicalize, validate,
 fetch, import, publish, deploy, or read back RDF. The normative L5c behavior
 boundary and adoption sequence are specified in
@@ -488,8 +489,9 @@ boundary and adoption sequence are specified in
   percent-encoding of its canonical ID under the governed ontology base;
 - explicit endpoint-set encoding. Multiple domains or ranges cannot be emitted
   as repeated `rdfs:domain` or `rdfs:range` statements because that denotes an
-  intersection; the contract permits a deterministic named `owl:unionOf` node
-  or SHACL `sh:or`; and
+  intersection. Each multi-endpoint side has its own deterministic union node
+  IRI derived from term ID, side, and sorted endpoint-set hash; single sides
+  use the direct class/value IRI and have no union node; and
 - opt-in external alignment metadata with target IRI, approved relation,
   immutable source artifact/version/hash, license, and approval proof.
   Alignment is metadata-only: no default `owl:imports`, remote fetch, embedded
@@ -529,6 +531,14 @@ Every top-level RDF contract recursively rejects secrets, bearer/API-key
 material, URI credentials, signed/SAS query keys, and percent-encoded variants
 in nested identifiers, references, metadata, and alignments while allowing
 stable governed and W3C vocabulary IRIs.
+
+`RdfProjectionAcceptanceBundle` embeds one exact manifest, the complete
+serialization artifact metadata set, and one validation receipt. Its model
+validator invokes every graph, manifest, authority, format, artifact-hash,
+dataset, round-trip, and SHACL cross-invariant and seals the accepted bundle.
+L5c MUST emit and consume this registered bundle for successful publication.
+Validating an individual manifest, artifact, or receipt proves syntax and local
+integrity only and MUST NOT be treated as successful publication.
 
 ## 11. Manifests, receipts, and resource evidence
 
