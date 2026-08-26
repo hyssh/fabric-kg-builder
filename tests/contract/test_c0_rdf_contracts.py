@@ -1053,6 +1053,47 @@ def test_signed_url_families_and_nested_encodings_fail_closed(
 
 @pytest.mark.contract
 @pytest.mark.parametrize(
+    "stable_namespace_id",
+    [
+        "authorization:policy",
+        "credential:approval",
+        "password:policy",
+        "authentication:vocabulary",
+    ],
+)
+def test_colon_delimited_namespace_ids_are_not_credential_assignments(
+    stable_namespace_id: str,
+) -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["approval_reference_id"] = stable_namespace_id
+    assert (
+        RdfExternalAlignment.model_validate(payload).approval_reference_id
+        == stable_namespace_id
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "invalid_assignment",
+    [
+        "Authorization: Bearer secret-value",
+        "password: secret-value",
+        "api-key=secret-value",
+        "client_secret=secret-value",
+        "authentication = secret-value",
+    ],
+)
+def test_headers_and_explicit_secret_assignments_fail_closed(
+    invalid_assignment: str,
+) -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["approval_reference_id"] = invalid_assignment
+    with pytest.raises(ValidationError, match="credential"):
+        RdfExternalAlignment.model_validate(payload)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
     ("model_type", "payload_factory", "mutate"),
     [
         (

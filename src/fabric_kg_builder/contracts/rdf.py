@@ -23,7 +23,6 @@ from .base import (
     SemVer,
     Sha256,
     canonical_sha256,
-    reject_secret_text,
     sorted_unique,
 )
 from .identity import CanonicalIdentityEnvelope
@@ -80,11 +79,22 @@ _SIGNED_QUERY_KEYS = {
     "authentication",
     "authorization",
 }
-_SECRET_VALUE_RE = re.compile(
-    r"(?i)(?:authorization\s*[:=]\s*bearer|bearer\s+\S+|"
-    r"(?:api[_-]?key|x-api-key|sig(?:nature)?|token|secret|credential|"
-    r"password|passwd|pwd|auth(?:entication|orization)?|client[_-]?secret|"
-    r"accountkey|sharedaccesssignature)\s*[:=]\s*\S+)"
+_CREDENTIAL_KEY_PATTERN = (
+    r"(?:api[\s._-]*key|x[\s._-]*api[\s._-]*key|sig(?:nature)?|token|"
+    r"secret|credential|password|passwd|pwd|auth(?:entication|orization)?|"
+    r"client[\s._-]*secret|account[\s._-]*key|shared[\s._-]*access"
+    r"[\s._-]*signature|x[\s._-]*amz[\s._-]*(?:signature|credential|"
+    r"security[\s._-]*token|algorithm)|x[\s._-]*goog[\s._-]*"
+    r"(?:signature|credential))"
+)
+_BEARER_RE = re.compile(
+    r"(?i)(?:authorization\s*:\s*bearer\s+\S+|\bbearer\s+\S+)"
+)
+_EQUALS_ASSIGNMENT_RE = re.compile(
+    rf"(?i)\b{_CREDENTIAL_KEY_PATTERN}\s*=\s*\S+"
+)
+_HEADER_ASSIGNMENT_RE = re.compile(
+    rf"(?i)\b{_CREDENTIAL_KEY_PATTERN}\s*:\s+\S+"
 )
 _MAX_DECODE_ROUNDS = 12
 _MAX_SENSITIVE_TEXT_BYTES = 65_536
@@ -113,7 +123,7 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     decoded = unicodedata.normalize("NFKC", value)
     stable = False
     for _ in range(_MAX_DECODE_ROUNDS):
-        expanded = unquote(decoded)
+        expanded = unicodedata.normalize("NFKC", unquote(decoded))
         if expanded == decoded:
             stable = True
             break
@@ -122,27 +132,28 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         decoded = expanded
     if not stable:
         raise ValueError(f"{field_name} contains excessive nested URL encoding")
-    reject_secret_text(decoded, field_name=field_name)
-    if _SECRET_VALUE_RE.search(decoded):
-        raise ValueError(f"{field_name} must not contain secrets or credentials")
+    decoded = unicodedata.normalize("NFKC", decoded)
     parsed = urlparse(decoded)
     if parsed.username is not None or parsed.password is not None:
         raise ValueError(f"{field_name} must not contain URI credentials")
-    query_keys = {key.casefold() for key, _ in parse_qsl(parsed.query)}
-    normalized_keys = {
-        re.sub(
+    if _BEARER_RE.search(decoded):
+        raise ValueError(f"{field_name} must not contain bearer credentials")
+
+    def normalize_key(key: str) -> str:
+        return re.sub(
             r"[^a-z0-9]",
             "",
             unicodedata.normalize("NFKC", key).casefold(),
         )
-        for key in query_keys
-    }
+
+    query_items = (
+        parse_qsl(parsed.query, keep_blank_values=True)
+        if parsed.scheme and parsed.netloc
+        else ()
+    )
+    normalized_keys = {normalize_key(key) for key, _ in query_items}
     normalized_signed = {
-        re.sub(
-            r"[^a-z0-9]",
-            "",
-            unicodedata.normalize("NFKC", key).casefold(),
-        )
+        normalize_key(key)
         for key in _SIGNED_QUERY_KEYS
     }
     credential_keys = {
@@ -161,11 +172,43 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         or key.endswith("token")
         for key in normalized_keys
     )
-    if query_keys.intersection(_SIGNED_QUERY_KEYS) or normalized_keys.intersection(
-        normalized_signed
-    ) or generic_signed:
+    if normalized_keys.intersection(normalized_signed) or generic_signed:
         raise ValueError(f"{field_name} must not contain a signed or transient URL")
     if normalized_keys.intersection(credential_keys):
+        raise ValueError(f"{field_name} must not contain credentials")
+
+    for _, query_value in query_items:
+        normalized_value = unicodedata.normalize("NFKC", query_value)
+        if (
+            _BEARER_RE.search(normalized_value)
+            or _EQUALS_ASSIGNMENT_RE.search(normalized_value)
+            or _HEADER_ASSIGNMENT_RE.search(normalized_value)
+        ):
+            raise ValueError(f"{field_name} must not contain credentials")
+
+    text_to_check = decoded
+    if parsed.scheme and parsed.netloc:
+        text_to_check = unicodedata.normalize("NFKC", parsed.fragment)
+        fragment_keys = {
+            normalize_key(key)
+            for key, _ in parse_qsl(parsed.fragment, keep_blank_values=True)
+        }
+        generic_fragment_key = any(
+            "signature" in key
+            or "credential" in key
+            or "securitytoken" in key
+            or key.endswith("token")
+            for key in fragment_keys
+        )
+        if (
+            fragment_keys.intersection(normalized_signed | credential_keys)
+            or generic_fragment_key
+        ):
+            raise ValueError(f"{field_name} must not contain credentials")
+    if (
+        _EQUALS_ASSIGNMENT_RE.search(text_to_check)
+        or _HEADER_ASSIGNMENT_RE.search(text_to_check)
+    ):
         raise ValueError(f"{field_name} must not contain credentials")
 
 

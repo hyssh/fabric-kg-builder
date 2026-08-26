@@ -228,6 +228,11 @@ values, and repeatedly
 percent-encoded variants from nested IDs, references, metadata, and alignment
 values. Decoding is size-bounded and depth-bounded and fails closed if not
 stable. Stable governed and W3C vocabulary IRIs remain permitted.
+NFKC and case normalization are applied after every decode round and to the
+final stable value. Absolute URLs parse query keys/values and fragments;
+non-URL text requires a bearer/header pattern, an equals assignment, or a
+colon-plus-whitespace assignment. Colon-delimited namespace IDs without
+assignment context remain valid.
 Every RDF-owned model inherits the RDF-local strict base configured to hide
 inputs, preflights nested sensitive values, and returns sanitized structured
 validation errors containing no rejected raw value.

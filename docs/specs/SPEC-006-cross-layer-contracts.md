@@ -541,6 +541,11 @@ material, password/passwd/pwd/auth/client-secret credentials, URI credentials,
 AWS SigV4, Google signed URL, signed/SAS query keys, and percent-encoded variants
 in nested identifiers, references, metadata, and alignments while allowing
 stable governed and W3C vocabulary IRIs.
+NFKC and case normalization run after every bounded decode round and again on
+the stable value. URL queries/fragments use normalized credential-key parsing;
+free text requires a bearer/header pattern, `=` assignment, or colon followed
+by assignment whitespace. Stable namespace IDs such as
+`authorization:policy` and `credential:approval` remain valid.
 Every RDF-owned top-level and nested model uses the RDF-local strict base with
 hidden inputs and sanitized `ValidationError.errors()` details; rejected values
 are never included in exception text or structured error input.
