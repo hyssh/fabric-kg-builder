@@ -2711,6 +2711,7 @@ def _agentic_runtime_seconds(max_runtime_milliseconds: int) -> int:
 
 # Azure Search REST request integer fields use signed int32 values.
 _PROVIDER_INT32_MAX = (2 ** 31) - 1
+_PROVIDER_INT32_MIN = -(2 ** 31)
 
 
 def _provider_int32(value: int, *, field_name: str) -> int:
@@ -3123,33 +3124,14 @@ def _opaque_external_id(prefix: str, value: Any) -> str:
     return f"{prefix}:{canonical_sha256(value)[:32]}"
 
 
-_PROVIDER_ACTIVITY_ID_MAX_LENGTH = 256
-
-
 def _provider_activity_key(value: object) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
-        if 0 <= value <= _PROVIDER_INT32_MAX:
+        if _PROVIDER_INT32_MIN <= value <= _PROVIDER_INT32_MAX:
             return f"integer:{value}"
-    elif isinstance(value, str):
-        normalized = normalize_nfc(value)
-        if (
-            value == normalized
-            and value == value.strip()
-            and 0 < len(value) <= _PROVIDER_ACTIVITY_ID_MAX_LENGTH
-            and not any(unicodedata.category(character).startswith("C") for character in value)
-        ):
-            return f"string:{value}"
     raise L5bPublicationError(
         "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
         "provider Search activity identity is invalid",
     )
-
-
-def _reference_activity_key(value: object) -> str | None:
-    try:
-        return _provider_activity_key(value)
-    except L5bPublicationError:
-        return None
 
 
 def _response_items(
@@ -3637,7 +3619,7 @@ def interpret_retrieval_response(
             continue
         if (
             context.retrieval_mode.startswith("agentic_")
-            and _reference_activity_key(reference.get("activitySource"))
+            and _provider_activity_key(reference.get("activitySource"))
             not in search_activity_ids
         ):
             missing_reference_ids.append(local_reference_id)

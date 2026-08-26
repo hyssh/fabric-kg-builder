@@ -3162,11 +3162,11 @@ def test_agentic_multi_call_candidates_reconcile_to_exact_sum(
     retrieval_scope = resolved_retrieval_scope()
     context, budget = request_context()
     response = _agentic_response(context, [])
-    response["activity"][0]["id"] = "source-a"
+    response["activity"][0]["id"] = 1
     response["activity"][0]["count"] = 4
     response["activity"][0].pop("searchIndexArguments")
     second = dict(response["activity"][0])
-    second["id"] = "source-b"
+    second["id"] = 2
     second["count"] = 6
     response["activity"].append(second)
     monkeypatch.setattr(
@@ -3199,6 +3199,43 @@ def test_agentic_multi_call_candidates_reconcile_to_exact_sum(
     assert tuple(call.matched_count for call in result.coverage.source_calls) == (4, 6)
     assert len({call.request_hash for call in result.coverage.source_calls}) == 2
     assert result.coverage.budget.budget_exhausted_dimensions == ()
+
+
+@pytest.mark.unit
+def test_official_preview_activity_and_reference_int32_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    document = _reference_document(
+        context,
+        retrieval_scope.canonical_member_ids[0],
+        0,
+    )
+    response = _agentic_response(context, [document])
+    assert response["activity"][0]["id"] == 1
+    assert response["references"][0]["activitySource"] == 1
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=_runtime_publication(context, [document]),
+        response=response,
+        accounting=_retrieval_accounting(1),
+    )
+
+    assert result.coverage.matched_document_count == 1
+    assert result.coverage.returned_document_count == 1
+    assert result.coverage.source_calls[0].matched_count == 1
+    assert result.coverage.source_calls[0].returned_count == 1
 
 
 @pytest.mark.unit
@@ -3250,9 +3287,20 @@ def test_two_idless_agentic_activities_cannot_be_aggregated(
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "activity_id",
-    (None, "", " ", [], True, "control\nid", "x" * 257),
+    (
+        None,
+        "",
+        "1",
+        [],
+        True,
+        1.0,
+        -(2 ** 31) - 1,
+        2 ** 31,
+        "control\nid",
+        "x" * 257,
+    ),
 )
-def test_agentic_activity_id_must_be_schema_valid(
+def test_agentic_activity_id_must_be_signed_int32(
     activity_id: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3279,6 +3327,126 @@ def test_agentic_activity_id_must_be_schema_valid(
             publication=_runtime_publication(context, []),
             response=response,
             accounting=_retrieval_accounting(0),
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "activity_ids",
+    (("1", "2"), (1, "2"), ("1", 2)),
+)
+def test_agentic_activity_string_spoof_or_mixed_type_fails_closed(
+    activity_ids: tuple[object, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    response = _agentic_response(context, [])
+    response["activity"] = [
+        {
+            "id": activity_id,
+            "type": "searchIndex",
+            "count": 0,
+            "searchIndexArguments": {"search": f"query-{index}"},
+        }
+        for index, activity_id in enumerate(activity_ids)
+    ]
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="provider Search activity identity is invalid",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=_runtime_publication(context, []),
+            response=response,
+            accounting=_retrieval_accounting(0),
+        )
+
+
+@pytest.mark.unit
+def test_agentic_activity_signed_int32_boundaries_are_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    response = _agentic_response(context, [])
+    response["activity"] = [
+        {
+            "id": activity_id,
+            "type": "searchIndex",
+            "count": 0,
+            "searchIndexArguments": {"search": f"query-{index}"},
+        }
+        for index, activity_id in enumerate((-(2 ** 31), (2 ** 31) - 1))
+    ]
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=_runtime_publication(context, []),
+        response=response,
+        accounting=_retrieval_accounting(0),
+    )
+
+    assert len(result.coverage.source_calls) == 2
+    assert len({call.source_call_id for call in result.coverage.source_calls}) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "activity_source",
+    ("1", 1.0, True, None, -(2 ** 31) - 1, 2 ** 31),
+)
+def test_agentic_reference_activity_source_must_be_signed_int32(
+    activity_source: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    document = _reference_document(
+        context,
+        retrieval_scope.canonical_member_ids[0],
+        0,
+    )
+    response = _agentic_response(context, [document])
+    response["references"][0]["activitySource"] = activity_source
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="provider Search activity identity is invalid",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=_runtime_publication(context, [document]),
+            response=response,
+            accounting=_retrieval_accounting(1),
         )
 
 

@@ -64,11 +64,11 @@ L4, and hardened L5a authority.
   `@odata.count`, when returned, must likewise equal adapter accounting.
   Missing, negative, contradictory, or signed-int32-overflowing candidate
   accounting fails closed before a receipt or citation can be returned;
-- every counted agentic Search activity requires a present, bounded,
-  control-free provider activity ID of an accepted scalar type; IDs are
-  canonicalized for duplicate detection and bound opaquely into source-call
-  and subquery receipt IDs. Missing, malformed, or duplicate activity identity
-  fails closed before candidate aggregation;
+- every counted agentic Search activity and every reference `activitySource`
+  requires the signed-int32 identity defined by the pinned preview schema;
+  booleans, strings, floats, nulls, and under/overflow are rejected before
+  aggregation or binding. Numeric IDs are canonicalized for duplicate
+  detection and bound opaquely into source-call and subquery receipt IDs;
 - exhausted dimensions are derived exactly when observation exceeds ceiling;
   provider overexecution produces one typed `retrieval_budget_exhausted`
   failure with `partial` or `abstain` coverage instead of validation failure or
@@ -117,7 +117,9 @@ The adapter shapes follow Microsoft Learn for the Azure AI Search
 
 - [migration and version shape](https://learn.microsoft.com/azure/search/agentic-retrieval-how-to-migrate);
 - [retrieve references and activity](https://learn.microsoft.com/azure/search/agentic-retrieval-how-to-retrieve); and
-- [search-index knowledge source and baseFilter/filterAddOn](https://learn.microsoft.com/azure/search/agentic-knowledge-source-how-to-search-index).
+- [search-index knowledge source and baseFilter/filterAddOn](https://learn.microsoft.com/azure/search/agentic-knowledge-source-how-to-search-index);
+- [`KnowledgeBaseActivityRecord.Id` signed-int32 identity](https://learn.microsoft.com/dotnet/api/azure.search.documents.knowledgebases.models.knowledgebaseactivityrecord.id); and
+- [`KnowledgeBaseReference.ActivitySource` signed-int32 binding](https://learn.microsoft.com/dotnet/api/azure.search.documents.knowledgebases.models.knowledgebasereference.activitysource).
 
 The preview knowledge base is persisted with `outputMode=extractiveData`, no
 models, and minimal reasoning. Live capability validation and service-side
