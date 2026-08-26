@@ -3505,6 +3505,7 @@ def interpret_retrieval_response(
     quarantined_findings: dict[str, set[str]] = {}
     quarantined_unexpected_ids: set[str] = set()
     returned_document_type_ids: set[str] = set()
+    verified_references_by_activity: dict[str, int] = {}
     reference_id_counts: dict[str, int] = {}
     document_id_counts: dict[str, int] = {}
     for reference in references:
@@ -3601,6 +3602,12 @@ def interpret_retrieval_response(
             continue
         citations.append(citation)
         presentations.append(presentation)
+        activity_source = reference.get("activitySource")
+        if activity_source is not None:
+            activity_key = str(activity_source)
+            verified_references_by_activity[activity_key] = (
+                verified_references_by_activity.get(activity_key, 0) + 1
+            )
         returned_document_type_ids.update(
             str(item) for item in document.get("canonical_type_ids", ())
         )
@@ -3726,14 +3733,45 @@ def interpret_retrieval_response(
     )
     if context.retrieval_mode.startswith("agentic_") and not search_activities:
         raise ValueError("agentic response omitted searchIndex activity")
-    references_by_activity: dict[str, int] = {}
-    for reference in references:
-        activity_source = reference.get("activitySource")
-        if activity_source is not None:
-            key = str(activity_source)
-            references_by_activity[key] = references_by_activity.get(key, 0) + 1
-    source_calls = tuple(
-        SourceCallReceipt(
+    search_activity_id_values = [
+        str(item["id"])
+        for item in search_activities
+        if item.get("id") is not None
+    ]
+    if len(search_activity_id_values) != len(set(search_activity_id_values)):
+        raise L5bPublicationError(
+            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+            "provider response contains duplicate Search activity IDs",
+        )
+    verified_document_count = len(citations)
+    if accounting.candidate_count < verified_document_count:
+        raise L5bPublicationError(
+            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+            "provider candidate count is below verified returned documents",
+        )
+    source_calls_list: list[SourceCallReceipt] = []
+    for index, item in enumerate(search_activities):
+        matched_count = item.get("count", accounting.candidate_count)
+        if (
+            not isinstance(matched_count, int)
+            or isinstance(matched_count, bool)
+            or matched_count < 0
+        ):
+            raise L5bPublicationError(
+                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                "provider activity matched count is invalid",
+            )
+        returned_count = (
+            0
+            if item.get("error") is not None
+            else verified_references_by_activity.get(str(item.get("id")), 0)
+        )
+        if returned_count > matched_count:
+            raise L5bPublicationError(
+                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                "provider activity matched count is below verified returns",
+            )
+        source_calls_list.append(SourceCallReceipt(
             source_call_id=f"source-call:{index}",
             knowledge_source_id=context.knowledge_source_id,
             request_hash=canonical_sha256(
@@ -3753,19 +3791,10 @@ def interpret_retrieval_response(
                 if _warning_codes(item.get("warning") or item.get("warnings"))
                 else "succeeded"
             ),
-            matched_count=int(item.get("count", accounting.candidate_count)),
-            returned_count=(
-                0
-                if item.get("error") is not None
-                else max(
-                    int(item.get("count", accounting.candidate_count)),
-                    accounting.candidate_count,
-                    references_by_activity.get(str(item.get("id")), 0),
-                )
-            ),
-        )
-        for index, item in enumerate(search_activities)
-    )
+            matched_count=matched_count,
+            returned_count=returned_count,
+        ))
+    source_calls = tuple(source_calls_list)
     if not source_calls:
         source_calls = (
             SourceCallReceipt(
@@ -3775,10 +3804,7 @@ def interpret_retrieval_response(
                 response_hash=canonical_sha256(response),
                 status="partial" if accounting.warning_codes else "succeeded",
                 matched_count=accounting.candidate_count,
-                returned_count=max(
-                    accounting.candidate_count,
-                    len(references),
-                ),
+                returned_count=verified_document_count,
             ),
         )
     planned = tuple(
@@ -3789,7 +3815,7 @@ def interpret_retrieval_response(
             knowledge_source_ids=(
                 context.knowledge_source_id,
             ),
-            returned_reference_count=references_by_activity.get(
+            returned_reference_count=verified_references_by_activity.get(
                 str(item.get("id")),
                 0,
             ),
@@ -3966,7 +3992,7 @@ def interpret_retrieval_response(
     output_bytes = len(canonical_json(response).encode("utf-8"))
     agentic_mode = context.retrieval_mode.startswith("agentic_")
     direct_mode = context.retrieval_mode == "direct_hybrid_prefilter"
-    observed_search_records = max(accounting.candidate_count, len(references))
+    observed_search_records = verified_document_count
     observed_direct_requests = 1 if direct_mode else 0
     exhausted = tuple(sorted({
         *(
@@ -3976,7 +4002,7 @@ def interpret_retrieval_response(
         ),
         *(
             ("max_search_result_records",)
-            if observed_search_records > budget.max_search_result_records
+            if accounting.candidate_count > budget.max_search_result_records
             else ()
         ),
         *(
@@ -4095,9 +4121,9 @@ def interpret_retrieval_response(
         "planned_subqueries": planned,
         "activity": activity,
         "source_calls": source_calls,
-        "matched_document_count": observed_search_records,
+        "matched_document_count": accounting.candidate_count,
         "returned_document_count": observed_search_records,
-        "reference_count": len(references),
+        "reference_count": verified_document_count,
         "unique_canonical_id_count": len(returned_ids),
         "canonical_citation_count": len(citation_mappings),
         "returned_members": returned_member_tuple,

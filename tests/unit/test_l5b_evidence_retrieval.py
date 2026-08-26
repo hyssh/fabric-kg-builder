@@ -1826,9 +1826,13 @@ def test_candidate_accounting_remains_budget_defense_in_depth(
     )
 
     assert result.coverage.coverage_status == "partial"
-    assert result.coverage.budget.observed_search_result_records == 2
-    assert result.coverage.returned_document_count == 2
+    assert result.coverage.matched_document_count == 2
+    assert result.coverage.budget.observed_search_result_records == 1
+    assert result.coverage.budget.observed_output_documents == 1
+    assert result.coverage.returned_document_count == 1
     assert result.coverage.reference_count == 1
+    assert result.coverage.source_calls[0].matched_count == 1
+    assert result.coverage.source_calls[0].returned_count == 1
     assert result.coverage.budget.budget_exhausted_dimensions == (
         "max_search_result_records",
     )
@@ -2087,6 +2091,15 @@ def test_returned_document_spoof_never_reaches_citation(
 
     assert result.coverage.coverage_status == "partial"
     assert len(result.citations) == len(returned_documents) - 1
+    assert result.coverage.matched_document_count == len(returned_documents)
+    assert result.coverage.returned_document_count == len(result.citations)
+    assert result.coverage.reference_count == len(result.citations)
+    assert result.coverage.budget.observed_output_documents == len(
+        result.citations
+    )
+    assert result.coverage.source_calls[0].returned_count == len(
+        result.citations
+    )
     assert all(
         citation.search_document_id != sealed_documents[0]["id"]
         for citation in result.citations
@@ -2696,11 +2709,163 @@ def test_direct_candidate_overage_exhausts_shared_record_budget_only(
     )
 
     assert result.coverage.coverage_status == "partial"
-    assert result.coverage.returned_document_count == 11
+    assert result.coverage.matched_document_count == 11
+    assert result.coverage.returned_document_count == len(documents)
     assert result.coverage.reference_count == len(documents)
-    assert result.coverage.budget.observed_search_result_records == 11
+    assert result.coverage.budget.observed_search_result_records == len(documents)
+    assert result.coverage.budget.observed_output_documents == len(documents)
+    assert result.coverage.source_calls[0].matched_count == 11
+    assert result.coverage.source_calls[0].returned_count == len(documents)
     assert result.coverage.budget.observed_agentic_source_calls == 0
     assert result.coverage.budget.observed_direct_search_requests == 1
     assert result.coverage.budget.budget_exhausted_dimensions == (
         "max_search_result_records",
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ("agentic_preview", "direct_hybrid_prefilter"))
+def test_candidate_count_below_verified_returns_fails_closed(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context(mode)
+    document = _reference_document(
+        context,
+        retrieval_scope.canonical_member_ids[0],
+        0,
+    )
+    publication = _runtime_publication(context, [document])
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+    response = (
+        _agentic_response(context, [document])
+        if mode == "agentic_preview"
+        else {"value": [document]}
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=publication,
+            checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+            response=response,
+            accounting=L5bRemoteAccounting(
+                operation_refs=(f"{mode}:contradictory",),
+                request_bytes=100,
+                response_bytes=1000,
+                retry_count=0,
+                retry_wait_ms=0,
+                latency_ms=25,
+                candidate_count=0,
+                output_tokens=0 if mode == "agentic_preview" else None,
+            ),
+        )
+
+
+@pytest.mark.unit
+def test_duplicate_search_activity_ids_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    document = _reference_document(
+        context,
+        retrieval_scope.canonical_member_ids[0],
+        0,
+    )
+    publication = _runtime_publication(context, [document])
+    response = _agentic_response(context, [document])
+    response["activity"].append(dict(response["activity"][0]))
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="duplicate Search activity IDs",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=publication,
+            checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+            response=response,
+            accounting=_retrieval_accounting(1),
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ("agentic_preview", "direct_hybrid_prefilter"))
+def test_zero_result_accounting_stays_zero(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context(mode)
+    publication = _runtime_publication(context, [])
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+    response = (
+        {
+            "requestId": "provider-request:zero",
+            "references": [],
+            "activity": [{
+                "id": 1,
+                "type": "searchIndex",
+                "knowledgeSourceName": context.knowledge_source_id,
+                "count": 0,
+                "searchIndexArguments": {"search": "none"},
+            }],
+        }
+        if mode == "agentic_preview"
+        else {"value": []}
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response=response,
+        accounting=L5bRemoteAccounting(
+            operation_refs=(f"{mode}:zero",),
+            request_bytes=100,
+            response_bytes=100,
+            retry_count=0,
+            retry_wait_ms=0,
+            latency_ms=25,
+            candidate_count=0,
+            output_tokens=0 if mode == "agentic_preview" else None,
+        ),
+    )
+
+    assert result.coverage.matched_document_count == 0
+    assert result.coverage.returned_document_count == 0
+    assert result.coverage.reference_count == 0
+    assert result.coverage.budget.observed_output_documents == 0
+    assert result.coverage.budget.observed_search_result_records == 0
+    assert result.coverage.source_calls[0].matched_count == 0
+    assert result.coverage.source_calls[0].returned_count == 0
