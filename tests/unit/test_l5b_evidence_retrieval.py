@@ -2227,19 +2227,16 @@ def test_preverification_attacker_metadata_is_never_echoed(
     response = _agentic_response(context, returned_documents)
     response["requestId"] = malicious
     response["correlationId"] = malicious
-    response["activity"][0]["id"] = malicious
     response["activity"][0]["warning"] = malicious
-    for reference in response["references"]:
-        reference["activitySource"] = malicious
     response["references"].extend((
         {
             "id": malicious,
-            "activitySource": malicious,
+            "activitySource": 1,
             "sourceData": unknown,
         },
         {
             "id": malicious,
-            "activitySource": malicious,
+            "activitySource": 1,
             "sourceData": unknown,
         },
     ))
@@ -3165,11 +3162,12 @@ def test_agentic_multi_call_candidates_reconcile_to_exact_sum(
     retrieval_scope = resolved_retrieval_scope()
     context, budget = request_context()
     response = _agentic_response(context, [])
+    response["activity"][0]["id"] = "source-a"
     response["activity"][0]["count"] = 4
+    response["activity"][0].pop("searchIndexArguments")
     second = dict(response["activity"][0])
-    second["id"] = 2
+    second["id"] = "source-b"
     second["count"] = 6
-    second["searchIndexArguments"] = {"search": "second"}
     response["activity"].append(second)
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
@@ -3199,7 +3197,119 @@ def test_agentic_multi_call_candidates_reconcile_to_exact_sum(
     assert result.coverage.matched_document_count == 10
     assert result.coverage.budget.observed_search_candidate_records == 10
     assert tuple(call.matched_count for call in result.coverage.source_calls) == (4, 6)
+    assert len({call.request_hash for call in result.coverage.source_calls}) == 2
     assert result.coverage.budget.budget_exhausted_dimensions == ()
+
+
+@pytest.mark.unit
+def test_two_idless_agentic_activities_cannot_be_aggregated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    response = _agentic_response(context, [])
+    response["activity"] = [
+        {
+            "type": "searchIndex",
+            "count": count,
+            "searchIndexArguments": {"search": f"query-{index}"},
+        }
+        for index, count in enumerate((4, 6))
+    ]
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="provider Search activity identity is invalid",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=_runtime_publication(context, []),
+            response=response,
+            accounting=L5bRemoteAccounting(
+                operation_refs=("agentic:idless-aggregate",),
+                request_bytes=100,
+                response_bytes=100,
+                retry_count=0,
+                retry_wait_ms=0,
+                latency_ms=25,
+                candidate_count=10,
+                output_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "activity_id",
+    (None, "", " ", [], True, "control\nid", "x" * 257),
+)
+def test_agentic_activity_id_must_be_schema_valid(
+    activity_id: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    response = _agentic_response(context, [])
+    response["activity"][0]["id"] = activity_id
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="provider Search activity identity is invalid",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=_runtime_publication(context, []),
+            response=response,
+            accounting=_retrieval_accounting(0),
+        )
+
+
+@pytest.mark.unit
+def test_agentic_activity_id_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    response = _agentic_response(context, [])
+    response["activity"][0].pop("id")
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="provider Search activity identity is invalid",
+    ):
+        interpret_retrieval_response(
+            context,
+            budget,
+            ontology_scope,
+            retrieval_scope,
+            publication=_runtime_publication(context, []),
+            response=response,
+            accounting=_retrieval_accounting(0),
+        )
 
 
 @pytest.mark.unit

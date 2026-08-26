@@ -64,6 +64,11 @@ L4, and hardened L5a authority.
   `@odata.count`, when returned, must likewise equal adapter accounting.
   Missing, negative, contradictory, or signed-int32-overflowing candidate
   accounting fails closed before a receipt or citation can be returned;
+- every counted agentic Search activity requires a present, bounded,
+  control-free provider activity ID of an accepted scalar type; IDs are
+  canonicalized for duplicate detection and bound opaquely into source-call
+  and subquery receipt IDs. Missing, malformed, or duplicate activity identity
+  fails closed before candidate aggregation;
 - exhausted dimensions are derived exactly when observation exceeds ceiling;
   provider overexecution produces one typed `retrieval_budget_exhausted`
   failure with `partial` or `abstain` coverage instead of validation failure or

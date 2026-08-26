@@ -3123,6 +3123,35 @@ def _opaque_external_id(prefix: str, value: Any) -> str:
     return f"{prefix}:{canonical_sha256(value)[:32]}"
 
 
+_PROVIDER_ACTIVITY_ID_MAX_LENGTH = 256
+
+
+def _provider_activity_key(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        if 0 <= value <= _PROVIDER_INT32_MAX:
+            return f"integer:{value}"
+    elif isinstance(value, str):
+        normalized = normalize_nfc(value)
+        if (
+            value == normalized
+            and value == value.strip()
+            and 0 < len(value) <= _PROVIDER_ACTIVITY_ID_MAX_LENGTH
+            and not any(unicodedata.category(character).startswith("C") for character in value)
+        ):
+            return f"string:{value}"
+    raise L5bPublicationError(
+        "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+        "provider Search activity identity is invalid",
+    )
+
+
+def _reference_activity_key(value: object) -> str | None:
+    try:
+        return _provider_activity_key(value)
+    except L5bPublicationError:
+        return None
+
+
 def _response_items(
     context: AgenticRetrievalRequestContextV1_1,
     response: Mapping[str, Any],
@@ -3534,11 +3563,21 @@ def interpret_retrieval_response(
     if degradation_code is not None and context.retrieval_mode != "direct_hybrid_prefilter":
         raise ValueError("only direct retrieval can report vector degradation")
     references, activity_raw = _response_items(context, response)
-    search_activity_ids = {
-        str(item.get("id"))
+    search_activities = tuple(
+        item
         for item in activity_raw
-        if item.get("type") == "searchIndex" and item.get("id") is not None
-    }
+        if isinstance(item, Mapping) and item.get("type") == "searchIndex"
+    )
+    search_activity_keys = tuple(
+        _provider_activity_key(item.get("id"))
+        for item in search_activities
+    )
+    if len(search_activity_keys) != len(set(search_activity_keys)):
+        raise L5bPublicationError(
+            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+            "provider response contains duplicate Search activity IDs",
+        )
+    search_activity_ids = set(search_activity_keys)
     citations: list[SearchCitationEnvelope] = []
     presentations: list[CitationPresentation] = []
     missing_reference_ids: list[str] = []
@@ -3598,7 +3637,8 @@ def interpret_retrieval_response(
             continue
         if (
             context.retrieval_mode.startswith("agentic_")
-            and str(reference.get("activitySource")) not in search_activity_ids
+            and _reference_activity_key(reference.get("activitySource"))
+            not in search_activity_ids
         ):
             missing_reference_ids.append(local_reference_id)
             quarantined_findings.setdefault("citation_invalid", set())
@@ -3644,7 +3684,7 @@ def interpret_retrieval_response(
         presentations.append(presentation)
         activity_source = reference.get("activitySource")
         if activity_source is not None:
-            activity_key = str(activity_source)
+            activity_key = _provider_activity_key(activity_source)
             verified_references_by_activity[activity_key] = (
                 verified_references_by_activity.get(activity_key, 0) + 1
             )
@@ -3766,23 +3806,8 @@ def interpret_retrieval_response(
         )
         for index, item in enumerate(activity_raw)
     )
-    search_activities = tuple(
-        item
-        for item in activity_raw
-        if item.get("type") == "searchIndex"
-    )
     if context.retrieval_mode.startswith("agentic_") and not search_activities:
         raise ValueError("agentic response omitted searchIndex activity")
-    search_activity_id_values = [
-        str(item["id"])
-        for item in search_activities
-        if item.get("id") is not None
-    ]
-    if len(search_activity_id_values) != len(set(search_activity_id_values)):
-        raise L5bPublicationError(
-            "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
-            "provider response contains duplicate Search activity IDs",
-        )
     if context.retrieval_mode.startswith("agentic_"):
         candidate_observation = 0
         for item in search_activities:
@@ -3826,12 +3851,12 @@ def interpret_retrieval_response(
             "provider candidate count is below verified returned documents",
         )
     source_calls_list: list[SourceCallReceipt] = []
-    for index, item in enumerate(search_activities):
+    for item, activity_key in zip(search_activities, search_activity_keys, strict=True):
         matched_count = item["count"]
         returned_count = (
             0
             if item.get("error") is not None
-            else verified_references_by_activity.get(str(item.get("id")), 0)
+            else verified_references_by_activity.get(activity_key, 0)
         )
         if returned_count > matched_count:
             raise L5bPublicationError(
@@ -3839,13 +3864,13 @@ def interpret_retrieval_response(
                 "provider activity matched count is below verified returns",
             )
         source_calls_list.append(SourceCallReceipt(
-            source_call_id=f"source-call:{index}",
+            source_call_id=_opaque_external_id("source-call", activity_key),
             knowledge_source_id=context.knowledge_source_id,
             request_hash=canonical_sha256(
                 item.get("searchIndexArguments")
                 or {
                     "context": context.request_context_hash,
-                    "index": index,
+                    "activity": activity_key,
                 }
             ),
             response_hash=(
@@ -3876,18 +3901,22 @@ def interpret_retrieval_response(
         )
     planned = tuple(
         PlannedSubqueryReceipt(
-            subquery_id=f"subquery:{index}",
+            subquery_id=_opaque_external_id("subquery", activity_key),
             subquery_hash=canonical_sha256(item),
             executed=item.get("error") is None,
             knowledge_source_ids=(
                 context.knowledge_source_id,
             ),
             returned_reference_count=verified_references_by_activity.get(
-                str(item.get("id")),
+                activity_key,
                 0,
             ),
         )
-        for index, item in enumerate(search_activities)
+        for item, activity_key in zip(
+            search_activities,
+            search_activity_keys,
+            strict=True,
+        )
     )
     warnings = tuple(sorted({
         *_warning_codes(accounting.warning_codes),
