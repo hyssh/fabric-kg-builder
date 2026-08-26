@@ -1,0 +1,43 @@
+# L6 Agent Connection Guide
+
+L6 definitions are local artifacts in version 0.2.3. Do not deploy them from
+this stage.
+
+## Required existing connections
+
+1. A Fabric Data Agent project connection created through the existing
+   `FoundryProjectConnectionClient.upsert_fabric_data_agent` abstraction.
+2. A Foundry `RemoteTool` project connection created through
+   `FoundryProjectConnectionClient.upsert_remote_tool`.
+
+Pass only the resulting stable project connection IDs to
+`build_l6_agent_definition`. Credentials, workspace secrets, ACL principals,
+signed URLs, and provider metadata must not be embedded.
+
+```python
+from pathlib import Path
+
+from fabric_kg_builder.agent.l6_integration import (
+    build_l6_agent_definition,
+    persist_l6_agent_definition,
+)
+
+definition = build_l6_agent_definition(
+    agent_name="fabric-kg-evidence-agent",
+    fabric_data_agent_connection_id="connection:fabric-data-agent",
+    foundry_remote_tool_connection_id="connection:l6-remote-tool",
+)
+persist_l6_agent_definition(
+    Path("build/agent/l6-agent-definition.json"),
+    definition,
+)
+```
+
+The generated instructions require Ontology/Graph first, one filtered Search
+route second, exact citations, and partial/abstain when authority or coverage is
+incomplete. The downstream agent may synthesize at most once from the returned
+structured package. Fabric-kg never performs that synthesis.
+
+L7 must deploy the endpoint and definition, verify project connection
+audiences/RBAC, run live Graph and Search acceptance, and confirm definition
+read-back from Microsoft Foundry and Fabric Data Agent.

@@ -1844,6 +1844,61 @@ canonical IDs, and other persisted result fields.
 L5b does not activate CLI/Data Agent behavior, L6 answer synthesis, live Search
 or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.
 
+### 12.14 L6 Evidence-First Agent Integration
+
+L6 consumes only successful, intact L5a and L5b publication/read-back results.
+`require_l5a_publication_receipt` and `require_l5b_publication_receipt` run
+before the Graph host can execute. L6 does not edit C0 contracts, implement RDF
+behavior, or require RDF for readiness. Schema-1 behavior remains unchanged.
+
+The deterministic tool order is:
+
+```text
+resolve Ontology scope locally
+  -> execute at most one bounded canonical Graph request
+  -> retain exact canonical IDs/assertions/relationships/path hashes
+  -> execute at most one sealed L5b retrieval route
+  -> validate Runtime 1.1 coverage and citation hash links
+  -> emit zero-synthesis downstream input
+```
+
+The five public tool names are
+`fabric_kg_resolve_ontology_scope`,
+`fabric_kg_execute_bounded_graph_scope`,
+`fabric_kg_retrieve_scoped_evidence`,
+`fabric_kg_assemble_citation_presentation`, and
+`fabric_kg_report_coverage_readiness`. Their input and output JSON Schemas are
+generated from strict models by
+`fabric_kg_builder.agent.l6_integration.build_l6_tool_definitions`.
+
+Graph requests accept stable canonical IDs, approved relationship semantic IDs,
+approved graph path IDs, K, and record ceilings. They do not accept display-name
+parsing or model-generated GQL. Search cannot run before a valid Graph result.
+An empty, failed, overexecuted, stale, unauthorized, or out-of-scope Graph result
+abstains without hidden Search fallback. Direct filtered retrieval is permitted
+only when the exact Runtime 1.1 request context authorizes and binds its origin;
+it remains the single selected L5b route.
+
+Complete readiness requires exact Graph required-ID/assertion coverage and a
+complete `AgenticRetrievalCoverageReceiptV1_1`: no missing or unexpected
+members, duplicate/misassigned citations, warnings, truncation, source errors,
+ACL gaps, stale hashes, or exhausted dimensions. A safe non-empty evidence
+subset may be partial and carries only exact missing authority IDs. Otherwise
+L6 abstains. Ranked top-k is never completeness evidence.
+
+The downstream package contains Graph assertions, `SearchCitationEnvelope`,
+`CitationPresentation`, the full coverage receipt, readiness failures, and
+operation accounting. It contains no answer, summary, inferred fact, transient
+URL, credential, ACL principal, or provider secret. Fabric-kg performs zero
+downstream synthesis calls and records a one-call synthesis limit for the
+downstream agent boundary.
+
+Agent definitions are built and canonically hashed by
+`build_l6_agent_definition`, using the existing Fabric Data Agent and Foundry
+RemoteTool project connection IDs. `persist_l6_agent_definition` writes and
+reads back the canonical JSON byte-for-byte. L6 performs no live deployment;
+that remains an L7 activity.
+
 ## 13. Revision History
 
 | Date | Author | Summary |
@@ -1857,6 +1912,7 @@ or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.
 | 2026-08-23 | Copilot | Added §12.11: schema-2.0 Ontology/Graph publication is semantic-only and requires compile/deploy/persisted hash and count equivalence. |
 | 2026-08-25 | Copilot | Added §12.12: isolated L5a structured publication over sealed L4, persisted-definition lifecycle, exact read-back equivalence, and explicit Search/L6/L7 exclusions. |
 | 2026-08-25 | Copilot | Added §12.13: isolated L5b evidence publication and zero-synthesis Azure AI Search retrieval data plane. |
+| 2026-08-26 | Copilot | Added §12.14: bounded zero-synthesis L6 agent tools over intact L5a/L5b authority, exact Runtime 1.1 coverage/citation validation, local definition read-back, and explicit RDF/L7 exclusions. |
 
 ---
 
