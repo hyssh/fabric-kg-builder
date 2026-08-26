@@ -549,6 +549,11 @@ embedding, or retry path. Embedding calls and items are enabled or disabled
 together. Agentic modes cannot declare client vector or embedding request
 ceilings; direct mode may enable them. These are provider-neutral request
 ceilings and observations, not performance targets or permission to retry.
+If retry count is zero, retry wait must also be zero. A positive retry count
+with zero retry wait permits bounded immediate retries while disabling waits;
+a positive wait ceiling therefore always requires a positive retry-count
+ceiling. Observed wait is zero when no retry occurred, while an observed retry
+may have zero wait.
 
 `AgenticRetrievalRequestContext` seals knowledge-base, knowledge-source, Search
 index, capability, static base-policy, ACL, publication, hierarchy, scope,
@@ -606,8 +611,13 @@ ceiling and its exact observed counterpart. Its sorted
 only if observed use exceeds its ceiling. Missing, extra, duplicate, or
 undeclared names fail validation. Provider over-execution is preserved as
 observed and is never clamped to the request ceiling. Any exhausted dimension
-requires `partial` or `abstain`, a typed `retrieval_budget_exhausted` failure,
-and never `complete`. Mode-inapplicable observations are zero. Search candidate
+requires `partial` or `abstain`, exactly one typed
+`retrieval_budget_exhausted` failure, and never `complete`; that failure is
+forbidden when no dimension is exhausted. Failure records and source-call IDs
+are unique. Mode-inapplicable observations are zero. Agentic source-call and
+direct Search request observations each equal the exact number of source-call
+records in their applicable mode, including over-execution beyond the ceiling.
+Search candidate
 records equal matched candidates, while Search result records and output
 documents equal returned documents; these quantities are not interchangeable.
 The same exact rule covers Ontology/Graph scope requests and result records,

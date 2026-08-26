@@ -1131,17 +1131,19 @@ def coverage_receipt_v1_1(
             for index in range(planned_count)
         )
         source_call_count = observation_values["observed_agentic_source_calls"]
-        existing_call = receipt_values["source_calls"][0]
-        receipt_values["source_calls"] = tuple(
-            SourceCallReceipt.model_validate(
-                {
-                    **existing_call,
-                    "source_call_id": f"source-call:search:{index}",
-                    "request_hash": canonical_sha256({"source-call": index}),
-                }
-            )
-            for index in range(source_call_count)
+    else:
+        source_call_count = observation_values["observed_direct_search_requests"]
+    existing_call = receipt_values["source_calls"][0]
+    receipt_values["source_calls"] = tuple(
+        SourceCallReceipt.model_validate(
+            {
+                **existing_call,
+                "source_call_id": f"source-call:search:{index}",
+                "request_hash": canonical_sha256({"source-call": index}),
+            }
         )
+        for index in range(source_call_count)
+    )
     if exhausted:
         receipt_values.update(
             {
@@ -2417,6 +2419,100 @@ def test_runtime_1_1_direct_vector_embedding_retry_overrun_is_exact() -> None:
 
 
 @pytest.mark.contract
+def test_runtime_1_1_direct_request_overrun_reconciles_exact_source_calls() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        mode="direct_hybrid_prefilter",
+        status="partial",
+        observed={"observed_direct_search_requests": 2},
+    )
+    assert receipt.budget.observed_direct_search_requests == 2
+    assert len(receipt.source_calls) == 2
+    assert len({call.source_call_id for call in receipt.source_calls}) == 2
+    assert receipt.budget.budget_exhausted_dimensions == (
+        "max_direct_search_requests",
+    )
+
+    payload = receipt.model_dump(mode="python")
+    payload["budget"]["observed_direct_search_requests"] = 1
+    payload["budget"]["budget_exhausted_dimensions"] = ()
+    payload["coverage_status"] = "complete"
+    payload["failures"] = ()
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="request counts differ"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+    payload = receipt.model_dump(mode="python")
+    payload["source_calls"][1]["source_call_id"] = payload["source_calls"][0][
+        "source_call_id"
+    ]
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="source call IDs must be unique"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_runtime_1_1_retry_count_and_wait_coupling() -> None:
+    _, _, budget, _, _ = coverage_receipt_v1_1()
+    values = budget.model_dump(
+        mode="python",
+        exclude={"budget_hash"},
+        round_trip=True,
+    )
+    values.update({"max_retry_count": 0, "max_retry_wait_milliseconds": 0})
+    disabled = seal(QueryBudgetV1_1, "budget_hash", values)
+    assert disabled.max_retry_count == disabled.max_retry_wait_milliseconds == 0
+
+    values.update({"max_retry_count": 1, "max_retry_wait_milliseconds": 0})
+    immediate = seal(QueryBudgetV1_1, "budget_hash", values)
+    assert immediate.max_retry_count == 1
+    assert immediate.max_retry_wait_milliseconds == 0
+
+    values.update({"max_retry_count": 0, "max_retry_wait_milliseconds": 1})
+    with pytest.raises(ValidationError, match="retry wait ceiling must be zero"):
+        seal(QueryBudgetV1_1, "budget_hash", values)
+
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={"observed_retry_count": 3},
+    )
+    observation = receipt.budget.model_dump(mode="python")
+    observation.update(
+        {
+            "observed_retry_count": 0,
+            "observed_retry_wait_milliseconds": 1,
+            "budget_exhausted_dimensions": (),
+        }
+    )
+    with pytest.raises(ValidationError, match="observed retry wait must be zero"):
+        CoverageBudgetObservationV1_1.model_validate(observation)
+
+    observation.update(
+        {
+            "observed_retry_count": 1,
+            "observed_retry_wait_milliseconds": 0,
+        }
+    )
+    assert (
+        CoverageBudgetObservationV1_1.model_validate(
+            observation
+        ).observed_retry_wait_milliseconds
+        == 0
+    )
+
+
+@pytest.mark.contract
 @pytest.mark.parametrize(
     ("mutation", "match"),
     (
@@ -2501,7 +2597,7 @@ def test_runtime_1_1_rejects_complete_exhausted_clamped_and_mismatched_counts() 
             if key != "coverage_receipt_hash"
         }
     )
-    with pytest.raises(ValidationError, match="typed retrieval_budget_exhausted"):
+    with pytest.raises(ValidationError, match="exactly one retrieval_budget_exhausted"):
         AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
 
     complete, _, _, _, _ = coverage_receipt_v1_1()
@@ -2545,6 +2641,47 @@ def test_runtime_1_1_rejects_mode_inapplicable_observations() -> None:
 
 
 @pytest.mark.contract
+def test_runtime_1_1_budget_failure_is_exactly_iff_exhaustion() -> None:
+    receipt, _, _, _, _ = coverage_receipt_v1_1(
+        status="partial",
+        observed={"observed_retry_count": 3},
+    )
+    payload = receipt.model_dump(mode="python")
+    payload["failures"] = (*payload["failures"], payload["failures"][0])
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="retrieval failures must be unique"):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+    complete, _, _, _, _ = coverage_receipt_v1_1()
+    payload = complete.model_dump(mode="python")
+    payload["coverage_status"] = "abstain"
+    payload["failures"] = (
+        RetrievalFailure(
+            reason_code="retrieval_budget_exhausted",
+            remediation="downstream_abstention_required",
+        ),
+    )
+    payload["coverage_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "coverage_receipt_hash"
+        }
+    )
+    with pytest.raises(
+        ValidationError,
+        match="failure requires exhausted dimensions",
+    ):
+        AgenticRetrievalCoverageReceiptV1_1.model_validate(payload)
+
+
+@pytest.mark.contract
 def test_runtime_1_1_generic_fixtures_are_canonical_and_adversarial() -> None:
     valid_names = (
         "query-budget-v1.1-optional-disabled",
@@ -2552,6 +2689,8 @@ def test_runtime_1_1_generic_fixtures_are_canonical_and_adversarial() -> None:
         "agentic-coverage-receipt-v1.1-provider-overrun-partial",
         "agentic-coverage-receipt-v1.1-multi-overrun-abstain",
         "agentic-coverage-receipt-v1.1-graph-overrun-abstain",
+        "agentic-coverage-receipt-v1.1-direct-request-overrun-partial",
+        "query-budget-v1.1-immediate-retry",
     )
     for name in valid_names:
         parsed = parse_contract(
@@ -2574,6 +2713,12 @@ def test_runtime_1_1_generic_fixtures_are_canonical_and_adversarial() -> None:
         "agentic-coverage-receipt-v1.1-clamped-observation",
         "agentic-coverage-receipt-v1.1-mismatched-candidates",
         "agentic-coverage-receipt-v1.1-wrong-exhaustion-failure",
+        "agentic-coverage-receipt-v1.1-direct-call-mismatch",
+        "agentic-coverage-receipt-v1.1-duplicate-source-call-id",
+        "query-budget-v1.1-retry-wait-without-count",
+        "agentic-coverage-receipt-v1.1-retry-wait-without-retry",
+        "agentic-coverage-receipt-v1.1-duplicate-budget-failure",
+        "agentic-coverage-receipt-v1.1-false-budget-failure",
     )
     for name in invalid_names:
         with pytest.raises(ValidationError):

@@ -629,6 +629,10 @@ class QueryBudgetV1_1(QueryBudget):
             raise ValueError(
                 "agentic mode cannot declare client vector or embedding request ceilings"
             )
+        if self.max_retry_count == 0 and self.max_retry_wait_milliseconds != 0:
+            raise ValueError(
+                "retry wait ceiling must be zero when retry count ceiling is zero"
+            )
         return self
 
 
@@ -2251,6 +2255,13 @@ class CoverageBudgetObservationV1_1(CoverageBudgetObservation):
 
     @model_validator(mode="after")
     def _invariants(self) -> "CoverageBudgetObservationV1_1":
+        if (
+            self.observed_retry_count == 0
+            and self.observed_retry_wait_milliseconds != 0
+        ):
+            raise ValueError(
+                "observed retry wait must be zero when observed retry count is zero"
+            )
         comparisons = (
             (
                 "max_ontology_graph_scope_requests",
@@ -2592,7 +2603,8 @@ class AgenticRetrievalCoverageReceipt(ContractModel):
                 request_counts_valid = (
                     self.budget.observed_agentic_retrieval_invocations == 0
                     and self.budget.observed_agentic_source_calls == 0
-                    and self.budget.observed_direct_search_requests >= 1
+                    and self.budget.observed_direct_search_requests
+                    == expected_direct_requests
                 )
         else:
             request_counts_valid = (
@@ -3041,6 +3053,15 @@ class AgenticRetrievalCoverageReceiptV1_1(AgenticRetrievalCoverageReceipt):
             raise ValueError(
                 "direct mode has nonzero mode-inapplicable agentic observations"
             )
+        source_call_ids = [call.source_call_id for call in self.source_calls]
+        if len(source_call_ids) != len(set(source_call_ids)):
+            raise ValueError("source call IDs must be unique")
+        failure_keys = [
+            (failure.reason_code, failure.remediation, failure.canonical_ids)
+            for failure in self.failures
+        ]
+        if len(failure_keys) != len(set(failure_keys)):
+            raise ValueError("retrieval failures must be unique")
         if (
             self.budget.budget_exhausted_dimensions
             and self.coverage_status not in {"partial", "abstain"}
@@ -3048,12 +3069,17 @@ class AgenticRetrievalCoverageReceiptV1_1(AgenticRetrievalCoverageReceipt):
             raise ValueError(
                 "budget exhaustion requires partial or abstain coverage status"
             )
-        if self.budget.budget_exhausted_dimensions and not any(
+        budget_failure_count = sum(
             failure.reason_code == "retrieval_budget_exhausted"
             for failure in self.failures
-        ):
+        )
+        if self.budget.budget_exhausted_dimensions and budget_failure_count != 1:
             raise ValueError(
-                "budget exhaustion requires a typed retrieval_budget_exhausted failure"
+                "budget exhaustion requires exactly one retrieval_budget_exhausted failure"
+            )
+        if not self.budget.budget_exhausted_dimensions and budget_failure_count:
+            raise ValueError(
+                "retrieval_budget_exhausted failure requires exhausted dimensions"
             )
         return self
 
