@@ -910,6 +910,7 @@ def test_generated_schema_registry_matches_registered_kinds() -> None:
                     "EvidenceIdentityV1_1",
                     "RequiredMemberManifestIdentityV1_1",
                     "RequiredMemberSetProposalIdentityV1_1",
+                    "PublicationCrosswalkIdentityV1_1",
                 }
             )
         assert (

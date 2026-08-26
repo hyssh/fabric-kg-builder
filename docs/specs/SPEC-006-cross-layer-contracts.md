@@ -1,8 +1,8 @@
 # SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, C0.Publish, and C0.Runtime)
 
 **Status:** Approved foundation
-**Version:** 1.4.0
-**Date:** 2026-08-24
+**Version:** 1.5.0
+**Date:** 2026-08-25
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
 
@@ -106,7 +106,8 @@ readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 | `c0.canonical_property_assertion` | `CanonicalPropertyAssertion` | Typed `PropertyObservationRow` reference |
 | `c0.audit_projection` | `AuditProjection` | Complete accounting header |
 | `c0.semantic_serving_projection` | `SemanticServingProjection` | Exact asserted subset header |
-| `c0.publication_crosswalk` | `PublicationCrosswalk` | Canonical-to-physical mapping proof |
+| `c0.publication_crosswalk@1.0.0` | `PublicationCrosswalk` | Legacy canonical-to-physical mapping proof |
+| `c0.publication_crosswalk@1.1.0` | `PublicationCrosswalkV1_1` | Ownership/reference/materialization-separated mapping proof |
 | `c0.projection_equivalence` | `ProjectionEquivalence` | Expected/compiled/deployed/read-back equality proof |
 | `c0.governed_asset_reference` | `GovernedAssetReference` | Generic immutable delivery-asset reference |
 | `c0.access_policy` | `AccessPolicy` | Credential-free authorization and retention policy |
@@ -371,19 +372,53 @@ or activate L4 projection behavior.
 
 ## 10. C0.Publish contracts
 
-C0.Publish registers exactly four strict, frozen `1.0.0` contracts. They are
-proof and reference schemas only; they do not compile, deploy, read back, sign,
-authorize, retrieve, or log a remote resource.
+C0.Publish registers four strict, frozen contract kinds. Publication crosswalk
+readers `1.0.0` and `1.1.0` coexist; the other three contracts remain `1.0.0`.
+All are proof and reference schemas only; they do not compile, deploy, read
+back, sign, authorize, retrieve, or log a remote resource.
 
-`PublicationCrosswalk` maps upstream-owned canonical semantic type, property,
-relationship, hierarchy, and instance-key IDs to physical table/column IDs,
-Ontology BigInt IDs, Graph labels/aliases/properties, Search
-index/filter/vector fields, and Data Agent selected-property IDs. It seals the
-stable-ID lock, hierarchy, identity-policy, semantic-contract, and source
-projection hashes. Canonical IDs and physical namespace IDs are unique, and
-relationship endpoint key mappings must equal the canonical instance keys of
-their referenced types. The contract rejects physical ID reuse or collision;
-it never creates hierarchy, identity, or projection authority.
+Legacy `PublicationCrosswalk@1.0.0` retains its exact schema, canonical bytes,
+hashes, acceptance, and rejection behavior. It maps upstream-owned canonical
+semantic type, property, relationship, hierarchy, and instance-key IDs to
+physical namespaces, and requires every type key to resolve to that type's
+local property mappings. It is not reinterpreted or migrated implicitly.
+
+`PublicationCrosswalkV1_1@1.1.0` additively separates:
+
+- one global `SemanticPropertyOwnershipMappingV1_1` for every canonical
+  property, including its sole owner type, data type, value-semantics ID, and
+  semantic Ontology/Graph/Data Agent mapping authority;
+- each type's locally owned canonical property IDs and explicit
+  `InheritedPropertyReferenceV1_1` values. An inherited reference repeats the
+  owner, data type, and value-semantics ID and must equal the global authority;
+- exact type-local `PhysicalPropertyBindingV1_1` materializations for every
+  effective local or inherited canonical property. A binding may repeat
+  physical presence in another type but cannot change canonical ID, owner,
+  data type, or value semantics;
+- explicit `PhysicalSurrogateKeyBindingV1_1` values, which are non-semantic,
+  cannot use canonical property IDs, and cannot enter canonical property or
+  instance-key sets; and
+- relationship endpoint canonical key sets separately from relationship-local
+  physical endpoint bindings. Canonical endpoint sets must equal the selected
+  type mappings' exact canonical instance keys, and each local endpoint
+  binding must resolve exactly one of those keys.
+
+Every canonical property has exactly one ownership mapping and exactly one
+local owner claim. Unknown owners, orphan properties, duplicate ownership,
+cross-type ownership shadows, self-inheritance, contradictory inherited
+metadata, missing/extra/duplicate physical bindings, physical-column
+collisions, surrogate/canonical collisions, unknown parents, hierarchy cycles,
+endpoint key mismatches, and coordinated hash reseals fail closed. Physical
+columns are unique within their containing type or relationship; the same
+canonical property may be physically materialized in multiple type tables
+without creating additional semantic ownership.
+
+The successor seals the same stable-ID lock, hierarchy, identity-policy,
+semantic-contract, source-projection, membership-manifest, and source-artifact
+authorities. It performs no hierarchy inference and does not decide whether an
+owner is a valid ancestor. L5a must compare the explicitly selected owner and
+parent references against the sealed `DomainContract` authority before
+publication. The contract remains provider- and domain-neutral.
 
 The crosswalk references, without copying or recomputing membership:
 

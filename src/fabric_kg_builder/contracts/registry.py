@@ -38,6 +38,7 @@ from .publication import (
     GovernedAssetReference,
     ProjectionEquivalence,
     PublicationCrosswalk,
+    PublicationCrosswalkV1_1,
 )
 from .receipts import ArtifactManifest, StageReceipt
 from .resources import StageResourceMetrics
@@ -88,6 +89,7 @@ SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
 SUPPORTED_VERSIONS["c0.evidence_span"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.required_member_set_proposal"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.required_member_manifest"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.publication_crosswalk"] = ("1.0.0", "1.1.0")
 
 REGISTERED_CONTRACT_VERSIONS: dict[tuple[str, str], type[ContractModel]] = {
     (kind, CONTRACT_VERSION): model for kind, model in REGISTERED_CONTRACTS.items()
@@ -99,6 +101,9 @@ REGISTERED_CONTRACT_VERSIONS[
 REGISTERED_CONTRACT_VERSIONS[
     ("c0.required_member_manifest", "1.1.0")
 ] = RequiredMemberManifestV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.publication_crosswalk", "1.1.0")
+] = PublicationCrosswalkV1_1
 
 
 def negotiate_contract(kind: str, version: str) -> type[ContractModel]:
@@ -153,6 +158,7 @@ def schema_catalog() -> dict[tuple[str, str], dict[str, Any]]:
                     "EvidenceIdentityV1_1",
                     "RequiredMemberManifestIdentityV1_1",
                     "RequiredMemberSetProposalIdentityV1_1",
+                    "PublicationCrosswalkIdentityV1_1",
                 }
             )
         identity_schema["properties"]["contract_kind"] = {
@@ -185,7 +191,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.4.0",
+        "registry_version": "1.5.0",
         "schemas": [
             {
                 "contract_kind": kind,
