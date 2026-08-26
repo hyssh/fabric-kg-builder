@@ -482,8 +482,10 @@ boundary and adoption sequence are specified in
 - exact common-schema, domain-schema, SHACL-shapes, optional-instance, and
   provenance/authority named graphs, with schema triples separated from
   instance/evidence triples and access-policy IDs/hashes on protected graphs;
-- exact class, property, hierarchy, key, endpoint, range, and value-type
-  inventory under a conservative OWL 2 RL-compatible derived vocabulary;
+- exact class, property, relationship, hierarchy, key, endpoint, range, and
+  value-type inventory under a conservative OWL 2 RL-compatible derived
+  vocabulary. Every term IRI is the injective canonical uppercase
+  percent-encoding of its canonical ID under the governed ontology base;
 - explicit endpoint-set encoding. Multiple domains or ranges cannot be emitted
   as repeated `rdfs:domain` or `rdfs:range` statements because that denotes an
   intersection; the contract permits a deterministic named `owl:unionOf` node
@@ -501,20 +503,32 @@ remains completeness authority; neither RDF nor SHACL recomputes membership.
 `RdfSerializationArtifact` records one exact Turtle, RDF/XML, optional JSON-LD,
 or canonical N-Quads artifact. It fixes media type and W3C syntax version,
 content hash, byte/triple/graph counts, named graph IDs, canonical ID-set hash,
+sealed graph ID/IRI/role/required/policy/count bindings and inventory hash,
 RDFC-1.0 canonical dataset hash, and deterministic no-unstable-blank-node
-policy. Turtle is the human-review form, RDF/XML is the compatibility form,
+policy. Public artifacts contain exactly common/domain/SHACL roles and no
+policy; protected artifacts contain mandatory provenance and optional
+instances with exact policy. `validate_against_manifest` rejects any missing,
+extra, relabeled, optionalized, or policy-shifted graph. Turtle is the human-review form, RDF/XML is the compatibility form,
 JSON-LD is optional, and canonical N-Quads is the equivalence form. Sorted
 N-Triples is not a dataset-canonicalization substitute. Public schema
 artifacts cannot carry ACL principal policy; protected dataset artifacts must
 reference an `AccessPolicy` by exact ID/hash.
 
 `RdfValidationReceipt` records SHACL shapes/report hashes, conformance and
-severity counts, validator identity/version, and exact observations after each
-serialization is parsed back to a dataset. Exact equivalence requires the same
+severity counts, validator identity/version, and observations sealed to the
+actual artifact contract hash, format/media type, content/dataset hash, graph
+inventory hash/IDs, and triple count. Its format set exactly equals the
+manifest, including selected JSON-LD and no extras. The cross-object acceptance
+hook binds the exact manifest, authority, and artifact set. Exact equivalence requires the same
 RDFC-1.0 graph hash, named graph set, triple count/set, and authority-reference
 set. Missing/extra triples, serialization or base-IRI drift, label-derived
 identity, unstable blank nodes, or SHACL violations force
 `exact_round_trip_equivalent=false`.
+
+Every top-level RDF contract recursively rejects secrets, bearer/API-key
+material, URI credentials, signed/SAS query keys, and percent-encoded variants
+in nested identifiers, references, metadata, and alignments while allowing
+stable governed and W3C vocabulary IRIs.
 
 ## 11. Manifests, receipts, and resource evidence
 

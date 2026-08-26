@@ -19,8 +19,10 @@ from fabric_kg_builder.contracts import (
     RdfNamedGraph,
     RdfProjectionManifest,
     RdfPropertyDefinition,
+    RdfRelationshipDefinition,
     RdfSerializationArtifact,
     RdfSerializationObservation,
+    RdfSerializedGraphBinding,
     RdfShaclValidationSummary,
     RdfSourceAuthorityTuple,
     RdfValidationReceipt,
@@ -32,7 +34,20 @@ from fabric_kg_builder.contracts import (
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "contracts"
+ADVERSARIAL = FIXTURES / "adversarial"
 SCHEMAS = Path(__file__).parents[2] / "src" / "fabric_kg_builder" / "contracts" / "schemas"
+BASELINE_COMMIT = "1d1db5ac0dd3bcbf0534a502c7277ab939f9a03e"
+SECRET_VALUES = json.loads(
+    (ADVERSARIAL / "rdf-secret-values.json").read_text(encoding="utf-8")
+)
+NONCANONICAL_IRIS = json.loads(
+    (ADVERSARIAL / "rdf-noncanonical-iris.json").read_text(encoding="utf-8")
+)
+BINDING_MUTATIONS = json.loads(
+    (ADVERSARIAL / "rdf-artifact-binding-mutations.json").read_text(
+        encoding="utf-8"
+    )
+)
 H = {
     letter: letter * 64
     for letter in "abcdef0123456789"
@@ -106,31 +121,21 @@ def vocabulary() -> RdfVocabularyInventory:
     classes = (
         RdfClassDefinition(
             canonical_class_id="semantic-type:asset",
-            class_iri="https://ontology.contoso.test/kg/class/asset",
+            class_iri="https://ontology.contoso.test/kg/semantic-type%3Aasset",
             parent_canonical_class_ids=(),
             exact_key_property_ids=("property:asset:id",),
         ),
         RdfClassDefinition(
             canonical_class_id="semantic-type:facility",
-            class_iri="https://ontology.contoso.test/kg/class/facility",
+            class_iri="https://ontology.contoso.test/kg/semantic-type%3Afacility",
             parent_canonical_class_ids=(),
             exact_key_property_ids=("property:facility:id",),
         ),
     )
     properties = (
         RdfPropertyDefinition(
-            canonical_property_id="property:asset:facility",
-            property_iri="https://ontology.contoso.test/kg/property/asset-facility",
-            term_kind="object_property",
-            domain_canonical_class_ids=("semantic-type:asset",),
-            range_canonical_ids=("semantic-type:facility",),
-            value_type_iris=(),
-            endpoint_encoding="single_rdfs_term",
-            deterministic_endpoint_node_iri=None,
-        ),
-        RdfPropertyDefinition(
             canonical_property_id="property:asset:id",
-            property_iri="https://ontology.contoso.test/kg/property/asset-id",
+            property_iri="https://ontology.contoso.test/kg/property%3Aasset%3Aid",
             term_kind="datatype_property",
             domain_canonical_class_ids=("semantic-type:asset",),
             range_canonical_ids=(),
@@ -140,7 +145,7 @@ def vocabulary() -> RdfVocabularyInventory:
         ),
         RdfPropertyDefinition(
             canonical_property_id="property:facility:id",
-            property_iri="https://ontology.contoso.test/kg/property/facility-id",
+            property_iri="https://ontology.contoso.test/kg/property%3Afacility%3Aid",
             term_kind="datatype_property",
             domain_canonical_class_ids=("semantic-type:facility",),
             range_canonical_ids=(),
@@ -149,15 +154,31 @@ def vocabulary() -> RdfVocabularyInventory:
             deterministic_endpoint_node_iri=None,
         ),
     )
+    relationships = (
+        RdfRelationshipDefinition(
+            canonical_relationship_id="relationship:asset:facility",
+            relationship_iri=(
+                "https://ontology.contoso.test/kg/relationship%3Aasset%3Afacility"
+            ),
+            source_canonical_class_ids=("semantic-type:asset",),
+            target_canonical_class_ids=("semantic-type:facility",),
+            endpoint_encoding="single_rdfs_term",
+            deterministic_endpoint_node_iri=None,
+        ),
+    )
     values = {
         "owl_profile": "OWL 2 RL compatible derived vocabulary",
         "class_definitions": classes,
         "property_definitions": properties,
+        "relationship_definitions": relationships,
         "class_id_set_hash": canonical_sha256(
             sorted(item.canonical_class_id for item in classes)
         ),
         "property_id_set_hash": canonical_sha256(
             sorted(item.canonical_property_id for item in properties)
+        ),
+        "relationship_id_set_hash": canonical_sha256(
+            sorted(item.canonical_relationship_id for item in relationships)
         ),
         "hierarchy_hash": H["1"],
     }
@@ -252,6 +273,7 @@ def artifact(
     *,
     dataset_hash: str = H["8"],
     artifact_id: str | None = None,
+    exposure: str = "protected_dataset",
 ) -> RdfSerializationArtifact:
     profile = {
         "turtle": ("text/turtle", "RDF 1.1 Turtle"),
@@ -259,31 +281,60 @@ def artifact(
         "json_ld": ("application/ld+json", "JSON-LD 1.1"),
         "canonical_n_quads": ("application/n-quads", "RDF 1.1 N-Quads"),
     }[rdf_format]
+    projection = manifest()
+    graph_counts = {
+        "graph:common-schema": 10,
+        "graph:domain-schema": 10,
+        "graph:provenance": 12,
+        "graph:shapes": 10,
+    }
+    graph_bindings = tuple(
+        RdfSerializedGraphBinding(
+            graph_id=graph.graph_id,
+            graph_iri=graph.graph_iri,
+            graph_role=graph.graph_role,
+            required=graph.required,
+            triple_count=graph_counts[graph.graph_id],
+            graph_hash={
+                "graph:common-schema": H["1"],
+                "graph:domain-schema": H["2"],
+                "graph:provenance": H["3"],
+                "graph:shapes": H["4"],
+            }[graph.graph_id],
+            access_policy_id=graph.access_policy_id,
+            access_policy_hash=graph.access_policy_hash,
+        )
+        for graph in projection.named_graphs
+        if exposure == "protected_dataset"
+        or graph.graph_role in {"common_schema", "domain_schema", "shacl_shapes"}
+    )
+    named_graph_ids = tuple(item.graph_id for item in graph_bindings)
     values = {
         "identity": identity("c0.rdf_serialization_artifact"),
         "rdf_serialization_artifact_id": artifact_id or f"rdf-artifact:{rdf_format}",
-        "rdf_projection_manifest_id": manifest().rdf_projection_manifest_id,
-        "rdf_projection_manifest_hash": manifest().projection_manifest_hash,
+        "rdf_projection_manifest_id": projection.rdf_projection_manifest_id,
+        "rdf_projection_manifest_hash": projection.projection_manifest_hash,
         "serialization_format": rdf_format,
         "media_type": profile[0],
         "w3c_syntax_version": profile[1],
-        "exposure": "protected_dataset",
+        "exposure": exposure,
         "content_hash": H["9"],
         "byte_count": 1024,
-        "triple_count": 42,
-        "graph_count": 4,
-        "named_graph_ids": (
-            "graph:common-schema",
-            "graph:domain-schema",
-            "graph:provenance",
-            "graph:shapes",
-        ),
+        "triple_count": sum(item.triple_count for item in graph_bindings),
+        "graph_count": len(graph_bindings),
+        "named_graph_ids": named_graph_ids,
+        "graph_bindings": graph_bindings,
+        "graph_inventory_hash": canonical_sha256(graph_bindings),
         "canonical_id_set_hash": H["a"],
         "canonical_dataset_hash_algorithm": "RDFC-1.0",
         "canonical_dataset_hash": dataset_hash,
         "blank_node_policy": "none_after_deterministic_skolemization",
-        "access_policy_id": "access-policy:rdf-protected",
-        "access_policy_hash": H["5"],
+        "access_policy_id": (
+            "access-policy:rdf-protected"
+            if exposure == "protected_dataset"
+            else None
+        ),
+        "access_policy_hash": H["5"] if exposure == "protected_dataset" else None,
     }
     return RdfSerializationArtifact(
         **values,
@@ -293,19 +344,22 @@ def artifact(
 
 def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
     formats = ("turtle", "rdf_xml", "canonical_n_quads")
+    artifacts = {rdf_format: artifact(rdf_format) for rdf_format in formats}
     observations = tuple(
         RdfSerializationObservation(
-            rdf_serialization_artifact_id=f"rdf-artifact:{rdf_format}",
+            rdf_serialization_artifact_id=artifacts[
+                rdf_format
+            ].rdf_serialization_artifact_id,
+            rdf_serialization_artifact_hash=artifacts[
+                rdf_format
+            ].serialization_artifact_hash,
             serialization_format=rdf_format,
-            content_hash=H["9"],
+            media_type=artifacts[rdf_format].media_type,
+            content_hash=artifacts[rdf_format].content_hash,
             canonical_dataset_hash=H["7"] if drift and rdf_format == "turtle" else H["8"],
-            named_graph_ids=(
-                "graph:common-schema",
-                "graph:domain-schema",
-                "graph:provenance",
-                "graph:shapes",
-            ),
-            triple_count=42,
+            named_graph_ids=artifacts[rdf_format].named_graph_ids,
+            graph_inventory_hash=artifacts[rdf_format].graph_inventory_hash,
+            triple_count=artifacts[rdf_format].triple_count,
             missing_triple_count=0,
             extra_triple_count=0,
             authority_reference_set_hash=H["6"],
@@ -327,6 +381,7 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
         "canonical_n_quads_artifact_id": "rdf-artifact:canonical_n_quads",
         "canonical_dataset_hash_algorithm": "RDFC-1.0",
         "canonical_dataset_hash": H["8"],
+        "required_serialization_formats": manifest().required_serialization_formats,
         "observations": observations,
         "shacl_validation": RdfShaclValidationSummary(
             shapes_hash=H["5"],
@@ -346,6 +401,46 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
     )
 
 
+def reseal_manifest_payload(payload: dict[str, object]) -> None:
+    payload["required_serialization_formats"] = sorted(
+        set(payload["required_serialization_formats"])
+    )
+    vocabulary_payload = payload["vocabulary"]
+    assert isinstance(vocabulary_payload, dict)
+    vocabulary_payload["class_id_set_hash"] = canonical_sha256(
+        sorted(
+            item["canonical_class_id"]
+            for item in vocabulary_payload["class_definitions"]
+        )
+    )
+    vocabulary_payload["property_id_set_hash"] = canonical_sha256(
+        sorted(
+            item["canonical_property_id"]
+            for item in vocabulary_payload["property_definitions"]
+        )
+    )
+    vocabulary_payload["relationship_id_set_hash"] = canonical_sha256(
+        sorted(
+            item["canonical_relationship_id"]
+            for item in vocabulary_payload["relationship_definitions"]
+        )
+    )
+    vocabulary_payload["vocabulary_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in vocabulary_payload.items()
+            if key != "vocabulary_hash"
+        }
+    )
+    payload["projection_manifest_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "projection_manifest_hash"
+        }
+    )
+
+
 @pytest.mark.contract
 def test_rdf_contracts_are_strict_derived_views() -> None:
     projection = manifest()
@@ -359,7 +454,15 @@ def test_rdf_contracts_are_strict_derived_views() -> None:
     assert parse_contract(canonical_json(projection)) == projection
     for rdf_format in ("turtle", "rdf_xml", "json_ld", "canonical_n_quads"):
         assert parse_contract(canonical_json(artifact(rdf_format))) == artifact(rdf_format)
-    assert parse_contract(canonical_json(validation_receipt())) == validation_receipt()
+    receipt = validation_receipt()
+    assert parse_contract(canonical_json(receipt)) == receipt
+    receipt.validate_against_manifest_and_artifacts(
+        projection,
+        tuple(
+            artifact(rdf_format)
+            for rdf_format in projection.required_serialization_formats
+        ),
+    )
 
 
 @pytest.mark.contract
@@ -424,6 +527,103 @@ def test_serialization_profile_and_access_boundaries_fail_closed() -> None:
 
 
 @pytest.mark.contract
+def test_public_artifact_cannot_relabel_or_include_protected_graphs() -> None:
+    public = artifact("turtle", exposure="public_schema")
+    public.validate_against_manifest(manifest())
+    payload = public.model_dump(mode="json")
+    protected = artifact("turtle").graph_bindings[2]
+    payload["graph_bindings"].append(protected.model_dump(mode="json"))
+    payload["named_graph_ids"].append(protected.graph_id)
+    payload["graph_bindings"].sort(key=lambda item: item["graph_id"])
+    payload["named_graph_ids"].sort()
+    payload["graph_count"] += 1
+    payload["triple_count"] += protected.triple_count
+    payload["graph_inventory_hash"] = canonical_sha256(payload["graph_bindings"])
+    payload["serialization_artifact_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "serialization_artifact_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="public.*graph roles"):
+        RdfSerializationArtifact.model_validate(payload)
+
+    payload = artifact("turtle").model_dump(mode="json")
+    payload["graph_bindings"][2]["graph_role"] = "domain_schema"
+    payload["graph_bindings"][2]["access_policy_id"] = None
+    payload["graph_bindings"][2]["access_policy_hash"] = None
+    payload["graph_inventory_hash"] = canonical_sha256(payload["graph_bindings"])
+    payload["serialization_artifact_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "serialization_artifact_hash"
+        }
+    )
+    with pytest.raises(ValidationError, match="roles must be unique"):
+        RdfSerializationArtifact.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_receipt_binds_exact_manifest_and_artifact_seals() -> None:
+    projection = manifest()
+    artifacts = tuple(
+        artifact(rdf_format)
+        for rdf_format in projection.required_serialization_formats
+    )
+    receipt = validation_receipt()
+    receipt.validate_against_manifest_and_artifacts(projection, artifacts)
+
+    payload = receipt.model_dump(mode="json")
+    payload["observations"][0]["rdf_serialization_artifact_hash"] = (
+        BINDING_MUTATIONS["artifact_hash"]
+    )
+    payload["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    resealed = RdfValidationReceipt.model_validate(payload)
+    with pytest.raises(ValueError, match="artifact hash mismatch"):
+        resealed.validate_against_manifest_and_artifacts(projection, artifacts)
+
+    with pytest.raises(ValueError, match="exact artifact set"):
+        receipt.validate_against_manifest_and_artifacts(projection, artifacts[:-1])
+
+
+@pytest.mark.contract
+def test_receipt_formats_equal_manifest_including_required_json_ld() -> None:
+    payload = manifest().model_dump(mode="json")
+    payload["required_serialization_formats"].append("json_ld")
+    reseal_manifest_payload(payload)
+    projection = RdfProjectionManifest.model_validate(payload)
+    receipt_payload = validation_receipt().model_dump(mode="json")
+    receipt_payload["rdf_projection_manifest_hash"] = projection.projection_manifest_hash
+    receipt_payload["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in receipt_payload.items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    receipt = RdfValidationReceipt.model_validate(receipt_payload)
+    artifacts = tuple(
+        artifact(rdf_format)
+        for rdf_format in receipt.required_serialization_formats
+    )
+    with pytest.raises(ValueError, match="required formats differ"):
+        receipt.validate_against_manifest_and_artifacts(projection, artifacts)
+
+    receipt_payload = receipt.model_dump(mode="json")
+    receipt_payload["required_serialization_formats"].append("json_ld")
+    with pytest.raises(ValidationError, match="exactly equal"):
+        RdfValidationReceipt.model_validate(receipt_payload)
+
+
+@pytest.mark.contract
 def test_manifest_rejects_duplicate_graph_roles_and_stale_hierarchy() -> None:
     payload = manifest().model_dump(mode="json")
     payload["named_graphs"][1]["graph_role"] = "common_schema"
@@ -441,6 +641,99 @@ def test_manifest_rejects_duplicate_graph_roles_and_stale_hierarchy() -> None:
     )
     with pytest.raises(ValidationError, match="hierarchy differs"):
         RdfProjectionManifest.model_validate(payload)
+
+    payload = manifest().model_dump(mode="json")
+    payload["named_graphs"][0]["required"] = False
+    with pytest.raises(ValidationError, match="required=true"):
+        RdfProjectionManifest.model_validate(payload)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("bad_iri", NONCANONICAL_IRIS)
+def test_vocabulary_iris_require_exact_governed_canonical_mapping(
+    bad_iri: str,
+) -> None:
+    payload = manifest().model_dump(mode="json")
+    payload["vocabulary"]["class_definitions"][0]["class_iri"] = bad_iri
+    reseal_manifest_payload(payload)
+    with pytest.raises(ValidationError, match="canonical-ID mapping"):
+        RdfProjectionManifest.model_validate(payload)
+
+    payload = manifest().model_dump(mode="json")
+    payload["vocabulary"]["class_definitions"][1]["class_iri"] = payload[
+        "vocabulary"
+    ]["class_definitions"][0]["class_iri"]
+    reseal_manifest_payload(payload)
+    with pytest.raises(ValidationError, match="globally injective"):
+        RdfProjectionManifest.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_vocabulary_mapping_rejects_path_traversal_canonical_ids() -> None:
+    payload = manifest().model_dump(mode="json")
+    payload["vocabulary"]["class_definitions"][0][
+        "canonical_class_id"
+    ] = "../asset"
+    payload["vocabulary"]["class_definitions"][0][
+        "class_iri"
+    ] = "https://ontology.contoso.test/kg/..%2Fasset"
+    payload["vocabulary"]["property_definitions"][0][
+        "domain_canonical_class_ids"
+    ] = ["../asset"]
+    payload["vocabulary"]["relationship_definitions"][0][
+        "source_canonical_class_ids"
+    ] = ["../asset"]
+    reseal_manifest_payload(payload)
+    with pytest.raises(ValidationError, match="path traversal"):
+        RdfProjectionManifest.model_validate(payload)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("contract_factory", "mutation"),
+    [
+        (
+            manifest,
+            lambda payload: payload["source_authority"].__setitem__(
+                "domain_contract_id",
+                SECRET_VALUES[0],
+            ),
+        ),
+        (
+            artifact,
+            lambda payload: payload.__setitem__(
+                "access_policy_id",
+                SECRET_VALUES[1],
+            ),
+        ),
+        (
+            validation_receipt,
+            lambda payload: payload["shacl_validation"].__setitem__(
+                "validator_id",
+                SECRET_VALUES[2],
+            ),
+        ),
+    ],
+)
+def test_recursive_secret_rejection_across_top_level_rdf_contracts(
+    contract_factory: object,
+    mutation: object,
+) -> None:
+    if contract_factory is artifact:
+        model = artifact("turtle")
+        model_type = RdfSerializationArtifact
+    else:
+        model = contract_factory()
+        model_type = type(model)
+    payload = model.model_dump(mode="json")
+    mutation(payload)
+    with pytest.raises(ValidationError, match="secret|credential|signed|transient"):
+        model_type.model_validate(payload)
+
+    nested = manifest().model_dump(mode="json")
+    nested["external_alignments"][0]["approval_reference_id"] = SECRET_VALUES[3]
+    with pytest.raises(ValidationError, match="secret|credential"):
+        RdfProjectionManifest.model_validate(nested)
 
 
 @pytest.mark.contract
@@ -501,7 +794,14 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         assert committed.read_bytes() == generated.read_bytes()
 
     baseline_paths = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", "HEAD", "src/fabric_kg_builder/contracts/schemas"],
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            BASELINE_COMMIT,
+            "src/fabric_kg_builder/contracts/schemas",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -510,7 +810,7 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         if path.endswith("/registry.json"):
             continue
         baseline = subprocess.run(
-            ["git", "show", f"HEAD:{path}"],
+            ["git", "show", f"{BASELINE_COMMIT}:{path}"],
             check=True,
             capture_output=True,
         ).stdout
@@ -521,7 +821,7 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
             [
                 "git",
                 "show",
-                "HEAD:src/fabric_kg_builder/contracts/schemas/registry.json",
+                f"{BASELINE_COMMIT}:src/fabric_kg_builder/contracts/schemas/registry.json",
             ],
             check=True,
             capture_output=True,

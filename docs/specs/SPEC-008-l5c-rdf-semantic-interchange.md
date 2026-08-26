@@ -85,7 +85,12 @@ The ontology IRI, version IRI, and semantic version are explicit, and the
 version IRI contains that semantic version.
 The namespace governance decision is bound by exact ID/hash.
 
-Canonical IDs map deterministically to UTF-8 percent-encoded path segments.
+Canonical IDs map deterministically under mapping version `1.0` to UTF-8
+percent-encoded path segments with canonical uppercase escapes. Exact term
+output is `ontology_base_iri + percent_encode(canonical_id)`. Class, property,
+and relationship mappings are globally injective and reject external bases,
+collisions, label-derived names, noncanonical escape case, and path traversal.
+Instance/skolem mapping is separately versioned under the governed instance base.
 Labels are annotations only and never define identity. Nodes without a
 canonical ID use deterministic skolem IRIs; unstable blank-node identity is
 forbidden in persisted artifacts and fails round-trip validation.
@@ -102,6 +107,10 @@ The dataset inventory has these named graph roles:
 | `instances` | no | Canonical instance and relationship assertions |
 | `provenance_authority` | yes | Authority, source, evidence, governed-asset IDs/hashes and PROV links |
 
+Every mandatory role exists exactly once and declares `required=true`. An
+instances graph is optional in the manifest, but when present it is required by
+the represented dataset. Graph IDs and IRIs are unique.
+
 Schema graphs contain schema triples only. Instance and provenance graphs
 contain instance/evidence triples only and carry exact access-policy IDs/hashes.
 The RDF dataset contains no full source quotes, secrets, ACL principals,
@@ -109,9 +118,10 @@ transient URLs, or signed URLs. Search remains the detailed quote surface.
 
 ## 7. Vocabulary and endpoint semantics
 
-The manifest inventories exact classes, properties, parents, key properties,
-domain endpoint sets, range endpoint sets, and literal value types. Every ID
-resolves within the inventory and every exact ID set is sealed.
+The manifest inventories exact classes, properties, explicit relationships,
+parents, key properties, source/domain endpoint sets, target/range endpoint
+sets, and literal value types. Every ID resolves within the inventory and every
+exact ID set is sealed.
 
 The declared vocabulary is a conservative OWL 2 RL-compatible derived
 vocabulary. For one domain or range, a single RDFS term is permitted. Multiple
@@ -133,6 +143,8 @@ optional. Each artifact records:
 - exact media type and W3C syntax version;
 - content SHA-256 and byte count;
 - triple count, graph count, and exact named graph IDs;
+- sealed graph ID/IRI/role/required/policy/triple-count bindings and exact
+  graph-inventory hash;
 - canonical ID-set hash;
 - `canonical_dataset_hash_algorithm="RDFC-1.0"` and canonical dataset hash; and
 - `blank_node_policy="none_after_deterministic_skolemization"`.
@@ -143,12 +155,25 @@ graphs, triple set/count, and authority-reference set. Missing or extra triples,
 serialization drift, base-IRI drift, label identity, or unstable blank nodes
 make the receipt non-equivalent.
 
+Standalone artifact validation enforces exact role sets by exposure:
+`public_schema` contains exactly common/domain/SHACL roles with no ACL policy;
+`protected_dataset` adds mandatory provenance and optional instances, whose
+policies equal the artifact policy. `validate_against_manifest` rejects any
+missing, extra, relabeled, optionalized, or policy-shifted graph binding.
+
 ## 9. SHACL boundary
 
 SHACL validates canonical identity, keys, cardinality, relationship endpoints,
 and types in the projection. A receipt records the shapes hash, conforms flag,
 violation/warning/info counts, report hash, and validator identity/version.
 `conforms` is true exactly when violation count is zero.
+
+Every observation seals the actual artifact contract hash, format/media type,
+content and canonical-dataset hashes, graph inventory hash/IDs, and triple
+count. Receipt formats equal observation formats.
+`validate_against_manifest_and_artifacts` requires that set to equal the
+manifest exactly, including JSON-LD when selected and no undeclared extra, and
+binds the exact manifest, authority, and artifact set.
 
 `RequiredMemberManifest@1.1.0` remains completeness authority. SHACL checks
 that the RDF projection matches the sealed membership; it does not discover,
@@ -163,6 +188,11 @@ immutable source artifact/version/hash; license; and approval ID/hash.
 There is no default `owl:imports`, remote fetch, URL in implementation code, or
 copied third-party ontology content. Approval of metadata does not authorize
 network retrieval or semantic adoption.
+
+Manifest, artifact, and receipt validation recursively rejects bearer tokens,
+API keys, URI credentials, SAS/signed query parameters, secret-looking values,
+and percent-encoded variants from nested IDs, references, metadata, and
+alignment values. Stable governed and W3C vocabulary IRIs remain permitted.
 
 ## 11. Access boundary
 
