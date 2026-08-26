@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import resource
 import shutil
@@ -119,46 +120,128 @@ _FIXED_FILES = {
     Path("resource-metrics.json"),
     Path("stage-receipt.json"),
 }
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_EPOCH_DATE = date(1970, 1, 1)
+_EPOCH_DATETIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _typed_value_error(data_type: str, detail: str) -> L5aPublicationError:
+    return L5aPublicationError(
+        "L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+        f"value does not match canonical property type {data_type!r}: {detail}",
+    )
+
+
+def _normalize_string(value: Any) -> str:
+    if not isinstance(value, str):
+        raise _typed_value_error("string", "expected str")
+    return value
+
+
+def _normalize_integer(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise _typed_value_error("integer", "expected non-boolean int")
+    if not _INT64_MIN <= value <= _INT64_MAX:
+        raise _typed_value_error("integer", "outside signed int64 range")
+    return value
+
+
+def _normalize_number(value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise _typed_value_error("number", "expected non-boolean int or float")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise _typed_value_error("number", "not representable as float64") from exc
+    if not math.isfinite(normalized):
+        raise _typed_value_error("number", "float64 value must be finite")
+    return normalized
+
+
+def _normalize_boolean(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise _typed_value_error("boolean", "expected bool")
+    return value
+
+
+def _normalize_date(value: Any) -> date:
+    if not isinstance(value, date) or isinstance(value, datetime):
+        raise _typed_value_error("date", "expected date without time")
+    days = (value - _EPOCH_DATE).days
+    if not -(2**31) <= days <= 2**31 - 1:
+        raise _typed_value_error("date", "outside Arrow date32 range")
+    try:
+        pa.scalar(value, type=pa.date32())
+    except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError) as exc:
+        raise _typed_value_error("date", "not representable as Arrow date32") from exc
+    return value
+
+
+def _normalize_datetime(value: Any) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise _typed_value_error("datetime", "expected timezone-aware datetime")
+    try:
+        offset = value.utcoffset()
+    except Exception as exc:
+        raise _typed_value_error("datetime", "timezone offset is invalid") from exc
+    if offset is None:
+        raise _typed_value_error("datetime", "timezone offset is undefined")
+    try:
+        normalized = value.astimezone(timezone.utc)
+        delta = normalized - _EPOCH_DATETIME
+        micros = (
+            delta.days * 86_400_000_000
+            + delta.seconds * 1_000_000
+            + delta.microseconds
+        )
+        if not _INT64_MIN <= micros <= _INT64_MAX:
+            raise _typed_value_error(
+                "datetime",
+                "outside Arrow timestamp[us] range",
+            )
+        pa.scalar(normalized, type=pa.timestamp("us", tz="UTC"))
+    except L5aPublicationError:
+        raise
+    except Exception as exc:
+        raise _typed_value_error(
+            "datetime",
+            "not representable as UTC Arrow timestamp[us]",
+        ) from exc
+    return normalized
+
+
 _CANONICAL_TYPE_RULES = {
     "string": (
         pa.string(),
-        lambda value: isinstance(value, str),
-        lambda value: value,
+        _normalize_string,
     ),
     "integer": (
         pa.int64(),
-        lambda value: isinstance(value, int) and not isinstance(value, bool),
-        lambda value: value,
+        _normalize_integer,
     ),
     "number": (
         pa.float64(),
-        lambda value: isinstance(value, (int, float))
-        and not isinstance(value, bool),
-        lambda value: value,
+        _normalize_number,
     ),
     "boolean": (
         pa.bool_(),
-        lambda value: isinstance(value, bool),
-        lambda value: value,
+        _normalize_boolean,
     ),
     "date": (
         pa.date32(),
-        lambda value: isinstance(value, date)
-        and not isinstance(value, datetime),
-        lambda value: value,
+        _normalize_date,
     ),
     "datetime": (
         pa.timestamp("us", tz="UTC"),
-        lambda value: isinstance(value, datetime)
-        and value.tzinfo is not None,
-        lambda value: value.astimezone(timezone.utc),
+        _normalize_datetime,
     ),
 }
 
 
 def _canonical_arrow_type(data_type: str) -> pa.DataType:
     try:
-        arrow_type, _validator, _normalizer = _CANONICAL_TYPE_RULES[data_type]
+        arrow_type, _normalizer = _CANONICAL_TYPE_RULES[data_type]
         return arrow_type
     except KeyError as exc:
         raise L5aPublicationError(
@@ -171,15 +254,10 @@ def _canonical_typed_value(data_type: str, value: Any) -> Any:
     if value is None:
         return None
     try:
-        _arrow_type, validator, normalizer = _CANONICAL_TYPE_RULES[data_type]
+        _arrow_type, normalizer = _CANONICAL_TYPE_RULES[data_type]
     except KeyError:
         _canonical_arrow_type(data_type)
         raise AssertionError("unreachable")
-    if not validator(value):
-        raise L5aPublicationError(
-            "L5A_PROPERTY_VALUE_TYPE_MISMATCH",
-            f"value does not match canonical property type {data_type!r}",
-        )
     return normalizer(value)
 
 
@@ -643,6 +721,57 @@ def _schema_descriptor(schema: pa.Schema) -> list[dict[str, Any]]:
     ]
 
 
+def _typed_fingerprint_scalar(data_type: pa.DataType, value: Any) -> Any:
+    if value is None:
+        return None
+    if pa.types.is_date32(data_type):
+        normalized = _normalize_date(value)
+        return {
+            "$l5a_arrow_scalar": {
+                "type": "date32",
+                "days_since_epoch": (normalized - _EPOCH_DATE).days,
+            }
+        }
+    if pa.types.is_timestamp(data_type):
+        if data_type.unit != "us" or data_type.tz != "UTC":
+            raise L5aPublicationError(
+                "L5A_TYPED_FINGERPRINT_UNSUPPORTED",
+                f"unsupported Arrow timestamp type {data_type}",
+            )
+        normalized = _normalize_datetime(value)
+        delta = normalized - _EPOCH_DATETIME
+        return {
+            "$l5a_arrow_scalar": {
+                "type": "timestamp[us,UTC]",
+                "microseconds_since_epoch": (
+                    delta.days * 86_400_000_000
+                    + delta.seconds * 1_000_000
+                    + delta.microseconds
+                ),
+            }
+        }
+    if pa.types.is_floating(data_type):
+        return _normalize_number(value)
+    if pa.types.is_integer(data_type):
+        return _normalize_integer(value)
+    if pa.types.is_boolean(data_type):
+        return _normalize_boolean(value)
+    if pa.types.is_string(data_type):
+        return _normalize_string(value)
+    return value
+
+
+def _typed_table_fingerprint_rows(table: pa.Table) -> list[dict[str, Any]]:
+    rows = table.to_pylist()
+    return [
+        {
+            field.name: _typed_fingerprint_scalar(field.type, row[field.name])
+            for field in table.schema
+        }
+        for row in rows
+    ]
+
+
 def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
     id_column = "__canonical_id" if "__canonical_id" in table.column_names else None
     if id_column is None:
@@ -685,13 +814,14 @@ def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
             ]
     else:
         ids = [str(value) for value in table[id_column].to_pylist()]
-    rows = table.to_pylist()
     return L5aTableSnapshot(
         table_id=table_id,
         schema_hash=canonical_sha256(_schema_descriptor(table.schema)),
         row_count=table.num_rows,
         canonical_id_set_hash=canonical_sha256(sorted(ids)),
-        row_fingerprint=canonical_sha256(rows),
+        row_fingerprint=canonical_sha256(
+            _typed_table_fingerprint_rows(table)
+        ),
     )
 
 

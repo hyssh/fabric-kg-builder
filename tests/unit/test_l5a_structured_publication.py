@@ -4,7 +4,7 @@ import dataclasses
 import copy
 import json
 import shutil
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pyarrow as pa
@@ -55,6 +55,7 @@ from fabric_kg_builder.serving.structured_publication import (
     _equivalences,
     _expected_state,
     _required_member_snapshots,
+    _table_snapshot,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
 from tests.unit.test_schema2_validation_stage import _subtypes
@@ -732,6 +733,100 @@ def test_l5a_rejects_invalid_runtime_property_values(
         match="L5A_PROPERTY_VALUE_TYPE_MISMATCH",
     ):
         _canonical_typed_value(data_type, invalid_value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invalid_value",
+    (float("nan"), float("inf"), float("-inf"), 10**400),
+)
+def test_l5a_rejects_nonfinite_or_overflowing_float64(
+    invalid_value,
+) -> None:
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+    ):
+        _canonical_typed_value("number", invalid_value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid_value", (-(2**63) - 1, 2**63))
+def test_l5a_rejects_integer_outside_int64(invalid_value: int) -> None:
+    with pytest.raises(
+        L5aPublicationError,
+        match="outside signed int64 range",
+    ):
+        _canonical_typed_value("integer", invalid_value)
+
+
+class _UndefinedOffset(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+
+@pytest.mark.unit
+def test_l5a_rejects_datetime_with_undefined_offset() -> None:
+    value = datetime(2026, 8, 25, tzinfo=_UndefinedOffset())
+    with pytest.raises(
+        L5aPublicationError,
+        match="timezone offset is undefined",
+    ):
+        _canonical_typed_value("datetime", value)
+
+
+@pytest.mark.unit
+def test_l5a_typed_date_datetime_fingerprint_survives_parquet_roundtrip(
+    tmp_path: Path,
+) -> None:
+    schema = pa.schema([
+        pa.field("__canonical_id", pa.string(), nullable=False),
+        pa.field("event_date", pa.date32(), nullable=False),
+        pa.field(
+            "event_time",
+            pa.timestamp("us", tz="UTC"),
+            nullable=False,
+        ),
+    ])
+    table = pa.Table.from_pylist(
+        [{
+            "__canonical_id": "entity:one",
+            "event_date": date(2026, 8, 25),
+            "event_time": datetime(
+                2026,
+                8,
+                25,
+                18,
+                27,
+                32,
+                123456,
+                tzinfo=timezone.utc,
+            ),
+        }],
+        schema=schema,
+    )
+    path = tmp_path / "typed.parquet"
+    pq.write_table(table, path)
+    read_back = pq.read_table(path)
+
+    expected = _table_snapshot("typed", table)
+    actual = _table_snapshot("typed", read_back)
+    assert actual == expected
+
+    tampered = pa.Table.from_pylist(
+        [{
+            "__canonical_id": "entity:one",
+            "event_date": date(2026, 8, 26),
+            "event_time": read_back.to_pylist()[0]["event_time"],
+        }],
+        schema=schema,
+    )
+    assert _table_snapshot("typed", tampered).row_fingerprint != (
+        expected.row_fingerprint
+    )
 
 
 @pytest.mark.unit
