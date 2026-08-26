@@ -13,9 +13,12 @@ sealed evidence data and returns citations plus structural coverage only.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import math
 import os
+import re
 import resource
 import shutil
 import tempfile
@@ -25,11 +28,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
+from urllib.parse import urlparse
 
 from fabric_kg_builder.contracts.base import (
     canonical_json,
     canonical_sha256,
     deterministic_contract_id,
+    normalize_nfc,
+    reject_secret_text,
 )
 from fabric_kg_builder.contracts.evidence import EvidenceSpanV1_1, SourceUnit
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
@@ -41,6 +47,7 @@ from fabric_kg_builder.contracts.publication import (
 )
 from fabric_kg_builder.contracts.receipts import ArtifactEntry, ArtifactManifest, StageReceipt
 from fabric_kg_builder.contracts.resources import StageResourceMetrics
+from fabric_kg_builder.contracts.resources import validate_receipt_resources
 from fabric_kg_builder.contracts.runtime import (
     ActivityReceipt,
     AgenticRetrievalCoverageReceipt,
@@ -557,6 +564,122 @@ def _asset_by_source_file(
     return indexed
 
 
+def _validate_governed_asset_input(
+    l5a: L5aStageResult,
+    assets: Sequence[GovernedAssetReference],
+    policy: AccessPolicy,
+) -> tuple[GovernedAssetReference, ...]:
+    ordered = tuple(sorted(
+        assets,
+        key=lambda item: item.governed_asset_reference_id,
+    ))
+    expected = l5a.compiled.governed_assets
+    ids = [item.governed_asset_reference_id for item in assets]
+    if (
+        len(ids) != len(set(ids))
+        or len(ordered) != len(expected)
+        or ordered != expected
+    ):
+        raise L5bPublicationError(
+            "L5B_GOVERNED_ASSET_SET_MISMATCH",
+            "governed assets must exactly equal sealed L5a ID/hash/content authority",
+        )
+    for asset in ordered:
+        try:
+            asset.validate_access_policy(policy)
+        except ValueError as exc:
+            raise L5bPublicationError(
+                "L5B_GOVERNED_ASSET_POLICY_MISMATCH",
+                str(exc),
+            ) from exc
+        if (
+            asset.identity.project_id != l5a.compiled.source.receipt.identity.project_id
+            or asset.identity.domain_contract_hash
+            != l5a.compiled.source.receipt.identity.domain_contract_hash
+            or asset.identity.semantic_contract_hash
+            != l5a.compiled.source.projection.sealed_semantic_contract_hash
+        ):
+            raise L5bPublicationError(
+                "L5B_GOVERNED_ASSET_AUTHORITY_MISMATCH",
+                f"governed asset {asset.governed_asset_reference_id} is stale",
+            )
+    return ordered
+
+
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+_CONNECTION_STRING_MARKERS = (
+    "defaultendpointsprotocol=",
+    "accountname=",
+    "accountkey=",
+    "sharedaccesssignature=",
+    "client_secret=",
+    "connection string",
+    "server=",
+    "driver=",
+    "password=",
+    "pwd=",
+    "user id=",
+    "userid=",
+    "uid=",
+    "username=",
+    "user=",
+    "host=",
+    "database=",
+    "initial catalog=",
+    "data source=",
+    "dsn=",
+    "port=",
+)
+_CONNECTION_STRING_KEY_RE = re.compile(
+    r"(?i)(?:^|;)\s*(?:"
+    r"defaultendpointsprotocol|accountname|accountkey|sharedaccesssignature|"
+    r"client_secret|password|pwd|user\s*id|userid|uid|username|user|"
+    r"host|database|initial\s+catalog|data\s+source|dsn|port|server|driver"
+    r")\s*="
+)
+
+
+def _safe_source_display_name(value: str, *, source_file_id: str) -> str:
+    if not isinstance(value, str):
+        raise L5bPublicationError(
+            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            f"display name for {source_file_id} must be text",
+        )
+    if value != normalize_nfc(value) or not value.strip() or value != value.strip():
+        raise L5bPublicationError(
+            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            f"display name for {source_file_id} must be nonempty NFC text",
+        )
+    try:
+        reject_secret_text(value, field_name="original_document_name")
+    except ValueError as exc:
+        raise L5bPublicationError(
+            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            str(exc),
+        ) from exc
+    parsed = urlparse(value)
+    folded = value.casefold()
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or "://" in value
+        or value.startswith(("/", "\\", "~"))
+        or _WINDOWS_ABSOLUTE_PATH.match(value)
+        or "/" in value
+        or "\\" in value
+        or "?" in value
+        or "#" in value
+        or any(ord(char) < 32 for char in value)
+        or any(marker in folded for marker in _CONNECTION_STRING_MARKERS)
+        or _CONNECTION_STRING_KEY_RE.search(value)
+    ):
+        raise L5bPublicationError(
+            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            f"display name for {source_file_id} must be a safe filename, not a URL, path, locator, or credential",
+        )
+    return value
+
+
 def _manifest_ids_by_member(l5a: L5aStageResult) -> dict[str, tuple[str, ...]]:
     memberships: dict[str, set[str]] = {}
     for row in l5a.compiled.required_member_rows:
@@ -712,12 +835,27 @@ def _assertion_documents(
                         "L5B_SOURCE_FILE_NAME_MISSING",
                         f"source file name missing for {span.source_file_id}",
                     )
+                display_name = _safe_source_display_name(
+                    source_file_names[span.source_file_id],
+                    source_file_id=span.source_file_id,
+                )
                 asset = asset_by_file.get(span.source_file_id)
-                if asset is not None and (
+                if asset is None:
+                    raise L5bPublicationError(
+                        "L5B_GOVERNED_SOURCE_ASSET_MISSING",
+                        f"evidence {evidence_id} has no exact governed L5a source asset",
+                    )
+                asset_locator = asset.immutable_locator.to_authority()
+                evidence_locator = span.locator.to_authority()
+                for field_name in ("char_start", "char_end"):
+                    asset_locator.pop(field_name, None)
+                    evidence_locator.pop(field_name, None)
+                if (
                     asset.asset_version_id != span.asset_version_id
+                    or asset.asset_id != span.identity.asset_id
                     or asset.content_hash != span.identity.content_hash
-                    or asset.immutable_locator.to_authority()
-                    != span.locator.to_authority()
+                    or asset.source_file_id != span.source_file_id
+                    or asset_locator != evidence_locator
                 ):
                     raise L5bPublicationError(
                         "L5B_GOVERNED_ASSET_MISMATCH",
@@ -740,7 +878,7 @@ def _assertion_documents(
                     "canonical_assertion_ids": [assertion_id],
                     "required_member_manifest_ids": list(member_manifest_ids),
                     "source_id": span.source_file_id,
-                    "original_document_name": source_file_names[span.source_file_id],
+                    "original_document_name": display_name,
                     "source_file_id": span.source_file_id,
                     "asset_id": span.identity.asset_id,
                     "asset_version_id": span.asset_version_id,
@@ -982,7 +1120,7 @@ def compile_l5b_publication(
     source_units: Sequence[SourceUnit],
     source_file_names: Mapping[str, str],
     access_policy: AccessPolicy,
-    governed_assets: Sequence[GovernedAssetReference] = (),
+    governed_assets: Sequence[GovernedAssetReference],
     target_id: str,
     index_name: str,
     knowledge_source_name: str,
@@ -1027,15 +1165,33 @@ def compile_l5b_publication(
             "Search target and resource names must be non-empty",
         )
     evidence = _validate_evidence_partitions(source, evidence_partitions)
+    ordered_assets = _validate_governed_asset_input(
+        l5a_result,
+        governed_assets,
+        access_policy,
+    )
+    source_file_ids = {item.source_file_id for item in source_units}
+    if set(source_file_names) != source_file_ids:
+        raise L5bPublicationError(
+            "L5B_SOURCE_FILE_NAME_SET_MISMATCH",
+            "source display names must exactly cover sealed SourceUnit source files",
+        )
+    safe_source_file_names = {
+        source_file_id: _safe_source_display_name(
+            source_file_names[source_file_id],
+            source_file_id=source_file_id,
+        )
+        for source_file_id in sorted(source_file_ids)
+    }
     documents = _assertion_documents(
         source,
         l5a_result,
         evidence=evidence,
         source_unit_manifest=source_unit_manifest,
         source_units=source_units,
-        source_file_names=source_file_names,
+        source_file_names=safe_source_file_names,
         policy=access_policy,
-        assets=governed_assets,
+        assets=ordered_assets,
     )
     index_definition = _index_definition(index_name)
     base_filter = canonical_scope_filter(
@@ -1095,7 +1251,7 @@ def compile_l5b_publication(
         "l5a_receipt_hash": l5a_result.receipt.receipt_hash,
         "access_policy_hash": access_policy.policy_hash,
         "governed_asset_hashes": sorted(
-            item.asset_reference_hash for item in governed_assets
+            item.asset_reference_hash for item in ordered_assets
         ),
         "target_id": target_id,
         "index_fingerprint": index_fingerprint,
@@ -1118,7 +1274,7 @@ def compile_l5b_publication(
         index_fingerprint=index_fingerprint,
         access_policy=access_policy,
         governed_assets=tuple(sorted(
-            governed_assets,
+            ordered_assets,
             key=lambda item: item.governed_asset_reference_id,
         )),
     )
@@ -1265,19 +1421,26 @@ def _projection_equivalences(
 
 def _artifact_manifest(
     compiled: L5bCompiledPublication,
-    root: Path,
     proofs: Sequence[ProjectionEquivalence],
 ) -> ArtifactManifest:
     files = (
-        ("index-definition", "l5b.search_index_definition", root / "index-definition.json"),
-        ("knowledge-source", "l5b.knowledge_source_definition", root / "knowledge-source-definition.json"),
-        ("knowledge-base", "l5b.knowledge_base_definition", root / "knowledge-base-definition.json"),
-        ("documents", "l5b.evidence_documents", root / "documents.json"),
-        ("projection-equivalence", "c0.projection_equivalence", root / "projection-equivalence.json"),
+        ("index-definition", "l5b.search_index_definition", compiled.index_definition),
+        (
+            "knowledge-source",
+            "l5b.knowledge_source_definition",
+            compiled.knowledge_source_definition,
+        ),
+        (
+            "knowledge-base",
+            "l5b.knowledge_base_definition",
+            compiled.knowledge_base_definition,
+        ),
+        ("documents", "l5b.evidence_documents", compiled.documents),
+        ("projection-equivalence", "c0.projection_equivalence", tuple(proofs)),
     )
     entries = []
-    for label, kind, path in files:
-        payload = path.read_bytes()
+    for label, kind, value in files:
+        payload = (canonical_json(value) + "\n").encode("utf-8")
         row_count = (
             len(compiled.documents)
             if label == "documents"
@@ -1293,7 +1456,7 @@ def _artifact_manifest(
             contract_kind=kind,
             contract_version="1.0.0",
             schema_hash=canonical_sha256({"kind": kind, "version": "1.0.0"}),
-            content_hash=canonical_sha256(json.loads(payload)),
+            content_hash=canonical_sha256(value),
             canonical_id_set_hash=(
                 canonical_sha256(compiled.document_ids)
                 if label == "documents"
@@ -1333,6 +1496,34 @@ def _budget_snapshot_hash() -> str:
             "rollback_mutation": L5B_ROLLBACK_MUTATION_CALLS,
             "ambiguous_recovery_inspect": L5B_AMBIGUOUS_RECOVERY_INSPECT_CALLS,
         },
+    })
+
+
+def _new_publication_token(compiled: L5bCompiledPublication) -> str:
+    nonce = uuid.uuid4().hex
+    seal = canonical_sha256({
+        "stage": "L5b",
+        "fingerprint": compiled.fingerprint,
+        "nonce": nonce,
+    })
+    return f"{nonce}.{seal}"
+
+
+def _publication_token_is_valid(
+    compiled: L5bCompiledPublication,
+    token: str,
+) -> bool:
+    parts = token.split(".")
+    if (
+        len(parts) != 2
+        or re.fullmatch(r"[0-9a-f]{32}", parts[0]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None
+    ):
+        return False
+    return parts[1] == canonical_sha256({
+        "stage": "L5b",
+        "fingerprint": compiled.fingerprint,
+        "nonce": parts[0],
     })
 
 
@@ -1448,16 +1639,239 @@ def _receipt(
     }))
 
 
+def _checkpoint_path(run_root: Path) -> Path:
+    return run_root.parent.parent / "checkpoints" / f"{run_root.name}.json"
+
+
+def _integrity_key_path(run_root: Path) -> Path:
+    return run_root.parent.parent / "integrity.key"
+
+
+def _integrity_key(run_root: Path, *, create: bool) -> bytes:
+    path = _integrity_key_path(run_root)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            pass
+        else:
+            try:
+                os.write(descriptor, os.urandom(32))
+            finally:
+                os.close(descriptor)
+    key = path.read_bytes()
+    if len(key) != 32:
+        raise L5bPublicationError(
+            "L5B_CHECKPOINT_KEY_INVALID",
+            "local checkpoint integrity key is missing or malformed",
+        )
+    return key
+
+
+def _checkpoint(
+    compiled: L5bCompiledPublication,
+    manifest: ArtifactManifest,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+    *,
+    integrity_key: bytes,
+) -> Mapping[str, Any]:
+    tokens = tuple(
+        item.removeprefix("publication-token:")
+        for item in receipt.remote_operation_refs
+        if item.startswith("publication-token:")
+    )
+    if len(tokens) != 1 or not _publication_token_is_valid(compiled, tokens[0]):
+        raise L5bPublicationError(
+            "L5B_PUBLICATION_TOKEN_INVALID",
+            "checkpoint requires one fingerprint-bound publication token",
+        )
+    values = {
+        "stage": "L5b",
+        "fingerprint": compiled.fingerprint,
+        "index_fingerprint": compiled.index_fingerprint,
+        "l3_artifact_manifest_hash": compiled.source.input_manifest.manifest_hash,
+        "l4_projection_hash": compiled.source.projection.projection_hash,
+        "l4_receipt_hash": compiled.source.receipt.receipt_hash,
+        "l5a_publication_fingerprint": compiled.l5a_result.compiled.fingerprint,
+        "l5a_receipt_hash": compiled.l5a_result.receipt.receipt_hash,
+        "artifact_manifest_hash": manifest.manifest_hash,
+        "metrics_hash": metrics.metrics_hash,
+        "receipt_hash": receipt.receipt_hash,
+        "metrics_payload_hash": canonical_sha256(metrics.model_dump(mode="json")),
+        "receipt_payload_hash": canonical_sha256(receipt.model_dump(mode="json")),
+        "publication_token": tokens[0],
+        "compiled_payload_hashes": {
+            "index_definition": canonical_sha256(compiled.index_definition),
+            "knowledge_source_definition": canonical_sha256(
+                compiled.knowledge_source_definition
+            ),
+            "knowledge_base_definition": canonical_sha256(
+                compiled.knowledge_base_definition
+            ),
+            "documents": canonical_sha256(compiled.documents),
+            "projection_equivalence": canonical_sha256(
+                _projection_equivalences(compiled)
+            ),
+        },
+    }
+    sealed = {**values, "checkpoint_hash": canonical_sha256(values)}
+    checkpoint_mac = hmac.new(
+        integrity_key,
+        canonical_json(sealed).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {**sealed, "checkpoint_mac": checkpoint_mac}
+
+
+def _persist_checkpoint(
+    run_root: Path,
+    compiled: L5bCompiledPublication,
+    manifest: ArtifactManifest,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+) -> None:
+    path = _checkpoint_path(run_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    _write_json(
+        temp_path,
+        _checkpoint(
+            compiled,
+            manifest,
+            metrics,
+            receipt,
+            integrity_key=_integrity_key(run_root, create=True),
+        ),
+    )
+    os.replace(temp_path, path)
+
+
+def _skip_checkpoint_path(run_root: Path, receipt: StageReceipt) -> Path:
+    return (
+        run_root.parent.parent
+        / "checkpoints"
+        / "skips"
+        / f"{receipt.receipt_hash}.json"
+    )
+
+
+def _skip_checkpoint(
+    run_root: Path,
+    compiled: L5bCompiledPublication,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+    *,
+    integrity_key: bytes,
+) -> Mapping[str, Any]:
+    succeeded_checkpoint = json.loads(
+        _checkpoint_path(run_root).read_text("utf-8")
+    )
+    values = {
+        "stage": "L5b-skip",
+        "fingerprint": compiled.fingerprint,
+        "succeeded_checkpoint_hash": canonical_sha256(succeeded_checkpoint),
+        "metrics_hash": metrics.metrics_hash,
+        "metrics_payload_hash": canonical_sha256(metrics.model_dump(mode="json")),
+        "receipt_hash": receipt.receipt_hash,
+        "receipt_payload_hash": canonical_sha256(receipt.model_dump(mode="json")),
+    }
+    sealed = {**values, "checkpoint_hash": canonical_sha256(values)}
+    return {
+        **sealed,
+        "checkpoint_mac": hmac.new(
+            integrity_key,
+            canonical_json(sealed).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest(),
+    }
+
+
+def _persist_skip_checkpoint(
+    run_root: Path,
+    compiled: L5bCompiledPublication,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+) -> None:
+    path = _skip_checkpoint_path(run_root, receipt)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    _write_json(
+        temp_path,
+        _skip_checkpoint(
+            run_root,
+            compiled,
+            metrics,
+            receipt,
+            integrity_key=_integrity_key(run_root, create=False),
+        ),
+    )
+    os.replace(temp_path, path)
+
+
+def _skip_checkpoint_is_valid(
+    run_root: Path,
+    compiled: L5bCompiledPublication,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+) -> bool:
+    try:
+        persisted = json.loads(
+            _skip_checkpoint_path(run_root, receipt).read_text("utf-8")
+        )
+        expected = _skip_checkpoint(
+            run_root,
+            compiled,
+            metrics,
+            receipt,
+            integrity_key=_integrity_key(run_root, create=False),
+        )
+    except (L5bPublicationError, OSError, ValueError, json.JSONDecodeError):
+        return False
+    return persisted == expected
+
+
 def _load_intact(
     compiled: L5bCompiledPublication,
     run_root: Path,
-) -> tuple[ArtifactManifest, tuple[ProjectionEquivalence, ...], StageReceipt] | None:
+) -> tuple[
+    ArtifactManifest,
+    tuple[ProjectionEquivalence, ...],
+    StageReceipt,
+    StageResourceMetrics,
+] | None:
     try:
+        expected_proofs = _projection_equivalences(compiled)
+        expected_payloads = {
+            "index-definition.json": compiled.index_definition,
+            "knowledge-source-definition.json": (
+                compiled.knowledge_source_definition
+            ),
+            "knowledge-base-definition.json": compiled.knowledge_base_definition,
+            "documents.json": compiled.documents,
+            "projection-equivalence.json": expected_proofs,
+        }
+        for filename, expected_value in expected_payloads.items():
+            if (run_root / filename).read_bytes() != (
+                canonical_json(expected_value) + "\n"
+            ).encode("utf-8"):
+                return None
         manifest = ArtifactManifest.model_validate_json(
             (run_root / "output-manifest.json").read_text("utf-8")
         )
+        metrics = StageResourceMetrics.model_validate_json(
+            (run_root / "resource-metrics.json").read_text("utf-8")
+        )
         receipt = StageReceipt.model_validate_json(
             (run_root / "stage-receipt.json").read_text("utf-8")
+        )
+        checkpoint = json.loads(
+            _checkpoint_path(run_root).read_text("utf-8")
         )
         proofs = tuple(
             ProjectionEquivalence.model_validate(item)
@@ -1465,17 +1879,118 @@ def _load_intact(
                 (run_root / "projection-equivalence.json").read_text("utf-8")
             )
         )
-        expected = _artifact_manifest(compiled, run_root, proofs)
+        expected = _artifact_manifest(compiled, expected_proofs)
+        validate_receipt_resources(receipt, metrics)
+        remote_refs = tuple(
+            item
+            for item in receipt.remote_operation_refs
+            if not item.startswith("publication-token:")
+        )
+        publication_tokens = tuple(
+            item.removeprefix("publication-token:")
+            for item in receipt.remote_operation_refs
+            if item.startswith("publication-token:")
+        )
+        expected_metrics_id = deterministic_contract_id(
+            "stage-resource-metrics",
+            {
+                "stage": "L5b",
+                "fingerprint": compiled.fingerprint,
+                "search_calls": metrics.search_calls,
+                "cache_hits": 0,
+            },
+        )
+        expected_receipt_id = deterministic_contract_id(
+            "stage-receipt",
+            {
+                "stage": "L5b",
+                "fingerprint": compiled.fingerprint,
+                "status": "succeeded",
+                "search_calls": metrics.search_calls,
+            },
+        )
+        expected_storage_write_bytes = sum(
+            len((canonical_json(value) + "\n").encode("utf-8"))
+            for value in expected_payloads.values()
+        ) + len((canonical_json(expected) + "\n").encode("utf-8"))
         if (
             manifest != expected
             or receipt.status != "succeeded"
+            or receipt.stage_receipt_id != expected_receipt_id
+            or receipt.identity != _identity(compiled.source, "c0.stage_receipt")
+            or receipt.stage_id != "L5"
+            or receipt.stage_name != L5B_STAGE_NAME
+            or receipt.stage_contract_version != L5B_STAGE_CONTRACT_VERSION
+            or receipt.input_manifest_id
+            != compiled.l5a_result.output_manifest.artifact_manifest_id
+            or receipt.input_manifest_hash
+            != compiled.l5a_result.output_manifest.manifest_hash
+            or receipt.output_manifest_id != expected.artifact_manifest_id
             or receipt.skip_key != compiled.fingerprint
             or receipt.output_manifest_hash != manifest.manifest_hash
-            or proofs != _projection_equivalences(compiled)
+            or dict(receipt.accepted_contract_versions) != L5B_ACCEPTED_VERSIONS
+            or receipt.attempt_count != 1
+            or receipt.error_codes
+            or len(publication_tokens) != 1
+            or not _publication_token_is_valid(compiled, publication_tokens[0])
+            or len(remote_refs) != metrics.search_calls
+            or metrics.resource_metrics_id != expected_metrics_id
+            or metrics.identity
+            != _identity(compiled.source, "c0.stage_resource_metrics")
+            or metrics.stage_id != "L5"
+            or metrics.stage_name != L5B_STAGE_NAME
+            or metrics.storage_read_bytes
+            != (
+                compiled.source.manifest.total_byte_count
+                + compiled.l5a_result.output_manifest.total_byte_count
+            )
+            or metrics.storage_write_bytes != expected_storage_write_bytes
+            or metrics.source_units_read
+            != len({item["source_unit_id"] for item in compiled.documents})
+            or metrics.source_units_written
+            or metrics.source_units_skipped
+            or metrics.document_intelligence_calls
+            or metrics.document_intelligence_pages
+            or metrics.foundry_calls
+            or metrics.foundry_input_tokens
+            or metrics.foundry_output_tokens
+            or metrics.embedding_calls
+            or metrics.embedding_items
+            or metrics.fabric_calls
+            or metrics.fabric_rows_read
+            or metrics.fabric_rows_written
+            or metrics.search_calls not in {3, 4}
+            or metrics.search_documents_written != len(compiled.documents)
+            or metrics.cache_hits != 0
+            or metrics.cache_misses != 1
+            or metrics.max_observed_concurrency != 1
+            or metrics.budget_snapshot_hash != _budget_snapshot_hash()
+            or metrics.exceeded_dimensions
+            or proofs != expected_proofs
+            or (run_root / "output-manifest.json").read_bytes()
+            != (canonical_json(expected) + "\n").encode("utf-8")
+            or (run_root / "resource-metrics.json").read_bytes()
+            != (canonical_json(metrics) + "\n").encode("utf-8")
+            or (run_root / "stage-receipt.json").read_bytes()
+            != (canonical_json(receipt) + "\n").encode("utf-8")
+            or checkpoint != _checkpoint(
+                compiled,
+                expected,
+                metrics,
+                receipt,
+                integrity_key=_integrity_key(run_root, create=False),
+            )
         ):
             return None
-        return manifest, proofs, receipt
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return manifest, proofs, receipt, metrics
+    except (
+        L5bPublicationError,
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        json.JSONDecodeError,
+    ):
         return None
 
 
@@ -1488,7 +2003,7 @@ def run_l5b(
     source_units: Sequence[SourceUnit],
     source_file_names: Mapping[str, str],
     access_policy: AccessPolicy,
-    governed_assets: Sequence[GovernedAssetReference] = (),
+    governed_assets: Sequence[GovernedAssetReference],
     target_id: str,
     index_name: str,
     knowledge_source_name: str,
@@ -1561,6 +2076,12 @@ def run_l5b(
                 accounting=accounting,
                 started_at=started_at,
             )
+            _persist_skip_checkpoint(
+                run_root,
+                compiled,
+                metrics,
+                receipt,
+            )
             return L5bStageResult(
                 compiled=compiled,
                 projection_equivalences=intact[1],
@@ -1572,7 +2093,7 @@ def run_l5b(
             )
 
     state_root.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex
+    token = _new_publication_token(compiled)
     accounting.remote_operation_refs = tuple(sorted({
         *accounting.remote_operation_refs,
         f"publication-token:{token}",
@@ -1644,7 +2165,7 @@ def run_l5b(
             )
         proofs = _projection_equivalences(compiled)
         _write_json(temp_root / "projection-equivalence.json", proofs)
-        manifest = _artifact_manifest(compiled, temp_root, proofs)
+        manifest = _artifact_manifest(compiled, proofs)
         _write_json(temp_root / "output-manifest.json", manifest)
         storage_write_bytes = sum(
             path.stat().st_size
@@ -1670,6 +2191,13 @@ def run_l5b(
         )
         _write_json(temp_root / "resource-metrics.json", metrics)
         _write_json(temp_root / "stage-receipt.json", receipt)
+        _persist_checkpoint(
+            run_root,
+            compiled,
+            manifest,
+            metrics,
+            receipt,
+        )
         if run_root.exists():
             shutil.rmtree(run_root)
         run_root.parent.mkdir(parents=True, exist_ok=True)
@@ -1790,11 +2318,38 @@ def require_l5b_publication_receipt(
         or result.receipt.status not in {"succeeded", "skipped"}
         or result.output_manifest != intact[0]
         or result.projection_equivalences != intact[1]
+        or (
+            result.receipt.status == "succeeded"
+            and (
+                result.receipt != intact[2]
+                or result.metrics != intact[3]
+            )
+        )
+        or (
+            result.receipt.status == "skipped"
+            and not _skip_checkpoint_is_valid(
+                result.run_root,
+                result.compiled,
+                result.metrics,
+                result.receipt,
+            )
+        )
     ):
         raise L5bPublicationError(
             "L5B_PUBLICATION_RECEIPT_INVALID",
             "retrieval requires intact persisted L5b publication authority",
         )
+
+
+def _agentic_runtime_seconds(max_runtime_milliseconds: int) -> int:
+    seconds = max_runtime_milliseconds // 1000
+    if seconds < 1:
+        raise L5bPublicationError(
+            "L5B_PROVIDER_TIMEOUT_UNREPRESENTABLE",
+            "Azure agentic retrieval requires a positive whole-second timeout; "
+            "the sealed QueryBudget cannot be rounded up",
+        )
+    return seconds
 
 
 def build_agentic_retrieve_payload(
@@ -1811,6 +2366,8 @@ def build_agentic_retrieve_payload(
     context.validate_scope(scope)
     if context.retrieval_mode != "agentic_preview":
         raise ValueError("agentic payload requires agentic_preview context")
+    if context.retrieval_reasoning_effort not in {"minimal", "low", "medium"}:
+        raise ValueError("unsupported retrieval reasoning effort")
     expected_filter = canonical_scope_filter(
         canonical_entity_ids=context.filter_add_on.canonical_entity_ids,
         canonical_type_ids=context.filter_add_on.exact_type_ids,
@@ -1832,8 +2389,12 @@ def build_agentic_retrieve_payload(
             "failOnError": True,
         }],
         "outputMode": "extractiveData",
-        "retrievalReasoningEffort": context.retrieval_reasoning_effort,
-        "maxRuntimeInSeconds": max(1, budget.max_runtime_milliseconds // 1000),
+        "retrievalReasoningEffort": {
+            "kind": context.retrieval_reasoning_effort,
+        },
+        "maxRuntimeInSeconds": _agentic_runtime_seconds(
+            budget.max_runtime_milliseconds
+        ),
         "maxOutputSize": budget.max_output_tokens,
         "maxOutputDocuments": budget.max_output_documents,
         "includeActivity": context.request_activity,
@@ -2108,6 +2669,231 @@ def _response_items(
     return references, activity
 
 
+def _document_scope_findings(
+    document: Mapping[str, Any],
+    context: AgenticRetrievalRequestContext,
+    ontology_scope: ResolvedOntologyScope,
+    publication: L5bStageResult,
+) -> tuple[Mapping[str, tuple[str, ...]], tuple[str, ...]]:
+    findings: dict[str, set[str]] = {}
+
+    def add(
+        reason: str,
+        values: Sequence[Any] = (),
+        *,
+        dimension: str | None = None,
+    ) -> None:
+        normalized = {
+            str(item) for item in values if item is not None
+        }
+        if not normalized:
+            normalized.add(
+                f"document:{document.get('id', 'missing')}:"
+                f"dimension:{dimension or reason}"
+            )
+        findings.setdefault(reason, set()).update(normalized)
+
+    allowed_entities = set(context.canonical_entity_ids)
+    document_entities = {
+        str(item) for item in document.get("canonical_entity_ids", ())
+    }
+    unexpected_entities = tuple(sorted(document_entities - allowed_entities))
+    if not document_entities or unexpected_entities:
+        add(
+            "unexpected_member" if unexpected_entities else "scope_key_missing",
+            unexpected_entities or (document.get("id"),),
+        )
+
+    allowed_relationships = set(
+        context.graph_scope_filter.canonical_relationship_ids
+    )
+    document_relationships = {
+        str(item) for item in document.get("canonical_relationship_ids", ())
+    }
+    unexpected_relationships = document_relationships - allowed_relationships
+    if not document_relationships:
+        add("scope_key_missing", dimension="canonical_relationship_ids")
+    elif unexpected_relationships:
+        add("unknown_relationship", unexpected_relationships)
+
+    allowed_types = set(context.exact_type_ids).union(context.ancestor_type_ids)
+    document_types = {
+        str(item) for item in document.get("canonical_type_ids", ())
+    }
+    unexpected_types = document_types - allowed_types
+    if not document_types:
+        add("scope_key_missing", dimension="canonical_type_ids")
+    elif unexpected_types:
+        add("hierarchy_scope_mismatch", unexpected_types)
+
+    document_properties = tuple(
+        str(item) for item in document.get("canonical_property_ids", ())
+    )
+    if document_properties:
+        # C0.Runtime 1.0 has no resolved property-scope carrier. Property evidence
+        # therefore cannot be exposed without a stronger scope authority.
+        add("scope_key_missing", document_properties)
+
+    allowed_assertions = {
+        *ontology_scope.assertion_ids,
+        *(item.type_assertion_id for item in ontology_scope.type_assertions),
+        *(
+            assertion_id
+            for item in ontology_scope.members
+            for assertion_id in item.membership_assertion_ids
+        ),
+        *(
+            edge.relationship_assertion_id
+            for edge in ontology_scope.adjacency_edges
+        ),
+    }
+    document_assertions = {
+        str(item) for item in document.get("canonical_assertion_ids", ())
+    }
+    if not document_assertions or not document_assertions <= allowed_assertions:
+        add(
+            "citation_invalid",
+            document_assertions - allowed_assertions
+            or (document.get("id"),),
+        )
+
+    manifest_ids = {
+        str(item)
+        for item in document.get("required_member_manifest_ids", ())
+    }
+    expected_manifest_id = (
+        ontology_scope.required_member_manifest.required_member_manifest_id
+    )
+    if manifest_ids != {expected_manifest_id}:
+        add(
+            "collection_hash_mismatch",
+            (*manifest_ids, expected_manifest_id),
+            dimension="required_member_manifest_ids",
+        )
+
+    policy = publication.compiled.access_policy
+    expected_principals = _principal_keys(policy)
+    expected_scopes = _scope_keys(policy)
+    actual_principals = tuple(sorted(document.get("acl_principal_keys", ())))
+    actual_scopes = tuple(sorted(document.get("acl_scope_keys", ())))
+    acl_values = (
+        document.get("access_policy_id"),
+        document.get("access_policy_hash"),
+        document.get("authorization_resource_id"),
+        *actual_principals,
+        *actual_scopes,
+        policy.access_policy_id,
+        context.acl_scope_hash,
+        policy.authorization_resource_id,
+        *expected_principals,
+        *expected_scopes,
+    )
+    if (
+        document.get("access_policy_id") != policy.access_policy_id
+        or document.get("access_policy_hash") != context.acl_scope_hash
+        or document.get("access_policy_hash") != policy.policy_hash
+        or document.get("authorization_resource_id")
+        != policy.authorization_resource_id
+        or actual_principals != expected_principals
+        or actual_scopes != expected_scopes
+    ):
+        add("citation_unauthorized", acl_values)
+
+    if document.get("source_id") != document.get("source_file_id"):
+        add(
+            "citation_invalid",
+            (document.get("source_id"), document.get("source_file_id")),
+            dimension="source_file_id",
+        )
+    governed_assets = {
+        (
+            asset.governed_asset_reference_id,
+            asset.asset_reference_hash,
+            asset.source_file_id,
+            asset.asset_id,
+            asset.asset_version_id,
+            asset.content_hash,
+        )
+        for asset in publication.compiled.governed_assets
+    }
+    document_asset = (
+        document.get("governed_asset_reference_id"),
+        document.get("governed_asset_reference_hash"),
+        document.get("source_file_id"),
+        document.get("asset_id"),
+        document.get("asset_version_id"),
+        document.get("asset_hash"),
+    )
+    if document_asset not in governed_assets:
+        matching_assets = tuple(
+            value
+            for asset in governed_assets
+            if asset[2] == document.get("source_file_id")
+            for value in asset
+        )
+        add(
+            "citation_invalid",
+            (*document_asset, *matching_assets),
+            dimension="governed_asset",
+        )
+
+    if document.get("asserted_publication_hash") != context.asserted_publication_hash:
+        add(
+            "projection_hash_stale",
+            (
+                document.get("asserted_publication_hash"),
+                context.asserted_publication_hash,
+            ),
+            dimension="asserted_publication_hash",
+        )
+
+    compiled_l5a = getattr(publication.compiled, "l5a_result", None)
+    if compiled_l5a is not None:
+        upstream_checks = (
+            (
+                "l3_artifact_manifest_hash",
+                compiled_l5a.compiled.source.input_manifest.manifest_hash,
+            ),
+            (
+                "l4_projection_hash",
+                compiled_l5a.compiled.source.projection.projection_hash,
+            ),
+            (
+                "l4_receipt_hash",
+                compiled_l5a.compiled.source.receipt.receipt_hash,
+            ),
+            (
+                "l5a_publication_fingerprint",
+                compiled_l5a.compiled.fingerprint,
+            ),
+            ("l5a_receipt_hash", compiled_l5a.receipt.receipt_hash),
+        )
+        for field_name, expected_value in upstream_checks:
+            if document.get(field_name) != expected_value:
+                add(
+                    "projection_hash_stale",
+                    (document.get(field_name), expected_value),
+                    dimension=field_name,
+                )
+        expected_crosswalks = tuple(sorted(
+            item.crosswalk_hash for item in compiled_l5a.compiled.crosswalks
+        ))
+        actual_crosswalks = tuple(sorted(
+            document.get("publication_crosswalk_hashes", ())
+        ))
+        if actual_crosswalks != expected_crosswalks:
+            add(
+                "crosswalk_hash_stale",
+                (*actual_crosswalks, *expected_crosswalks),
+                dimension="publication_crosswalk_hashes",
+            )
+
+    return {
+        reason: tuple(sorted(values))
+        for reason, values in sorted(findings.items())
+    }, unexpected_entities
+
+
 def interpret_retrieval_response(
     context: AgenticRetrievalRequestContext,
     budget: QueryBudget,
@@ -2156,6 +2942,8 @@ def interpret_retrieval_response(
     citations: list[SearchCitationEnvelope] = []
     presentations: list[CitationPresentation] = []
     missing_reference_ids: list[str] = []
+    quarantined_findings: dict[str, set[str]] = {}
+    quarantined_unexpected_ids: set[str] = set()
     returned_document_type_ids: set[str] = set()
     for reference in references:
         reference_id = reference.get("id") or reference.get("ref_id")
@@ -2173,6 +2961,18 @@ def interpret_retrieval_response(
             "document_hash"
         ):
             missing_reference_ids.append(reference_id)
+            continue
+        scope_findings, scope_unexpected_ids = _document_scope_findings(
+            document,
+            context,
+            ontology_scope,
+            publication,
+        )
+        if scope_findings:
+            missing_reference_ids.append(reference_id)
+            for reason, values in scope_findings.items():
+                quarantined_findings.setdefault(reason, set()).update(values)
+            quarantined_unexpected_ids.update(scope_unexpected_ids)
             continue
         try:
             citation, presentation = build_citation(
@@ -2460,6 +3260,23 @@ def interpret_retrieval_response(
             reason_code="reference_missing",
             remediation="downstream_abstention_required",
         ))
+    for reason_code, offending_ids in sorted(quarantined_findings.items()):
+        remediation = (
+            "operator_repair_required"
+            if reason_code in {
+                "citation_invalid",
+                "citation_unauthorized",
+                "collection_hash_mismatch",
+                "scope_key_missing",
+                "unknown_relationship",
+            }
+            else "downstream_abstention_required"
+        )
+        failures.append(RetrievalFailure(
+            reason_code=reason_code,
+            remediation=remediation,
+            canonical_ids=tuple(sorted(offending_ids)),
+        ))
     if warnings or source_failure_ids:
         failures.append(RetrievalFailure(
             reason_code="source_failure",
@@ -2631,7 +3448,10 @@ def interpret_retrieval_response(
         "missing_canonical_ids": missing_ids,
         "unexpected_canonical_ids": unexpected_ids,
         "duplicate_canonical_ids": duplicate_ids,
-        "orphan_canonical_ids": unexpected_ids,
+        "orphan_canonical_ids": tuple(sorted({
+            *unexpected_ids,
+            *quarantined_unexpected_ids,
+        })),
         "required_canonical_id_set_hash": canonical_sha256(sorted(required_ids)),
         "returned_canonical_id_set_hash": canonical_sha256(sorted(returned_ids)),
         "required_group_hash": retrieval_scope.group_membership_hash,

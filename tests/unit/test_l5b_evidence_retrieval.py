@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pyarrow as pa
 
 from fabric_kg_builder.contracts.base import canonical_sha256
 from fabric_kg_builder.contracts.base import canonical_json
+from fabric_kg_builder.contracts import (
+    AgenticRetrievalRequestContext,
+    ArtifactManifest,
+    GovernedAssetReference,
+    QueryBudget,
+    StageReceipt,
+    StageResourceMetrics,
+)
 from fabric_kg_builder.contracts.publication import AccessPolicy, PrincipalScope
 from fabric_kg_builder.serving.evidence_retrieval import (
     L5B_AGENTIC_API_VERSION,
@@ -25,6 +35,9 @@ from fabric_kg_builder.serving.evidence_retrieval import (
     interpret_retrieval_response,
     require_l5b_publication_receipt,
     run_l5b,
+    _agentic_runtime_seconds,
+    _assertion_documents,
+    _safe_source_display_name,
     _scope_keys,
 )
 from fabric_kg_builder.serving.lifecycle_projection import run_l4
@@ -222,6 +235,7 @@ def _inputs(tmp_path: Path):
             for unit in l3.inputs.source_units.units
         },
         "access_policy": policy,
+        "governed_assets": l5a.compiled.governed_assets,
         "target_id": "target:search-evidence",
         "index_name": "search-evidence-index",
         "knowledge_source_name": "search-evidence-source",
@@ -317,6 +331,121 @@ def test_l5b_rejects_stale_policy_and_acl_scope_collision(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+def test_l5b_requires_exact_l5a_governed_asset_set(tmp_path: Path) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    assets = kwargs["governed_assets"]
+    for supplied in ((), (*assets, assets[0])):
+        with pytest.raises(
+            L5bPublicationError,
+            match="L5B_GOVERNED_ASSET_SET_MISMATCH",
+        ):
+            compile_l5b_publication(
+                source,
+                l5a,
+                **{**kwargs, "governed_assets": supplied},
+            )
+
+    original = assets[0]
+    values = original.model_dump(
+        mode="python",
+        exclude={"asset_reference_hash"},
+    )
+    identity = dict(values["identity"])
+    identity["source_file_id"] = "l5a-definition:misassigned"
+    values["identity"] = identity
+    values["source_file_id"] = "l5a-definition:misassigned"
+    misassigned = GovernedAssetReference(
+        **values,
+        asset_reference_hash=canonical_sha256(values),
+    )
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_GOVERNED_ASSET_SET_MISMATCH",
+    ):
+        compile_l5b_publication(
+            source,
+            l5a,
+            **{
+                **kwargs,
+                "governed_assets": (misassigned, *assets[1:]),
+            },
+        )
+
+
+@pytest.mark.unit
+def test_applicable_evidence_requires_exact_governed_source_asset(
+    tmp_path: Path,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    span = next(
+        span
+        for spans in kwargs["evidence_partitions"].values()
+        for span in spans
+    )
+    table_name = "l4_semantic_required_members"
+    table = l5a.compiled.tables[table_name]
+    rows = table.to_pylist()
+    rows[0]["supporting_evidence_span_ids"] = [span.evidence_span_id]
+    tables = dict(l5a.compiled.tables)
+    tables[table_name] = pa.Table.from_pylist(rows, schema=table.schema)
+    compiled = dataclasses.replace(l5a.compiled, tables=tables)
+    evidence_l5a = dataclasses.replace(l5a, compiled=compiled)
+    evidence = {
+        item.evidence_span_id: item
+        for spans in kwargs["evidence_partitions"].values()
+        for item in spans
+    }
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_GOVERNED_SOURCE_ASSET_MISSING",
+    ):
+        _assertion_documents(
+            source,
+            evidence_l5a,
+            evidence=evidence,
+            source_unit_manifest=kwargs["source_unit_manifest"],
+            source_units=kwargs["source_units"],
+            source_file_names=kwargs["source_file_names"],
+            policy=kwargs["access_policy"],
+            assets=kwargs["governed_assets"],
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        "https://example.test/manual.pdf",
+        "file:///tmp/manual.pdf",
+        "data:text/plain,manual",
+        "/tmp/manual.pdf",
+        r"C:\temp\manual.pdf",
+        "../manual.pdf",
+        "manual.pdf?sig=secret",
+        "AccountKey=secret",
+        "DefaultEndpointsProtocol=https;AccountName=x",
+        "Host=db.example;Database=prod;User ID=admin;Pwd=not-a-secret",
+        "AccountKey = not-a-secret",
+        "Server = db; User ID = admin",
+    ),
+)
+def test_source_display_name_rejects_urls_paths_and_credentials(
+    unsafe: str,
+) -> None:
+    with pytest.raises(L5bPublicationError, match="L5B_SOURCE_FILE_NAME_UNSAFE"):
+        _safe_source_display_name(unsafe, source_file_id="source-file:manual")
+
+
+@pytest.mark.unit
+def test_source_display_name_allows_safe_unicode_filename() -> None:
+    assert _safe_source_display_name(
+        "製造マニュアル.pdf",
+        source_file_id="source-file:manual",
+    ) == "製造マニュアル.pdf"
+
+
+@pytest.mark.unit
 def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
     tmp_path: Path,
 ) -> None:
@@ -346,6 +475,21 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
     assert second.receipt.status == "skipped"
     assert second.reused
     assert client.calls == ["read_back"]
+    require_l5b_publication_receipt(source, l5a, second)
+
+    forged_values = second.receipt.model_dump(mode="python")
+    forged_values["completed_at_utc"] = (
+        second.receipt.completed_at_utc + timedelta(seconds=1)
+    )
+    forged = dataclasses.replace(
+        second,
+        receipt=StageReceipt.model_validate(forged_values),
+    )
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_PUBLICATION_RECEIPT_INVALID",
+    ):
+        require_l5b_publication_receipt(source, l5a, forged)
 
 
 @pytest.mark.unit
@@ -443,6 +587,240 @@ def test_l5b_ambiguous_publish_is_prebudgeted_and_recovered(
     assert "L5B_REMOTE_PUBLISH_AMBIGUOUS" in raised.value.receipt.error_codes
 
 
+def _write_contract(path: Path, value) -> None:
+    path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+
+
+def _coordinated_artifact_reseal(run_root: Path, filename: str) -> None:
+    path = run_root / filename
+    payload = json.loads(path.read_text("utf-8"))
+    if isinstance(payload, dict):
+        payload["description"] = f"coordinated tamper: {filename}"
+    elif filename == "documents.json":
+        payload.append({"id": "tampered-document"})
+    else:
+        payload = []
+    _write_contract(path, payload)
+
+    kind_by_file = {
+        "index-definition.json": "l5b.search_index_definition",
+        "knowledge-source-definition.json": "l5b.knowledge_source_definition",
+        "knowledge-base-definition.json": "l5b.knowledge_base_definition",
+        "documents.json": "l5b.evidence_documents",
+        "projection-equivalence.json": "c0.projection_equivalence",
+    }
+    manifest = ArtifactManifest.model_validate_json(
+        (run_root / "output-manifest.json").read_text("utf-8")
+    )
+    entries = []
+    for entry in manifest.entries:
+        if entry.contract_kind == kind_by_file[filename]:
+            entries.append(entry.model_copy(update={
+                "content_hash": canonical_sha256(payload),
+                "byte_count": path.stat().st_size,
+                "row_count": len(payload) if isinstance(payload, list) else 1,
+            }))
+        else:
+            entries.append(entry)
+    manifest_values = manifest.model_dump(
+        mode="python",
+        exclude={"manifest_hash"},
+    )
+    manifest_values["entries"] = tuple(entries)
+    manifest_values["total_row_count"] = sum(
+        entry.row_count or 0 for entry in entries
+    )
+    manifest_values["total_byte_count"] = sum(
+        entry.byte_count for entry in entries
+    )
+    resealed_manifest = ArtifactManifest(
+        **manifest_values,
+        manifest_hash=canonical_sha256(manifest_values),
+    )
+    _write_contract(run_root / "output-manifest.json", resealed_manifest)
+
+    metrics = StageResourceMetrics.model_validate_json(
+        (run_root / "resource-metrics.json").read_text("utf-8")
+    )
+    artifact_files = (
+        "index-definition.json",
+        "knowledge-source-definition.json",
+        "knowledge-base-definition.json",
+        "documents.json",
+        "projection-equivalence.json",
+        "output-manifest.json",
+    )
+    metrics_values = metrics.model_dump(
+        mode="python",
+        exclude={"metrics_hash"},
+    )
+    metrics_values["storage_write_bytes"] = sum(
+        (run_root / item).stat().st_size for item in artifact_files
+    )
+    resealed_metrics = StageResourceMetrics(
+        **metrics_values,
+        metrics_hash=canonical_sha256(metrics_values),
+    )
+    _write_contract(run_root / "resource-metrics.json", resealed_metrics)
+
+    receipt = StageReceipt.model_validate_json(
+        (run_root / "stage-receipt.json").read_text("utf-8")
+    )
+    receipt_values = receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+    )
+    receipt_values["output_manifest_hash"] = resealed_manifest.manifest_hash
+    receipt_values["resource_metrics_hash"] = resealed_metrics.metrics_hash
+    receipt_hash_values = {
+        key: value
+        for key, value in receipt_values.items()
+        if key not in {"started_at_utc", "completed_at_utc"}
+    }
+    resealed_receipt = StageReceipt(
+        **receipt_values,
+        receipt_hash=canonical_sha256(receipt_hash_values),
+    )
+    _write_contract(run_root / "stage-receipt.json", resealed_receipt)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "index-definition.json",
+        "knowledge-source-definition.json",
+        "knowledge-base-definition.json",
+        "documents.json",
+        "projection-equivalence.json",
+    ),
+)
+def test_coordinated_local_reseal_cannot_authorize_reuse(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    _coordinated_artifact_reseal(first.run_root, filename)
+    client.calls.clear()
+
+    repaired = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not repaired.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+def test_coordinated_metrics_receipt_and_token_reseal_cannot_authorize_reuse(
+    tmp_path: Path,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    metrics = StageResourceMetrics.model_validate_json(
+        (first.run_root / "resource-metrics.json").read_text("utf-8")
+    )
+    metrics_values = metrics.model_dump(
+        mode="python",
+        exclude={"metrics_hash"},
+    )
+    metrics_values["network_request_bytes"] += 1
+    resealed_metrics = StageResourceMetrics(
+        **metrics_values,
+        metrics_hash=canonical_sha256(metrics_values),
+    )
+    _write_contract(first.run_root / "resource-metrics.json", resealed_metrics)
+    receipt = StageReceipt.model_validate_json(
+        (first.run_root / "stage-receipt.json").read_text("utf-8")
+    )
+    receipt_values = receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+    )
+    receipt_values["resource_metrics_hash"] = resealed_metrics.metrics_hash
+    receipt_values["remote_operation_refs"] = tuple(
+        "publication-token:" + "f" * 32
+        if item.startswith("publication-token:")
+        else item
+        for item in receipt.remote_operation_refs
+    )
+    resealed_receipt = StageReceipt(
+        **receipt_values,
+        receipt_hash=canonical_sha256({
+            key: value
+            for key, value in receipt_values.items()
+            if key not in {"started_at_utc", "completed_at_utc"}
+        }),
+    )
+    _write_contract(first.run_root / "stage-receipt.json", resealed_receipt)
+    client.calls.clear()
+
+    repaired = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not repaired.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+def test_checkpoint_hmac_binds_receipt_timestamps(tmp_path: Path) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    receipt = StageReceipt.model_validate_json(
+        (first.run_root / "stage-receipt.json").read_text("utf-8")
+    )
+    changed = receipt.model_dump(mode="python")
+    changed["completed_at_utc"] = receipt.completed_at_utc + timedelta(seconds=1)
+    resealed = StageReceipt.model_validate(changed)
+    _write_contract(first.run_root / "stage-receipt.json", resealed)
+    client.calls.clear()
+
+    repaired = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not repaired.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
 @pytest.mark.unit
 def test_canonical_filters_escape_injection_and_preview_is_exact_and_narrow() -> None:
     scope = resolved_retrieval_scope()
@@ -464,11 +842,27 @@ def test_canonical_filters_escape_injection_and_preview_is_exact_and_narrow() ->
         filter_add_on=filter_text,
     )
 
-    assert payload["outputMode"] == "extractiveData"
-    assert payload["knowledgeSourceParams"][0]["filterAddOn"] == filter_text
-    assert payload["knowledgeSourceParams"][0]["failOnError"] is True
-    assert "maxSubQueries" not in payload["knowledgeSourceParams"][0]
-    assert payload["maxOutputSize"] == budget.max_output_tokens
+    assert payload == {
+        "intents": [{"type": "semantic", "search": "return exact evidence"}],
+        "knowledgeSourceParams": [{
+            "knowledgeSourceName": context.knowledge_source_id,
+            "kind": "searchIndex",
+            "filterAddOn": filter_text,
+            "includeReferences": True,
+            "includeReferenceSourceData": True,
+            "maxOutputDocuments": budget.max_output_documents,
+            "failOnError": True,
+        }],
+        "outputMode": "extractiveData",
+        "retrievalReasoningEffort": {
+            "kind": context.retrieval_reasoning_effort,
+        },
+        "maxRuntimeInSeconds": 30,
+        "maxOutputSize": budget.max_output_tokens,
+        "maxOutputDocuments": budget.max_output_documents,
+        "includeActivity": True,
+    }
+    assert L5B_AGENTIC_API_VERSION == "2026-05-01-preview"
     escaped = canonical_scope_filter(
         canonical_entity_ids=("entity:x' or true or 'y",),
         canonical_type_ids=(),
@@ -477,6 +871,106 @@ def test_canonical_filters_escape_injection_and_preview_is_exact_and_narrow() ->
         asserted_publication_hash="b" * 64,
     )
     assert "entity:x'' or true or ''y" in escaped
+
+    malformed = context.model_copy()
+    object.__setattr__(malformed, "retrieval_reasoning_effort", "extreme")
+    with pytest.raises(ValueError, match="unsupported retrieval reasoning effort"):
+        build_agentic_retrieve_payload(
+            malformed,
+            budget,
+            scope,
+            query_text="return exact evidence",
+            filter_add_on=filter_text,
+        )
+
+
+def _request_with_runtime(milliseconds: int):
+    context, budget = request_context()
+    budget_values = budget.model_dump(
+        mode="python",
+        exclude={"budget_hash"},
+    )
+    budget_values["max_runtime_milliseconds"] = milliseconds
+    revised_budget = QueryBudget(
+        **budget_values,
+        budget_hash=canonical_sha256(budget_values),
+    )
+    context_values = context.model_dump(
+        mode="python",
+        exclude={"request_context_hash"},
+    )
+    context_values["query_budget_hash"] = revised_budget.budget_hash
+    revised_context = AgenticRetrievalRequestContext(
+        **context_values,
+        request_context_hash=canonical_sha256(context_values),
+    )
+    return revised_context, revised_budget
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("milliseconds", (1, 999))
+def test_agentic_timeout_rejects_unrepresentable_subsecond_budget(
+    milliseconds: int,
+) -> None:
+    context, budget = _request_with_runtime(milliseconds)
+    scope = resolved_retrieval_scope()
+    filter_text = canonical_scope_filter(
+        canonical_entity_ids=context.filter_add_on.canonical_entity_ids,
+        canonical_type_ids=context.filter_add_on.exact_type_ids,
+        canonical_relationship_ids=(
+            context.filter_add_on.canonical_relationship_ids
+        ),
+        access_policy_hash=context.acl_scope_hash,
+        asserted_publication_hash=context.asserted_publication_hash,
+    )
+    provider_calls: list[str] = []
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_PROVIDER_TIMEOUT_UNREPRESENTABLE",
+    ):
+        build_agentic_retrieve_payload(
+            context,
+            budget,
+            scope,
+            query_text="evidence",
+            filter_add_on=filter_text,
+        )
+    assert provider_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("milliseconds", "expected_seconds"),
+    ((1000, 1), (1999, 1), (2000, 2)),
+)
+def test_agentic_timeout_floor_never_exceeds_budget(
+    milliseconds: int,
+    expected_seconds: int,
+) -> None:
+    context, budget = _request_with_runtime(milliseconds)
+    scope = resolved_retrieval_scope()
+    filter_text = canonical_scope_filter(
+        canonical_entity_ids=context.filter_add_on.canonical_entity_ids,
+        canonical_type_ids=context.filter_add_on.exact_type_ids,
+        canonical_relationship_ids=(
+            context.filter_add_on.canonical_relationship_ids
+        ),
+        access_policy_hash=context.acl_scope_hash,
+        asserted_publication_hash=context.asserted_publication_hash,
+    )
+    payload = build_agentic_retrieve_payload(
+        context,
+        budget,
+        scope,
+        query_text="evidence",
+        filter_add_on=filter_text,
+    )
+    assert payload["maxRuntimeInSeconds"] == expected_seconds
+    assert payload["maxRuntimeInSeconds"] * 1000 <= milliseconds
+    assert payload["retrievalReasoningEffort"] == {
+        "kind": context.retrieval_reasoning_effort,
+    }
+    assert L5B_AGENTIC_API_VERSION == "2026-05-01-preview"
 
 
 @pytest.mark.unit
@@ -529,9 +1023,9 @@ def _reference_document(context, entity_id: str, index: int) -> dict:
         "canonical_relationship_ids": ["relationship:has-member"],
         "canonical_property_ids": [],
         "canonical_type_ids": ["type:component"],
-        "canonical_assertion_ids": [f"assertion:{entity_id}"],
+        "canonical_assertion_ids": [f"assertion:membership:{index}"],
         "required_member_manifest_ids": ["manifest:required-members"],
-        "source_id": "source:manual",
+        "source_id": "source-file:manual",
         "original_document_name": "Original Service Manual.pdf",
         "source_file_id": "source-file:manual",
         "asset_id": "asset:manual",
@@ -566,13 +1060,240 @@ def _reference_document(context, entity_id: str, index: int) -> dict:
         "publication_crosswalk_hashes": [HASH_A],
         "asserted_publication_hash": context.asserted_publication_hash,
         "lifecycle_state": "asserted",
-        "governed_asset_reference_id": None,
-        "governed_asset_reference_hash": None,
+        "governed_asset_reference_id": "governed-asset:manual",
+        "governed_asset_reference_hash": HASH_A,
         "vector": None,
         "vector_state": "unavailable",
     }
     values["document_hash"] = canonical_sha256(values)
     return values
+
+
+def _runtime_publication(context, documents):
+    policy = SimpleNamespace(
+        access_policy_id="access-policy:evidence",
+        policy_hash=context.acl_scope_hash,
+        authorization_resource_id="authorization-resource:evidence",
+        principal_scopes=(
+            PrincipalScope(
+                principal_type="managed_identity",
+                principal_id="principal:reader",
+                resource_scope_ids=("scope:generic",),
+            ),
+        ),
+    )
+    asset = SimpleNamespace(
+        governed_asset_reference_id="governed-asset:manual",
+        asset_reference_hash=HASH_A,
+        source_file_id="source-file:manual",
+        asset_id="asset:manual",
+        asset_version_id="asset-version:manual:1",
+        content_hash=HASH_B,
+    )
+    return SimpleNamespace(
+        compiled=SimpleNamespace(
+            source=None,
+            l5a_result=None,
+            index_name=context.search_index_id,
+            knowledge_source_name=context.knowledge_source_id,
+            knowledge_base_name=context.knowledge_base_id,
+            index_fingerprint=context.search_index_fingerprint,
+            document_hashes=tuple(
+                (document["id"], document["document_hash"])
+                for document in documents
+            ),
+            access_policy=policy,
+            governed_assets=(asset,),
+        )
+    )
+
+
+def _agentic_response(context, documents):
+    return {
+        "requestId": "provider-request:bounded",
+        "references": [
+            {
+                "id": f"search-reference:{index}",
+                "activitySource": 1,
+                "sourceData": document,
+            }
+            for index, document in enumerate(documents)
+        ],
+        "activity": [{
+            "id": 1,
+            "type": "searchIndex",
+            "knowledgeSourceName": context.knowledge_source_id,
+            "count": len(documents),
+            "elapsedMs": 25,
+            "searchIndexArguments": {
+                "search": "exact evidence",
+                "filter": "sealed-filter",
+            },
+        }],
+    }
+
+
+def _retrieval_accounting(count: int) -> L5bRemoteAccounting:
+    return L5bRemoteAccounting(
+        operation_refs=("retrieve:scope-test",),
+        request_bytes=100,
+        response_bytes=1000,
+        retry_count=0,
+        retry_wait_ms=0,
+        latency_ms=25,
+        candidate_count=count,
+        output_tokens=0,
+    )
+
+
+@pytest.mark.unit
+def test_sealed_unrelated_document_is_quarantined_before_citation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    valid = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    spoof = _reference_document(context, "entity:unrelated", 99)
+    spoof["content"] = "OUT-OF-SCOPE SECRET QUOTE"
+    spoof["source_quote"] = "OUT-OF-SCOPE SECRET QUOTE"
+    spoof["quote_hash"] = canonical_sha256(spoof["source_quote"])
+    spoof["document_hash"] = canonical_sha256({
+        key: value for key, value in spoof.items() if key != "document_hash"
+    })
+    documents = [*valid, spoof]
+    publication = _runtime_publication(context, documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        response=_agentic_response(context, documents),
+        accounting=_retrieval_accounting(len(documents)),
+    )
+
+    assert result.coverage.coverage_status == "partial"
+    assert len(result.citations) == len(valid)
+    assert "entity:unrelated" in result.coverage.orphan_canonical_ids
+    assert any(
+        failure.reason_code == "unexpected_member"
+        and failure.canonical_ids == ("entity:unrelated",)
+        for failure in result.coverage.failures
+    )
+    assert all(
+        citation.exact_authorized_quote != "OUT-OF-SCOPE SECRET QUOTE"
+        for citation in result.citations
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason", "expected_id"),
+    (
+        ("type", "hierarchy_scope_mismatch", "type:unrelated"),
+        (
+            "relationship-endpoint",
+            "unexpected_member",
+            "entity:unrelated-endpoint",
+        ),
+        ("acl", "citation_unauthorized", "scope:unauthorized"),
+        ("property", "scope_key_missing", "property:unscoped"),
+        (
+            "member-manifest",
+            "collection_hash_mismatch",
+            "manifest:unrelated",
+        ),
+        (
+            "member-manifest-missing",
+            "collection_hash_mismatch",
+            "manifest:required-members",
+        ),
+        ("source", "citation_invalid", "source-file:unrelated"),
+        ("asset-missing", "citation_invalid", "governed-asset:manual"),
+        ("publication-missing", "projection_hash_stale", HASH_A),
+    ),
+)
+def test_scope_dimension_mismatch_never_exposes_document(
+    mutation: str,
+    expected_reason: str,
+    expected_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    changed = dict(documents[0])
+    changed["source_quote"] = f"QUARANTINED {mutation}"
+    changed["content"] = changed["source_quote"]
+    changed["quote_hash"] = canonical_sha256(changed["source_quote"])
+    if mutation == "type":
+        changed["canonical_type_ids"] = ["type:unrelated"]
+    elif mutation == "relationship-endpoint":
+        changed["canonical_entity_ids"] = [
+            retrieval_scope.canonical_member_ids[0],
+            "entity:unrelated-endpoint",
+        ]
+    elif mutation == "acl":
+        changed["acl_scope_keys"] = ["scope:unauthorized"]
+    elif mutation == "property":
+        changed["canonical_property_ids"] = ["property:unscoped"]
+    elif mutation == "member-manifest":
+        changed["required_member_manifest_ids"] = ["manifest:unrelated"]
+    elif mutation == "member-manifest-missing":
+        changed["required_member_manifest_ids"] = []
+    elif mutation == "asset-missing":
+        changed["governed_asset_reference_id"] = None
+        changed["governed_asset_reference_hash"] = None
+    elif mutation == "publication-missing":
+        changed["asserted_publication_hash"] = None
+    else:
+        changed["source_id"] = "source-file:unrelated"
+    changed["document_hash"] = canonical_sha256({
+        key: value for key, value in changed.items() if key != "document_hash"
+    })
+    documents[0] = changed
+    publication = _runtime_publication(context, documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        response=_agentic_response(context, documents),
+        accounting=_retrieval_accounting(len(documents)),
+    )
+
+    assert result.coverage.coverage_status == "partial"
+    assert len(result.citations) == len(documents) - 1
+    assert all(
+        citation.exact_authorized_quote != changed["source_quote"]
+        for citation in result.citations
+    )
+    assert any(
+        failure.reason_code == expected_reason
+        and expected_id in failure.canonical_ids
+        for failure in result.coverage.failures
+    )
 
 
 @pytest.mark.unit
@@ -633,22 +1354,9 @@ def test_retrieval_interop_returns_evidence_coverage_without_synthesis(
         warning_codes=("warning:source",) if warning else (),
         output_tokens=output_tokens,
     )
-    publication = SimpleNamespace(
-        compiled=SimpleNamespace(
-            source=None,
-            l5a_result=None,
-            index_name=context.search_index_id,
-            knowledge_source_name=context.knowledge_source_id,
-            knowledge_base_name=context.knowledge_base_id,
-            index_fingerprint=context.search_index_fingerprint,
-            document_hashes=tuple(
-                (
-                    reference["sourceData"]["id"],
-                    reference["sourceData"]["document_hash"],
-                )
-                for reference in references
-            ),
-        )
+    publication = _runtime_publication(
+        context,
+        [reference["sourceData"] for reference in references],
     )
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
@@ -690,20 +1398,7 @@ def test_direct_vector_degradation_forces_partial_coverage(
         _reference_document(context, entity_id, index)
         for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
     ]
-    publication = SimpleNamespace(
-        compiled=SimpleNamespace(
-            source=None,
-            l5a_result=None,
-            index_name=context.search_index_id,
-            knowledge_source_name=context.knowledge_source_id,
-            knowledge_base_name=context.knowledge_base_id,
-            index_fingerprint=context.search_index_fingerprint,
-            document_hashes=tuple(
-                (document["id"], document["document_hash"])
-                for document in documents
-            ),
-        )
-    )
+    publication = _runtime_publication(context, documents)
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
         "require_l5b_publication_receipt",

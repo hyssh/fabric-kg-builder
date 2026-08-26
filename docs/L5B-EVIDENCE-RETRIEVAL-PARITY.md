@@ -21,6 +21,8 @@ L4, and hardened L5a authority.
 - every indexed nontrivial assertion resolves through
   `EvidenceSpanV1_1 -> SourceUnit -> source file/asset version -> immutable
   locator/hash -> exact quote or governed asset`;
+- the supplied governed-asset set exactly equals sealed L5a authority, and each
+  applicable evidence source resolves one exact asset or publication fails;
 - exact filterable canonical entity, relationship, property, type, assertion,
   member-manifest, source, evidence, lifecycle, ACL, and authority keys are
   persisted without recomputing membership;
@@ -32,6 +34,9 @@ L4, and hardened L5a authority.
 - preview retrieval is explicitly pinned and gated to
   `2026-05-01-preview`; persisted `baseFilter` and request `filterAddOn` combine
   only by `AND`;
+- preview reasoning uses the official `{ "kind": ... }` shape, and provider
+  timeout conversion floors without broadening or rejects subsecond budgets
+  before any call;
 - stable direct fallback uses the same canonical scope with
   `vectorFilterMode=preFilter`; unavailable vectors can degrade only to the
   same filtered keyword/semantic path and must be reported;
@@ -40,6 +45,12 @@ L4, and hardened L5a authority.
 - exact Graph-required canonical IDs, not display names or ranked top-k, define
   completeness; missing IDs, warnings, truncation, source failures, collisions,
   stale hashes, or ACL gaps yield partial/abstain behavior; and
+- sealed response documents are quarantined before citation construction unless
+  every applicable canonical scope, source/asset, publication, and ACL
+  dimension is equal or narrower; quarantined quotes are never exposed;
+- local reuse compares canonical compiled payloads and deterministic seals
+  rather than deriving expected truth from mutable disk bytes, and source
+  display filenames reject URLs, paths, connection strings, and credentials;
 - schema 1, CLI/Data Agent activation, L6 synthesis, live Azure/Fabric
   deployment, and L7 validation remain unchanged or deferred.
 

@@ -1740,6 +1740,13 @@ canonical assertion
 AccessPolicy principal/scope keys, governed-asset references, lifecycle state,
 and all relevant L3/L4/L5a projection, receipt, manifest, crosswalk, and policy
 hashes travel with the document. Transient and signed URLs are excluded.
+The supplied governed-asset set must exactly equal the sealed L5a set by
+ID/hash/content and policy authority; omission, addition, duplication,
+misassignment, or coordinated reseal fails publication. An evidence document is
+publishable only when its source file, asset/version, content hash, and immutable
+locator resolve exactly one governed asset. Source display filenames are
+URL-free, path-free, credential-free NFC text; locators remain separate
+authority.
 Assertions without exact evidence are not indexed; required-member authority
 without a quote remains a retrieval coverage requirement and therefore cannot
 produce complete coverage unless another valid assertion document supplies its
@@ -1754,6 +1761,11 @@ worst-case bound. Every remote operation returns positive request/response
 bytes, unique operation references, retry/wait/latency/candidate/truncation/
 warning/error accounting; absent or malformed metadata fails closed. Mutations
 use inspected-state compare-and-swap and a per-attempt ownership token.
+Checkpoint reuse compares every persisted definition, knowledge resource,
+document set, projection proof, manifest, metrics, receipt, and token binding
+directly with immutable compiled values and deterministic authority seals.
+Rebuilding expected truth from current disk bytes is prohibited; coordinated
+local file/manifest/metrics/receipt reseals are cache misses.
 
 Runtime is zero-synthesis. C0.Runtime `QueryBudget`, resolved scope, request
 context, coverage receipt, citation envelope, and citation presentation
@@ -1772,6 +1784,18 @@ uses a separately budgeted filtered hybrid/vector request with
 `vectorFilterMode=preFilter` and the same or narrower canonical scope.
 Unavailable vectors may degrade only to the same filtered keyword/semantic
 query and must report degradation/partial state.
+
+The preview request emits `retrievalReasoningEffort` as `{ "kind": ... }`.
+Whole-second provider timeouts use the positive floor of the sealed millisecond
+budget and never round up. A budget below one second is not representable and
+fails locally before any provider call.
+
+Every returned document is scope-checked before citation construction. Its
+canonical entity, relationship, property, type, assertion, member-manifest,
+source/governed-asset, publication, and ACL dimensions must be identical to or
+narrower than the resolved scope. A sealed but unrelated document is
+quarantined: no quote or display metadata is returned, coverage is partial or
+abstaining, and typed failure evidence carries exact unexpected canonical IDs.
 
 L5b does not activate CLI/Data Agent behavior, L6 answer synthesis, live Search
 or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.
