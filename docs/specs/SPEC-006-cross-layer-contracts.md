@@ -1,15 +1,15 @@
-# SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, C0.Publish, and C0.Runtime)
+# SPEC-006: Cross-Layer Contracts (C0.Core, C0.Extraction, C0.Publish, C0.RDF, and C0.Runtime)
 
 **Status:** Approved foundation
-**Version:** 1.6.0
+**Version:** 1.7.0
 **Date:** 2026-08-26
 **Owner:** C0 Contract Owner
 **Depends on:** Bootstrap PR #30, SPEC-001 through SPEC-005
 
 ## 1. Scope
 
-C0.Core, the additive C0.Extraction carriers, and behavior-free C0.Publish and
-C0.Runtime proof/reference contracts are the shared contract, specification,
+C0.Core, the additive C0.Extraction carriers, and behavior-free C0.Publish,
+C0.RDF, and C0.Runtime proof/reference contracts are the shared contract, specification,
 schema, fixture, and hashing foundation used across L1-L6.
 They contain no proposal UX,
 LLM request, extraction activation, evidence pipeline integration, canonical
@@ -31,7 +31,8 @@ Stable layer vocabulary:
 | L7 | Acceptance |
 
 C0.Publish registers only crosswalk, equivalence, governed-asset reference, and
-access-policy contracts. C0.Runtime registers only canonical scope, bounded
+access-policy contracts. C0.RDF registers only derived RDF manifest,
+serialization-artifact, and validation-receipt contracts. C0.Runtime registers only canonical scope, bounded
 request configuration, structural coverage, and citation-data contracts.
 Downstream Agent intent, orchestration, retry, synthesis, final-answer, claim,
 and answer-evidence UX are not fabric-kg contract behavior.
@@ -111,6 +112,9 @@ readers. `c0.extraction_candidate_batch` remains `1.0.0`.
 | `c0.projection_equivalence` | `ProjectionEquivalence` | Expected/compiled/deployed/read-back equality proof |
 | `c0.governed_asset_reference` | `GovernedAssetReference` | Generic immutable delivery-asset reference |
 | `c0.access_policy` | `AccessPolicy` | Credential-free authorization and retention policy |
+| `c0.rdf_projection_manifest` | `RdfProjectionManifest` | Exact authority, namespace, graph, vocabulary, and alignment declaration |
+| `c0.rdf_serialization_artifact` | `RdfSerializationArtifact` | One format artifact bound to the canonical RDF dataset |
+| `c0.rdf_validation_receipt` | `RdfValidationReceipt` | SHACL and exact cross-serialization round-trip proof |
 | `c0.query_budget` | `QueryBudget` | Agent-selected request ceilings with separate hierarchy depth and relationship K |
 | `c0.ontology_scope_envelope` | `OntologyScopeEnvelope` | Agent-requested canonical scope proposal |
 | `c0.resolved_ontology_scope` | `ResolvedOntologyScope` | Structured authoritative Ontology/Graph scope response |
@@ -454,6 +458,64 @@ bearer tokens, secrets, credentials, and durable signed URLs are forbidden in
 every C0.Publish contract and therefore never enter canonical hashes or
 contract-derived logs.
 
+## 10A. C0.RDF contracts
+
+C0.RDF registers three strict, frozen `1.0.0` contracts. They are semantic
+interchange metadata only. They do not serialize, parse, canonicalize, validate,
+fetch, import, publish, deploy, or read back RDF. The normative L5c behavior
+boundary and adoption sequence are specified in
+[SPEC-008](SPEC-008-l5c-rdf-semantic-interchange.md).
+
+`RdfProjectionManifest` declares:
+
+- `authority="derived"` and the exact sealed L4 serving projection, L5a
+  projection manifest, `PublicationCrosswalk@1.1.0`, Ontology/Graph/Search
+  `ProjectionEquivalence` read-back proofs, Domain contract, hierarchy,
+  identity, relationship, K, `RequiredMemberManifest@1.1.0`, authoritative
+  collection, and original L3 `ArtifactManifest` IDs, versions, schema hashes,
+  and content hashes;
+- governed absolute HTTPS ontology and instance base IRIs with exact namespace
+  governance ID/hash, ontology IRI, version IRI, semantic version, UTF-8
+  percent-encoded canonical-ID mapping,
+  deterministic skolem policy, and the invariant that labels never define
+  identity;
+- exact common-schema, domain-schema, SHACL-shapes, optional-instance, and
+  provenance/authority named graphs, with schema triples separated from
+  instance/evidence triples and access-policy IDs/hashes on protected graphs;
+- exact class, property, hierarchy, key, endpoint, range, and value-type
+  inventory under a conservative OWL 2 RL-compatible derived vocabulary;
+- explicit endpoint-set encoding. Multiple domains or ranges cannot be emitted
+  as repeated `rdfs:domain` or `rdfs:range` statements because that denotes an
+  intersection; the contract permits a deterministic named `owl:unionOf` node
+  or SHACL `sh:or`; and
+- opt-in external alignment metadata with target IRI, approved relation,
+  immutable source artifact/version/hash, license, and approval proof.
+  Alignment is metadata-only: no default `owl:imports`, remote fetch, embedded
+  URL, or copied third-party ontology content is authorized.
+
+Full source quotes and transient or signed URLs are forbidden. RDF may carry
+only evidence/source/governed-asset IDs and hashes plus PROV links. Search
+remains the detailed authorized quote surface. `RequiredMemberManifest`
+remains completeness authority; neither RDF nor SHACL recomputes membership.
+
+`RdfSerializationArtifact` records one exact Turtle, RDF/XML, optional JSON-LD,
+or canonical N-Quads artifact. It fixes media type and W3C syntax version,
+content hash, byte/triple/graph counts, named graph IDs, canonical ID-set hash,
+RDFC-1.0 canonical dataset hash, and deterministic no-unstable-blank-node
+policy. Turtle is the human-review form, RDF/XML is the compatibility form,
+JSON-LD is optional, and canonical N-Quads is the equivalence form. Sorted
+N-Triples is not a dataset-canonicalization substitute. Public schema
+artifacts cannot carry ACL principal policy; protected dataset artifacts must
+reference an `AccessPolicy` by exact ID/hash.
+
+`RdfValidationReceipt` records SHACL shapes/report hashes, conformance and
+severity counts, validator identity/version, and exact observations after each
+serialization is parsed back to a dataset. Exact equivalence requires the same
+RDFC-1.0 graph hash, named graph set, triple count/set, and authority-reference
+set. Missing/extra triples, serialization or base-IRI drift, label-derived
+identity, unstable blank nodes, or SHACL violations force
+`exact_round_trip_equivalent=false`.
+
 ## 11. Manifests, receipts, and resource evidence
 
 `ArtifactManifest.entries` are sorted by artifact ID and unique. Total row and
@@ -686,6 +748,12 @@ The C0.Core gate includes:
   without asset references;
 - deterministic access-policy/asset/crosswalk/equivalence hashes and
   credential, SAS, bearer-token, secret, and durable-URL rejection;
+- exact C0.RDF authority tuples, governed HTTPS namespaces, named graph
+  layering, conservative vocabulary inventories, endpoint-set encoding, format
+  profiles, RDFC-1.0 equivalence hashes, SHACL summaries, protected-graph
+  policy references, and metadata-only external alignments;
+- RDF round-trip failure on missing/extra triples, graph/authority/base-IRI
+  drift, label identity, blank-node instability, or SHACL violations;
 - exact/narrow/expand and all four hierarchy scope modes over canonical IDs;
 - stable entity identity across subtype reclassification with revised
   type-assertion and scope hashes;
@@ -722,6 +790,8 @@ Excluded from C0.Core:
 - canonical Parquet or Arrow rewrites;
 - L4 projection execution;
 - L5 compile/deploy/read-back behavior;
+- L5c RDF serialization, parsing, canonicalization, SHACL execution, storage,
+  publication, remote import, or external ontology fetch;
 - L6 Graph/Search/synthesis execution;
 - L7 live acceptance;
 - remote requests, deployment, and live Fabric changes.
