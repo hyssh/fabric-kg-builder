@@ -2699,6 +2699,7 @@ def _agentic_runtime_seconds(max_runtime_milliseconds: int) -> int:
     return _provider_int32(seconds, field_name="maxRuntimeInSeconds")
 
 
+# Azure Search REST request integer fields use signed int32 values.
 _PROVIDER_INT32_MAX = (2 ** 31) - 1
 
 
