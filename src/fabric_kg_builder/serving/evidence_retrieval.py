@@ -2696,7 +2696,19 @@ def _agentic_runtime_seconds(max_runtime_milliseconds: int) -> int:
             "Azure agentic retrieval requires a positive whole-second timeout; "
             "the sealed QueryBudget cannot be rounded up",
         )
-    return seconds
+    return _provider_int32(seconds, field_name="maxRuntimeInSeconds")
+
+
+_PROVIDER_INT32_MAX = (2 ** 31) - 1
+
+
+def _provider_int32(value: int, *, field_name: str) -> int:
+    if not 1 <= value <= _PROVIDER_INT32_MAX:
+        raise L5bPublicationError(
+            "L5B_PROVIDER_INTEGER_UNREPRESENTABLE",
+            f"{field_name} must fit the provider signed int32 range",
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -2717,17 +2729,11 @@ def _shape_retrieval_budget(
         budget.max_output_documents,
         budget.max_search_result_records,
     )
-    if output_documents < 1:
-        raise L5bPublicationError(
-            "L5B_OUTPUT_DOCUMENT_BUDGET_UNAVAILABLE",
-            "retrieval requires a positive output-document ceiling",
-        )
+    output_documents = _provider_int32(
+        output_documents,
+        field_name="maxOutputDocuments",
+    )
     if retrieval_mode == "agentic_preview":
-        if budget.max_agentic_retrieval_invocations < 1:
-            raise L5bPublicationError(
-                "L5B_AGENTIC_INVOCATION_BUDGET_UNAVAILABLE",
-                "agentic retrieval is unavailable under the sealed invocation budget",
-            )
         # 2026-05-01-preview exposes no independent source-call or subquery
         # limit. One explicit intent targeted to one source is the exact
         # provider-enforceable minimum and bypasses model query planning.
@@ -2745,7 +2751,10 @@ def _shape_retrieval_budget(
             )
         return _RetrievalBudgetShape(
             output_documents=output_documents,
-            output_size=budget.max_output_tokens,
+            output_size=_provider_int32(
+                budget.max_output_tokens,
+                field_name="maxOutputSize",
+            ),
             runtime_seconds=_agentic_runtime_seconds(
                 budget.max_runtime_milliseconds
             ),
@@ -3747,7 +3756,11 @@ def interpret_retrieval_response(
             returned_count=(
                 0
                 if item.get("error") is not None
-                else references_by_activity.get(str(item.get("id")), 0)
+                else max(
+                    int(item.get("count", accounting.candidate_count)),
+                    accounting.candidate_count,
+                    references_by_activity.get(str(item.get("id")), 0),
+                )
             ),
         )
         for index, item in enumerate(search_activities)
@@ -3761,7 +3774,10 @@ def interpret_retrieval_response(
                 response_hash=canonical_sha256(response),
                 status="partial" if accounting.warning_codes else "succeeded",
                 matched_count=accounting.candidate_count,
-                returned_count=len(references),
+                returned_count=max(
+                    accounting.candidate_count,
+                    len(references),
+                ),
             ),
         )
     planned = tuple(
@@ -3947,6 +3963,10 @@ def interpret_retrieval_response(
     runtime_ms = accounting.latency_ms + accounting.retry_wait_ms
     output_tokens = accounting.output_tokens or 0
     output_bytes = len(canonical_json(response).encode("utf-8"))
+    agentic_mode = context.retrieval_mode.startswith("agentic_")
+    direct_mode = context.retrieval_mode == "direct_hybrid_prefilter"
+    observed_search_records = max(accounting.candidate_count, len(references))
+    observed_direct_requests = 1 if direct_mode else 0
     exhausted = tuple(sorted({
         *(
             ("max_runtime_milliseconds",)
@@ -3955,13 +3975,12 @@ def interpret_retrieval_response(
         ),
         *(
             ("max_search_result_records",)
-            if max(accounting.candidate_count, len(references))
-            > budget.max_search_result_records
+            if observed_search_records > budget.max_search_result_records
             else ()
         ),
         *(
             ("max_output_documents",)
-            if len(references) > budget.max_output_documents
+            if observed_search_records > budget.max_output_documents
             else ()
         ),
         *(
@@ -3975,13 +3994,26 @@ def interpret_retrieval_response(
             else ()
         ),
         *(
+            ("max_agentic_retrieval_invocations",)
+            if agentic_mode and 1 > budget.max_agentic_retrieval_invocations
+            else ()
+        ),
+        *(
             ("max_agentic_internal_subqueries",)
-            if len(planned) > budget.max_agentic_internal_subqueries
+            if agentic_mode
+            and len(planned) > budget.max_agentic_internal_subqueries
             else ()
         ),
         *(
             ("max_agentic_source_calls",)
-            if len(source_calls) > budget.max_agentic_source_calls
+            if agentic_mode
+            and len(source_calls) > budget.max_agentic_source_calls
+            else ()
+        ),
+        *(
+            ("max_direct_search_requests",)
+            if direct_mode
+            and observed_direct_requests > budget.max_direct_search_requests
             else ()
         ),
     }))
@@ -4005,23 +4037,21 @@ def interpret_retrieval_response(
         max_search_result_records=budget.max_search_result_records,
         observed_ontology_graph_scope_requests=1,
         observed_agentic_retrieval_invocations=(
-            1 if context.retrieval_mode.startswith("agentic_") else 0
+            1 if agentic_mode else 0
         ),
-        observed_agentic_internal_subqueries=len(planned),
+        observed_agentic_internal_subqueries=(
+            len(planned) if agentic_mode else 0
+        ),
         observed_agentic_source_calls=(
-            len(source_calls) if context.retrieval_mode.startswith("agentic_") else 0
+            len(source_calls) if agentic_mode else 0
         ),
-        observed_direct_search_requests=(
-            len(source_calls)
-            if context.retrieval_mode == "direct_hybrid_prefilter"
-            else 0
-        ),
-        observed_output_documents=len(references),
+        observed_direct_search_requests=observed_direct_requests,
+        observed_output_documents=observed_search_records,
         observed_output_tokens=output_tokens,
         observed_output_bytes=output_bytes,
         observed_runtime_milliseconds=runtime_ms,
         observed_graph_result_records=len(required_ids),
-        observed_search_result_records=len(references),
+        observed_search_result_records=observed_search_records,
         budget_exhausted_dimensions=exhausted,
     )
     returned_collection_hash = canonical_sha256(
@@ -4064,8 +4094,8 @@ def interpret_retrieval_response(
         "planned_subqueries": planned,
         "activity": activity,
         "source_calls": source_calls,
-        "matched_document_count": max(accounting.candidate_count, len(references)),
-        "returned_document_count": len(references),
+        "matched_document_count": observed_search_records,
+        "returned_document_count": observed_search_records,
         "reference_count": len(references),
         "unique_canonical_id_count": len(returned_ids),
         "canonical_citation_count": len(citation_mappings),

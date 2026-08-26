@@ -1537,6 +1537,61 @@ def test_query_budget_boundary_matrix_shapes_all_outgoing_preview_limits() -> No
     assert "vectorQueries" not in payload
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("changes", "field_name"),
+    (
+        ({"max_output_tokens": 2 ** 31}, "maxOutputSize"),
+        (
+            {
+                "max_output_documents": 2 ** 31,
+                "max_search_result_records": 2 ** 31,
+            },
+            "maxOutputDocuments",
+        ),
+        (
+            {"max_runtime_milliseconds": (2 ** 31) * 1000},
+            "maxRuntimeInSeconds",
+        ),
+    ),
+)
+def test_preview_rejects_provider_int32_overflow_before_call(
+    changes: dict[str, int],
+    field_name: str,
+) -> None:
+    context, budget = _request_with_budget_changes(**changes)
+    provider_calls: list[str] = []
+
+    with pytest.raises(
+        L5bPublicationError,
+        match=f"{field_name} must fit the provider signed int32 range",
+    ):
+        _preview_payload(context, budget)
+
+    assert provider_calls == []
+
+
+@pytest.mark.unit
+def test_preview_accepts_exact_provider_int32_boundaries() -> None:
+    maximum = (2 ** 31) - 1
+    context, budget = _request_with_budget_changes(
+        max_output_documents=maximum,
+        max_search_result_records=maximum,
+        max_output_tokens=maximum,
+        max_runtime_milliseconds=(maximum * 1000) + 999,
+    )
+
+    payload = _preview_payload(context, budget)
+
+    assert payload["maxOutputDocuments"] == maximum
+    assert payload["knowledgeSourceParams"][0]["maxOutputDocuments"] == maximum
+    assert payload["maxOutputSize"] == maximum
+    assert payload["maxRuntimeInSeconds"] == maximum
+    assert payload["maxRuntimeInSeconds"] * 1000 <= (
+        budget.max_runtime_milliseconds
+    )
+
+
 def _request_with_runtime(milliseconds: int):
     return _request_with_budget_changes(
         max_runtime_milliseconds=milliseconds,
@@ -1708,6 +1763,28 @@ def test_direct_vector_and_record_candidates_share_one_budget_shape() -> None:
 
 
 @pytest.mark.unit
+def test_direct_rejects_provider_int32_overflow_before_call() -> None:
+    context, budget = _request_with_budget_changes(
+        "direct_hybrid_prefilter",
+        max_output_documents=2 ** 31,
+        max_search_result_records=2 ** 31,
+    )
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="maxOutputDocuments must fit the provider signed int32 range",
+    ):
+        build_direct_search_payload(
+            context,
+            budget,
+            resolved_retrieval_scope(),
+            query_text="evidence",
+            vector=(0.0,) * 1536,
+            vector_available=True,
+        )
+
+
+@pytest.mark.unit
 def test_candidate_accounting_remains_budget_defense_in_depth(
     monkeypatch,
 ) -> None:
@@ -1749,7 +1826,9 @@ def test_candidate_accounting_remains_budget_defense_in_depth(
     )
 
     assert result.coverage.coverage_status == "partial"
-    assert result.coverage.budget.observed_search_result_records == 1
+    assert result.coverage.budget.observed_search_result_records == 2
+    assert result.coverage.returned_document_count == 2
+    assert result.coverage.reference_count == 1
     assert result.coverage.budget.budget_exhausted_dimensions == (
         "max_search_result_records",
     )
@@ -2453,4 +2532,175 @@ def test_direct_vector_degradation_forces_partial_coverage(
     assert result.coverage.coverage_status == "partial"
     assert result.coverage.unsupported_capability_codes == (
         "vector_unavailable_keyword_semantic_filtered",
+    )
+    assert result.coverage.budget.observed_agentic_retrieval_invocations == 0
+    assert result.coverage.budget.observed_agentic_internal_subqueries == 0
+    assert result.coverage.budget.observed_agentic_source_calls == 0
+    assert result.coverage.budget.observed_direct_search_requests == 1
+    assert "max_agentic_source_calls" not in (
+        result.coverage.budget.budget_exhausted_dimensions
+    )
+
+
+@pytest.mark.unit
+def test_direct_success_is_complete_with_mode_specific_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context("direct_hybrid_prefilter")
+    documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    publication = _runtime_publication(context, documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response={"value": documents},
+        accounting=L5bRemoteAccounting(
+            operation_refs=("direct-search:complete",),
+            request_bytes=100,
+            response_bytes=1000,
+            retry_count=0,
+            retry_wait_ms=0,
+            latency_ms=25,
+            candidate_count=len(documents),
+        ),
+    )
+
+    assert result.coverage.coverage_status == "complete"
+    assert result.coverage.budget.observed_agentic_retrieval_invocations == 0
+    assert result.coverage.budget.observed_agentic_internal_subqueries == 0
+    assert result.coverage.budget.observed_agentic_source_calls == 0
+    assert result.coverage.budget.observed_direct_search_requests == 1
+    assert result.coverage.budget.budget_exhausted_dimensions == ()
+
+
+@pytest.mark.unit
+def test_blocked_agentic_request_can_use_authorized_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    origin, origin_budget = _request_with_budget_changes(
+        max_agentic_source_calls=0,
+    )
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_AGENTIC_SOURCE_CALL_BUDGET_UNAVAILABLE",
+    ):
+        _preview_payload(origin, origin_budget)
+
+    context, budget = request_context(
+        "direct_hybrid_prefilter",
+        fallback_for=origin,
+    )
+    build_direct_search_payload(
+        context,
+        budget,
+        retrieval_scope,
+        query_text="evidence",
+        vector=(0.0,) * 1536,
+        vector_available=True,
+        originating_context=origin,
+        originating_budget=origin_budget,
+    )
+    documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    publication = _runtime_publication(context, documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response={"value": documents},
+        accounting=L5bRemoteAccounting(
+            operation_refs=("direct-search:fallback",),
+            request_bytes=100,
+            response_bytes=1000,
+            retry_count=0,
+            retry_wait_ms=0,
+            latency_ms=25,
+            candidate_count=len(documents),
+        ),
+        originating_context=origin,
+        originating_budget=origin_budget,
+        fallback_reason_code="retrieval_budget_exhausted",
+    )
+
+    assert result.coverage.coverage_status == "complete"
+    assert result.coverage.fallback_used is True
+    assert result.coverage.budget.observed_agentic_source_calls == 0
+    assert result.coverage.budget.observed_direct_search_requests == 1
+
+
+@pytest.mark.unit
+def test_direct_candidate_overage_exhausts_shared_record_budget_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = _request_with_budget_changes(
+        "direct_hybrid_prefilter",
+        max_search_result_records=10,
+    )
+    documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    publication = _runtime_publication(context, documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response={"value": documents},
+        accounting=L5bRemoteAccounting(
+            operation_refs=("direct-search:mixed-accounting",),
+            request_bytes=100,
+            response_bytes=1000,
+            retry_count=0,
+            retry_wait_ms=0,
+            latency_ms=25,
+            candidate_count=11,
+        ),
+    )
+
+    assert result.coverage.coverage_status == "partial"
+    assert result.coverage.returned_document_count == 11
+    assert result.coverage.reference_count == len(documents)
+    assert result.coverage.budget.observed_search_result_records == 11
+    assert result.coverage.budget.observed_agentic_source_calls == 0
+    assert result.coverage.budget.observed_direct_search_requests == 1
+    assert result.coverage.budget.budget_exhausted_dimensions == (
+        "max_search_result_records",
     )
