@@ -537,6 +537,11 @@ Receipt observations and the acceptance bundle require both partitions for
 every format. Public-only artifacts, a missing protected format, duplicate
 graphs across partitions, or incomplete provenance/instance coverage cannot
 be accepted.
+The receipt carries distinct
+`public_schema_canonical_dataset_hash` and
+`protected_dataset_canonical_dataset_hash` values. Each format must equal the
+canonical N-Quads hash for its own exposure; public and protected hashes must
+differ and are never treated as one combined dataset hash.
 
 `RdfValidationReceipt` records SHACL shapes/report hashes, conformance and
 severity counts, validator identity/version, and observations sealed to the

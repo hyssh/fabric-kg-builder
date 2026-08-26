@@ -186,6 +186,13 @@ instance IDs, are required.
 The receipt and acceptance bundle require both partitions for every format, so
 public-only artifacts, a missing protected format, duplicate graph coverage,
 or omitted provenance/instances fail.
+The receipt declares two RDFC-1.0 authorities:
+`public_schema_canonical_dataset_hash` and
+`protected_dataset_canonical_dataset_hash`. Every serialization observation
+equals the canonical N-Quads hash for its own exposure. Swapped, reused,
+missing, or per-format-drifted partition hashes fail. No combined hash is
+claimed without an actual combined canonical artifact or separately specified
+composition algorithm.
 
 ## 9. SHACL boundary
 

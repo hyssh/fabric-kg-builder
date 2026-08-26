@@ -1537,7 +1537,8 @@ class RdfValidationReceipt(RdfContractModel):
     canonical_id_partition_binding_hash: Sha256
     canonical_n_quads_artifact_ids: tuple[str, ...]
     canonical_dataset_hash_algorithm: Literal["RDFC-1.0"] = "RDFC-1.0"
-    canonical_dataset_hash: Sha256
+    public_schema_canonical_dataset_hash: Sha256
+    protected_dataset_canonical_dataset_hash: Sha256
     required_serialization_formats: tuple[RdfFormat, ...]
     observations: tuple[RdfSerializationObservation, ...]
     shacl_validation: RdfShaclValidationSummary
@@ -1635,8 +1636,23 @@ class RdfValidationReceipt(RdfContractModel):
         ) != self.canonical_n_quads_artifact_ids:
             raise ValueError("canonical N-Quads artifact IDs mismatch")
         canonical_by_exposure = {item.exposure: item for item in canonicals}
+        expected_dataset_hashes = {
+            "public_schema": self.public_schema_canonical_dataset_hash,
+            "protected_dataset": self.protected_dataset_canonical_dataset_hash,
+        }
+        if self.public_schema_canonical_dataset_hash == (
+            self.protected_dataset_canonical_dataset_hash
+        ):
+            raise ValueError("public and protected partition dataset hashes must differ")
+        if {
+            exposure: item.canonical_dataset_hash
+            for exposure, item in canonical_by_exposure.items()
+        } != expected_dataset_hashes:
+            raise ValueError(
+                "canonical N-Quads hashes must equal receipt partition dataset hashes"
+            )
         failures = any(
-            item.canonical_dataset_hash != self.canonical_dataset_hash
+            item.canonical_dataset_hash != expected_dataset_hashes[item.exposure]
             or item.named_graph_ids
             != canonical_by_exposure[item.exposure].named_graph_ids
             or item.triple_count

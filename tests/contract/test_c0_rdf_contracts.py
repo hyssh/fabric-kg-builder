@@ -349,10 +349,12 @@ def manifest() -> RdfProjectionManifest:
 def artifact(
     rdf_format: str,
     *,
-    dataset_hash: str = H["8"],
+    dataset_hash: str | None = None,
     artifact_id: str | None = None,
     exposure: str = "protected_dataset",
 ) -> RdfSerializationArtifact:
+    if dataset_hash is None:
+        dataset_hash = H["8"] if exposure == "public_schema" else H["7"]
     profile = {
         "turtle": ("text/turtle", "RDF 1.1 Turtle"),
         "rdf_xml": ("application/rdf+xml", "RDF 1.1 XML Syntax"),
@@ -450,7 +452,13 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
             exposure=exposure,
             media_type=artifacts[(rdf_format, exposure)].media_type,
             content_hash=artifacts[(rdf_format, exposure)].content_hash,
-            canonical_dataset_hash=H["7"] if drift and rdf_format == "turtle" else H["8"],
+            canonical_dataset_hash=(
+                H["6"]
+                if drift
+                and rdf_format == "turtle"
+                and exposure == "public_schema"
+                else artifacts[(rdf_format, exposure)].canonical_dataset_hash
+            ),
             named_graph_ids=artifacts[(rdf_format, exposure)].named_graph_ids,
             graph_inventory_hash=artifacts[
                 (rdf_format, exposure)
@@ -496,7 +504,8 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
             if item.serialization_format == "canonical_n_quads"
         ),
         "canonical_dataset_hash_algorithm": "RDFC-1.0",
-        "canonical_dataset_hash": H["8"],
+        "public_schema_canonical_dataset_hash": H["8"],
+        "protected_dataset_canonical_dataset_hash": H["7"],
         "required_serialization_formats": projection.required_serialization_formats,
         "observations": observations,
         "shacl_validation": RdfShaclValidationSummary(
@@ -1714,6 +1723,49 @@ def test_round_trip_drift_is_recorded_as_failure() -> None:
     )
     with pytest.raises(ValidationError, match="round-trip equivalence"):
         RdfValidationReceipt.model_validate(payload)
+
+
+@pytest.mark.contract
+def test_partition_dataset_hashes_are_distinct_and_exposure_bound() -> None:
+    receipt = validation_receipt()
+    assert receipt.public_schema_canonical_dataset_hash == H["8"]
+    assert receipt.protected_dataset_canonical_dataset_hash == H["7"]
+
+    reused = receipt.model_dump(mode="json")
+    reused["protected_dataset_canonical_dataset_hash"] = H["8"]
+    with pytest.raises(ValidationError, match="must differ"):
+        RdfValidationReceipt.model_validate(reused)
+
+    swapped = receipt.model_dump(mode="json")
+    swapped["public_schema_canonical_dataset_hash"] = H["7"]
+    swapped["protected_dataset_canonical_dataset_hash"] = H["8"]
+    with pytest.raises(ValidationError, match="canonical N-Quads hashes"):
+        RdfValidationReceipt.model_validate(swapped)
+
+    missing = receipt.model_dump(mode="json")
+    del missing["protected_dataset_canonical_dataset_hash"]
+    with pytest.raises(ValidationError, match="protected_dataset"):
+        RdfValidationReceipt.model_validate(missing)
+
+    drifted = receipt.model_dump(mode="json")
+    observation = next(
+        item
+        for item in drifted["observations"]
+        if item["serialization_format"] == "rdf_xml"
+        and item["exposure"] == "protected_dataset"
+    )
+    observation["canonical_dataset_hash"] = H["6"]
+    drifted["exact_round_trip_equivalent"] = False
+    drifted["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in drifted.items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    assert not RdfValidationReceipt.model_validate(
+        drifted
+    ).exact_round_trip_equivalent
 
 
 @pytest.mark.contract
