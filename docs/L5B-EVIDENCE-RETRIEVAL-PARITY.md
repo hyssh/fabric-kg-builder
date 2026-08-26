@@ -59,6 +59,11 @@ L4, and hardened L5a authority.
   ID count, Search matched candidates remain distinct from verified returned
   documents, direct and agentic source-call accounting remains mode-specific,
   and fallback preserves separate origin and direct budgets;
+- agentic Search candidate observations are the checked sum of unique validated
+  source-call activity counts and must exactly equal adapter accounting; direct
+  `@odata.count`, when returned, must likewise equal adapter accounting.
+  Missing, negative, contradictory, or signed-int32-overflowing candidate
+  accounting fails closed before a receipt or citation can be returned;
 - exhausted dimensions are derived exactly when observation exceeds ceiling;
   provider overexecution produces one typed `retrieval_budget_exhausted`
   failure with `partial` or `abstain` coverage instead of validation failure or

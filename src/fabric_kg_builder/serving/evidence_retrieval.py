@@ -3783,24 +3783,51 @@ def interpret_retrieval_response(
             "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
             "provider response contains duplicate Search activity IDs",
         )
+    if context.retrieval_mode.startswith("agentic_"):
+        candidate_observation = 0
+        for item in search_activities:
+            matched_count = item.get("count")
+            if (
+                not isinstance(matched_count, int)
+                or isinstance(matched_count, bool)
+                or not 0 <= matched_count <= _PROVIDER_INT32_MAX
+                or candidate_observation > _PROVIDER_INT32_MAX - matched_count
+            ):
+                raise L5bPublicationError(
+                    "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                    "provider activity candidate accounting is invalid",
+                )
+            candidate_observation += matched_count
+        if candidate_observation != accounting.candidate_count:
+            raise L5bPublicationError(
+                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                "provider activity and adapter candidate accounting disagree",
+            )
+    else:
+        direct_provider_count = response.get(
+            "@odata.count",
+            accounting.candidate_count,
+        )
+        if (
+            not isinstance(direct_provider_count, int)
+            or isinstance(direct_provider_count, bool)
+            or not 0 <= direct_provider_count <= _PROVIDER_INT32_MAX
+            or direct_provider_count != accounting.candidate_count
+        ):
+            raise L5bPublicationError(
+                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
+                "direct provider and adapter candidate accounting disagree",
+            )
+        candidate_observation = direct_provider_count
     verified_document_count = len(citations)
-    if accounting.candidate_count < verified_document_count:
+    if candidate_observation < verified_document_count:
         raise L5bPublicationError(
             "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
             "provider candidate count is below verified returned documents",
         )
     source_calls_list: list[SourceCallReceipt] = []
     for index, item in enumerate(search_activities):
-        matched_count = item.get("count", accounting.candidate_count)
-        if (
-            not isinstance(matched_count, int)
-            or isinstance(matched_count, bool)
-            or matched_count < 0
-        ):
-            raise L5bPublicationError(
-                "L5B_REMOTE_ACCOUNTING_CONTRADICTORY",
-                "provider activity matched count is invalid",
-            )
+        matched_count = item["count"]
         returned_count = (
             0
             if item.get("error") is not None
@@ -3843,7 +3870,7 @@ def interpret_retrieval_response(
                 request_hash=context.request_context_hash,
                 response_hash=canonical_sha256(response),
                 status="partial" if accounting.warning_codes else "succeeded",
-                matched_count=accounting.candidate_count,
+                matched_count=candidate_observation,
                 returned_count=verified_document_count,
             ),
         )
@@ -4088,7 +4115,7 @@ def interpret_retrieval_response(
         ),
         (
             "max_search_candidate_records",
-            accounting.candidate_count,
+            candidate_observation,
             budget.max_search_candidate_records,
         ),
         (
@@ -4155,7 +4182,7 @@ def interpret_retrieval_response(
         observed_runtime_milliseconds=runtime_ms,
         observed_graph_result_records=observed_graph_records,
         observed_search_result_records=observed_search_records,
-        observed_search_candidate_records=accounting.candidate_count,
+        observed_search_candidate_records=candidate_observation,
         observed_vector_search_requests=observed_vector_requests,
         observed_embedding_calls=observed_embedding_calls,
         observed_embedding_items=observed_embedding_items,
@@ -4206,7 +4233,7 @@ def interpret_retrieval_response(
         "planned_subqueries": planned,
         "activity": activity,
         "source_calls": source_calls,
-        "matched_document_count": accounting.candidate_count,
+        "matched_document_count": candidate_observation,
         "returned_document_count": observed_search_records,
         "reference_count": verified_document_count,
         "unique_canonical_id_count": len(returned_ids),
