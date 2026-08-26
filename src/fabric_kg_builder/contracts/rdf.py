@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlparse
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .base import (
     ContractModel,
@@ -65,11 +73,18 @@ _SIGNED_QUERY_KEYS = {
     "x-amz-algorithm",
     "x-goog-signature",
     "x-goog-credential",
+    "password",
+    "passwd",
+    "pwd",
+    "auth",
+    "authentication",
+    "authorization",
 }
 _SECRET_VALUE_RE = re.compile(
     r"(?i)(?:authorization\s*[:=]\s*bearer|bearer\s+\S+|"
     r"(?:api[_-]?key|x-api-key|sig(?:nature)?|token|secret|credential|"
-    r"client_secret|accountkey|sharedaccesssignature)\s*[:=]\s*\S+)"
+    r"password|passwd|pwd|auth(?:entication|orization)?|client[_-]?secret|"
+    r"accountkey|sharedaccesssignature)\s*[:=]\s*\S+)"
 )
 _MAX_DECODE_ROUNDS = 12
 _MAX_SENSITIVE_TEXT_BYTES = 65_536
@@ -95,7 +110,7 @@ def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
 def _reject_sensitive_text(value: str, *, field_name: str) -> None:
     if len(value.encode("utf-8")) > _MAX_SENSITIVE_TEXT_BYTES:
         raise ValueError(f"{field_name} exceeds the safe validation size")
-    decoded = value
+    decoded = unicodedata.normalize("NFKC", value)
     stable = False
     for _ in range(_MAX_DECODE_ROUNDS):
         expanded = unquote(decoded)
@@ -115,12 +130,29 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} must not contain URI credentials")
     query_keys = {key.casefold() for key, _ in parse_qsl(parsed.query)}
     normalized_keys = {
-        re.sub(r"[-_]", "", key.casefold())
+        re.sub(
+            r"[^a-z0-9]",
+            "",
+            unicodedata.normalize("NFKC", key).casefold(),
+        )
         for key in query_keys
     }
     normalized_signed = {
-        re.sub(r"[-_]", "", key.casefold())
+        re.sub(
+            r"[^a-z0-9]",
+            "",
+            unicodedata.normalize("NFKC", key).casefold(),
+        )
         for key in _SIGNED_QUERY_KEYS
+    }
+    credential_keys = {
+        "password",
+        "passwd",
+        "pwd",
+        "auth",
+        "authentication",
+        "authorization",
+        "clientsecret",
     }
     generic_signed = any(
         "signature" in key
@@ -133,6 +165,8 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         normalized_signed
     ) or generic_signed:
         raise ValueError(f"{field_name} must not contain a signed or transient URL")
+    if normalized_keys.intersection(credential_keys):
+        raise ValueError(f"{field_name} must not contain credentials")
 
 
 def _reject_sensitive_in(value: Any, *, path: str = "contract") -> None:
@@ -195,7 +229,47 @@ def _sorted_unique_models(value: object, *, key: str, field_name: str) -> object
     return items
 
 
-class RdfSourceAuthorityTuple(ContractModel):
+def _sanitized_validation_error(
+    model_name: str,
+    error: ValidationError,
+) -> ValidationError:
+    details = error.errors(include_input=False, include_url=False)
+    return ValidationError.from_exception_data(model_name, details)
+
+
+class RdfContractModel(ContractModel):
+    """RDF-local strict model that never exposes rejected input in errors."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_sensitive_input(cls, value: Any) -> Any:
+        _reject_sensitive_in(value)
+        return value
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except ValidationError as error:
+            raise _sanitized_validation_error(type(self).__name__, error) from None
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        try:
+            return super().model_validate(obj, **kwargs)
+        except ValidationError as error:
+            raise _sanitized_validation_error(cls.__name__, error) from None
+
+    @classmethod
+    def model_validate_json(cls, json_data: str | bytes | bytearray, **kwargs: Any) -> Any:
+        try:
+            return super().model_validate_json(json_data, **kwargs)
+        except ValidationError as error:
+            raise _sanitized_validation_error(cls.__name__, error) from None
+
+
+class RdfSourceAuthorityTuple(RdfContractModel):
     """Exact upstream authority tuple; RDF is never an independent authority."""
 
     authority: Literal["derived"] = "derived"
@@ -221,8 +295,131 @@ class RdfSourceAuthorityTuple(ContractModel):
     k_policy_hash: Sha256
     publication_authority: PublicationAuthorityReferences
 
+    def reference_set_hash(self) -> str:
+        references = (
+            {
+                "reference_name": "semantic_serving_projection",
+                "reference_id": self.semantic_serving_projection_id,
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.semantic_serving_projection_hash,
+            },
+            {
+                "reference_name": "l5a_projection_manifest",
+                "reference_id": self.l5a_projection_manifest_id,
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.l5a_projection_manifest_hash,
+            },
+            {
+                "reference_name": "publication_crosswalk",
+                "reference_id": self.publication_crosswalk_id,
+                "contract_version": self.publication_crosswalk_contract_version,
+                "schema_hash": self.publication_crosswalk_schema_hash,
+                "content_hash": self.publication_crosswalk_hash,
+            },
+            {
+                "reference_name": "ontology_projection_equivalence",
+                "reference_id": self.ontology_projection_equivalence_id,
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.ontology_projection_equivalence_hash,
+            },
+            {
+                "reference_name": "graph_projection_equivalence",
+                "reference_id": self.graph_projection_equivalence_id,
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.graph_projection_equivalence_hash,
+            },
+            {
+                "reference_name": "search_projection_equivalence",
+                "reference_id": self.search_projection_equivalence_id,
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.search_projection_equivalence_hash,
+            },
+            {
+                "reference_name": "domain_contract",
+                "reference_id": self.domain_contract_id,
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.domain_contract_hash,
+            },
+            {
+                "reference_name": "hierarchy_policy",
+                "reference_id": "authority:hierarchy",
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.hierarchy_hash,
+            },
+            {
+                "reference_name": "identity_policy",
+                "reference_id": "authority:identity-policy",
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.identity_policy_hash,
+            },
+            {
+                "reference_name": "relationship_policy",
+                "reference_id": "authority:relationship-policy",
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.relationship_policy_hash,
+            },
+            {
+                "reference_name": "k_policy",
+                "reference_id": "authority:k-policy",
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": self.k_policy_hash,
+            },
+            {
+                "reference_name": "required_member_manifest",
+                "reference_id": (
+                    self.publication_authority.required_member_manifest_id
+                ),
+                "contract_version": (
+                    self.publication_authority.required_member_manifest_contract_version
+                ),
+                "schema_hash": (
+                    self.publication_authority.required_member_manifest_schema_hash
+                ),
+                "content_hash": (
+                    self.publication_authority.required_member_manifest_hash
+                ),
+            },
+            {
+                "reference_name": "authoritative_collection",
+                "reference_id": (
+                    self.publication_authority.required_member_manifest_id
+                ),
+                "contract_version": (
+                    self.publication_authority.required_member_manifest_contract_version
+                ),
+                "schema_hash": None,
+                "content_hash": (
+                    self.publication_authority.authoritative_collection_hash
+                ),
+            },
+            {
+                "reference_name": "source_artifact_manifest",
+                "reference_id": (
+                    self.publication_authority.source_artifact_manifest_id
+                ),
+                "contract_version": None,
+                "schema_hash": None,
+                "content_hash": (
+                    self.publication_authority.source_artifact_manifest_hash
+                ),
+            },
+        )
+        return canonical_sha256(
+            tuple(sorted(references, key=lambda item: item["reference_name"]))
+        )
 
-class RdfIriPolicy(ContractModel):
+
+class RdfIriPolicy(RdfContractModel):
     namespace_governance_id: RequiredText
     namespace_governance_hash: Sha256
     ontology_base_iri: RequiredText
@@ -263,13 +460,15 @@ class RdfIriPolicy(ContractModel):
         return self
 
 
-class RdfNamedGraph(ContractModel):
+class RdfNamedGraph(RdfContractModel):
     graph_id: RequiredText
     graph_iri: RequiredText
     graph_role: RdfGraphRole
     required: bool
     contains_schema_triples: bool
     contains_instance_or_evidence_triples: bool
+    expected_graph_hash: Sha256
+    expected_triple_count: NonNegativeInt
     access_policy_id: RequiredText | None = None
     access_policy_hash: Sha256 | None = None
 
@@ -295,7 +494,7 @@ class RdfNamedGraph(ContractModel):
         return self
 
 
-class RdfClassDefinition(ContractModel):
+class RdfClassDefinition(RdfContractModel):
     canonical_class_id: RequiredText
     class_iri: RequiredText
     parent_canonical_class_ids: tuple[str, ...] = ()
@@ -314,7 +513,7 @@ class RdfClassDefinition(ContractModel):
         return _https_iri(value, field_name="class_iri")
 
 
-class RdfPropertyDefinition(ContractModel):
+class RdfPropertyDefinition(RdfContractModel):
     canonical_property_id: RequiredText
     property_iri: RequiredText
     term_kind: RdfTermKind
@@ -402,7 +601,7 @@ class RdfPropertyDefinition(ContractModel):
         return self
 
 
-class RdfRelationshipDefinition(ContractModel):
+class RdfRelationshipDefinition(RdfContractModel):
     canonical_relationship_id: RequiredText
     relationship_iri: RequiredText
     source_canonical_class_ids: tuple[str, ...]
@@ -473,7 +672,7 @@ class RdfRelationshipDefinition(ContractModel):
         return self
 
 
-class RdfVocabularyInventory(ContractModel):
+class RdfVocabularyInventory(RdfContractModel):
     owl_profile: Literal["OWL 2 RL compatible derived vocabulary"] = (
         "OWL 2 RL compatible derived vocabulary"
     )
@@ -555,7 +754,7 @@ class RdfVocabularyInventory(ContractModel):
         return self
 
 
-class RdfExternalAlignment(ContractModel):
+class RdfExternalAlignment(RdfContractModel):
     target_iri: RequiredText
     relation_kind: ExternalAlignmentRelation
     source_artifact_reference_id: RequiredText
@@ -574,10 +773,11 @@ class RdfExternalAlignment(ContractModel):
         return _https_iri(value, field_name="target_iri")
 
 
-class RdfProjectionManifest(ContractModel):
+class RdfProjectionManifest(RdfContractModel):
     identity: CanonicalIdentityEnvelope
     rdf_projection_manifest_id: RequiredText
     source_authority: RdfSourceAuthorityTuple
+    authority_reference_set_hash: Sha256
     iri_policy: RdfIriPolicy
     named_graphs: tuple[RdfNamedGraph, ...]
     vocabulary: RdfVocabularyInventory
@@ -623,6 +823,13 @@ class RdfProjectionManifest(ContractModel):
             raise ValueError("invalid RDF projection manifest contract_kind")
         if self.identity.domain_contract_hash != self.source_authority.domain_contract_hash:
             raise ValueError("domain contract hash differs from identity authority")
+        if (
+            self.authority_reference_set_hash
+            != self.source_authority.reference_set_hash()
+        ):
+            raise ValueError(
+                "authority_reference_set_hash does not match exact source references"
+            )
         graph_roles = {item.graph_role for item in self.named_graphs}
         if len(graph_roles) != len(self.named_graphs):
             raise ValueError("RDF graph roles must be unique")
@@ -751,7 +958,7 @@ class RdfProjectionManifest(ContractModel):
         return self
 
 
-class RdfSerializedGraphBinding(ContractModel):
+class RdfSerializedGraphBinding(RdfContractModel):
     graph_id: RequiredText
     graph_iri: RequiredText
     graph_role: RdfGraphRole
@@ -777,11 +984,12 @@ class RdfSerializedGraphBinding(ContractModel):
         return self
 
 
-class RdfSerializationArtifact(ContractModel):
+class RdfSerializationArtifact(RdfContractModel):
     identity: CanonicalIdentityEnvelope
     rdf_serialization_artifact_id: RequiredText
     rdf_projection_manifest_id: RequiredText
     rdf_projection_manifest_hash: Sha256
+    authority_reference_set_hash: Sha256
     serialization_format: RdfFormat
     media_type: RequiredText
     w3c_syntax_version: RequiredText
@@ -884,6 +1092,8 @@ class RdfSerializationArtifact(ContractModel):
             raise ValueError("RDF projection manifest ID mismatch")
         if self.rdf_projection_manifest_hash != manifest.projection_manifest_hash:
             raise ValueError("RDF projection manifest hash mismatch")
+        if self.authority_reference_set_hash != manifest.authority_reference_set_hash:
+            raise ValueError("artifact authority reference set hash mismatch")
         if self.serialization_format not in manifest.required_serialization_formats:
             raise ValueError("serialization format is not declared by the manifest")
         expected_graphs = tuple(
@@ -900,6 +1110,8 @@ class RdfSerializationArtifact(ContractModel):
                 item.required,
                 item.access_policy_id,
                 item.access_policy_hash,
+                item.graph_hash,
+                item.triple_count,
             )
             for item in self.graph_bindings
         )
@@ -911,6 +1123,8 @@ class RdfSerializationArtifact(ContractModel):
                 item.required,
                 item.access_policy_id,
                 item.access_policy_hash,
+                item.expected_graph_hash,
+                item.expected_triple_count,
             )
             for item in expected_graphs
         )
@@ -921,7 +1135,7 @@ class RdfSerializationArtifact(ContractModel):
             )
 
 
-class RdfSerializationObservation(ContractModel):
+class RdfSerializationObservation(RdfContractModel):
     rdf_serialization_artifact_id: RequiredText
     rdf_serialization_artifact_hash: Sha256
     serialization_format: RdfFormat
@@ -946,7 +1160,7 @@ class RdfSerializationObservation(ContractModel):
         return value
 
 
-class RdfShaclValidationSummary(ContractModel):
+class RdfShaclValidationSummary(RdfContractModel):
     shapes_hash: Sha256
     conforms: bool
     violation_count: NonNegativeInt
@@ -969,12 +1183,13 @@ class RdfShaclValidationSummary(ContractModel):
         return self
 
 
-class RdfValidationReceipt(ContractModel):
+class RdfValidationReceipt(RdfContractModel):
     identity: CanonicalIdentityEnvelope
     rdf_validation_receipt_id: RequiredText
     rdf_projection_manifest_id: RequiredText
     rdf_projection_manifest_hash: Sha256
     source_authority_hash: Sha256
+    authority_reference_set_hash: Sha256
     canonical_n_quads_artifact_id: RequiredText
     canonical_dataset_hash_algorithm: Literal["RDFC-1.0"] = "RDFC-1.0"
     canonical_dataset_hash: Sha256
@@ -1014,6 +1229,14 @@ class RdfValidationReceipt(ContractModel):
             )
         if "canonical_n_quads" not in formats:
             raise ValueError("round-trip receipt requires canonical N-Quads")
+        if any(
+            item.authority_reference_set_hash
+            != self.authority_reference_set_hash
+            for item in self.observations
+        ):
+            raise ValueError(
+                "observations must equal the receipt authority reference set hash"
+            )
         canonical = next(
             item
             for item in self.observations
@@ -1058,6 +1281,8 @@ class RdfValidationReceipt(ContractModel):
             raise ValueError("RDF projection manifest hash mismatch")
         if self.source_authority_hash != canonical_sha256(manifest.source_authority):
             raise ValueError("RDF source authority hash mismatch")
+        if self.authority_reference_set_hash != manifest.authority_reference_set_hash:
+            raise ValueError("receipt authority reference set hash mismatch")
         if self.required_serialization_formats != manifest.required_serialization_formats:
             raise ValueError("receipt required formats differ from manifest")
         artifact_by_id = {
@@ -1079,6 +1304,11 @@ class RdfValidationReceipt(ContractModel):
                     observation.rdf_serialization_artifact_hash,
                     artifact.serialization_artifact_hash,
                 ),
+                (
+                    "authority reference set hash",
+                    observation.authority_reference_set_hash,
+                    artifact.authority_reference_set_hash,
+                ),
                 ("format", observation.serialization_format, artifact.serialization_format),
                 ("media type", observation.media_type, artifact.media_type),
                 ("content hash", observation.content_hash, artifact.content_hash),
@@ -1098,13 +1328,21 @@ class RdfValidationReceipt(ContractModel):
             for name, observed, sealed in checks:
                 if observed != sealed:
                     raise ValueError(f"receipt observation {name} mismatch")
+        shapes_graph = next(
+            graph
+            for graph in manifest.named_graphs
+            if graph.graph_role == "shacl_shapes"
+        )
+        if self.shacl_validation.shapes_hash != shapes_graph.expected_graph_hash:
+            raise ValueError("SHACL shapes hash differs from manifest shapes graph")
 
 
-class RdfProjectionAcceptanceBundle(ContractModel):
+class RdfProjectionAcceptanceBundle(RdfContractModel):
     """Self-contained proof that a complete RDF projection is accepted."""
 
     identity: CanonicalIdentityEnvelope
     rdf_projection_acceptance_bundle_id: RequiredText
+    authority_reference_set_hash: Sha256
     manifest: RdfProjectionManifest
     serialization_artifacts: tuple[RdfSerializationArtifact, ...]
     validation_receipt: RdfValidationReceipt
@@ -1125,6 +1363,11 @@ class RdfProjectionAcceptanceBundle(ContractModel):
         _reject_sensitive_in(self)
         if self.identity.contract_kind != "c0.rdf_projection_acceptance_bundle":
             raise ValueError("invalid RDF projection acceptance bundle contract_kind")
+        if (
+            self.authority_reference_set_hash
+            != self.manifest.authority_reference_set_hash
+        ):
+            raise ValueError("bundle authority reference set hash mismatch")
         authority_identity = self.manifest.identity.model_dump(
             mode="json",
             exclude={"contract_kind", "contract_version"},

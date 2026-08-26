@@ -202,6 +202,8 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=True,
             contains_instance_or_evidence_triples=False,
+            expected_graph_hash=H["1"],
+            expected_triple_count=10,
         ),
         RdfNamedGraph(
             graph_id="graph:domain-schema",
@@ -210,6 +212,8 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=True,
             contains_instance_or_evidence_triples=False,
+            expected_graph_hash=H["2"],
+            expected_triple_count=10,
         ),
         RdfNamedGraph(
             graph_id="graph:provenance",
@@ -218,6 +222,8 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=False,
             contains_instance_or_evidence_triples=True,
+            expected_graph_hash=H["3"],
+            expected_triple_count=12,
             access_policy_id="access-policy:rdf-protected",
             access_policy_hash=H["5"],
         ),
@@ -228,12 +234,16 @@ def manifest() -> RdfProjectionManifest:
             required=True,
             contains_schema_triples=True,
             contains_instance_or_evidence_triples=False,
+            expected_graph_hash=H["4"],
+            expected_triple_count=10,
         ),
     )
+    authority = source_authority()
     values = {
         "identity": identity("c0.rdf_projection_manifest"),
         "rdf_projection_manifest_id": "rdf-projection-manifest:generic",
-        "source_authority": source_authority(),
+        "source_authority": authority,
+        "authority_reference_set_hash": authority.reference_set_hash(),
         "iri_policy": RdfIriPolicy(
             namespace_governance_id="namespace-governance:rdf",
             namespace_governance_hash=H["0"],
@@ -287,25 +297,14 @@ def artifact(
         "canonical_n_quads": ("application/n-quads", "RDF 1.1 N-Quads"),
     }[rdf_format]
     projection = manifest()
-    graph_counts = {
-        "graph:common-schema": 10,
-        "graph:domain-schema": 10,
-        "graph:provenance": 12,
-        "graph:shapes": 10,
-    }
     graph_bindings = tuple(
         RdfSerializedGraphBinding(
             graph_id=graph.graph_id,
             graph_iri=graph.graph_iri,
             graph_role=graph.graph_role,
             required=graph.required,
-            triple_count=graph_counts[graph.graph_id],
-            graph_hash={
-                "graph:common-schema": H["1"],
-                "graph:domain-schema": H["2"],
-                "graph:provenance": H["3"],
-                "graph:shapes": H["4"],
-            }[graph.graph_id],
+            triple_count=graph.expected_triple_count,
+            graph_hash=graph.expected_graph_hash,
             access_policy_id=graph.access_policy_id,
             access_policy_hash=graph.access_policy_hash,
         )
@@ -319,6 +318,7 @@ def artifact(
         "rdf_serialization_artifact_id": artifact_id or f"rdf-artifact:{rdf_format}",
         "rdf_projection_manifest_id": projection.rdf_projection_manifest_id,
         "rdf_projection_manifest_hash": projection.projection_manifest_hash,
+        "authority_reference_set_hash": projection.authority_reference_set_hash,
         "serialization_format": rdf_format,
         "media_type": profile[0],
         "w3c_syntax_version": profile[1],
@@ -350,6 +350,7 @@ def artifact(
 def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
     formats = ("turtle", "rdf_xml", "canonical_n_quads")
     artifacts = {rdf_format: artifact(rdf_format) for rdf_format in formats}
+    projection = manifest()
     observations = tuple(
         RdfSerializationObservation(
             rdf_serialization_artifact_id=artifacts[
@@ -367,7 +368,7 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
             triple_count=artifacts[rdf_format].triple_count,
             missing_triple_count=0,
             extra_triple_count=0,
-            authority_reference_set_hash=H["6"],
+            authority_reference_set_hash=projection.authority_reference_set_hash,
             base_iri_matches=True,
             label_identity_detected=False,
             unstable_blank_node_detected=False,
@@ -380,16 +381,17 @@ def validation_receipt(*, drift: bool = False) -> RdfValidationReceipt:
     values = {
         "identity": identity("c0.rdf_validation_receipt"),
         "rdf_validation_receipt_id": "rdf-validation-receipt:generic",
-        "rdf_projection_manifest_id": manifest().rdf_projection_manifest_id,
-        "rdf_projection_manifest_hash": manifest().projection_manifest_hash,
+        "rdf_projection_manifest_id": projection.rdf_projection_manifest_id,
+        "rdf_projection_manifest_hash": projection.projection_manifest_hash,
         "source_authority_hash": canonical_sha256(source_authority()),
+        "authority_reference_set_hash": projection.authority_reference_set_hash,
         "canonical_n_quads_artifact_id": "rdf-artifact:canonical_n_quads",
         "canonical_dataset_hash_algorithm": "RDFC-1.0",
         "canonical_dataset_hash": H["8"],
-        "required_serialization_formats": manifest().required_serialization_formats,
+        "required_serialization_formats": projection.required_serialization_formats,
         "observations": observations,
         "shacl_validation": RdfShaclValidationSummary(
-            shapes_hash=H["5"],
+            shapes_hash=H["4"],
             conforms=True,
             violation_count=0,
             warning_count=0,
@@ -416,6 +418,7 @@ def acceptance_bundle() -> RdfProjectionAcceptanceBundle:
     values = {
         "identity": identity("c0.rdf_projection_acceptance_bundle"),
         "rdf_projection_acceptance_bundle_id": "rdf-acceptance-bundle:generic",
+        "authority_reference_set_hash": projection.authority_reference_set_hash,
         "manifest": projection,
         "serialization_artifacts": artifacts,
         "validation_receipt": receipt,
@@ -759,6 +762,135 @@ def test_receipt_binds_exact_manifest_and_artifact_seals() -> None:
 
 
 @pytest.mark.contract
+def test_acceptance_bundle_binds_manifest_shacl_shapes_graph_hash() -> None:
+    manifest_payload = manifest().model_dump(mode="json")
+    shapes = next(
+        graph
+        for graph in manifest_payload["named_graphs"]
+        if graph["graph_role"] == "shacl_shapes"
+    )
+    shapes["expected_graph_hash"] = H["9"]
+    reseal_manifest_payload(manifest_payload)
+    projection = RdfProjectionManifest.model_validate(manifest_payload)
+
+    artifacts = []
+    for rdf_format in projection.required_serialization_formats:
+        artifact_payload = artifact(rdf_format).model_dump(mode="json")
+        artifact_payload["rdf_projection_manifest_hash"] = (
+            projection.projection_manifest_hash
+        )
+        artifact_shapes = next(
+            graph
+            for graph in artifact_payload["graph_bindings"]
+            if graph["graph_role"] == "shacl_shapes"
+        )
+        artifact_shapes["graph_hash"] = H["9"]
+        artifact_payload["graph_inventory_hash"] = canonical_sha256(
+            artifact_payload["graph_bindings"]
+        )
+        artifact_payload["serialization_artifact_hash"] = canonical_sha256(
+            {
+                key: value
+                for key, value in artifact_payload.items()
+                if key != "serialization_artifact_hash"
+            }
+        )
+        artifacts.append(RdfSerializationArtifact.model_validate(artifact_payload))
+
+    receipt_payload = validation_receipt().model_dump(mode="json")
+    receipt_payload["rdf_projection_manifest_hash"] = projection.projection_manifest_hash
+    artifact_by_id = {
+        item.rdf_serialization_artifact_id: item for item in artifacts
+    }
+    for observation in receipt_payload["observations"]:
+        sealed = artifact_by_id[observation["rdf_serialization_artifact_id"]]
+        observation["rdf_serialization_artifact_hash"] = (
+            sealed.serialization_artifact_hash
+        )
+        observation["graph_inventory_hash"] = sealed.graph_inventory_hash
+    receipt_payload["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in receipt_payload.items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    receipt = RdfValidationReceipt.model_validate(receipt_payload)
+    with pytest.raises(ValueError, match="SHACL shapes hash"):
+        receipt.validate_against_manifest_and_artifacts(projection, artifacts)
+
+    bundle_values = {
+        "identity": identity("c0.rdf_projection_acceptance_bundle"),
+        "rdf_projection_acceptance_bundle_id": "rdf-acceptance-bundle:forged-shapes",
+        "authority_reference_set_hash": projection.authority_reference_set_hash,
+        "manifest": projection,
+        "serialization_artifacts": tuple(artifacts),
+        "validation_receipt": receipt,
+        "acceptance_status": "accepted",
+    }
+    with pytest.raises(ValidationError, match="SHACL shapes hash"):
+        RdfProjectionAcceptanceBundle(
+            **bundle_values,
+            acceptance_bundle_hash=canonical_sha256(bundle_values),
+        )
+
+
+@pytest.mark.contract
+def test_authority_reference_set_cannot_be_self_agreed_downstream() -> None:
+    manifest_payload = manifest().model_dump(mode="json")
+    manifest_payload["source_authority"]["domain_contract_id"] = (
+        "domain-contract:changed"
+    )
+    with pytest.raises(ValidationError, match="authority_reference_set_hash"):
+        RdfProjectionManifest.model_validate(manifest_payload)
+
+    manifest_payload = manifest().model_dump(mode="json")
+    manifest_payload["source_authority"]["extra_reference"] = "forbidden"
+    with pytest.raises(ValidationError, match="extra"):
+        RdfProjectionManifest.model_validate(manifest_payload)
+
+    payload = acceptance_bundle().model_dump(mode="json")
+    for artifact_payload in payload["serialization_artifacts"]:
+        artifact_payload["authority_reference_set_hash"] = H["9"]
+        artifact_payload["serialization_artifact_hash"] = canonical_sha256(
+            {
+                key: value
+                for key, value in artifact_payload.items()
+                if key != "serialization_artifact_hash"
+            }
+        )
+    artifact_hashes = {
+        item["rdf_serialization_artifact_id"]: item["serialization_artifact_hash"]
+        for item in payload["serialization_artifacts"]
+    }
+    payload["validation_receipt"]["authority_reference_set_hash"] = H["9"]
+    for observation in payload["validation_receipt"]["observations"]:
+        observation["authority_reference_set_hash"] = H["9"]
+        observation["rdf_serialization_artifact_hash"] = artifact_hashes[
+            observation["rdf_serialization_artifact_id"]
+        ]
+    payload["validation_receipt"]["validation_receipt_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload["validation_receipt"].items()
+            if key != "validation_receipt_hash"
+        }
+    )
+    payload["acceptance_bundle_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "acceptance_bundle_hash"
+        }
+    )
+    with pytest.raises(
+        ValidationError,
+        match="authority reference set hash mismatch",
+    ):
+        RdfProjectionAcceptanceBundle.model_validate(payload)
+
+
+@pytest.mark.contract
 def test_receipt_formats_equal_manifest_including_required_json_ld() -> None:
     payload = manifest().model_dump(mode="json")
     payload["required_serialization_formats"].append("json_ld")
@@ -917,6 +1049,53 @@ def test_signed_url_families_and_nested_encodings_fail_closed(
         match="secret|credential|signed|transient|nested URL encoding",
     ):
         RdfProjectionManifest.model_validate(payload)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("model_type", "payload_factory", "mutate"),
+    [
+        (
+            RdfProjectionManifest,
+            lambda: manifest().model_dump(mode="json"),
+            lambda payload, secret: payload["source_authority"].__setitem__(
+                "domain_contract_id", secret
+            ),
+        ),
+        (
+            RdfSerializationArtifact,
+            lambda: artifact("turtle").model_dump(mode="json"),
+            lambda payload, secret: payload.__setitem__("access_policy_id", secret),
+        ),
+        (
+            RdfValidationReceipt,
+            lambda: validation_receipt().model_dump(mode="json"),
+            lambda payload, secret: payload["shacl_validation"].__setitem__(
+                "validator_id", secret
+            ),
+        ),
+        (
+            RdfExternalAlignment,
+            lambda: manifest().external_alignments[0].model_dump(mode="json"),
+            lambda payload, secret: payload.__setitem__(
+                "approval_reference_id", secret
+            ),
+        ),
+    ],
+)
+def test_rdf_validation_errors_never_expose_rejected_input(
+    model_type: object,
+    payload_factory: object,
+    mutate: object,
+) -> None:
+    marker = "DO_NOT_EXPOSE_7f9a"
+    secret = f"https://storage.test/item?password={marker}"
+    payload = payload_factory()
+    mutate(payload, secret)
+    with pytest.raises(ValidationError) as captured:
+        model_type.model_validate(payload)
+    assert marker not in str(captured.value)
+    assert marker not in json.dumps(captured.value.errors(), default=str)
 
 
 @pytest.mark.contract

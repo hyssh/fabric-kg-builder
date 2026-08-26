@@ -474,7 +474,8 @@ boundary and adoption sequence are specified in
   `ProjectionEquivalence` read-back proofs, Domain contract, hierarchy,
   identity, relationship, K, `RequiredMemberManifest@1.1.0`, authoritative
   collection, and original L3 `ArtifactManifest` IDs, versions, schema hashes,
-  and content hashes;
+  and content hashes. The manifest seals a deterministic
+  `authority_reference_set_hash` over the exact sorted reference tuples;
 - governed absolute HTTPS ontology and instance base IRIs with exact namespace
   governance ID/hash, ontology IRI, version IRI, semantic version, UTF-8
   percent-encoded canonical-ID mapping,
@@ -527,10 +528,22 @@ set. Missing/extra triples, serialization or base-IRI drift, label-derived
 identity, unstable blank nodes, or SHACL violations force
 `exact_round_trip_equivalent=false`.
 
+The manifest declares every graph's expected content hash and triple count.
+Every serialization's `shacl_shapes` graph binding must equal that manifest
+hash/IRI/count, and `RdfShaclValidationSummary.shapes_hash` must equal it.
+Coordinated artifact/receipt reseals cannot replace the manifest shapes
+authority. Artifact, observation, receipt, and acceptance-bundle
+`authority_reference_set_hash` values likewise must equal the manifest value;
+downstream observations cannot establish authority by agreeing with each other.
+
 Every top-level RDF contract recursively rejects secrets, bearer/API-key
-material, URI credentials, signed/SAS query keys, and percent-encoded variants
+material, password/passwd/pwd/auth/client-secret credentials, URI credentials,
+AWS SigV4, Google signed URL, signed/SAS query keys, and percent-encoded variants
 in nested identifiers, references, metadata, and alignments while allowing
 stable governed and W3C vocabulary IRIs.
+Every RDF-owned top-level and nested model uses the RDF-local strict base with
+hidden inputs and sanitized `ValidationError.errors()` details; rejected values
+are never included in exception text or structured error input.
 
 `RdfProjectionAcceptanceBundle` embeds one exact manifest, the complete
 serialization artifact metadata set, and one validation receipt. Its model

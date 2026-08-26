@@ -76,6 +76,11 @@ tuple:
 The tuple references the existing `PublicationAuthorityReferences` primitive
 for membership and original-artifact authority. It does not duplicate member
 lists, canonical authority, access principals, or projection behavior.
+The manifest's `authority_reference_set_hash` is computed from the exact sorted
+reference tuples: stable reference name, ID, optional contract version,
+optional schema hash, and content/policy hash. Artifacts, observations,
+receipts, and the acceptance bundle must equal that manifest value; downstream
+agreement is never authority.
 
 ## 5. IRI and identity policy
 
@@ -110,7 +115,8 @@ The dataset inventory has these named graph roles:
 
 Every mandatory role exists exactly once and declares `required=true`. An
 instances graph is optional in the manifest, but when present it is required by
-the represented dataset. Graph IDs and IRIs are unique.
+the represented dataset. Graph IDs and IRIs are unique. Every graph also
+declares its expected graph hash and triple count.
 
 Schema graphs contain schema triples only. Instance and provenance graphs
 contain instance/evidence triples only and carry exact access-policy IDs/hashes.
@@ -179,6 +185,10 @@ count. Receipt formats equal observation formats.
 `validate_against_manifest_and_artifacts` requires that set to equal the
 manifest exactly, including JSON-LD when selected and no undeclared extra, and
 binds the exact manifest, authority, and artifact set.
+It derives the manifest's exact `shacl_shapes` graph ID/IRI/hash/triple count,
+requires every serialization binding to equal it, and requires
+`RdfShaclValidationSummary.shapes_hash` to equal that same graph hash. Missing,
+extra, divergent, or coordinately resealed shapes metadata fails.
 
 `RequiredMemberManifest@1.1.0` remains completeness authority. SHACL checks
 that the RDF projection matches the sealed membership; it does not discover,
@@ -191,7 +201,8 @@ surface. It embeds the exact manifest, complete serialization artifact metadata
 objects, and validation receipt, then validates all manifest/artifact/receipt
 set, hash, format, authority, exposure, graph, dataset, round-trip, SHACL, and
 identity invariants in one model-level validator. It requires conforming SHACL
-and exact round-trip equivalence and seals an accepted bundle hash.
+and exact round-trip equivalence, carries the manifest
+`authority_reference_set_hash`, and seals an accepted bundle hash.
 
 L5c MUST emit and consume this bundle. Individual
 `RdfProjectionManifest`, `RdfSerializationArtifact`, and
@@ -211,10 +222,15 @@ network retrieval or semantic adoption.
 
 Manifest, artifact, and receipt validation recursively rejects bearer tokens,
 API keys, URI credentials, Azure SAS, AWS SigV4, Google signed URL, generic
-signature/credential query parameters, secret-looking values, and repeatedly
+signature/credential/password/passwd/pwd/auth/authentication/client-secret
+query parameters after NFKC, case, and separator normalization, secret-looking
+values, and repeatedly
 percent-encoded variants from nested IDs, references, metadata, and alignment
 values. Decoding is size-bounded and depth-bounded and fails closed if not
 stable. Stable governed and W3C vocabulary IRIs remain permitted.
+Every RDF-owned model inherits the RDF-local strict base configured to hide
+inputs, preflights nested sensitive values, and returns sanitized structured
+validation errors containing no rejected raw value.
 
 ## 11. Access boundary
 
