@@ -1831,6 +1831,8 @@ def _l3_with_sealed_manifest(
     type_properties=None,
     extra_types=(),
     extra_relationship_targets=False,
+    identity_business_keys=None,
+    inject_identity_keys=False,
 ):
     fact_set = _fact_set(
         "manufacturing",
@@ -1839,9 +1841,23 @@ def _l3_with_sealed_manifest(
         expected_count=None,
     )
     mutate = None
-    if ordered or roles or member_count > 1:
+    if ordered or roles or member_count > 1 or inject_identity_keys:
         def mutate(candidates, _work_unit):
             values = [dict(candidate) for candidate in candidates]
+            if inject_identity_keys:
+                for index, candidate in enumerate(values):
+                    if candidate["candidate_kind"] != "entity":
+                        continue
+                    candidate = dict(candidate)
+                    suffix = (
+                        "record"
+                        if candidate["local_id"].startswith("record")
+                        else "subject"
+                    )
+                    candidate["identity_key"] = {
+                        f"property:{suffix}:canonical-id": candidate["local_id"]
+                    }
+                    values[index] = candidate
             relationship = dict(values[2])
             relationship["member_role_id"] = (
                 "role:manufacturing.subject" if roles else None
@@ -1854,6 +1870,10 @@ def _l3_with_sealed_manifest(
                     "local_id": "subject-2",
                     "label": "Subject 2",
                 }
+                if inject_identity_keys:
+                    second_member["identity_key"] = {
+                        "property:subject:canonical-id": "subject-2"
+                    }
                 second_relationship = {
                     **relationship,
                     "target_local_id": "subject-2",
@@ -1869,6 +1889,7 @@ def _l3_with_sealed_manifest(
         type_properties=type_properties,
         extra_types=extra_types,
         extra_relationship_targets=extra_relationship_targets,
+        identity_business_keys=identity_business_keys,
     )
     l3 = _l3(tmp_path, l1_root, domain_path)
     manifest = schema2_validation_stage._seal_manifest(

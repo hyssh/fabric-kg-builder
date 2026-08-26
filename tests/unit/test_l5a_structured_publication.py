@@ -16,14 +16,17 @@ from fabric_kg_builder.contracts.identity import (
 )
 from fabric_kg_builder.contracts.publication import (
     AccessPolicy,
-    EndpointKeyProjectionMapping,
+    EndpointPhysicalKeyBindingV1_1,
     GovernedAssetReference,
+    InheritedPropertyReferenceV1_1,
+    PhysicalPropertyBindingV1_1,
     PrincipalScope,
-    PropertyProjectionMapping,
     PublicationAuthorityReferences,
-    PublicationCrosswalk,
-    RelationshipProjectionMapping,
-    SemanticTypeProjectionMapping,
+    PublicationCrosswalkIdentityV1_1,
+    PublicationCrosswalkV1_1,
+    RelationshipProjectionMappingV1_1,
+    SemanticPropertyOwnershipMappingV1_1,
+    SemanticTypeProjectionMappingV1_1,
     StorageReference,
 )
 from fabric_kg_builder.contracts.receipts import StageReceipt
@@ -291,7 +294,7 @@ def _assets(source, crosswalk, policy, target_ids):
     )
 
 
-def _crosswalk(source) -> PublicationCrosswalk:
+def _crosswalk(source) -> PublicationCrosswalkV1_1:
     manifest = pq.read_table(
         source.resolve("semantic_required_member_manifests")
     ).to_pylist()[0]
@@ -301,6 +304,22 @@ def _crosswalk(source) -> PublicationCrosswalk:
     contract = DomainContractV2.model_validate_json(
         authority_row["domain_contract_json"]
     )
+    ownership_mappings = []
+    property_by_id = {}
+    for definition in contract.candidate_model.entity_types:
+        for prop in definition.declared_properties:
+            property_by_id[prop.property_id] = (definition.type_id, prop)
+            ownership_mappings.append(SemanticPropertyOwnershipMappingV1_1(
+                canonical_property_id=prop.property_id,
+                owner_semantic_type_id=definition.type_id,
+                data_type=prop.value_type,
+                value_semantics_id=f"value-semantics:{prop.property_id}",
+                ontology_bigint_id=2001 + len(ownership_mappings),
+                graph_property=(
+                    f"graph_{prop.property_id.replace(':', '_')}"
+                ),
+                data_agent_selected_property_id=None,
+            ))
     type_mappings = []
     for ordinal, definition in enumerate(
         contract.candidate_model.entity_types,
@@ -308,34 +327,55 @@ def _crosswalk(source) -> PublicationCrosswalk:
     ):
         type_id = definition.type_id
         suffix = type_id.rsplit(".", 1)[-1].replace("-", "_")
-        property_mappings = tuple(
-            PropertyProjectionMapping(
-                canonical_property_id=prop.property_id,
+        effective_ids = contract.hierarchy_closure.effective_property_ids_by_type[
+            type_id
+        ]
+        local_ids = tuple(prop.property_id for prop in definition.declared_properties)
+        inherited_ids = tuple(
+            property_id for property_id in effective_ids
+            if property_id not in local_ids
+        )
+        inherited_refs = tuple(
+            InheritedPropertyReferenceV1_1(
+                canonical_property_id=property_id,
+                owner_semantic_type_id=property_by_id[property_id][0],
+                data_type=property_by_id[property_id][1].value_type,
+                value_semantics_id=f"value-semantics:{property_id}",
+            )
+            for property_id in inherited_ids
+        )
+        physical_bindings = tuple(
+            PhysicalPropertyBindingV1_1(
+                canonical_property_id=property_id,
+                owner_semantic_type_id=property_by_id[property_id][0],
+                data_type=property_by_id[property_id][1].value_type,
+                value_semantics_id=f"value-semantics:{property_id}",
                 physical_column_id=f"{suffix}_{index}",
-                ontology_bigint_id=2000 + (ordinal * 10) + index,
-                graph_property=f"{suffix}_{index}",
                 search_index_field=f"{suffix}_{index}",
                 search_filter_field=f"{suffix}_{index}",
                 search_vector_field=None,
-                data_agent_selected_property_id=None,
             )
-            for index, prop in enumerate(
-                definition.declared_properties,
-                start=1,
-            )
+            for index, property_id in enumerate(effective_ids, start=1)
         )
-        assert property_mappings
-        type_mappings.append(SemanticTypeProjectionMapping(
+        assert physical_bindings
+        root = next(
+            item for item in contract.candidate_model.entity_types
+            if item.type_id == definition.identity_root_type_id
+        )
+        type_mappings.append(SemanticTypeProjectionMappingV1_1(
             canonical_semantic_type_id=type_id,
             canonical_parent_semantic_type_id=definition.parent_type_id,
             physical_table_id=f"l5a_{suffix}",
             ontology_bigint_id=1000 + ordinal,
             graph_label=f"L5A_{suffix.upper()}",
             graph_aliases=(),
-            canonical_instance_key_property_ids=(
-                property_mappings[0].canonical_property_id,
+            locally_owned_canonical_property_ids=local_ids,
+            inherited_property_references=inherited_refs,
+            canonical_instance_key_property_ids=tuple(
+                root.identity_key_policy.business_key_fields
             ),
-            property_mappings=property_mappings,
+            physical_property_bindings=physical_bindings,
+            physical_surrogate_key_bindings=(),
         ))
     relationship_definition = contract.candidate_model.relationship_types[0]
     source_type = relationship_definition.source_type_ids[0]
@@ -344,7 +384,7 @@ def _crosswalk(source) -> PublicationCrosswalk:
     type_mapping_by_id = {
         item.canonical_semantic_type_id: item for item in type_mappings
     }
-    relationship = RelationshipProjectionMapping(
+    relationship = RelationshipProjectionMappingV1_1(
         canonical_semantic_relationship_id=relationship_id,
         source_semantic_type_id=source_type,
         target_semantic_type_id=target_type,
@@ -352,21 +392,35 @@ def _crosswalk(source) -> PublicationCrosswalk:
         ontology_bigint_id=3001,
         graph_label="L5A_MEMBER",
         graph_aliases=(),
-        source_key_fields=(
-            EndpointKeyProjectionMapping(
-                canonical_property_id=type_mapping_by_id[
+        source_canonical_key_property_ids=type_mapping_by_id[
+            source_type
+        ].canonical_instance_key_property_ids,
+        target_canonical_key_property_ids=type_mapping_by_id[
+            target_type
+        ].canonical_instance_key_property_ids,
+        source_key_bindings=tuple(
+            EndpointPhysicalKeyBindingV1_1(
+                canonical_property_id=property_id,
+                physical_column_id=f"source_{index}",
+            )
+            for index, property_id in enumerate(
+                type_mapping_by_id[
                     source_type
-                ].canonical_instance_key_property_ids[0],
-                physical_column_id="source_id",
-            ),
+                ].canonical_instance_key_property_ids,
+                start=1,
+            )
         ),
-        target_key_fields=(
-            EndpointKeyProjectionMapping(
-                canonical_property_id=type_mapping_by_id[
+        target_key_bindings=tuple(
+            EndpointPhysicalKeyBindingV1_1(
+                canonical_property_id=property_id,
+                physical_column_id=f"target_{index}",
+            )
+            for index, property_id in enumerate(
+                type_mapping_by_id[
                     target_type
-                ].canonical_instance_key_property_ids[0],
-                physical_column_id="target_id",
-            ),
+                ].canonical_instance_key_property_ids,
+                start=1,
+            )
         ),
         search_index_field=None,
     )
@@ -383,24 +437,34 @@ def _crosswalk(source) -> PublicationCrosswalk:
         source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
         source_artifact_manifest_hash=source.input_manifest.manifest_hash,
     )
-    entity_rows = pq.read_table(
-        source.resolve("semantic_asserted_entities")
-    ).to_pylist()
     values = {
-        "identity": _identity(source, "c0.publication_crosswalk"),
+        "identity": PublicationCrosswalkIdentityV1_1.model_validate({
+            **_identity(
+                source,
+                "c0.publication_crosswalk",
+            ).model_dump(mode="python"),
+            "contract_version": "1.1.0",
+        }),
         "publication_crosswalk_id": "publication-crosswalk:l5a",
         "authority": authority,
         "semantic_contract_hash": source.projection.sealed_semantic_contract_hash,
         "stable_id_lock_id": "stable-id-lock:l5a",
         "stable_id_lock_hash": "b" * 64,
-        "hierarchy_hash": entity_rows[0]["hierarchy_hash"],
-        "identity_policy_hash": entity_rows[0]["identity_policy_hash"],
+        "hierarchy_hash": authority_row["hierarchy_hash"],
+        "identity_policy_hash": authority_row["identity_policy_hash"],
         "source_projection_id": source.projection.projection_id,
         "source_projection_hash": source.projection.projection_hash,
-        "semantic_type_mappings": tuple(type_mappings),
+        "semantic_property_ownership_mappings": tuple(sorted(
+            ownership_mappings,
+            key=lambda item: item.canonical_property_id,
+        )),
+        "semantic_type_mappings": tuple(sorted(
+            type_mappings,
+            key=lambda item: item.canonical_semantic_type_id,
+        )),
         "relationship_mappings": (relationship,),
     }
-    return PublicationCrosswalk(
+    return PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -436,6 +500,15 @@ def _inputs(
             },
             extra_types=extra_types,
             extra_relationship_targets=extra_relationship_targets,
+            identity_business_keys={
+                "semantic-type:manufacturing.record": (
+                    "property:record:canonical-id",
+                ),
+                "semantic-type:manufacturing.subject": (
+                    "property:subject:canonical-id",
+                ),
+            },
+            inject_identity_keys=True,
         ),
         state_root=tmp_path / ".fkg" / "l4",
     )
@@ -597,6 +670,37 @@ def test_l5a_derives_inherited_properties_and_full_endpoint_sets(
     assert relationship["target_semantic_type_ids"] == authority.target_type_ids
     assert len(relationship["source_semantic_type_ids"]) > 1
     assert len(relationship["target_semantic_type_ids"]) > 1
+    ontology_relationship = compiled.definitions["ontology"][
+        "relationship_types"
+    ][0]
+    graph_relationship = compiled.definitions["graph"]["edge_types"][0]
+    for published in (ontology_relationship, graph_relationship):
+        assert published["declared_source_semantic_type_ids"] == (
+            authority.source_type_ids
+        )
+        assert published["declared_target_semantic_type_ids"] == (
+            authority.target_type_ids
+        )
+        assert published["allowed_source_semantic_type_ids"] == (
+            contract.hierarchy_closure
+            .compatible_source_type_ids_by_relationship[
+                authority.relationship_type_id
+            ]
+        )
+        assert published["allowed_target_semantic_type_ids"] == (
+            contract.hierarchy_closure
+            .compatible_target_type_ids_by_relationship[
+                authority.relationship_type_id
+            ]
+        )
+    assert "source_entity_type_id" not in ontology_relationship
+    assert "target_entity_type_id" not in ontology_relationship
+    assert ontology_relationship[
+        "physical_source_entity_type_representative_id"
+    ]
+    assert ontology_relationship[
+        "physical_target_entity_type_representative_id"
+    ]
 
 
 @pytest.mark.unit
@@ -608,23 +712,74 @@ def test_l5a_rejects_nonexact_canonical_property_ownership(
     inputs = _nontrivial_inputs(tmp_path)
     crosswalk = inputs["crosswalks"][0]
     values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    values["semantic_property_ownership_mappings"] = list(
+        values["semantic_property_ownership_mappings"]
+    )
     record = next(
         item
         for item in values["semantic_type_mappings"]
         if item["canonical_semantic_type_id"]
         == "semantic-type:manufacturing.record"
     )
+    record["locally_owned_canonical_property_ids"] = list(
+        record["locally_owned_canonical_property_ids"]
+    )
+    record["physical_property_bindings"] = list(
+        record["physical_property_bindings"]
+    )
+    property_id = "property:record:status"
     if mutation == "omit":
-        record["property_mappings"] = record["property_mappings"][:1]
+        values["semantic_property_ownership_mappings"] = [
+            item for item in values["semantic_property_ownership_mappings"]
+            if item["canonical_property_id"] != property_id
+        ]
+        record["locally_owned_canonical_property_ids"] = [
+            item for item in record["locally_owned_canonical_property_ids"]
+            if item != property_id
+        ]
+        for mapping in values["semantic_type_mappings"]:
+            mapping["inherited_property_references"] = [
+                item for item in mapping["inherited_property_references"]
+                if item["canonical_property_id"] != property_id
+            ]
+            mapping["physical_property_bindings"] = [
+                item for item in mapping["physical_property_bindings"]
+                if item["canonical_property_id"] != property_id
+            ]
     else:
-        record["property_mappings"][1]["canonical_property_id"] = (
-            "property:forged:shadow"
-        )
-        record["property_mappings"] = sorted(
-            record["property_mappings"],
-            key=lambda item: item["canonical_property_id"],
-        )
-    forged = PublicationCrosswalk(
+        forged_id = "property:forged:shadow"
+        values["semantic_property_ownership_mappings"].append({
+            "canonical_property_id": forged_id,
+            "owner_semantic_type_id": record["canonical_semantic_type_id"],
+            "data_type": "string",
+            "value_semantics_id": f"value-semantics:{forged_id}",
+            "ontology_bigint_id": 2999,
+            "graph_property": "graph_property_forged_shadow",
+            "data_agent_selected_property_id": None,
+        })
+        record["locally_owned_canonical_property_ids"].append(forged_id)
+        record["physical_property_bindings"].append({
+            "canonical_property_id": forged_id,
+            "owner_semantic_type_id": record["canonical_semantic_type_id"],
+            "data_type": "string",
+            "value_semantics_id": f"value-semantics:{forged_id}",
+            "physical_column_id": "forged_shadow",
+            "search_index_field": "forged_shadow",
+            "search_filter_field": None,
+            "search_vector_field": None,
+        })
+    values["semantic_property_ownership_mappings"] = sorted(
+        values["semantic_property_ownership_mappings"],
+        key=lambda item: item["canonical_property_id"],
+    )
+    record["locally_owned_canonical_property_ids"] = sorted(
+        record["locally_owned_canonical_property_ids"]
+    )
+    record["physical_property_bindings"] = sorted(
+        record["physical_property_bindings"],
+        key=lambda item: item["canonical_property_id"],
+    )
+    forged = PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -651,17 +806,56 @@ def test_crosswalk_rejects_duplicate_inherited_physical_property_owner(
         if item["canonical_semantic_type_id"]
         == "semantic-type:manufacturing.record-a"
     )
-    child["property_mappings"][0]["canonical_property_id"] = (
-        "property:record:canonical-id"
-    )
-    child["canonical_instance_key_property_ids"] = [
-        "property:record:canonical-id"
+    child["locally_owned_canonical_property_ids"] = [
+        *child["locally_owned_canonical_property_ids"],
+        "property:record:canonical-id",
     ]
 
-    with pytest.raises(ValueError, match="globally unique"):
-        PublicationCrosswalk(
+    with pytest.raises(ValueError, match="both local and inherited"):
+        PublicationCrosswalkV1_1(
             **values,
             crosswalk_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_arbitrary_descendant_semantic_instance_key(
+    tmp_path: Path,
+) -> None:
+    inputs = _nontrivial_inputs(tmp_path)
+    crosswalk = inputs["crosswalks"][0]
+    values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
+    child = next(
+        item
+        for item in values["semantic_type_mappings"]
+        if item["canonical_semantic_type_id"]
+        == "semantic-type:manufacturing.record-a"
+    )
+    child["canonical_instance_key_property_ids"] = [
+        "property:record-a:detail"
+    ]
+    relationship = values["relationship_mappings"][0]
+    assert relationship["target_semantic_type_id"] == child[
+        "canonical_semantic_type_id"
+    ]
+    relationship["target_canonical_key_property_ids"] = [
+        "property:record-a:detail"
+    ]
+    relationship["target_key_bindings"] = [{
+        "canonical_property_id": "property:record-a:detail",
+        "physical_column_id": "target_1",
+    }]
+    forged = PublicationCrosswalkV1_1(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_TYPE_AUTHORITY_MISMATCH",
+    ):
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (forged,)},
         )
 
 
@@ -682,13 +876,16 @@ def test_l5a_rejects_physical_relationship_representative_outside_authority(
     relationship["source_semantic_type_id"] = (
         "semantic-type:manufacturing.subject"
     )
-    relationship["source_key_fields"] = [{
+    relationship["source_canonical_key_property_ids"] = list(
+        subject["canonical_instance_key_property_ids"]
+    )
+    relationship["source_key_bindings"] = [{
         "canonical_property_id": subject[
             "canonical_instance_key_property_ids"
         ][0],
         "physical_column_id": "source_id",
     }]
-    forged = PublicationCrosswalk(
+    forged = PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -786,7 +983,7 @@ def test_l5a_multi_manifest_proofs_are_unique_and_manifest_specific(
     second_crosswalk_values["publication_crosswalk_id"] = (
         "publication-crosswalk:l5a:second"
     )
-    second_crosswalk = PublicationCrosswalk(
+    second_crosswalk = PublicationCrosswalkV1_1(
         **second_crosswalk_values,
         crosswalk_hash=canonical_sha256(second_crosswalk_values),
     )
@@ -983,7 +1180,7 @@ def test_l5a_rejects_authority_and_policy_drift(tmp_path: Path) -> None:
         exclude={"crosswalk_hash"},
     )
     stale_values["hierarchy_hash"] = "f" * 64
-    stale = PublicationCrosswalk(
+    stale = PublicationCrosswalkV1_1(
         **stale_values,
         crosswalk_hash=canonical_sha256(stale_values),
     )
@@ -1738,8 +1935,10 @@ def test_l5a_rejects_reserved_physical_column_collision(tmp_path: Path) -> None:
     crosswalk = inputs["crosswalks"][0]
     values = crosswalk.model_dump(mode="python", exclude={"crosswalk_hash"})
     first_type = values["semantic_type_mappings"][0]
-    first_type["property_mappings"][0]["physical_column_id"] = "__canonical_id"
-    changed = PublicationCrosswalk(
+    first_type["physical_property_bindings"][0][
+        "physical_column_id"
+    ] = "__canonical_id"
+    changed = PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1770,7 +1969,7 @@ def test_l5a_rejects_forged_parent_with_coordinated_caller_reseals(
         crosswalk.semantic_type_mappings[0],
         forged_child,
     )
-    forged = PublicationCrosswalk(
+    forged = PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1796,7 +1995,7 @@ def test_l5a_rejects_physical_name_shadow_of_carried_authority(
     values["semantic_type_mappings"][0]["physical_table_id"] = (
         "l4_semantic_publication_authority"
     )
-    changed = PublicationCrosswalk(
+    changed = PublicationCrosswalkV1_1(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
