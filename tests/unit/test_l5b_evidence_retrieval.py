@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
 import json
+import secrets
 import shutil
 from datetime import timedelta
 from pathlib import Path
@@ -22,7 +25,6 @@ from fabric_kg_builder.contracts import (
 )
 from fabric_kg_builder.contracts.publication import AccessPolicy, PrincipalScope
 from fabric_kg_builder.serving.evidence_retrieval import (
-    CheckpointIntegrityKey,
     L5B_AGENTIC_API_VERSION,
     L5B_MAX_BATCH_SIZE,
     L5bMutationOperation,
@@ -40,6 +42,7 @@ from fabric_kg_builder.serving.evidence_retrieval import (
     _agentic_runtime_seconds,
     _assertion_documents,
     _safe_source_display_name,
+    _safe_section_path,
     _scope_keys,
 )
 from fabric_kg_builder.serving.lifecycle_projection import run_l4
@@ -172,34 +175,76 @@ class _MissingAccountingClient(_SearchClient):
         return object()
 
 
-class _KeyProvider:
+class _TestCheckpointSigner:
     def __init__(
         self,
         *,
         key_id: str = "test-l5b-checkpoint",
         key_version: str = "1",
-        key_material: bytes = bytes(range(32)),
+        algorithm: str = "HMAC-SHA256",
+        secret: bytes | None = None,
         unavailable: bool = False,
+        verify_result: bool | None = None,
+        verify_error: bool = False,
+        verify_exception: Exception | None = None,
+        sign_error: bool = False,
+        malformed_sign: bool = False,
     ) -> None:
-        self.key = CheckpointIntegrityKey(
-            key_id=key_id,
-            key_version=key_version,
-            key_material=key_material,
-        )
+        self._key_id = key_id
+        self._key_version = key_version
+        self._algorithm = algorithm
+        self.secret = secret or secrets.token_bytes(32)
         self.unavailable = unavailable
+        self.verify_result = verify_result
+        self.verify_error = verify_error
+        self.verify_exception = verify_exception
+        self.sign_error = sign_error
+        self.malformed_sign = malformed_sign
 
-    def get_checkpoint_integrity_key(self):
-        return None if self.unavailable else self.key
+    @property
+    def key_id(self):
+        if self.unavailable:
+            raise RuntimeError("signer unavailable")
+        return self._key_id
+
+    @property
+    def key_version(self):
+        return self._key_version
+
+    @property
+    def algorithm(self):
+        return self._algorithm
+
+    def sign(self, canonical_payload: bytes) -> str:
+        if self.sign_error:
+            raise RuntimeError("sign failed")
+        if self.malformed_sign:
+            return "not-a-valid-mac"
+        return hmac.new(
+            self.secret,
+            canonical_payload,
+            hashlib.sha256,
+        ).hexdigest()
+
+    def verify(self, canonical_payload: bytes, persisted_mac: str) -> bool:
+        if self.verify_exception is not None:
+            raise self.verify_exception
+        if self.verify_error:
+            raise RuntimeError("verify failed")
+        expected = self.sign(canonical_payload)
+        if self.verify_result is not None:
+            return self.verify_result
+        return hmac.compare_digest(expected, persisted_mac)
 
 
-_TEST_KEY_PROVIDER = _KeyProvider()
+_TEST_CHECKPOINT_SIGNER = _TestCheckpointSigner()
 
 
 def _compile_kwargs(kwargs):
     return {
         key: value
         for key, value in kwargs.items()
-        if key != "checkpoint_key_provider"
+        if key != "checkpoint_integrity_signer"
     }
 
 
@@ -273,7 +318,7 @@ def _inputs(tmp_path: Path):
         "index_name": "search-evidence-index",
         "knowledge_source_name": "search-evidence-source",
         "knowledge_base_name": "search-evidence-base",
-        "checkpoint_key_provider": _TEST_KEY_PROVIDER,
+        "checkpoint_integrity_signer": _TEST_CHECKPOINT_SIGNER,
     }
     return source, l5a, kwargs
 
@@ -482,6 +527,7 @@ def test_applicable_evidence_requires_exact_governed_source_asset(
         "report-api key=supersecret.pdf",
         "report_api key=supersecret.pdf",
         "report(api key=supersecret).pdf",
+        "prefixapikey=supersecret.pdf",
     ),
 )
 def test_source_display_name_rejects_urls_paths_and_credentials(
@@ -497,6 +543,19 @@ def test_source_display_name_allows_safe_unicode_filename() -> None:
         "製造 マニュアル 2026.pdf",
         source_file_id="source-file:manual",
     ) == "製造 マニュアル 2026.pdf"
+
+
+@pytest.mark.unit
+def test_section_path_uses_shared_display_policy() -> None:
+    with pytest.raises(L5bPublicationError, match="L5B_DISPLAY_TEXT_UNSAFE"):
+        _safe_section_path(
+            ("prefixapikey=supersecret",),
+            source_unit_id="source-unit:manual",
+        )
+    assert _safe_section_path(
+        ("section:maintenance", "バッテリー 取り外し"),
+        source_unit_id="source-unit:manual",
+    ) == ("section:maintenance", "バッテリー 取り外し")
 
 
 @pytest.mark.unit
@@ -518,7 +577,7 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
         source,
         l5a,
         first,
-        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
     )
     client.calls.clear()
     second = run_l5b(
@@ -538,7 +597,7 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
         source,
         l5a,
         second,
-        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
     )
 
     forged_values = second.receipt.model_dump(mode="python")
@@ -557,7 +616,7 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
             source,
             l5a,
             forged,
-            checkpoint_key_provider=_TEST_KEY_PROVIDER,
+            checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
         )
 
 
@@ -895,7 +954,7 @@ def test_missing_checkpoint_provider_disables_reuse_and_persists_no_key(
     tmp_path: Path,
 ) -> None:
     source, l5a, kwargs = _inputs(tmp_path)
-    kwargs["checkpoint_key_provider"] = None
+    kwargs["checkpoint_integrity_signer"] = None
     client = _SearchClient(kwargs["access_policy"].policy_hash)
     state_root = tmp_path / ".fkg" / "l5b"
     first = run_l5b(
@@ -926,13 +985,13 @@ def test_missing_checkpoint_provider_disables_reuse_and_persists_no_key(
 @pytest.mark.parametrize(
     "replacement",
     (
-        _KeyProvider(key_version="2", key_material=bytes(range(32, 64))),
-        _KeyProvider(key_material=bytes(range(32, 64))),
+        _TestCheckpointSigner(key_version="2"),
+        _TestCheckpointSigner(),
     ),
 )
 def test_checkpoint_key_rotation_or_replacement_invalidates_reuse(
     tmp_path: Path,
-    replacement: _KeyProvider,
+    replacement: _TestCheckpointSigner,
 ) -> None:
     source, l5a, kwargs = _inputs(tmp_path)
     client = _SearchClient(kwargs["access_policy"].policy_hash)
@@ -945,7 +1004,7 @@ def test_checkpoint_key_rotation_or_replacement_invalidates_reuse(
         state_root=state_root,
     )
     client.calls.clear()
-    kwargs["checkpoint_key_provider"] = replacement
+    kwargs["checkpoint_integrity_signer"] = replacement
 
     rebuilt = run_l5b(
         source,
@@ -984,7 +1043,7 @@ def test_state_root_key_preseed_and_symlink_cannot_control_checkpoint(
         / f"{first.compiled.fingerprint}.json"
     )
     persisted = checkpoint.read_text("utf-8")
-    assert kwargs["checkpoint_key_provider"].key.key_material.hex() not in persisted
+    assert kwargs["checkpoint_integrity_signer"].secret.hex() not in persisted
     assert (state_root / "integrity.key").is_symlink()
     client.calls.clear()
 
@@ -1048,16 +1107,16 @@ def test_cross_run_checkpoint_replay_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_weak_checkpoint_provider_fails_before_remote_call(tmp_path: Path) -> None:
+def test_unsupported_checkpoint_signer_fails_before_remote_call(tmp_path: Path) -> None:
     source, l5a, kwargs = _inputs(tmp_path)
-    kwargs["checkpoint_key_provider"] = _KeyProvider(
-        key_material=b"A" * 32,
+    kwargs["checkpoint_integrity_signer"] = _TestCheckpointSigner(
+        algorithm="unsupported",
     )
     client = _SearchClient(kwargs["access_policy"].policy_hash)
 
     with pytest.raises(
         L5bPublicationError,
-        match="L5B_CHECKPOINT_KEY_INVALID",
+        match="L5B_CHECKPOINT_SIGNER_UNSUPPORTED",
     ):
         run_l5b(
             source,
@@ -1068,6 +1127,177 @@ def test_weak_checkpoint_provider_fails_before_remote_call(tmp_path: Path) -> No
         )
 
     assert client.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("position", (0, 32, 63))
+def test_checkpoint_mac_mismatch_at_any_position_rebuilds_safely(
+    tmp_path: Path,
+    position: int,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    checkpoint_path = (
+        state_root / "checkpoints" / f"{first.compiled.fingerprint}.json"
+    )
+    checkpoint = json.loads(checkpoint_path.read_text("utf-8"))
+    mac = checkpoint["checkpoint_mac"]
+    replacement = "0" if mac[position] != "0" else "1"
+    checkpoint["checkpoint_mac"] = (
+        mac[:position] + replacement + mac[position + 1 :]
+    )
+    _write_contract(checkpoint_path, checkpoint)
+    client.calls.clear()
+
+    rebuilt = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not rebuilt.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid_checkpoint", ([], "invalid", None))
+def test_nonobject_checkpoint_rebuilds_safely(
+    tmp_path: Path,
+    invalid_checkpoint,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    checkpoint_path = (
+        state_root / "checkpoints" / f"{first.compiled.fingerprint}.json"
+    )
+    _write_contract(checkpoint_path, invalid_checkpoint)
+    client.calls.clear()
+
+    rebuilt = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not rebuilt.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("verify_error", (False, True))
+def test_signer_verify_false_or_exception_disables_reuse(
+    tmp_path: Path,
+    verify_error: bool,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    signer = _TestCheckpointSigner()
+    kwargs["checkpoint_integrity_signer"] = signer
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    signer.verify_error = verify_error
+    signer.verify_result = None if verify_error else False
+    client.calls.clear()
+
+    rebuilt = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not rebuilt.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+def test_provider_specific_verify_exception_disables_reuse(
+    tmp_path: Path,
+) -> None:
+    class ProviderError(Exception):
+        pass
+
+    source, l5a, kwargs = _inputs(tmp_path)
+    signer = _TestCheckpointSigner()
+    kwargs["checkpoint_integrity_signer"] = signer
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    signer.verify_exception = ProviderError("backend verification unavailable")
+    client.calls.clear()
+
+    rebuilt = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not rebuilt.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "signer",
+    (
+        _TestCheckpointSigner(key_id="default"),
+        _TestCheckpointSigner(malformed_sign=True),
+        _TestCheckpointSigner(sign_error=True),
+    ),
+)
+def test_invalid_signer_identity_or_sign_failure_fails_closed(
+    tmp_path: Path,
+    signer: _TestCheckpointSigner,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    kwargs["checkpoint_integrity_signer"] = signer
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+
+    with pytest.raises(L5bPublicationError):
+        run_l5b(
+            source,
+            l5a,
+            **kwargs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5b",
+        )
+
+    assert not (tmp_path / ".fkg" / "l5b" / "runs").exists()
 
 
 @pytest.mark.unit
@@ -1427,7 +1657,7 @@ def test_sealed_unrelated_document_is_quarantined_before_citation(
         ontology_scope,
         retrieval_scope,
         publication=publication,
-        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
         response=_agentic_response(context, documents),
         accounting=_retrieval_accounting(len(documents)),
     )
@@ -1471,6 +1701,11 @@ def test_sealed_unrelated_document_is_quarantined_before_citation(
         ("source", "citation_invalid", "source-file:unrelated"),
         ("asset-missing", "citation_invalid", "governed-asset:manual"),
         ("publication-missing", "projection_hash_stale", HASH_A),
+        (
+            "section-path",
+            "citation_invalid",
+            "dimension:section_path",
+        ),
     ),
 )
 def test_scope_dimension_mismatch_never_exposes_document(
@@ -1510,6 +1745,12 @@ def test_scope_dimension_mismatch_never_exposes_document(
         changed["governed_asset_reference_hash"] = None
     elif mutation == "publication-missing":
         changed["asserted_publication_hash"] = None
+    elif mutation == "section-path":
+        malicious_section = "trusted\u202efdp.exe"
+        changed["section_path"] = [malicious_section]
+        changed_locator = json.loads(changed["immutable_locator_json"])
+        changed_locator["section_path"] = [malicious_section]
+        changed["immutable_locator_json"] = canonical_json(changed_locator)
     else:
         changed["source_id"] = "source-file:unrelated"
     changed["document_hash"] = canonical_sha256({
@@ -1529,7 +1770,7 @@ def test_scope_dimension_mismatch_never_exposes_document(
         ontology_scope,
         retrieval_scope,
         publication=publication,
-        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
         response=_agentic_response(context, documents),
         accounting=_retrieval_accounting(len(documents)),
     )
@@ -1542,7 +1783,7 @@ def test_scope_dimension_mismatch_never_exposes_document(
     )
     assert any(
         failure.reason_code == expected_reason
-        and expected_id in failure.canonical_ids
+        and any(expected_id in item for item in failure.canonical_ids)
         for failure in result.coverage.failures
     )
 
@@ -1621,7 +1862,7 @@ def test_retrieval_interop_returns_evidence_coverage_without_synthesis(
         ontology_scope,
         retrieval_scope,
         publication=publication,
-        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
         response=response,
         accounting=accounting,
     )
@@ -1663,7 +1904,7 @@ def test_direct_vector_degradation_forces_partial_coverage(
         ontology_scope,
         retrieval_scope,
         publication=publication,
-        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
         response={"value": documents},
         accounting=L5bRemoteAccounting(
             operation_refs=("direct-search:1",),

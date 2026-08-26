@@ -13,8 +13,6 @@ sealed evidence data and returns citations plus structural coverage only.
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import json
 import math
 import os
@@ -191,38 +189,55 @@ class L5bPublicationError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+L5B_CHECKPOINT_SIGNING_ALGORITHM = "HMAC-SHA256"
+
+
 @dataclass(frozen=True)
-class CheckpointIntegrityKey:
+class CheckpointSignerIdentity:
     key_id: str
     key_version: str
-    key_material: bytes = field(repr=False)
+    algorithm: str
 
 
-class CheckpointIntegrityKeyProvider(Protocol):
-    """Supplies protected HMAC key material from outside the L5b state tree."""
+class CheckpointIntegritySigner(Protocol):
+    """Opaque protected signer; secret key material never enters fabric-kg."""
 
-    def get_checkpoint_integrity_key(self) -> CheckpointIntegrityKey | None: ...
+    @property
+    def key_id(self) -> str: ...
+
+    @property
+    def key_version(self) -> str: ...
+
+    @property
+    def algorithm(self) -> str: ...
+
+    def sign(self, canonical_payload: bytes) -> str: ...
+
+    def verify(self, canonical_payload: bytes, persisted_mac: str) -> bool: ...
 
 
-def _resolve_checkpoint_integrity_key(
-    provider: CheckpointIntegrityKeyProvider | None,
-) -> CheckpointIntegrityKey | None:
-    if provider is None:
+@dataclass(frozen=True)
+class _ResolvedCheckpointSigner:
+    signer: CheckpointIntegritySigner = field(repr=False)
+    identity: CheckpointSignerIdentity
+
+
+def _resolve_checkpoint_signer(
+    signer: CheckpointIntegritySigner | None,
+) -> _ResolvedCheckpointSigner | None:
+    if signer is None:
         return None
     try:
-        key = provider.get_checkpoint_integrity_key()
-    except (OSError, RuntimeError, TimeoutError):
-        return None
-    if key is None:
-        return None
-    if not isinstance(key, CheckpointIntegrityKey):
-        raise L5bPublicationError(
-            "L5B_CHECKPOINT_KEY_INVALID",
-            "checkpoint key provider returned an unsupported value",
+        identity = CheckpointSignerIdentity(
+            key_id=signer.key_id,
+            key_version=signer.key_version,
+            algorithm=signer.algorithm,
         )
+    except Exception:
+        return None
     for field_name, value in (
-        ("key_id", key.key_id),
-        ("key_version", key.key_version),
+        ("key_id", identity.key_id),
+        ("key_version", identity.key_version),
     ):
         if (
             not isinstance(value, str)
@@ -244,18 +259,64 @@ def _resolve_checkpoint_integrity_key(
                 "L5B_CHECKPOINT_KEY_INVALID",
                 str(exc),
             ) from exc
-    material = key.key_material
-    if (
-        not isinstance(material, bytes)
-        or len(material) < 32
-        or len(set(material)) < 16
-        or material == bytes(len(material))
-    ):
+    if identity.key_id.casefold() in {
+        "default",
+        "changeme",
+        "none",
+        "unknown",
+        "test",
+    }:
         raise L5bPublicationError(
             "L5B_CHECKPOINT_KEY_INVALID",
-            "checkpoint key material must contain at least 32 strong protected bytes",
+            "checkpoint key ID must identify protected non-default material",
         )
-    return key
+    if identity.algorithm != L5B_CHECKPOINT_SIGNING_ALGORITHM:
+        raise L5bPublicationError(
+            "L5B_CHECKPOINT_SIGNER_UNSUPPORTED",
+            f"unsupported checkpoint signing algorithm {identity.algorithm!r}",
+        )
+    return _ResolvedCheckpointSigner(signer=signer, identity=identity)
+
+
+def _sign_checkpoint_payload(
+    signer: _ResolvedCheckpointSigner,
+    payload: Mapping[str, Any],
+) -> str:
+    canonical_payload = canonical_json(payload).encode("utf-8")
+    try:
+        mac = signer.signer.sign(canonical_payload)
+    except Exception as exc:
+        raise L5bPublicationError(
+            "L5B_CHECKPOINT_SIGNING_FAILED",
+            "checkpoint signer could not sign canonical payload",
+        ) from exc
+    if (
+        not isinstance(mac, str)
+        or re.fullmatch(r"[0-9a-f]{64}", mac) is None
+    ):
+        raise L5bPublicationError(
+            "L5B_CHECKPOINT_MAC_INVALID",
+            "checkpoint signer returned a malformed MAC",
+        )
+    return mac
+
+
+def _verify_checkpoint_payload(
+    signer: _ResolvedCheckpointSigner,
+    payload: Mapping[str, Any],
+    persisted_mac: object,
+) -> bool:
+    if (
+        not isinstance(persisted_mac, str)
+        or re.fullmatch(r"[0-9a-f]{64}", persisted_mac) is None
+    ):
+        return False
+    canonical_payload = canonical_json(payload).encode("utf-8")
+    try:
+        verified = signer.signer.verify(canonical_payload, persisted_mac)
+    except Exception:
+        return False
+    return verified is True
 
 
 @dataclass(frozen=True)
@@ -706,7 +767,7 @@ _CONNECTION_STRING_KEY_RE = re.compile(
     r")\s*="
 )
 _CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(?:"
+    r"(?i)(?:"
     r"api[\s_-]*key|access[\s_-]*key|account[\s_-]*key|"
     r"client[\s_-]*secret|"
     r"secret|password|passwd|pwd|token|credential|"
@@ -715,11 +776,23 @@ _CREDENTIAL_ASSIGNMENT_RE = re.compile(
 )
 
 
-def _unsafe_display_text(value: str) -> bool:
+_UNSAFE_URI_SCHEMES = {
+    "http",
+    "https",
+    "file",
+    "data",
+    "ftp",
+    "ftps",
+    "blob",
+    "javascript",
+}
+
+
+def _unsafe_display_text(value: str, *, reject_any_scheme: bool) -> bool:
     parsed = urlparse(value)
     folded = value.casefold()
     return bool(
-        parsed.scheme
+        (parsed.scheme and (reject_any_scheme or parsed.scheme.casefold() in _UNSAFE_URI_SCHEMES))
         or parsed.netloc
         or "://" in value
         or value.startswith(("/", "\\", "~"))
@@ -744,22 +817,28 @@ def _unsafe_unicode_character(char: str) -> bool:
     )
 
 
-def _safe_source_display_name(value: str, *, source_file_id: str) -> str:
+def _safe_display_text(
+    value: str,
+    *,
+    field_name: str,
+    subject_id: str,
+    reject_any_scheme: bool,
+) -> str:
     if not isinstance(value, str):
         raise L5bPublicationError(
-            "L5B_SOURCE_FILE_NAME_UNSAFE",
-            f"display name for {source_file_id} must be text",
+            "L5B_DISPLAY_TEXT_UNSAFE",
+            f"{field_name} for {subject_id} must be text",
         )
     if value != normalize_nfc(value) or not value.strip() or value != value.strip():
         raise L5bPublicationError(
-            "L5B_SOURCE_FILE_NAME_UNSAFE",
-            f"display name for {source_file_id} must be nonempty NFC text",
+            "L5B_DISPLAY_TEXT_UNSAFE",
+            f"{field_name} for {subject_id} must be nonempty NFC text",
         )
     try:
-        reject_secret_text(value, field_name="original_document_name")
+        reject_secret_text(value, field_name=field_name)
     except ValueError as exc:
         raise L5bPublicationError(
-            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            "L5B_DISPLAY_TEXT_UNSAFE",
             str(exc),
         ) from exc
     decoded = value
@@ -772,32 +851,63 @@ def _safe_source_display_name(value: str, *, source_file_id: str) -> str:
         else:
             if unquote(decoded, errors="strict") != decoded:
                 raise L5bPublicationError(
-                    "L5B_SOURCE_FILE_NAME_UNSAFE",
-                    f"display name for {source_file_id} has excessive nested encoding",
+                    "L5B_DISPLAY_TEXT_UNSAFE",
+                    f"{field_name} for {subject_id} has excessive nested encoding",
                 )
     except UnicodeDecodeError as exc:
         raise L5bPublicationError(
-            "L5B_SOURCE_FILE_NAME_UNSAFE",
-            f"display name for {source_file_id} contains invalid percent encoding",
+            "L5B_DISPLAY_TEXT_UNSAFE",
+            f"{field_name} for {subject_id} contains invalid percent encoding",
         ) from exc
     try:
-        reject_secret_text(decoded, field_name="original_document_name")
+        reject_secret_text(decoded, field_name=field_name)
     except ValueError as exc:
         raise L5bPublicationError(
-            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            "L5B_DISPLAY_TEXT_UNSAFE",
             str(exc),
         ) from exc
     if (
         any(_unsafe_unicode_character(char) for char in value)
         or any(_unsafe_unicode_character(char) for char in decoded)
-        or _unsafe_display_text(value)
-        or _unsafe_display_text(decoded)
+        or _unsafe_display_text(value, reject_any_scheme=reject_any_scheme)
+        or _unsafe_display_text(decoded, reject_any_scheme=reject_any_scheme)
     ):
         raise L5bPublicationError(
-            "L5B_SOURCE_FILE_NAME_UNSAFE",
-            f"display name for {source_file_id} must be a safe filename, not a URL, path, locator, or credential",
+            "L5B_DISPLAY_TEXT_UNSAFE",
+            f"{field_name} for {subject_id} must not contain a URL, path, locator, control, or credential",
         )
     return value
+
+
+def _safe_source_display_name(value: str, *, source_file_id: str) -> str:
+    try:
+        return _safe_display_text(
+            value,
+            field_name="original_document_name",
+            subject_id=source_file_id,
+            reject_any_scheme=True,
+        )
+    except L5bPublicationError as exc:
+        raise L5bPublicationError(
+            "L5B_SOURCE_FILE_NAME_UNSAFE",
+            str(exc),
+        ) from exc
+
+
+def _safe_section_path(
+    value: Sequence[str],
+    *,
+    source_unit_id: str,
+) -> tuple[str, ...]:
+    return tuple(
+        _safe_display_text(
+            component,
+            field_name=f"section_path[{index}]",
+            subject_id=source_unit_id,
+            reject_any_scheme=False,
+        )
+        for index, component in enumerate(value)
+    )
 
 
 def _manifest_ids_by_member(l5a: L5aStageResult) -> dict[str, tuple[str, ...]]:
@@ -959,6 +1069,10 @@ def _assertion_documents(
                     source_file_names[span.source_file_id],
                     source_file_id=span.source_file_id,
                 )
+                section_path = _safe_section_path(
+                    span.locator.section_path or (),
+                    source_unit_id=span.source_unit_id,
+                )
                 asset = asset_by_file.get(span.source_file_id)
                 if asset is None:
                     raise L5bPublicationError(
@@ -1017,7 +1131,7 @@ def _assertion_documents(
                     "immutable_locator_json": locator_json,
                     "immutable_locator_hash": span.locator.locator_hash,
                     "page": span.locator.page,
-                    "section_path": list(span.locator.section_path or ()),
+                    "section_path": list(section_path),
                     "access_policy_id": policy.access_policy_id,
                     "access_policy_hash": policy.policy_hash,
                     "acl_principal_keys": list(principal_keys),
@@ -1763,13 +1877,13 @@ def _checkpoint_path(run_root: Path) -> Path:
     return run_root.parent.parent / "checkpoints" / f"{run_root.name}.json"
 
 
-def _checkpoint(
+def _checkpoint_payload(
     compiled: L5bCompiledPublication,
     manifest: ArtifactManifest,
     metrics: StageResourceMetrics,
     receipt: StageReceipt,
     *,
-    integrity_key: CheckpointIntegrityKey,
+    signer: _ResolvedCheckpointSigner,
 ) -> Mapping[str, Any]:
     tokens = tuple(
         item.removeprefix("publication-token:")
@@ -1783,8 +1897,9 @@ def _checkpoint(
         )
     values = {
         "stage": "L5b",
-        "checkpoint_key_id": integrity_key.key_id,
-        "checkpoint_key_version": integrity_key.key_version,
+        "checkpoint_key_id": signer.identity.key_id,
+        "checkpoint_key_version": signer.identity.key_version,
+        "checkpoint_algorithm": signer.identity.algorithm,
         "fingerprint": compiled.fingerprint,
         "index_fingerprint": compiled.index_fingerprint,
         "l3_artifact_manifest_hash": compiled.source.input_manifest.manifest_hash,
@@ -1813,12 +1928,51 @@ def _checkpoint(
         },
     }
     sealed = {**values, "checkpoint_hash": canonical_sha256(values)}
-    checkpoint_mac = hmac.new(
-        integrity_key.key_material,
-        canonical_json(sealed).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return {**sealed, "checkpoint_mac": checkpoint_mac}
+    return sealed
+
+
+def _checkpoint(
+    compiled: L5bCompiledPublication,
+    manifest: ArtifactManifest,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+    *,
+    signer: _ResolvedCheckpointSigner,
+) -> Mapping[str, Any]:
+    payload = _checkpoint_payload(
+        compiled,
+        manifest,
+        metrics,
+        receipt,
+        signer=signer,
+    )
+    return {**payload, "checkpoint_mac": _sign_checkpoint_payload(signer, payload)}
+
+
+def _checkpoint_unsigned(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if key != "checkpoint_mac"
+    }
+
+
+def _checkpoint_is_authentic(
+    persisted: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    signer: _ResolvedCheckpointSigner,
+) -> bool:
+    if not isinstance(persisted, Mapping):
+        return False
+    persisted_unsigned = _checkpoint_unsigned(persisted)
+    expected_unsigned = _checkpoint_unsigned(expected)
+    if persisted_unsigned != expected_unsigned:
+        return False
+    return _verify_checkpoint_payload(
+        signer,
+        expected_unsigned,
+        persisted.get("checkpoint_mac"),
+    )
 
 
 def _persist_checkpoint(
@@ -1827,9 +1981,9 @@ def _persist_checkpoint(
     manifest: ArtifactManifest,
     metrics: StageResourceMetrics,
     receipt: StageReceipt,
-    integrity_key: CheckpointIntegrityKey | None,
+    signer: _ResolvedCheckpointSigner | None,
 ) -> None:
-    if integrity_key is None:
+    if signer is None:
         return
     path = _checkpoint_path(run_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1841,7 +1995,7 @@ def _persist_checkpoint(
             manifest,
             metrics,
             receipt,
-            integrity_key=integrity_key,
+            signer=signer,
         ),
     )
     os.replace(temp_path, path)
@@ -1856,21 +2010,22 @@ def _skip_checkpoint_path(run_root: Path, receipt: StageReceipt) -> Path:
     )
 
 
-def _skip_checkpoint(
+def _skip_checkpoint_payload(
     run_root: Path,
     compiled: L5bCompiledPublication,
     metrics: StageResourceMetrics,
     receipt: StageReceipt,
     *,
-    integrity_key: CheckpointIntegrityKey,
+    signer: _ResolvedCheckpointSigner,
 ) -> Mapping[str, Any]:
     succeeded_checkpoint = json.loads(
         _checkpoint_path(run_root).read_text("utf-8")
     )
     values = {
         "stage": "L5b-skip",
-        "checkpoint_key_id": integrity_key.key_id,
-        "checkpoint_key_version": integrity_key.key_version,
+        "checkpoint_key_id": signer.identity.key_id,
+        "checkpoint_key_version": signer.identity.key_version,
+        "checkpoint_algorithm": signer.identity.algorithm,
         "fingerprint": compiled.fingerprint,
         "succeeded_checkpoint_hash": canonical_sha256(succeeded_checkpoint),
         "metrics_hash": metrics.metrics_hash,
@@ -1879,14 +2034,25 @@ def _skip_checkpoint(
         "receipt_payload_hash": canonical_sha256(receipt.model_dump(mode="json")),
     }
     sealed = {**values, "checkpoint_hash": canonical_sha256(values)}
-    return {
-        **sealed,
-        "checkpoint_mac": hmac.new(
-            integrity_key.key_material,
-            canonical_json(sealed).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest(),
-    }
+    return sealed
+
+
+def _skip_checkpoint(
+    run_root: Path,
+    compiled: L5bCompiledPublication,
+    metrics: StageResourceMetrics,
+    receipt: StageReceipt,
+    *,
+    signer: _ResolvedCheckpointSigner,
+) -> Mapping[str, Any]:
+    payload = _skip_checkpoint_payload(
+        run_root,
+        compiled,
+        metrics,
+        receipt,
+        signer=signer,
+    )
+    return {**payload, "checkpoint_mac": _sign_checkpoint_payload(signer, payload)}
 
 
 def _persist_skip_checkpoint(
@@ -1894,7 +2060,7 @@ def _persist_skip_checkpoint(
     compiled: L5bCompiledPublication,
     metrics: StageResourceMetrics,
     receipt: StageReceipt,
-    integrity_key: CheckpointIntegrityKey,
+    signer: _ResolvedCheckpointSigner,
 ) -> None:
     path = _skip_checkpoint_path(run_root, receipt)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1906,7 +2072,7 @@ def _persist_skip_checkpoint(
             compiled,
             metrics,
             receipt,
-            integrity_key=integrity_key,
+            signer=signer,
         ),
     )
     os.replace(temp_path, path)
@@ -1917,28 +2083,28 @@ def _skip_checkpoint_is_valid(
     compiled: L5bCompiledPublication,
     metrics: StageResourceMetrics,
     receipt: StageReceipt,
-    integrity_key: CheckpointIntegrityKey,
+    signer: _ResolvedCheckpointSigner,
 ) -> bool:
     try:
         persisted = json.loads(
             _skip_checkpoint_path(run_root, receipt).read_text("utf-8")
         )
-        expected = _skip_checkpoint(
+        expected = _skip_checkpoint_payload(
             run_root,
             compiled,
             metrics,
             receipt,
-            integrity_key=integrity_key,
+            signer=signer,
         )
     except (L5bPublicationError, OSError, ValueError, json.JSONDecodeError):
         return False
-    return persisted == expected
+    return _checkpoint_is_authentic(persisted, expected, signer)
 
 
 def _load_intact(
     compiled: L5bCompiledPublication,
     run_root: Path,
-    integrity_key: CheckpointIntegrityKey | None,
+    signer: _ResolvedCheckpointSigner | None,
 ) -> tuple[
     ArtifactManifest,
     tuple[ProjectionEquivalence, ...],
@@ -1972,7 +2138,7 @@ def _load_intact(
         )
         checkpoint = (
             json.loads(_checkpoint_path(run_root).read_text("utf-8"))
-            if integrity_key is not None
+            if signer is not None
             else None
         )
         proofs = tuple(
@@ -2076,13 +2242,17 @@ def _load_intact(
             or (run_root / "stage-receipt.json").read_bytes()
             != (canonical_json(receipt) + "\n").encode("utf-8")
             or (
-                integrity_key is not None
-                and checkpoint != _checkpoint(
-                    compiled,
-                    expected,
-                    metrics,
-                    receipt,
-                    integrity_key=integrity_key,
+                signer is not None
+                and not _checkpoint_is_authentic(
+                    checkpoint,
+                    _checkpoint_payload(
+                        compiled,
+                        expected,
+                        metrics,
+                        receipt,
+                        signer=signer,
+                    ),
+                    signer,
                 )
             )
         ):
@@ -2114,7 +2284,7 @@ def run_l5b(
     knowledge_source_name: str,
     knowledge_base_name: str,
     client: L5bTargetClient,
-    checkpoint_key_provider: CheckpointIntegrityKeyProvider | None = None,
+    checkpoint_integrity_signer: CheckpointIntegritySigner | None = None,
     state_root: Path = L5B_STATE_DIR,
 ) -> L5bStageResult:
     """Publish and read back one atomic Search evidence resource set."""
@@ -2140,10 +2310,10 @@ def run_l5b(
     )
     run_root = state_root / "runs" / compiled.fingerprint
     accounting = _PublicationAccounting()
-    integrity_key = _resolve_checkpoint_integrity_key(checkpoint_key_provider)
+    checkpoint_signer = _resolve_checkpoint_signer(checkpoint_integrity_signer)
     intact = (
-        _load_intact(compiled, run_root, integrity_key)
-        if integrity_key is not None
+        _load_intact(compiled, run_root, checkpoint_signer)
+        if checkpoint_signer is not None
         else None
     )
     if intact is not None:
@@ -2192,7 +2362,7 @@ def run_l5b(
                 compiled,
                 metrics,
                 receipt,
-                integrity_key,
+                checkpoint_signer,
             )
             return L5bStageResult(
                 compiled=compiled,
@@ -2309,7 +2479,7 @@ def run_l5b(
             manifest,
             metrics,
             receipt,
-            integrity_key,
+            checkpoint_signer,
         )
         if run_root.exists():
             shutil.rmtree(run_root)
@@ -2419,13 +2589,13 @@ def require_l5b_publication_receipt(
     l5a_result: L5aStageResult,
     result: L5bStageResult,
     *,
-    checkpoint_key_provider: CheckpointIntegrityKeyProvider | None = None,
+    checkpoint_integrity_signer: CheckpointIntegritySigner | None = None,
 ) -> None:
     """Authorize retrieval only from intact L5b artifacts and exact upstream seals."""
 
     require_l5a_publication_receipt(source, l5a_result)
-    integrity_key = _resolve_checkpoint_integrity_key(checkpoint_key_provider)
-    intact = _load_intact(result.compiled, result.run_root, integrity_key)
+    checkpoint_signer = _resolve_checkpoint_signer(checkpoint_integrity_signer)
+    intact = _load_intact(result.compiled, result.run_root, checkpoint_signer)
     if (
         intact is None
         or result.compiled.source.receipt.receipt_hash != source.receipt.receipt_hash
@@ -2444,13 +2614,13 @@ def require_l5b_publication_receipt(
         or (
             result.receipt.status == "skipped"
             and (
-                integrity_key is None
+                checkpoint_signer is None
                 or not _skip_checkpoint_is_valid(
                     result.run_root,
                     result.compiled,
                     result.metrics,
                     result.receipt,
-                    integrity_key,
+                    checkpoint_signer,
                 )
             )
         )
@@ -2663,6 +2833,20 @@ def build_citation(
     ):
         raise ValueError("Search document quote, policy, or publication seal is stale")
     locator = json.loads(str(document["immutable_locator_json"]))
+    _safe_source_display_name(
+        document["original_document_name"],
+        source_file_id=document["source_file_id"],
+    )
+    locator_section_path = _safe_section_path(
+        locator.get("section_path") or (),
+        source_unit_id=document["source_unit_id"],
+    )
+    document_section_path = _safe_section_path(
+        document.get("section_path") or (),
+        source_unit_id=document["source_unit_id"],
+    )
+    if document_section_path != locator_section_path:
+        raise ValueError("Search document section path differs from immutable locator")
     identity = _citation_identity(
         context,
         document,
@@ -2693,7 +2877,7 @@ def build_citation(
         "exact_authorized_quote": document["source_quote"],
         "quote_hash": document["quote_hash"],
         "page": locator.get("page"),
-        "section_path": tuple(locator.get("section_path") or ()),
+        "section_path": locator_section_path,
         "immutable_locator": locator,
         "content_hash": document["source_text_content_hash"],
         "asset_hash": document["asset_hash"],
@@ -2932,6 +3116,25 @@ def _document_scope_findings(
         )
     except L5bPublicationError:
         add("citation_invalid", dimension="original_document_name")
+    try:
+        locator = json.loads(str(document.get("immutable_locator_json")))
+        locator_section_path = _safe_section_path(
+            locator.get("section_path") or (),
+            source_unit_id=str(document.get("source_unit_id") or "missing"),
+        )
+        document_section_path = _safe_section_path(
+            document.get("section_path") or (),
+            source_unit_id=str(document.get("source_unit_id") or "missing"),
+        )
+        if document_section_path != locator_section_path:
+            add("citation_invalid", dimension="section_path")
+    except (
+        L5bPublicationError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        add("citation_invalid", dimension="section_path")
     governed_assets = {
         (
             asset.governed_asset_reference_id,
@@ -3030,7 +3233,7 @@ def interpret_retrieval_response(
     publication: L5bStageResult,
     response: Mapping[str, Any],
     accounting: L5bRemoteAccounting,
-    checkpoint_key_provider: CheckpointIntegrityKeyProvider | None = None,
+    checkpoint_integrity_signer: CheckpointIntegritySigner | None = None,
     originating_context: AgenticRetrievalRequestContext | None = None,
     originating_budget: QueryBudget | None = None,
     fallback_reason_code: str | None = None,
@@ -3043,7 +3246,7 @@ def interpret_retrieval_response(
         publication.compiled.source,
         publication.compiled.l5a_result,
         publication,
-        checkpoint_key_provider=checkpoint_key_provider,
+        checkpoint_integrity_signer=checkpoint_integrity_signer,
     )
     if (
         context.search_index_id != publication.compiled.index_name

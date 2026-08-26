@@ -1752,6 +1752,10 @@ line/paragraph separators, bidi overrides/isolates, noncharacters, encoded URL
 or secret forms, and whitespace-tolerant API/access/account/client key, token,
 password, credential, connection-string, SAS, and signature assignments.
 Ordinary NFC Unicode filenames and safe internal spaces remain valid.
+Credential stems are detected before an assignment delimiter even when embedded
+after punctuation or inside another filename token. The same shared policy
+validates every user-displayable citation section-path component before
+construction; a malicious section quarantines the complete document.
 Assertions without exact evidence are not indexed; required-member authority
 without a quote remains a retrieval coverage requirement and therefore cannot
 produce complete coverage unless another valid assertion document supplies its
@@ -1771,13 +1775,15 @@ document set, projection proof, manifest, metrics, receipt, and token binding
 directly with immutable compiled values and deterministic authority seals.
 Rebuilding expected truth from current disk bytes is prohibited; coordinated
 local file/manifest/metrics/receipt reseals are cache misses.
-Checkpoint MAC keys are injected by a protected
-`CheckpointIntegrityKeyProvider` and never generated or stored under the L5b
-state tree, logs, receipts, manifests, or Search documents. The provider returns
-strong in-memory key material plus stable key ID/version. Missing or unavailable
-keys disable reuse and force a safe rebuild; malformed/weak keys fail closed,
-and ID/version or material rotation invalidates prior checkpoints without
-cross-run replay.
+Checkpoint authentication is injected through an opaque protected
+`CheckpointIntegritySigner` and never exposes raw secret bytes to fabric-kg or
+stores them under the L5b state tree, logs, receipts, manifests, or Search
+documents. The signer advertises a supported algorithm plus stable key
+ID/version and implements `sign(canonical_payload)` and timing-safe
+`verify(canonical_payload, persisted_mac)`. Missing or unavailable signers
+disable reuse and force a safe rebuild; unsupported identity/algorithm,
+malformed MACs, and signing failures fail closed. ID/version or protected-key
+rotation invalidates prior checkpoints without cross-run replay.
 
 Runtime is zero-synthesis. C0.Runtime `QueryBudget`, resolved scope, request
 context, coverage receipt, citation envelope, and citation presentation
