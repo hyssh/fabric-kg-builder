@@ -51,6 +51,12 @@ L4, and hardened L5a authority.
 - local reuse compares canonical compiled payloads and deterministic seals
   rather than deriving expected truth from mutable disk bytes, and source
   display filenames reject URLs, paths, connection strings, and credentials;
+- succeeded and skipped checkpoints use strong key material injected from
+  outside the mutable state tree, bind key ID/version for safe rotation, and
+  disable reuse when protected key material is unavailable;
+- persisted display names additionally reject Unicode controls/formats/bidi,
+  noncharacters, encoded URL/secret forms, and whitespace-tolerant credential
+  assignments while preserving safe NFC Unicode and spaces;
 - schema 1, CLI/Data Agent activation, L6 synthesis, live Azure/Fabric
   deployment, and L7 validation remain unchanged or deferred.
 

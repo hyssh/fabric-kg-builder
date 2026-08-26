@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from fabric_kg_builder.contracts import (
 )
 from fabric_kg_builder.contracts.publication import AccessPolicy, PrincipalScope
 from fabric_kg_builder.serving.evidence_retrieval import (
+    CheckpointIntegrityKey,
     L5B_AGENTIC_API_VERSION,
     L5B_MAX_BATCH_SIZE,
     L5bMutationOperation,
@@ -170,6 +172,37 @@ class _MissingAccountingClient(_SearchClient):
         return object()
 
 
+class _KeyProvider:
+    def __init__(
+        self,
+        *,
+        key_id: str = "test-l5b-checkpoint",
+        key_version: str = "1",
+        key_material: bytes = bytes(range(32)),
+        unavailable: bool = False,
+    ) -> None:
+        self.key = CheckpointIntegrityKey(
+            key_id=key_id,
+            key_version=key_version,
+            key_material=key_material,
+        )
+        self.unavailable = unavailable
+
+    def get_checkpoint_integrity_key(self):
+        return None if self.unavailable else self.key
+
+
+_TEST_KEY_PROVIDER = _KeyProvider()
+
+
+def _compile_kwargs(kwargs):
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key != "checkpoint_key_provider"
+    }
+
+
 def _inputs(tmp_path: Path):
     properties = {
         "semantic-type:manufacturing.record": ({
@@ -240,6 +273,7 @@ def _inputs(tmp_path: Path):
         "index_name": "search-evidence-index",
         "knowledge_source_name": "search-evidence-source",
         "knowledge_base_name": "search-evidence-base",
+        "checkpoint_key_provider": _TEST_KEY_PROVIDER,
     }
     return source, l5a, kwargs
 
@@ -249,7 +283,7 @@ def test_l5b_compiles_exact_search_resources_from_sealed_authority(
     tmp_path: Path,
 ) -> None:
     source, l5a, kwargs = _inputs(tmp_path)
-    compiled = compile_l5b_publication(source, l5a, **kwargs)
+    compiled = compile_l5b_publication(source, l5a, **_compile_kwargs(kwargs))
 
     assert compiled.index_definition["name"] == "search-evidence-index"
     assert compiled.knowledge_source_definition["searchIndexParameters"][
@@ -277,7 +311,7 @@ def test_l5b_rejects_l3_evidence_partition_tamper(tmp_path: Path) -> None:
         L5bPublicationError,
         match="L5B_L3_EVIDENCE_PARTITION_TAMPERED",
     ):
-        compile_l5b_publication(source, l5a, **kwargs)
+        compile_l5b_publication(source, l5a, **_compile_kwargs(kwargs))
 
 
 @pytest.mark.unit
@@ -289,7 +323,7 @@ def test_l5b_rejects_source_unit_semantic_tamper(tmp_path: Path) -> None:
     )
 
     with pytest.raises(L5bPublicationError, match="L5B_SOURCE_UNIT_TAMPERED"):
-        compile_l5b_publication(source, l5a, **kwargs)
+        compile_l5b_publication(source, l5a, **_compile_kwargs(kwargs))
 
 
 @pytest.mark.unit
@@ -308,7 +342,10 @@ def test_l5b_rejects_stale_policy_and_acl_scope_collision(tmp_path: Path) -> Non
         compile_l5b_publication(
             source,
             l5a,
-            **{**kwargs, "access_policy": stale},
+            **{
+                **_compile_kwargs(kwargs),
+                "access_policy": stale,
+            },
         )
 
     policy = kwargs["access_policy"]
@@ -342,7 +379,10 @@ def test_l5b_requires_exact_l5a_governed_asset_set(tmp_path: Path) -> None:
             compile_l5b_publication(
                 source,
                 l5a,
-                **{**kwargs, "governed_assets": supplied},
+                **{
+                    **_compile_kwargs(kwargs),
+                    "governed_assets": supplied,
+                },
             )
 
     original = assets[0]
@@ -366,7 +406,7 @@ def test_l5b_requires_exact_l5a_governed_asset_set(tmp_path: Path) -> None:
             source,
             l5a,
             **{
-                **kwargs,
+                **_compile_kwargs(kwargs),
                 "governed_assets": (misassigned, *assets[1:]),
             },
         )
@@ -428,6 +468,20 @@ def test_applicable_evidence_requires_exact_governed_source_asset(
         "Host=db.example;Database=prod;User ID=admin;Pwd=not-a-secret",
         "AccountKey = not-a-secret",
         "Server = db; User ID = admin",
+        "report\u202efdp.exe",
+        "trusted.pdf\u0085FORGED",
+        "api_key=supersecret.txt",
+        "access-key : not-a-secret.txt",
+        "manual%2Fsecret.pdf",
+        "https%3A%2F%2Fexample.test%2Fmanual.pdf",
+        "api%5Fkey%3Dsupersecret.txt",
+        "API KEY = supersecret.pdf",
+        "Account Key : x.pdf",
+        "foo%252Fbar.pdf",
+        "api%255Fkey%253Dsupersecret.pdf",
+        "report-api key=supersecret.pdf",
+        "report_api key=supersecret.pdf",
+        "report(api key=supersecret).pdf",
     ),
 )
 def test_source_display_name_rejects_urls_paths_and_credentials(
@@ -440,9 +494,9 @@ def test_source_display_name_rejects_urls_paths_and_credentials(
 @pytest.mark.unit
 def test_source_display_name_allows_safe_unicode_filename() -> None:
     assert _safe_source_display_name(
-        "製造マニュアル.pdf",
+        "製造 マニュアル 2026.pdf",
         source_file_id="source-file:manual",
-    ) == "製造マニュアル.pdf"
+    ) == "製造 マニュアル 2026.pdf"
 
 
 @pytest.mark.unit
@@ -460,7 +514,12 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
         client=client,
         state_root=state_root,
     )
-    require_l5b_publication_receipt(source, l5a, first)
+    require_l5b_publication_receipt(
+        source,
+        l5a,
+        first,
+        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+    )
     client.calls.clear()
     second = run_l5b(
         source,
@@ -475,7 +534,12 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
     assert second.receipt.status == "skipped"
     assert second.reused
     assert client.calls == ["read_back"]
-    require_l5b_publication_receipt(source, l5a, second)
+    require_l5b_publication_receipt(
+        source,
+        l5a,
+        second,
+        checkpoint_key_provider=_TEST_KEY_PROVIDER,
+    )
 
     forged_values = second.receipt.model_dump(mode="python")
     forged_values["completed_at_utc"] = (
@@ -489,7 +553,12 @@ def test_l5b_publishes_reads_back_and_reuses_hash_keyed_state(
         L5bPublicationError,
         match="L5B_PUBLICATION_RECEIPT_INVALID",
     ):
-        require_l5b_publication_receipt(source, l5a, forged)
+        require_l5b_publication_receipt(
+            source,
+            l5a,
+            forged,
+            checkpoint_key_provider=_TEST_KEY_PROVIDER,
+        )
 
 
 @pytest.mark.unit
@@ -819,6 +888,186 @@ def test_checkpoint_hmac_binds_receipt_timestamps(tmp_path: Path) -> None:
 
     assert not repaired.reused
     assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+def test_missing_checkpoint_provider_disables_reuse_and_persists_no_key(
+    tmp_path: Path,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    kwargs["checkpoint_key_provider"] = None
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    require_l5b_publication_receipt(source, l5a, first)
+    assert not (state_root / "integrity.key").exists()
+    assert not (state_root / "checkpoints").exists()
+    client.calls.clear()
+
+    rebuilt = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not rebuilt.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        _KeyProvider(key_version="2", key_material=bytes(range(32, 64))),
+        _KeyProvider(key_material=bytes(range(32, 64))),
+    ),
+)
+def test_checkpoint_key_rotation_or_replacement_invalidates_reuse(
+    tmp_path: Path,
+    replacement: _KeyProvider,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    client.calls.clear()
+    kwargs["checkpoint_key_provider"] = replacement
+
+    rebuilt = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert not rebuilt.reused
+    assert client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+def test_state_root_key_preseed_and_symlink_cannot_control_checkpoint(
+    tmp_path: Path,
+) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+    state_root = tmp_path / ".fkg" / "l5b"
+    state_root.mkdir(parents=True)
+    attacker_key = tmp_path / "attacker.key"
+    attacker_key.write_bytes(b"x" * 32)
+    (state_root / "integrity.key").symlink_to(attacker_key)
+
+    first = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+    checkpoint = (
+        state_root
+        / "checkpoints"
+        / f"{first.compiled.fingerprint}.json"
+    )
+    persisted = checkpoint.read_text("utf-8")
+    assert kwargs["checkpoint_key_provider"].key.key_material.hex() not in persisted
+    assert (state_root / "integrity.key").is_symlink()
+    client.calls.clear()
+
+    reused = run_l5b(
+        source,
+        l5a,
+        **kwargs,
+        client=client,
+        state_root=state_root,
+    )
+
+    assert reused.reused
+    assert client.calls == ["read_back"]
+
+
+@pytest.mark.unit
+def test_cross_run_checkpoint_replay_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first_source, first_l5a, first_kwargs = _inputs(tmp_path / "first")
+    second_source, second_l5a, second_kwargs = _inputs(tmp_path / "second")
+    second_kwargs["index_name"] = "search-evidence-index-two"
+    first_client = _SearchClient(first_kwargs["access_policy"].policy_hash)
+    second_client = _SearchClient(second_kwargs["access_policy"].policy_hash)
+    first_root = tmp_path / "first" / ".fkg" / "l5b"
+    second_root = tmp_path / "second" / ".fkg" / "l5b"
+    first = run_l5b(
+        first_source,
+        first_l5a,
+        **first_kwargs,
+        client=first_client,
+        state_root=first_root,
+    )
+    second = run_l5b(
+        second_source,
+        second_l5a,
+        **second_kwargs,
+        client=second_client,
+        state_root=second_root,
+    )
+    assert first.compiled.fingerprint != second.compiled.fingerprint
+    first_checkpoint = (
+        first_root / "checkpoints" / f"{first.compiled.fingerprint}.json"
+    )
+    second_checkpoint = (
+        second_root / "checkpoints" / f"{second.compiled.fingerprint}.json"
+    )
+    shutil.copyfile(first_checkpoint, second_checkpoint)
+    second_client.calls.clear()
+
+    rebuilt = run_l5b(
+        second_source,
+        second_l5a,
+        **second_kwargs,
+        client=second_client,
+        state_root=second_root,
+    )
+
+    assert not rebuilt.reused
+    assert second_client.calls == ["inspect", "publish", "read_back"]
+
+
+@pytest.mark.unit
+def test_weak_checkpoint_provider_fails_before_remote_call(tmp_path: Path) -> None:
+    source, l5a, kwargs = _inputs(tmp_path)
+    kwargs["checkpoint_key_provider"] = _KeyProvider(
+        key_material=b"A" * 32,
+    )
+    client = _SearchClient(kwargs["access_policy"].policy_hash)
+
+    with pytest.raises(
+        L5bPublicationError,
+        match="L5B_CHECKPOINT_KEY_INVALID",
+    ):
+        run_l5b(
+            source,
+            l5a,
+            **kwargs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5b",
+        )
+
+    assert client.calls == []
 
 
 @pytest.mark.unit
@@ -1169,7 +1418,7 @@ def test_sealed_unrelated_document_is_quarantined_before_citation(
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
         "require_l5b_publication_receipt",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
 
     result = interpret_retrieval_response(
@@ -1178,6 +1427,7 @@ def test_sealed_unrelated_document_is_quarantined_before_citation(
         ontology_scope,
         retrieval_scope,
         publication=publication,
+        checkpoint_key_provider=_TEST_KEY_PROVIDER,
         response=_agentic_response(context, documents),
         accounting=_retrieval_accounting(len(documents)),
     )
@@ -1270,7 +1520,7 @@ def test_scope_dimension_mismatch_never_exposes_document(
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
         "require_l5b_publication_receipt",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
 
     result = interpret_retrieval_response(
@@ -1279,6 +1529,7 @@ def test_scope_dimension_mismatch_never_exposes_document(
         ontology_scope,
         retrieval_scope,
         publication=publication,
+        checkpoint_key_provider=_TEST_KEY_PROVIDER,
         response=_agentic_response(context, documents),
         accounting=_retrieval_accounting(len(documents)),
     )
@@ -1361,7 +1612,7 @@ def test_retrieval_interop_returns_evidence_coverage_without_synthesis(
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
         "require_l5b_publication_receipt",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
 
     result = interpret_retrieval_response(
@@ -1370,6 +1621,7 @@ def test_retrieval_interop_returns_evidence_coverage_without_synthesis(
         ontology_scope,
         retrieval_scope,
         publication=publication,
+        checkpoint_key_provider=_TEST_KEY_PROVIDER,
         response=response,
         accounting=accounting,
     )
@@ -1402,7 +1654,7 @@ def test_direct_vector_degradation_forces_partial_coverage(
     monkeypatch.setattr(
         "fabric_kg_builder.serving.evidence_retrieval."
         "require_l5b_publication_receipt",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
 
     result = interpret_retrieval_response(
@@ -1411,6 +1663,7 @@ def test_direct_vector_degradation_forces_partial_coverage(
         ontology_scope,
         retrieval_scope,
         publication=publication,
+        checkpoint_key_provider=_TEST_KEY_PROVIDER,
         response={"value": documents},
         accounting=L5bRemoteAccounting(
             operation_refs=("direct-search:1",),

@@ -1747,6 +1747,11 @@ publishable only when its source file, asset/version, content hash, and immutabl
 locator resolve exactly one governed asset. Source display filenames are
 URL-free, path-free, credential-free NFC text; locators remain separate
 authority.
+Display filenames also reject Unicode control/format/surrogate characters,
+line/paragraph separators, bidi overrides/isolates, noncharacters, encoded URL
+or secret forms, and whitespace-tolerant API/access/account/client key, token,
+password, credential, connection-string, SAS, and signature assignments.
+Ordinary NFC Unicode filenames and safe internal spaces remain valid.
 Assertions without exact evidence are not indexed; required-member authority
 without a quote remains a retrieval coverage requirement and therefore cannot
 produce complete coverage unless another valid assertion document supplies its
@@ -1766,6 +1771,13 @@ document set, projection proof, manifest, metrics, receipt, and token binding
 directly with immutable compiled values and deterministic authority seals.
 Rebuilding expected truth from current disk bytes is prohibited; coordinated
 local file/manifest/metrics/receipt reseals are cache misses.
+Checkpoint MAC keys are injected by a protected
+`CheckpointIntegrityKeyProvider` and never generated or stored under the L5b
+state tree, logs, receipts, manifests, or Search documents. The provider returns
+strong in-memory key material plus stable key ID/version. Missing or unavailable
+keys disable reuse and force a safe rebuild; malformed/weak keys fail closed,
+and ID/version or material rotation invalidates prior checkpoints without
+cross-run replay.
 
 Runtime is zero-synthesis. C0.Runtime `QueryBudget`, resolved scope, request
 context, coverage receipt, citation envelope, and citation presentation
