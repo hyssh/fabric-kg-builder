@@ -4,8 +4,10 @@ import dataclasses
 import copy
 import json
 import shutil
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -48,6 +50,8 @@ from fabric_kg_builder.serving.structured_publication import (
     require_l5a_publication_receipt,
     run_l5a,
     _CallAccounting,
+    _canonical_arrow_type,
+    _canonical_typed_value,
     _equivalences,
     _expected_state,
     _required_member_snapshots,
@@ -63,6 +67,7 @@ class _FakeClient:
         self.fail_publish: str | None = None
         self.raise_after_create: str | None = None
         self.tamper_read_back: str | None = None
+        self.tamper_schema_read_back: str | None = None
         self.raise_read_back: str | None = None
         self.tamper_required_members: str | None = None
         self.remote_sequence = 0
@@ -167,6 +172,16 @@ class _FakeClient:
             definition = dict(state.definition)
             definition["source_projection_hash"] = "f" * 64
             state = dataclasses.replace(state, definition=definition)
+        if state is not None and self.tamper_schema_read_back == target_kind:
+            snapshots = list(state.table_snapshots)
+            snapshots[0] = dataclasses.replace(
+                snapshots[0],
+                schema_hash="f" * 64,
+            )
+            state = dataclasses.replace(
+                state,
+                table_snapshots=tuple(snapshots),
+            )
         if state is not None and self.tamper_required_members == target_kind:
             changed_rows = [dict(row) for row in state.required_member_rows]
             changed_rows[0]["member_canonical_id"] = "entity:wrong"
@@ -477,6 +492,7 @@ def _inputs(
     extra_types=(),
     extra_type_properties=None,
     extra_relationship_targets=False,
+    identity_business_keys=None,
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
     l4 = run_l4(
@@ -500,7 +516,7 @@ def _inputs(
             },
             extra_types=extra_types,
             extra_relationship_targets=extra_relationship_targets,
-            identity_business_keys={
+            identity_business_keys=identity_business_keys or {
                 "semantic-type:manufacturing.record": (
                     "property:record:canonical-id",
                 ),
@@ -535,7 +551,7 @@ def _inputs(
     }
 
 
-def _nontrivial_inputs(tmp_path: Path):
+def _nontrivial_inputs(tmp_path: Path, *, root_key_type: str = "string"):
     extra_types = list(copy.deepcopy(_subtypes("manufacturing")))
     intermediate_id = "semantic-type:manufacturing.record-b"
     grandchild = extra_types[0]["proposed_type"]
@@ -550,7 +566,7 @@ def _nontrivial_inputs(tmp_path: Path):
                 {
                     "property_id": "property:record:canonical-id",
                     "display_name": "Record ID",
-                    "value_type": "string",
+                    "value_type": root_key_type,
                     "required": True,
                 },
                 {
@@ -573,6 +589,47 @@ def _nontrivial_inputs(tmp_path: Path):
                 "required": False,
             },),
         },
+    )
+
+
+def _all_property_types_inputs(tmp_path: Path):
+    return _inputs(
+        tmp_path,
+        extra_type_properties={
+            "semantic-type:manufacturing.record": tuple(
+                [
+                    {
+                    "property_id": "property:record:canonical-id",
+                    "display_name": "Record ID",
+                    "value_type": "string",
+                    "required": True,
+                    }
+                ]
+                + [
+                    {
+                        "property_id": f"property:record:{data_type}",
+                        "display_name": f"Record {data_type}",
+                        "value_type": data_type,
+                        "required": data_type == "integer",
+                    }
+                    for data_type in (
+                        "string",
+                        "integer",
+                        "number",
+                        "boolean",
+                        "date",
+                        "datetime",
+                    )
+                ]
+            ),
+        },
+    )
+
+
+def _integer_endpoint_key_inputs(tmp_path: Path):
+    return _nontrivial_inputs(
+        tmp_path,
+        root_key_type="integer",
     )
 
 
@@ -626,6 +683,110 @@ def test_l5a_persists_and_reads_back_all_structured_targets(tmp_path: Path) -> N
         )
         if proof.projection_kind == "parquet":
             assert proof.expected.row_fingerprint == required.row_fingerprint
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("data_type", "arrow_type", "valid_value"),
+    (
+        ("string", pa.string(), "value"),
+        ("integer", pa.int64(), 7),
+        ("number", pa.float64(), 7.5),
+        ("boolean", pa.bool_(), True),
+        ("date", pa.date32(), date(2026, 8, 25)),
+        (
+            "datetime",
+            pa.timestamp("us", tz="UTC"),
+            datetime(2026, 8, 25, 12, 30, tzinfo=timezone.utc),
+        ),
+    ),
+)
+def test_l5a_canonical_arrow_types_and_values(
+    data_type: str,
+    arrow_type: pa.DataType,
+    valid_value,
+) -> None:
+    assert _canonical_arrow_type(data_type) == arrow_type
+    assert _canonical_typed_value(data_type, valid_value) == valid_value
+    assert _canonical_typed_value(data_type, None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("data_type", "invalid_value"),
+    (
+        ("string", 1),
+        ("integer", True),
+        ("number", False),
+        ("boolean", 1),
+        ("date", datetime(2026, 8, 25, tzinfo=timezone.utc)),
+        ("datetime", datetime(2026, 8, 25)),
+    ),
+)
+def test_l5a_rejects_invalid_runtime_property_values(
+    data_type: str,
+    invalid_value,
+) -> None:
+    with pytest.raises(
+        L5aPublicationError,
+        match="L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+    ):
+        _canonical_typed_value(data_type, invalid_value)
+
+
+@pytest.mark.unit
+def test_l5a_uses_authoritative_types_for_all_physical_columns(
+    tmp_path: Path,
+) -> None:
+    compiled = compile_l5a_publication(**_all_property_types_inputs(tmp_path))
+    record = compiled.tables["l5a_record"]
+    expected = {
+        "record_1": pa.bool_(),
+        "record_2": pa.string(),
+        "record_3": pa.date32(),
+        "record_4": pa.timestamp("us", tz="UTC"),
+        "record_5": pa.int64(),
+        "record_6": pa.float64(),
+        "record_7": pa.string(),
+    }
+    for column, arrow_type in expected.items():
+        assert record.schema.field(column).type == arrow_type
+
+    relationship = compiled.tables["l5a_membership"]
+    assert relationship.schema.field("source_1").type == pa.string()
+    assert relationship.schema.field("target_1").type == pa.string()
+
+
+@pytest.mark.unit
+def test_l5a_preserves_authoritative_inherited_endpoint_key_type(
+    tmp_path: Path,
+) -> None:
+    compiled = compile_l5a_publication(
+        **_integer_endpoint_key_inputs(tmp_path)
+    )
+    relationship = compiled.tables["l5a_membership"]
+    assert relationship.schema.field("source_1").type == pa.int64()
+    assert relationship.schema.field("target_1").type == pa.int64()
+
+
+@pytest.mark.unit
+def test_l5a_normalizes_aware_datetime_to_utc() -> None:
+    value = datetime(
+        2026,
+        8,
+        25,
+        14,
+        30,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    assert _canonical_typed_value("datetime", value) == datetime(
+        2026,
+        8,
+        25,
+        12,
+        30,
+        tzinfo=timezone.utc,
+    )
 
 
 @pytest.mark.unit
@@ -1236,6 +1397,24 @@ def test_l5a_rejects_misassigned_required_member_readback(
 
     assert raised.value.receipt is not None
     assert raised.value.receipt.status == "failed"
+
+
+@pytest.mark.unit
+def test_l5a_typed_schema_readback_drift_fails_closed(tmp_path: Path) -> None:
+    inputs = _all_property_types_inputs(tmp_path)
+    client = _FakeClient()
+    client.tamper_schema_read_back = "parquet"
+
+    with pytest.raises(L5aPublicationError) as raised:
+        run_l5a(
+            **inputs,
+            client=client,
+            state_root=tmp_path / ".fkg" / "l5a",
+        )
+
+    assert raised.value.receipt is not None
+    assert raised.value.receipt.status == "failed"
+    assert not client.states
 
 
 @pytest.mark.unit

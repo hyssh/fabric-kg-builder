@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -119,6 +119,68 @@ _FIXED_FILES = {
     Path("resource-metrics.json"),
     Path("stage-receipt.json"),
 }
+_CANONICAL_TYPE_RULES = {
+    "string": (
+        pa.string(),
+        lambda value: isinstance(value, str),
+        lambda value: value,
+    ),
+    "integer": (
+        pa.int64(),
+        lambda value: isinstance(value, int) and not isinstance(value, bool),
+        lambda value: value,
+    ),
+    "number": (
+        pa.float64(),
+        lambda value: isinstance(value, (int, float))
+        and not isinstance(value, bool),
+        lambda value: value,
+    ),
+    "boolean": (
+        pa.bool_(),
+        lambda value: isinstance(value, bool),
+        lambda value: value,
+    ),
+    "date": (
+        pa.date32(),
+        lambda value: isinstance(value, date)
+        and not isinstance(value, datetime),
+        lambda value: value,
+    ),
+    "datetime": (
+        pa.timestamp("us", tz="UTC"),
+        lambda value: isinstance(value, datetime)
+        and value.tzinfo is not None,
+        lambda value: value.astimezone(timezone.utc),
+    ),
+}
+
+
+def _canonical_arrow_type(data_type: str) -> pa.DataType:
+    try:
+        arrow_type, _validator, _normalizer = _CANONICAL_TYPE_RULES[data_type]
+        return arrow_type
+    except KeyError as exc:
+        raise L5aPublicationError(
+            "L5A_PROPERTY_TYPE_UNSUPPORTED",
+            f"unsupported canonical property type {data_type!r}",
+        ) from exc
+
+
+def _canonical_typed_value(data_type: str, value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        _arrow_type, validator, normalizer = _CANONICAL_TYPE_RULES[data_type]
+    except KeyError:
+        _canonical_arrow_type(data_type)
+        raise AssertionError("unreachable")
+    if not validator(value):
+        raise L5aPublicationError(
+            "L5A_PROPERTY_VALUE_TYPE_MISMATCH",
+            f"value does not match canonical property type {data_type!r}",
+        )
+    return normalizer(value)
 
 
 def _budget_snapshot_hash() -> str:
@@ -1149,7 +1211,7 @@ def _entity_tables(
         for prop in mapping.physical_property_bindings:
             fields.append(pa.field(
                 prop.physical_column_id,
-                pa.string(),
+                _canonical_arrow_type(prop.data_type),
                 nullable=True,
             ))
         rows: list[dict[str, Any]] = []
@@ -1171,7 +1233,10 @@ def _entity_tables(
                 "__hierarchy_depth": assertion["hierarchy_depth"],
             }
             for prop in mapping.physical_property_bindings:
-                row[prop.physical_column_id] = None
+                row[prop.physical_column_id] = _canonical_typed_value(
+                    prop.data_type,
+                    None,
+                )
             rows.append(row)
         result[mapping.physical_table_id] = pa.Table.from_pylist(
             rows,
@@ -1191,6 +1256,10 @@ def _relationship_tables(
             [],
         ).append(row)
     result: dict[str, pa.Table] = {}
+    ownership_by_id = {
+        item.canonical_property_id: item
+        for item in crosswalk.semantic_property_ownership_mappings
+    }
     for mapping in crosswalk.relationship_mappings:
         fields = [
             pa.field("__canonical_id", pa.string(), nullable=False),
@@ -1199,7 +1268,17 @@ def _relationship_tables(
             pa.field("__target_entity_id", pa.string(), nullable=False),
         ]
         for key in (*mapping.source_key_bindings, *mapping.target_key_bindings):
-            fields.append(pa.field(key.physical_column_id, pa.string(), nullable=True))
+            ownership = ownership_by_id.get(key.canonical_property_id)
+            if ownership is None:
+                raise L5aPublicationError(
+                    "L5A_ENDPOINT_KEY_AUTHORITY_MISSING",
+                    f"endpoint key {key.canonical_property_id} has no owner",
+                )
+            fields.append(pa.field(
+                key.physical_column_id,
+                _canonical_arrow_type(ownership.data_type),
+                nullable=True,
+            ))
         table_rows = []
         for relationship in sorted(
             rows_by_type.get(mapping.canonical_semantic_relationship_id, []),
@@ -1212,11 +1291,17 @@ def _relationship_tables(
                 "__target_entity_id": relationship["target_entity_id"],
             }
             row.update({
-                key.physical_column_id: None
+                key.physical_column_id: _canonical_typed_value(
+                    ownership_by_id[key.canonical_property_id].data_type,
+                    None,
+                )
                 for key in mapping.source_key_bindings
             })
             row.update({
-                key.physical_column_id: None
+                key.physical_column_id: _canonical_typed_value(
+                    ownership_by_id[key.canonical_property_id].data_type,
+                    None,
+                )
                 for key in mapping.target_key_bindings
             })
             table_rows.append(row)
@@ -1481,6 +1566,7 @@ def _definitions(
                 {
                     "canonical_property_id": property_id,
                     "declaring_semantic_type_id": owner.owner_semantic_type_id,
+                    "data_type": owner.data_type,
                     "physical_table_id": item.physical_table_id,
                     "physical_column_id": prop.physical_column_id,
                     "materialization": "schema_only",
@@ -1611,6 +1697,7 @@ def _definitions(
                             "declaring_semantic_type_id": (
                                 owner.owner_semantic_type_id
                             ),
+                            "data_type": owner.data_type,
                             "physical_table_id": item.physical_table_id,
                             "physical_column_id": prop.physical_column_id,
                             "materialization": "schema_only",
@@ -1715,6 +1802,7 @@ def _definitions(
                             "declaring_semantic_type_id": (
                                 owner.owner_semantic_type_id
                             ),
+                            "data_type": owner.data_type,
                             "physical_table_id": item.physical_table_id,
                             "graph_property": owner.graph_property,
                             "physical_column_id": prop.physical_column_id,
