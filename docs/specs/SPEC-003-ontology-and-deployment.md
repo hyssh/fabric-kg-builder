@@ -1762,6 +1762,10 @@ key, client secret, refresh-token/token, credential, password, connection
 string, SAS, and signature stems anywhere in that skeleton are forbidden;
 ordinary text such as `Tokenization: overview` remains valid because it has no
 credential assignment stem.
+Skeleton detection compatibility-normalizes each raw and bounded-decoded key
+prefix with Unicode NFKC before case folding, so fullwidth and mathematical
+credential letters/delimiters cannot bypass detection. Persisted display text
+remains NFC and is never compatibility-rewritten.
 Assertions without exact evidence are not indexed; required-member authority
 without a quote remains a retrieval coverage requirement and therefore cannot
 produce complete coverage unless another valid assertion document supplies its
@@ -1830,6 +1834,12 @@ including coordinated quote/locator/ACL/scope/display/evidence/hash changes.
 exact `ImmutableSourceLocator` field set and strict field types; non-objects,
 extra/missing/duplicate keys, malformed section arrays, or mismatched duplicate
 page/section/hash fields fail before citation construction.
+Pre-verification response IDs and provider metadata are opaque: local reference,
+activity, source-call, subquery, request, correlation, and warning identifiers
+are generated or hashed without echoing attacker text. Quarantine failures carry
+a document ID only after exact resolution to compiled sealed authority; unknown
+or duplicate attacker IDs remain absent from citations, receipts, failure
+canonical IDs, and other persisted result fields.
 
 L5b does not activate CLI/Data Agent behavior, L6 answer synthesis, live Search
 or Fabric deployment, or L7 acceptance. Schema-1 behavior is unchanged.

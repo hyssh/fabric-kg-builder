@@ -62,10 +62,15 @@ L4, and hardened L5a authority.
 - credential assignment keys are checked through a normalized alphanumeric
   skeleton across raw and bounded-decoded forms, so prefixed/suffixed stems
   cannot bypass policy while non-credential words remain valid;
+- credential skeletons use NFKC plus case folding for detection only, blocking
+  fullwidth/mathematical confusables while persisted display values remain NFC;
 - every Search result must reproduce the exact compiled field set, canonical
   payload, recomputed document hash, and immutable document ID/hash authority
   before any quote, locator, or display field is inspected; duplicate
   references/documents and strict locator-schema drift are quarantined;
+- pre-verification reference/document/provider IDs and warnings are never
+  echoed; opaque local or hashed identifiers are used, and only document IDs
+  already resolved to immutable compiled authority may appear in failures;
 - schema 1, CLI/Data Agent activation, L6 synthesis, live Azure/Fabric
   deployment, and L7 validation remain unchanged or deferred.
 

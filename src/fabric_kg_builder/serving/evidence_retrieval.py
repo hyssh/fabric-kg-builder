@@ -778,6 +778,7 @@ _CREDENTIAL_ASSIGNMENT_RE = re.compile(
 
 
 def _credential_assignment_detected(value: str) -> bool:
+    detection_value = unicodedata.normalize("NFKC", value).casefold()
     strong_stems = (
         "apikey",
         "accesskey",
@@ -808,12 +809,12 @@ def _credential_assignment_detected(value: str) -> bool:
         "signaturevalue",
         "signaturekey",
     )
-    for index, char in enumerate(value):
+    for index, char in enumerate(detection_value):
         if char not in "=:":
             continue
-        key_segment = value[:index]
+        key_segment = detection_value[:index]
         skeleton = "".join(
-            item.casefold()
+            item
             for item in key_segment
             if item.isalnum()
         )
@@ -2994,16 +2995,15 @@ def build_citation(
 def _warning_codes(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
-    items = value if isinstance(value, list) else [value]
+    items = value if isinstance(value, (list, tuple)) else [value]
     return tuple(sorted({
-        str(
-            item.get("code")
-            or f"provider-warning:{canonical_sha256(item)}"
-        )
-        if isinstance(item, Mapping)
-        else str(item)
+        f"provider-warning:{canonical_sha256(item)[:32]}"
         for item in items
     }))
+
+
+def _opaque_external_id(prefix: str, value: Any) -> str:
+    return f"{prefix}:{canonical_sha256(value)[:32]}"
 
 
 def _response_items(
@@ -3438,41 +3438,53 @@ def interpret_retrieval_response(
     duplicate_document_ids = {
         value for value, count in document_id_counts.items() if count > 1
     }
-    for reference in references:
+    for index, reference in enumerate(references):
+        local_reference_id = f"search-reference:{index}"
         if not isinstance(reference, Mapping):
-            missing_reference_ids.append("reference:malformed")
+            missing_reference_ids.append(local_reference_id)
+            quarantined_findings.setdefault("citation_invalid", set())
             continue
-        reference_id = reference.get("id") or reference.get("ref_id")
+        returned_reference_id = reference.get("id") or reference.get("ref_id")
         document = reference.get("sourceData") or reference.get("source_data")
-        if not isinstance(reference_id, str) or not isinstance(document, Mapping):
-            missing_reference_ids.append(str(reference_id or "reference:missing"))
+        if not isinstance(returned_reference_id, str) or not isinstance(document, Mapping):
+            missing_reference_ids.append(local_reference_id)
+            quarantined_findings.setdefault("citation_invalid", set())
             continue
         document_id = str(document.get("id") or "document:missing")
         if (
-            reference_id in duplicate_reference_ids
+            returned_reference_id in duplicate_reference_ids
             or document_id in duplicate_document_ids
         ):
-            missing_reference_ids.append(reference_id)
-            quarantined_findings.setdefault("citation_invalid", set()).update({
-                reference_id,
-                document_id,
-            })
+            missing_reference_ids.append(local_reference_id)
+            safe_document_id = (
+                document_id if document_id in sealed_documents else None
+            )
+            finding_ids = quarantined_findings.setdefault(
+                "citation_invalid",
+                set(),
+            )
+            if safe_document_id is not None:
+                finding_ids.add(safe_document_id)
             continue
         if (
             context.retrieval_mode.startswith("agentic_")
             and str(reference.get("activitySource")) not in search_activity_ids
         ):
-            missing_reference_ids.append(reference_id)
+            missing_reference_ids.append(local_reference_id)
+            quarantined_findings.setdefault("citation_invalid", set())
             continue
         sealed_document = sealed_documents.get(document_id)
         if (
             sealed_document is None
             or not _document_matches_sealed_payload(document, sealed_document)
         ):
-            missing_reference_ids.append(reference_id)
-            quarantined_findings.setdefault("citation_invalid", set()).add(
-                document_id
+            missing_reference_ids.append(local_reference_id)
+            finding_ids = quarantined_findings.setdefault(
+                "citation_invalid",
+                set(),
             )
+            if sealed_document is not None:
+                finding_ids.add(str(sealed_document["id"]))
             continue
         scope_findings, scope_unexpected_ids = _document_scope_findings(
             document,
@@ -3481,7 +3493,7 @@ def interpret_retrieval_response(
             publication,
         )
         if scope_findings:
-            missing_reference_ids.append(reference_id)
+            missing_reference_ids.append(local_reference_id)
             for reason, values in scope_findings.items():
                 quarantined_findings.setdefault(reason, set()).update(values)
             quarantined_unexpected_ids.update(scope_unexpected_ids)
@@ -3489,11 +3501,14 @@ def interpret_retrieval_response(
         try:
             citation, presentation = build_citation(
                 context,
-                reference_id=reference_id,
+                reference_id=local_reference_id,
                 document=document,
             )
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-            missing_reference_ids.append(reference_id)
+            missing_reference_ids.append(local_reference_id)
+            quarantined_findings.setdefault("citation_invalid", set()).add(
+                str(sealed_document["id"])
+            )
             continue
         citations.append(citation)
         presentations.append(presentation)
@@ -3591,8 +3606,19 @@ def interpret_retrieval_response(
     ))
     activity = tuple(
         ActivityReceipt(
-            activity_id=str(item.get("id") or f"activity:{index}"),
-            activity_kind=str(item.get("type") or item.get("kind") or "unknown"),
+            activity_id=f"activity:{index}",
+            activity_kind=(
+                str(item.get("type"))
+                if item.get("type") in {
+                    "searchIndex",
+                    "modelQueryPlanning",
+                    "agenticReasoning",
+                    "modelAnswerSynthesis",
+                    "modelWebSummarization",
+                    "imageServing",
+                }
+                else "providerActivity"
+            ),
             activity_hash=canonical_sha256(item),
             warning_codes=_warning_codes(
                 item.get("warning") or item.get("warnings")
@@ -3619,10 +3645,8 @@ def interpret_retrieval_response(
             references_by_activity[key] = references_by_activity.get(key, 0) + 1
     source_calls = tuple(
         SourceCallReceipt(
-            source_call_id=str(item.get("id") or f"source-call:{index}"),
-            knowledge_source_id=str(
-                item.get("knowledgeSourceName") or context.knowledge_source_id
-            ),
+            source_call_id=f"source-call:{index}",
+            knowledge_source_id=context.knowledge_source_id,
             request_hash=canonical_sha256(
                 item.get("searchIndexArguments")
                 or {
@@ -3663,11 +3687,11 @@ def interpret_retrieval_response(
         )
     planned = tuple(
         PlannedSubqueryReceipt(
-            subquery_id=str(item.get("id") or f"subquery:{index}"),
+            subquery_id=f"subquery:{index}",
             subquery_hash=canonical_sha256(item),
             executed=item.get("error") is None,
             knowledge_source_ids=(
-                str(item.get("knowledgeSourceName") or context.knowledge_source_id),
+                context.knowledge_source_id,
             ),
             returned_reference_count=references_by_activity.get(
                 str(item.get("id")),
@@ -3677,7 +3701,7 @@ def interpret_retrieval_response(
         for index, item in enumerate(search_activities)
     )
     warnings = tuple(sorted({
-        *accounting.warning_codes,
+        *_warning_codes(accounting.warning_codes),
         *((degradation_code,) if degradation_code is not None else ()),
         *(
             str(item)
@@ -3938,8 +3962,20 @@ def interpret_retrieval_response(
         "request_context_hash": context.request_context_hash,
         "resolved_retrieval_scope_id": retrieval_scope.resolved_retrieval_scope_id,
         "resolved_retrieval_scope_hash": retrieval_scope.retrieval_scope_hash,
-        "provider_request_id": str(response.get("requestId") or accounting.operation_refs[0]),
-        "provider_correlation_id": response.get("correlationId"),
+        "provider_request_id": _opaque_external_id(
+            "provider-request",
+            response.get("requestId")
+            if response.get("requestId") is not None
+            else accounting.operation_refs[0],
+        ),
+        "provider_correlation_id": (
+            _opaque_external_id(
+                "provider-correlation",
+                response.get("correlationId"),
+            )
+            if response.get("correlationId") is not None
+            else None
+        ),
         "retrieval_mode": context.retrieval_mode,
         "api_version": context.capability.api_version,
         "capability_fingerprint": context.capability.capability_fingerprint,

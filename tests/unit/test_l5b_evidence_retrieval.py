@@ -9,6 +9,7 @@ import shutil
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 import pyarrow as pa
@@ -533,6 +534,10 @@ def test_applicable_evidence_requires_exact_governed_source_asset(
         "api-key-name=supersecret.pdf",
         "credential label: supersecret.pdf",
         "api\u00a0key = supersecret.pdf",
+        "ａｐｉ　ｋｅｙ＝supersecret.pdf",
+        "𝕒𝕡𝕚 𝕜𝕖𝕪=supersecret.pdf",
+        quote("ａｐｉ ｋｅｙ＝supersecret.pdf"),
+        quote(quote("ａｐｉ ｋｅｙ＝supersecret.pdf")),
     ),
 )
 def test_source_display_name_rejects_urls_paths_and_credentials(
@@ -1815,6 +1820,97 @@ def test_duplicate_search_response_identity_is_quarantined(
         citation.search_document_id != sealed_documents[0]["id"]
         for citation in result.citations
     )
+
+
+@pytest.mark.unit
+def test_preverification_attacker_metadata_is_never_echoed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    malicious = "api_key=supersecret\n" + "X" * 2000
+    ontology_scope = resolved_ontology_scope()
+    retrieval_scope = resolved_retrieval_scope()
+    context, budget = request_context()
+    sealed_documents = [
+        _reference_document(context, entity_id, index)
+        for index, entity_id in enumerate(retrieval_scope.canonical_member_ids)
+    ]
+    returned_documents = [dict(item) for item in sealed_documents]
+    returned_documents[0]["source_quote"] = malicious
+    returned_documents[0]["content"] = malicious
+    returned_documents[0]["quote_hash"] = canonical_sha256(malicious)
+    returned_documents[0]["document_hash"] = canonical_sha256({
+        key: value
+        for key, value in returned_documents[0].items()
+        if key != "document_hash"
+    })
+    unknown = dict(sealed_documents[1])
+    unknown["id"] = malicious
+    unknown["document_hash"] = canonical_sha256({
+        key: value for key, value in unknown.items() if key != "document_hash"
+    })
+    response = _agentic_response(context, returned_documents)
+    response["requestId"] = malicious
+    response["correlationId"] = malicious
+    response["activity"][0]["id"] = malicious
+    response["activity"][0]["warning"] = malicious
+    for reference in response["references"]:
+        reference["activitySource"] = malicious
+    response["references"].extend((
+        {
+            "id": malicious,
+            "activitySource": malicious,
+            "sourceData": unknown,
+        },
+        {
+            "id": malicious,
+            "activitySource": malicious,
+            "sourceData": unknown,
+        },
+    ))
+    publication = _runtime_publication(context, sealed_documents)
+    monkeypatch.setattr(
+        "fabric_kg_builder.serving.evidence_retrieval."
+        "require_l5b_publication_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = interpret_retrieval_response(
+        context,
+        budget,
+        ontology_scope,
+        retrieval_scope,
+        publication=publication,
+        checkpoint_integrity_signer=_TEST_CHECKPOINT_SIGNER,
+        response=response,
+        accounting=L5bRemoteAccounting(
+            operation_refs=("retrieve:opaque-test",),
+            request_bytes=100,
+            response_bytes=1000,
+            retry_count=0,
+            retry_wait_ms=0,
+            latency_ms=25,
+            candidate_count=len(response["references"]),
+            output_tokens=0,
+            warning_codes=(malicious,),
+        ),
+    )
+    persisted_result = canonical_json({
+        "coverage": result.coverage.model_dump(mode="json"),
+        "citations": [
+            item.model_dump(mode="json") for item in result.citations
+        ],
+        "presentations": [
+            item.model_dump(mode="json") for item in result.presentations
+        ],
+    })
+
+    assert result.coverage.coverage_status == "partial"
+    assert malicious not in persisted_result
+    assert sealed_documents[0]["id"] in {
+        canonical_id
+        for failure in result.coverage.failures
+        for canonical_id in failure.canonical_ids
+    }
 
 
 @pytest.mark.unit
