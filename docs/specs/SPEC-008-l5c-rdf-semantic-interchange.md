@@ -230,9 +230,15 @@ values. Decoding is size-bounded and depth-bounded and fails closed if not
 stable. Stable governed and W3C vocabulary IRIs remain permitted.
 NFKC and case normalization are applied after every decode round and to the
 final stable value. Absolute URLs parse query keys/values and fragments;
+normalized query/fragment text is also scanned for header assignments across
+ampersand and semicolon segments, and duplicate credential keys reject;
 non-URL text requires a bearer/header pattern, an equals assignment, or a
 colon-plus-whitespace assignment. Colon-delimited namespace IDs without
 assignment context remain valid.
+The 64 KiB bound is checked on raw input, initial NFKC output, every
+decoded-and-normalized round, and final stable output, so compatibility
+expansion cannot bypass limits. URL parsing and lazy hostname/port/user-info
+validation are wrapped in constant sanitized errors.
 Every RDF-owned model inherits the RDF-local strict base configured to hide
 inputs, preflights nested sensitive values, and returns sanitized structured
 validation errors containing no rejected raw value.

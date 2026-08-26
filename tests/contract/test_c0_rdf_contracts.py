@@ -1093,6 +1093,56 @@ def test_headers_and_explicit_secret_assignments_fail_closed(
 
 
 @pytest.mark.contract
+def test_benign_namespace_query_values_remain_valid_metadata() -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["approval_reference_id"] = (
+        "https://metadata.contoso.test/approval?ref=authorization:policy"
+    )
+    assert RdfExternalAlignment.model_validate(payload).approval_reference_id.endswith(
+        "authorization:policy"
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "invalid_url",
+    [
+        "https://[::1/path?ref=URL_MARKER_73",
+        "https://storage.test:99999/path/URL_MARKER_73",
+        "https://user:URL_MARKER_73@storage.test/path",
+        "https://storage.test／URL_MARKER_73/path",
+        "https://storage.test%EF%BC%8FURL_MARKER_73/path",
+    ],
+)
+def test_url_parser_failures_never_expose_rejected_input(
+    invalid_url: str,
+) -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["approval_reference_id"] = invalid_url
+    with pytest.raises(ValidationError) as captured:
+        RdfExternalAlignment.model_validate(payload)
+    assert "URL_MARKER_73" not in str(captured.value)
+    assert "URL_MARKER_73" not in json.dumps(captured.value.errors(), default=str)
+
+
+@pytest.mark.contract
+def test_sensitive_text_size_bounds_cover_nfkc_expansion_and_boundaries() -> None:
+    payload = manifest().external_alignments[0].model_dump(mode="json")
+    payload["approval_reference_id"] = "a" * 65_536
+    assert len(
+        RdfExternalAlignment.model_validate(payload).approval_reference_id
+    ) == 65_536
+
+    payload["approval_reference_id"] = "a" * 65_537
+    with pytest.raises(ValidationError, match="safe validation size"):
+        RdfExternalAlignment.model_validate(payload)
+
+    payload["approval_reference_id"] = "\ufdfa" * 2_000
+    with pytest.raises(ValidationError, match="safe validation size"):
+        RdfExternalAlignment.model_validate(payload)
+
+
+@pytest.mark.contract
 @pytest.mark.parametrize(
     ("model_type", "payload_factory", "mutate"),
     [

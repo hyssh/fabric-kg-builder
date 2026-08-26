@@ -543,9 +543,15 @@ in nested identifiers, references, metadata, and alignments while allowing
 stable governed and W3C vocabulary IRIs.
 NFKC and case normalization run after every bounded decode round and again on
 the stable value. URL queries/fragments use normalized credential-key parsing;
+their normalized raw text is also scanned for header assignments across
+ampersand/semicolon segments and duplicate credential keys fail.
 free text requires a bearer/header pattern, `=` assignment, or colon followed
 by assignment whitespace. Stable namespace IDs such as
 `authorization:policy` and `credential:approval` remain valid.
+Raw, initially normalized, every decoded-and-normalized, and final stable values
+are each limited to 64 KiB. URL parsing and lazy hostname/port/user-info access
+are wrapped in constant input-free errors, including NFKC delimiter, malformed
+IPv6, and invalid-port cases.
 Every RDF-owned top-level and nested model uses the RDF-local strict base with
 hidden inputs and sanitized `ValidationError.errors()` details; rejected values
 are never included in exception text or structured error input.

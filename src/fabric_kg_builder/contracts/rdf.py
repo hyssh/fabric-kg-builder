@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal
-from urllib.parse import parse_qsl, quote, unquote, urlparse
+from urllib.parse import ParseResult, parse_qsl, quote, unquote, urlparse
 
 from pydantic import (
     BaseModel,
@@ -102,7 +102,7 @@ _MAX_SENSITIVE_TEXT_BYTES = 65_536
 
 def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
     _reject_sensitive_text(value, field_name=field_name)
-    parsed = urlparse(value)
+    parsed = _safe_urlparse(value, field_name=field_name)
     if (
         parsed.scheme != "https"
         or not parsed.netloc
@@ -117,23 +117,62 @@ def _https_iri(value: str, *, field_name: str, base: bool = False) -> str:
     return value
 
 
-def _reject_sensitive_text(value: str, *, field_name: str) -> None:
+def _safe_urlparse(value: str, *, field_name: str) -> ParseResult:
+    try:
+        parsed = urlparse(value)
+        # Force validation of netloc components that urlparse exposes lazily.
+        _ = parsed.hostname
+        _ = parsed.port
+        _ = parsed.username
+        _ = parsed.password
+        return parsed
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError(f"{field_name} contains invalid URL syntax") from None
+
+
+def _check_sensitive_size(value: str, *, field_name: str) -> None:
     if len(value.encode("utf-8")) > _MAX_SENSITIVE_TEXT_BYTES:
         raise ValueError(f"{field_name} exceeds the safe validation size")
+
+
+def _check_nfkc_url_delimiters(value: str, *, field_name: str) -> None:
+    if "://" not in value:
+        return
+    for character in value:
+        normalized_character = unicodedata.normalize("NFKC", character)
+        if character != normalized_character and any(
+            delimiter in normalized_character for delimiter in "/?#[]@"
+        ):
+            raise ValueError(f"{field_name} contains invalid URL syntax")
+
+
+def _safe_parse_qsl(value: str, *, field_name: str) -> list[tuple[str, str]]:
+    try:
+        return parse_qsl(value, keep_blank_values=True)
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError(f"{field_name} contains invalid URL syntax") from None
+
+
+def _reject_sensitive_text(value: str, *, field_name: str) -> None:
+    _check_sensitive_size(value, field_name=field_name)
+    _check_nfkc_url_delimiters(value, field_name=field_name)
     decoded = unicodedata.normalize("NFKC", value)
+    _check_sensitive_size(decoded, field_name=field_name)
     stable = False
     for _ in range(_MAX_DECODE_ROUNDS):
-        expanded = unicodedata.normalize("NFKC", unquote(decoded))
+        unescaped = unquote(decoded)
+        _check_nfkc_url_delimiters(unescaped, field_name=field_name)
+        expanded = unicodedata.normalize("NFKC", unescaped)
         if expanded == decoded:
             stable = True
             break
-        if len(expanded.encode("utf-8")) > _MAX_SENSITIVE_TEXT_BYTES:
-            raise ValueError(f"{field_name} exceeds the safe validation size")
+        _check_sensitive_size(expanded, field_name=field_name)
         decoded = expanded
     if not stable:
         raise ValueError(f"{field_name} contains excessive nested URL encoding")
     decoded = unicodedata.normalize("NFKC", decoded)
-    parsed = urlparse(decoded)
+    _check_sensitive_size(decoded, field_name=field_name)
+    parsed = _safe_urlparse(decoded, field_name=field_name)
     if parsed.username is not None or parsed.password is not None:
         raise ValueError(f"{field_name} must not contain URI credentials")
     if _BEARER_RE.search(decoded):
@@ -146,12 +185,22 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
             unicodedata.normalize("NFKC", key).casefold(),
         )
 
+    def component_keys(value: str) -> set[str]:
+        keys: set[str] = set()
+        for segment in re.split(r"[&;]", unicodedata.normalize("NFKC", value)):
+            match = re.match(r"^\s*([^=:\s]+)\s*(?:=|:\s+)", segment)
+            if match is not None:
+                keys.add(normalize_key(match.group(1)))
+        return keys
+
     query_items = (
-        parse_qsl(parsed.query, keep_blank_values=True)
+        _safe_parse_qsl(parsed.query, field_name=field_name)
         if parsed.scheme and parsed.netloc
         else ()
     )
-    normalized_keys = {normalize_key(key) for key, _ in query_items}
+    normalized_keys = {
+        normalize_key(key) for key, _ in query_items
+    } | component_keys(parsed.query)
     normalized_signed = {
         normalize_key(key)
         for key in _SIGNED_QUERY_KEYS
@@ -176,6 +225,12 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} must not contain a signed or transient URL")
     if normalized_keys.intersection(credential_keys):
         raise ValueError(f"{field_name} must not contain credentials")
+    normalized_query = unicodedata.normalize("NFKC", parsed.query)
+    if (
+        _EQUALS_ASSIGNMENT_RE.search(normalized_query)
+        or _HEADER_ASSIGNMENT_RE.search(normalized_query)
+    ):
+        raise ValueError(f"{field_name} must not contain credentials")
 
     for _, query_value in query_items:
         normalized_value = unicodedata.normalize("NFKC", query_value)
@@ -191,8 +246,11 @@ def _reject_sensitive_text(value: str, *, field_name: str) -> None:
         text_to_check = unicodedata.normalize("NFKC", parsed.fragment)
         fragment_keys = {
             normalize_key(key)
-            for key, _ in parse_qsl(parsed.fragment, keep_blank_values=True)
-        }
+            for key, _ in _safe_parse_qsl(
+                parsed.fragment,
+                field_name=field_name,
+            )
+        } | component_keys(parsed.fragment)
         generic_fragment_key = any(
             "signature" in key
             or "credential" in key
