@@ -32,6 +32,10 @@ activate schema-2 CLI behavior or change schema-1 behavior.
    A trusted atomic store validates all expected bindings and consumes the
    receipt once. Missing, forged, stale, replayed, or cross-scope receipts cause
    zero Search calls and cannot consume a valid receipt for another scope.
+   Receipt payloads carry an authority-instance HMAC verified by the model
+   constructor, so a caller cannot alter and self-rehash scope, result, or
+   accounting fields. Non-abstain packages bind every duplicated scope,
+   request, result, and Runtime retrieval field to that authenticated receipt.
 6. Reject empty, failed, overexecuted, stale, or out-of-scope Graph responses
    without Search fallback.
 7. Execute one L5b route selected by the Runtime 1.1 request context. An
@@ -89,6 +93,13 @@ credentials, encoded secret assignments, principal/provider/email metadata,
 control/format characters, and Latin/Cyrillic/Greek homoglyph mixing in
 security-key prefixes fail with input-free errors. Safe NFC Unicode display
 text remains supported.
+
+Internationalized email/principal detection scans RFC-style atom and quoted
+local parts and canonicalizes Unicode/IDN domains, including IDNA dot
+separators and punycode. Ordinary prose using `@` without an address-shaped
+domain remains valid. Mixed scripts are rejected only when their normalized
+security skeleton matches a prohibited credential/provider/principal prefix;
+ordinary multilingual headings remain valid.
 
 The citation collection seals a source binding for each presentation:
 `(presentation_id, source_envelope_id, source_envelope_hash,

@@ -6,6 +6,8 @@ an answer, generates GQL, or invokes a downstream model.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -325,10 +327,45 @@ class L6GraphResult(_L6Model):
         return cls.model_validate(values)
 
 
+class L6GraphReceiptAuthenticator(Protocol):
+    """Server-registered receipt authenticator; never exposed as a tool."""
+
+    def verify(self, payload: Mapping[str, Any], authentication_tag: str) -> bool: ...
+
+
+_GRAPH_AUTHENTICATORS: dict[str, L6GraphReceiptAuthenticator] = {}
+_GRAPH_AUTHENTICATORS_LOCK = threading.Lock()
+
+
+def register_l6_graph_receipt_authenticator(
+    authority_id: str,
+    authenticator: L6GraphReceiptAuthenticator,
+) -> None:
+    """Register a trusted verifier during tool-host bootstrap."""
+
+    if not re.fullmatch(r"gxra-sha256:[0-9a-f]{64}", authority_id):
+        raise ValueError("Graph receipt authority ID must be opaque")
+    with _GRAPH_AUTHENTICATORS_LOCK:
+        existing = _GRAPH_AUTHENTICATORS.get(authority_id)
+        if existing is not None and existing is not authenticator:
+            raise RuntimeError("Graph receipt authenticator identity collision")
+        _GRAPH_AUTHENTICATORS[authority_id] = authenticator
+
+
+def _graph_receipt_auth_payload(values: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in values.items()
+        if key not in {"authentication_tag", "receipt_hash"}
+    }
+
+
 class L6GraphExecutionReceipt(_L6Model):
     """Trusted completed Graph execution capability consumed exactly once."""
 
     graph_execution_receipt_id: str
+    authority_id: str = Field(pattern=r"^gxra-sha256:[0-9a-f]{64}$")
+    authentication_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_request_id: str
     graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -377,6 +414,13 @@ class L6GraphExecutionReceipt(_L6Model):
             raise ValueError("Graph receipt assertion count mismatch")
         if self.accounting.request_count != 1:
             raise ValueError("Graph receipt requires exactly one Graph request")
+        with _GRAPH_AUTHENTICATORS_LOCK:
+            authenticator = _GRAPH_AUTHENTICATORS.get(self.authority_id)
+        if authenticator is None:
+            raise ValueError("Graph receipt authority is not trusted")
+        payload = _graph_receipt_auth_payload(self.model_dump(mode="json"))
+        if not authenticator.verify(payload, self.authentication_tag):
+            raise ValueError("Graph receipt authentication failed")
         expected = canonical_sha256(
             self.model_dump(mode="json", exclude={"receipt_hash"})
         )
@@ -545,7 +589,6 @@ _L6_PROVIDER_METADATA_RE = re.compile(
     r"(?i)(?:^|[^a-z0-9])(?:principal|provider|tenant|subscription|"
     r"authorization|bearer)\s*[:=]"
 )
-_L6_EMAIL_RE = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 _L6_CREDENTIAL_RE = re.compile(
     r"(?i)(?:api[\s_-]*key|access[\s_-]*key|account[\s_-]*key|"
     r"client[\s_-]*secret|password|passwd|pwd|token|credential|"
@@ -583,24 +626,63 @@ def _l6_security_skeleton(value: str) -> str:
     )
 
 
-def _l6_mixed_confusable_key(value: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", value)
-    for delimiter in (":", "="):
-        if delimiter not in normalized:
+def _l6_contains_international_email(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value).translate(
+        str.maketrans({"。": ".", "．": ".", "｡": "."})
+    )
+    def local_char(char: str) -> bool:
+        return (
+            char.isalnum()
+            or unicodedata.category(char).startswith("M")
+            or char in ".!#$%&'*+-/=?^_`{|}~"
+        )
+
+    def domain_char(char: str) -> bool:
+        return (
+            char.isalnum()
+            or unicodedata.category(char).startswith("M")
+            or char in ".-"
+        )
+
+    for at_index, char in enumerate(normalized):
+        if char != "@":
             continue
-        prefix = normalized.split(delimiter, 1)[0]
-        has_ascii_latin = any(
-            "a" <= char.casefold() <= "z" for char in prefix
-        )
-        has_confusable_script = any(
-            unicodedata.category(char).startswith("L")
-            and (
-                "CYRILLIC" in unicodedata.name(char, "")
-                or "GREEK" in unicodedata.name(char, "")
+        if at_index > 0 and normalized[at_index - 1] == '"':
+            opening_quote = normalized.rfind('"', 0, at_index - 1)
+            local = (
+                normalized[opening_quote + 1:at_index - 1]
+                if opening_quote >= 0
+                else ""
             )
-            for char in prefix
-        )
-        if has_ascii_latin and has_confusable_script:
+        else:
+            start = at_index
+            while start > 0 and local_char(normalized[start - 1]):
+                start -= 1
+            local = normalized[start:at_index]
+        end = at_index + 1
+        while end < len(normalized) and domain_char(normalized[end]):
+            end += 1
+        domain = normalized[at_index + 1:end].rstrip(".")
+        if not local or "." not in domain:
+            continue
+        if len(local) > 64 or len(domain) > 255:
+            continue
+        try:
+            alabel = domain.encode("idna").decode("ascii")
+        except UnicodeError:
+            continue
+        labels = alabel.split(".")
+        if (
+            "." in alabel
+            and all(
+                label
+                and len(label) <= 63
+                and not label.startswith("-")
+                and not label.endswith("-")
+                and all(char.isalnum() or char == "-" for char in label)
+                for label in labels
+            )
+        ):
             return True
     return False
 
@@ -646,10 +728,9 @@ def _l6_safe_stable_text(value: str, *, field_name: str) -> str:
             or re.match(r"^[A-Za-z]:[\\/]", normalized)
             or _L6_PROVIDER_METADATA_RE.search(normalized)
             or _L6_PROVIDER_METADATA_RE.search(skeleton)
-            or _L6_EMAIL_RE.search(normalized)
+            or _l6_contains_international_email(normalized)
             or _L6_CREDENTIAL_RE.search(normalized)
             or _L6_CREDENTIAL_RE.search(skeleton)
-            or _l6_mixed_confusable_key(normalized)
         ):
             raise ValueError(f"{field_name} contains unsafe stable text")
     return value
@@ -864,8 +945,15 @@ class L6CitationPresentationCollection(_L6Model):
             values = tuple(sorted(str(item) for item in value))
             if not values or len(values) != len(set(values)):
                 raise ValueError("source response hashes must be non-empty and unique")
+            if any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in values):
+                raise ValueError("source response hashes must be SHA-256 values")
             return values
         return value
+
+    @field_validator("coverage_receipt_id")
+    @classmethod
+    def _safe_coverage_id(cls, value: str) -> str:
+        return _l6_safe_stable_text(value, field_name="coverage_receipt_id")
 
     @model_validator(mode="after")
     def _collection_invariants(self) -> "L6CitationPresentationCollection":
@@ -1083,7 +1171,7 @@ class L6SynthesisInput(_L6Model):
     coverage_receipt: AgenticRetrievalCoverageReceiptV1_1 | None = None
     readiness: L6Readiness
     operation_accounting: L6RunAccounting
-    synthesis_call_limit: Literal[1] = 1
+    synthesis_call_limit: Literal[0, 1] = 1
     zero_synthesis: Literal[True] = True
     package_hash: str
 
@@ -1094,16 +1182,46 @@ class L6SynthesisInput(_L6Model):
         )
         if self.package_hash != expected:
             raise ValueError("L6 synthesis input hash mismatch")
-        if self.status == "complete" and (
+        if self.status == "abstain":
+            if (
+                self.search_citations
+                or self.citation_collection is not None
+                or self.synthesis_call_limit != 0
+            ):
+                raise ValueError("abstain L6 output cannot expose synthesis evidence")
+            return self
+        if (
             not self.graph_assertions
             or not self.search_citations
             or self.citation_collection is None
             or self.graph_execution_receipt is None
             or self.coverage_receipt is None
+            or self.synthesis_call_limit != 1
         ):
-            raise ValueError("complete L6 output requires Graph and cited Search evidence")
-        if self.status == "complete":
+            raise ValueError(
+                "non-abstain L6 output requires Graph and cited Search evidence"
+            )
+        if self.status in {"complete", "partial"}:
             self.coverage_receipt.validate_citations(self.search_citations)
+            reconstructed_graph = L6GraphResult(
+                graph_request_id=self.graph_execution_receipt.graph_request_id,
+                graph_request_hash=self.graph_execution_receipt.graph_request_hash,
+                canonical_scope_id=self.graph_execution_receipt.canonical_scope_id,
+                assertions=self.graph_assertions,
+                returned_canonical_ids=(
+                    self.graph_execution_receipt.returned_canonical_ids
+                ),
+                warning_codes=(),
+                truncated=False,
+                source_error=False,
+                accounting=self.graph_execution_receipt.accounting,
+                response_hash=self.graph_execution_receipt.graph_result_hash,
+            )
+            if (
+                tuple(sorted(item.assertion_id for item in reconstructed_graph.assertions))
+                != self.graph_execution_receipt.returned_assertion_ids
+            ):
+                raise ValueError("packaged Graph assertions differ from trusted receipt")
             citation_ids = tuple(
                 sorted(
                     item.search_citation_envelope_id
@@ -1124,12 +1242,39 @@ class L6SynthesisInput(_L6Model):
             ) and len(self.citation_collection.presentations) == len(
                 citations_by_id
             )
+            source_response_hashes = tuple(
+                sorted(
+                    {
+                        item.response_hash
+                        for item in self.coverage_receipt.source_calls
+                        if item.response_hash is not None
+                    }
+                )
+            )
             if (
-                self.readiness.status != "complete"
+                self.readiness.status != self.status
                 or not self.readiness.graph_complete
-                or not self.readiness.retrieval_complete
                 or not self.graph_execution_receipt.graph_complete
-                or self.coverage_receipt.coverage_status != "complete"
+                or self.canonical_scope_id
+                != self.graph_execution_receipt.canonical_scope_id
+                or self.resolved_ontology_scope_id
+                != self.graph_execution_receipt.resolved_ontology_scope_id
+                or self.resolved_ontology_scope_hash
+                != self.graph_execution_receipt.resolved_ontology_scope_hash
+                or self.resolved_retrieval_scope_id
+                != self.graph_execution_receipt.resolved_retrieval_scope_id
+                or self.resolved_retrieval_scope_hash
+                != self.graph_execution_receipt.resolved_retrieval_scope_hash
+                or self.graph_request_id
+                != self.graph_execution_receipt.graph_request_id
+                or self.graph_request_hash
+                != self.graph_execution_receipt.graph_request_hash
+                or self.graph_response_hash
+                != self.graph_execution_receipt.graph_result_hash
+                or self.coverage_receipt.resolved_retrieval_scope_id
+                != self.graph_execution_receipt.resolved_retrieval_scope_id
+                or self.coverage_receipt.resolved_retrieval_scope_hash
+                != self.graph_execution_receipt.resolved_retrieval_scope_hash
                 or citation_ids != self.citation_collection.citation_envelope_ids
                 or not presentations_canonical
                 or self.citation_collection.coverage_receipt_id
@@ -1140,12 +1285,25 @@ class L6SynthesisInput(_L6Model):
                 != self.graph_execution_receipt.asserted_publication_hash
                 or self.citation_collection.search_index_fingerprint
                 != self.graph_execution_receipt.search_index_fingerprint
+                or self.citation_collection.source_response_hashes
+                != source_response_hashes
                 or tuple(self.coverage_receipt.required_canonical_ids)
                 != tuple(self.graph_execution_receipt.returned_canonical_ids)
             ):
                 raise ValueError(
-                    "complete L6 output has contradictory readiness or citation authority"
+                    "L6 output has contradictory readiness or citation authority"
                 )
+            if self.status == "complete" and (
+                not self.readiness.retrieval_complete
+                or self.coverage_receipt.coverage_status != "complete"
+            ):
+                raise ValueError("complete L6 output lacks complete Runtime coverage")
+            if self.status == "partial" and (
+                self.readiness.retrieval_complete
+                or self.coverage_receipt.coverage_status != "partial"
+                or not self.coverage_receipt.failures
+            ):
+                raise ValueError("partial L6 output lacks typed coverage gaps")
         return self
 
 
@@ -1204,6 +1362,23 @@ class L6GraphReceiptAuthority(Protocol):
     ) -> L6GraphExecutionReceipt: ...
 
 
+@dataclass(frozen=True)
+class _L6HmacGraphReceiptAuthenticator:
+    key: bytes
+
+    def verify(
+        self,
+        payload: Mapping[str, Any],
+        authentication_tag: str,
+    ) -> bool:
+        expected = hmac.new(
+            self.key,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(authentication_tag, expected)
+
+
 class L6InMemoryGraphReceiptAuthority:
     """Atomic process-local receipt authority for a single L6 tool host.
 
@@ -1215,6 +1390,17 @@ class L6InMemoryGraphReceiptAuthority:
         self._lock = threading.Lock()
         self._receipts: dict[str, L6GraphExecutionReceipt] = {}
         self._consumed: set[str] = set()
+        self._authority_key = secrets.token_bytes(32)
+        self._authenticator = _L6HmacGraphReceiptAuthenticator(
+            self._authority_key
+        )
+        self.authority_id = "gxra-sha256:" + canonical_sha256(
+            self._authority_key.hex()
+        )
+        register_l6_graph_receipt_authenticator(
+            self.authority_id,
+            self._authenticator,
+        )
 
     def issue(
         self,
@@ -1241,6 +1427,7 @@ class L6InMemoryGraphReceiptAuthority:
         receipt_id = "gxr-sha256:" + secrets.token_hex(32)
         values = {
             "graph_execution_receipt_id": receipt_id,
+            "authority_id": self.authority_id,
             "graph_request_id": graph_query.graph_request_id,
             "graph_request_hash": graph_query.request_hash,
             "graph_result_hash": graph_result.response_hash,
@@ -1269,9 +1456,18 @@ class L6InMemoryGraphReceiptAuthority:
             "accounting": graph_result.accounting,
             "execution_status": "succeeded",
         }
-        receipt = L6GraphExecutionReceipt(
+        authentication_tag = hmac.new(
+            self._authority_key,
+            canonical_json(values).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        sealed_values = {
             **values,
-            receipt_hash=canonical_sha256(values),
+            "authentication_tag": authentication_tag,
+        }
+        receipt = L6GraphExecutionReceipt(
+            **sealed_values,
+            receipt_hash=canonical_sha256(sealed_values),
         )
         with self._lock:
             if receipt_id in self._receipts:
@@ -2624,7 +2820,7 @@ class L6AgentOrchestrator:
                 "coverage_receipt": evidence.coverage,
                 "readiness": readiness,
                 "operation_accounting": accounting,
-                "synthesis_call_limit": 1,
+                "synthesis_call_limit": 0 if status == "abstain" else 1,
                 "zero_synthesis": True,
             }
         )
@@ -2675,7 +2871,7 @@ class L6AgentOrchestrator:
                         (time.monotonic() - started) * 1000
                     ),
                 ),
-                "synthesis_call_limit": 1,
+                "synthesis_call_limit": 0,
                 "zero_synthesis": True,
             }
         )
@@ -2739,7 +2935,7 @@ class L6AgentOrchestrator:
                         (time.monotonic() - started) * 1000
                     ),
                 ),
-                "synthesis_call_limit": 1,
+                "synthesis_call_limit": 0,
                 "zero_synthesis": True,
             }
         )

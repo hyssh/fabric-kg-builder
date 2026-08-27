@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import hashlib
+import hmac
 
 import pytest
 from pydantic import ValidationError
 
 from fabric_kg_builder.agent import l6_integration as l6
-from fabric_kg_builder.contracts.base import canonical_sha256
+from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
 from fabric_kg_builder.contracts.runtime import (
     AgenticRetrievalCoverageReceiptV1_1,
@@ -87,90 +89,18 @@ def _operation_ref(seed, *, status="succeeded"):
     )
 
 
-class _GraphReceiptStore:
+class _GraphReceiptStore(l6.L6InMemoryGraphReceiptAuthority):
     def __init__(self):
-        self.receipts = {}
-        self.consumed = set()
+        super().__init__()
         self.verify_calls = 0
-
-    def issue(
-        self,
-        *,
-        graph_query,
-        graph_result,
-        ontology_scope,
-        retrieval_scope,
-        budget,
-    ):
-        l6._validate_graph_query(
-            graph_query,
-            ontology_scope,
-            retrieval_scope,
-            budget,
-        )
-        graph_complete, _ = l6._validate_graph_result(
-            graph_query,
-            ontology_scope,
-            graph_result,
-        )
-        if not graph_complete:
-            raise ValueError("incomplete Graph result cannot mint a receipt")
-        receipt_id = "gxr-sha256:" + canonical_sha256(
-            {
-                "request": graph_query.request_hash,
-                "result": graph_result.response_hash,
-                "scope": retrieval_scope.retrieval_scope_hash,
-            }
-        )
-        values = {
-            "graph_execution_receipt_id": receipt_id,
-            "graph_request_id": graph_query.graph_request_id,
-            "graph_request_hash": graph_query.request_hash,
-            "graph_result_hash": graph_result.response_hash,
-            "resolved_ontology_scope_id": (
-                ontology_scope.resolved_ontology_scope_id
-            ),
-            "resolved_ontology_scope_hash": ontology_scope.resolved_scope_hash,
-            "resolved_retrieval_scope_id": (
-                retrieval_scope.resolved_retrieval_scope_id
-            ),
-            "resolved_retrieval_scope_hash": retrieval_scope.retrieval_scope_hash,
-            "canonical_scope_id": ontology_scope.canonical_scope_id,
-            "graph_model_hash": ontology_scope.graph_model_hash,
-            "search_index_fingerprint": ontology_scope.search_index_fingerprint,
-            "asserted_publication_hash": ontology_scope.asserted_publication_hash,
-            "publication_crosswalk_hash": (
-                ontology_scope.publication_crosswalk_hash
-            ),
-            "acl_scope_hash": ontology_scope.acl_scope_hash,
-            "returned_canonical_ids": graph_result.returned_canonical_ids,
-            "returned_assertion_ids": tuple(
-                sorted(item.assertion_id for item in graph_result.assertions)
-            ),
-            "assertion_count": len(graph_result.assertions),
-            "graph_complete": graph_complete,
-            "accounting": graph_result.accounting,
-            "execution_status": "succeeded",
-        }
-        receipt = l6.L6GraphExecutionReceipt(
-            **values,
-            receipt_hash=canonical_sha256(values),
-        )
-        self.receipts[receipt_id] = receipt
-        return receipt
 
     def verify_and_consume(self, receipt_id, receipt_hash, expectation):
         self.verify_calls += 1
-        receipt = self.receipts.get(receipt_id)
-        if (
-            receipt is None
-            or receipt.receipt_hash != receipt_hash
-            or receipt_id in self.consumed
-            or not l6._receipt_matches_expectation(receipt, expectation)
-        ):
-            raise ValueError("invalid or replayed Graph execution receipt")
-        self.consumed.add(receipt_id)
-        return receipt
+        return super().verify_and_consume(
+            receipt_id,
+            receipt_hash,
+            expectation,
+        )
 
 
 def _presentation_for(citation):
@@ -586,6 +516,55 @@ def test_server_side_receipt_authority_issues_unique_single_use_receipts():
             _evidence()[1],
         ),
     ) == second
+
+
+@pytest.mark.unit
+def test_external_receipt_authenticator_supports_multi_process_verification():
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology)
+    graph = _graph_result(ontology, query)
+    _, _, budget, _, _ = _evidence()
+    receipt = l6.L6InMemoryGraphReceiptAuthority().issue(
+        graph_query=query,
+        graph_result=graph,
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+    )
+    key = b"durable-verifier-key".ljust(32, b"\0")
+    authority_id = "gxra-sha256:" + canonical_sha256(key.hex())
+
+    class _DurableVerifier:
+        def verify(self, payload, authentication_tag):
+            expected = hmac.new(
+                key,
+                canonical_json(payload).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            return hmac.compare_digest(authentication_tag, expected)
+
+    l6.register_l6_graph_receipt_authenticator(
+        authority_id,
+        _DurableVerifier(),
+    )
+    values = receipt.model_dump(
+        mode="python",
+        exclude={"authentication_tag", "receipt_hash"},
+        round_trip=True,
+    )
+    values["authority_id"] = authority_id
+    authentication_tag = hmac.new(
+        key,
+        canonical_json(values).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    sealed = {**values, "authentication_tag": authentication_tag}
+    restored = l6.L6GraphExecutionReceipt(
+        **sealed,
+        receipt_hash=canonical_sha256(sealed),
+    )
+    assert restored.authority_id == authority_id
 
 
 @pytest.mark.unit
@@ -1083,6 +1062,127 @@ def test_invalid_runtime_receipt_abstains_and_suppresses_citations(monkeypatch):
 
 
 @pytest.mark.unit
+def test_partial_package_requires_exact_verified_subset_evidence(monkeypatch):
+    evidence_result, context, budget, _, _ = _evidence(
+        status="partial",
+        observed={"observed_search_candidate_records": 51},
+    )
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology)
+    orchestrator, _, _, _ = _orchestrator(
+        monkeypatch,
+        _graph_result(ontology, query),
+        evidence_result,
+    )
+    result = orchestrator.run(
+        l6.L6RunRequest(
+            question="detail",
+            ontology_scope_envelope=ontology_scope(),
+            graph_query=query,
+            request_context=context,
+            query_budget=budget,
+            access=_access(),
+        )
+    )
+    assert result.status == "partial"
+    assert result.synthesis_call_limit == 1
+    assert result.coverage_receipt.coverage_status == "partial"
+    assert result.search_citations
+    assert result.citation_collection is not None
+
+    missing_collection = result.model_dump(
+        mode="python",
+        exclude={"package_hash"},
+        round_trip=True,
+    )
+    missing_collection["citation_collection"] = None
+    with pytest.raises(ValidationError, match="non-abstain"):
+        l6.L6SynthesisInput(
+            **missing_collection,
+            package_hash=canonical_sha256(missing_collection),
+        )
+
+    forged_values = result.search_citations[0].model_dump(
+        mode="python",
+        exclude={"citation_hash"},
+        round_trip=True,
+    )
+    forged_values["original_document_name"] = "FORGED"
+    forged = SearchCitationEnvelope(
+        **forged_values,
+        citation_hash=canonical_sha256(forged_values),
+    )
+    forged_package = result.model_dump(
+        mode="python",
+        exclude={"package_hash"},
+        round_trip=True,
+    )
+    forged_package["search_citations"] = (
+        forged,
+        *result.search_citations[1:],
+    )
+    with pytest.raises(ValidationError):
+        l6.L6SynthesisInput(
+            **forged_package,
+            package_hash=canonical_sha256(forged_package),
+        )
+
+
+@pytest.mark.unit
+def test_abstain_package_rejects_injected_citation(monkeypatch):
+    evidence_result, context, budget, _, _ = _evidence()
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology)
+    empty_graph = l6.L6GraphResult.seal(
+        graph_request_id=query.graph_request_id,
+        graph_request_hash=query.request_hash,
+        canonical_scope_id=ontology.canonical_scope_id,
+        assertions=(),
+        returned_canonical_ids=(),
+        warning_codes=(),
+        truncated=False,
+        source_error=False,
+        accounting=l6.L6OperationAccounting(
+            operation_refs=(_operation_ref("abstain-empty"),),
+            request_count=1,
+            request_bytes=1,
+            response_bytes=1,
+            retry_count=0,
+            retry_wait_milliseconds=0,
+            duration_milliseconds=1,
+        ),
+    )
+    orchestrator, _, _, _ = _orchestrator(
+        monkeypatch,
+        empty_graph,
+        evidence_result,
+    )
+    result = orchestrator.run(
+        l6.L6RunRequest(
+            question="detail",
+            ontology_scope_envelope=ontology_scope(),
+            graph_query=query,
+            request_context=context,
+            query_budget=budget,
+            access=_access(),
+        )
+    )
+    assert result.status == "abstain"
+    assert result.synthesis_call_limit == 0
+    values = result.model_dump(
+        mode="python",
+        exclude={"package_hash"},
+        round_trip=True,
+    )
+    values["search_citations"] = (evidence_result.citations[0],)
+    with pytest.raises(ValidationError, match="cannot expose synthesis evidence"):
+        l6.L6SynthesisInput(
+            **values,
+            package_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
 def test_graph_overexecution_is_rejected_without_search(monkeypatch):
     evidence_result, context, budget, _, _ = _evidence()
     ontology = resolved_ontology_scope()
@@ -1330,6 +1430,83 @@ def test_synthesis_input_rejects_rehashed_citation_not_in_coverage(monkeypatch):
             package_hash=canonical_sha256(values),
         )
 
+    assertion_values = result.graph_assertions[0].model_dump(
+        mode="python",
+        exclude={"assertion_hash"},
+    )
+    assertion_values["graph_path_id"] = "graph-path:forged"
+    forged_assertion = l6.L6GraphAssertion(
+        **assertion_values,
+        assertion_hash=canonical_sha256(assertion_values),
+    )
+    graph_values = result.model_dump(
+        mode="python",
+        exclude={"package_hash"},
+        round_trip=True,
+    )
+    graph_values["graph_assertions"] = (
+        forged_assertion,
+        *result.graph_assertions[1:],
+    )
+    with pytest.raises(ValidationError):
+        l6.L6SynthesisInput(
+            **graph_values,
+            package_hash=canonical_sha256(graph_values),
+        )
+
+    collection_values = result.citation_collection.model_dump(
+        mode="python",
+        exclude={"collection_hash"},
+        round_trip=True,
+    )
+    collection_values["source_response_hashes"] = ("f" * 64,)
+    forged_collection = l6.L6CitationPresentationCollection(
+        **collection_values,
+        collection_hash=canonical_sha256(collection_values),
+    )
+    response_values = result.model_dump(
+        mode="python",
+        exclude={"package_hash"},
+        round_trip=True,
+    )
+    response_values["citation_collection"] = forged_collection
+    with pytest.raises(ValidationError):
+        l6.L6SynthesisInput(
+            **response_values,
+            package_hash=canonical_sha256(response_values),
+        )
+    unsafe_collection_values = result.citation_collection.model_dump(
+        mode="python",
+        exclude={"collection_hash"},
+        round_trip=True,
+    )
+    unsafe_collection_values["source_response_hashes"] = (
+        "https://private.example/x?sig=secret",
+    )
+    with pytest.raises(ValidationError, match="SHA-256"):
+        l6.L6CitationPresentationCollection(
+            **unsafe_collection_values,
+            collection_hash=canonical_sha256(unsafe_collection_values),
+        )
+    for field_name, forged_value in (
+        ("canonical_scope_id", "scope:forged"),
+        ("resolved_ontology_scope_hash", "f" * 64),
+        ("resolved_retrieval_scope_id", "retrieval:forged"),
+        ("graph_request_hash", "e" * 64),
+        ("graph_response_hash", "d" * 64),
+    ):
+        identity_values = result.model_dump(
+            mode="python",
+            exclude={"package_hash"},
+            round_trip=True,
+        )
+        identity_values[field_name] = forged_value
+        with pytest.raises(ValidationError):
+            l6.L6SynthesisInput(
+                **identity_values,
+                package_hash=canonical_sha256(identity_values),
+            )
+
 
 @pytest.mark.unit
 def test_complete_evidence_output_rejects_empty_citations():
@@ -1427,6 +1604,21 @@ def test_evidence_output_rejects_self_rehashed_forged_stable_presentation():
         ("source_id", "principaӏ:user"),
         ("exact_authorized_quote", "tоken=secret"),
         ("exact_authorized_quote", "toкen=secret"),
+        ("exact_authorized_quote", "user@例子.公司"),
+        ("exact_authorized_quote", "user@xn--fsqu00a.xn--55qx5d"),
+        ("exact_authorized_quote", "用户@例子.公司"),
+        ("exact_authorized_quote", "用户@例子。公司"),
+        ("exact_authorized_quote", "用户@例子．公司"),
+        ("exact_authorized_quote", "用户@例子｡公司"),
+        ("exact_authorized_quote", "user＠例子.公司"),
+        ("exact_authorized_quote", "Contact:user@例子.公司"),
+        ("exact_authorized_quote", "(user@例子.公司)"),
+        ("exact_authorized_quote", "user@उदाहरण.भारत"),
+        ("exact_authorized_quote", "user@example.com/"),
+        ("exact_authorized_quote", "user@example.com#"),
+        ("exact_authorized_quote", "Contact/user@例子.公司"),
+        ("exact_authorized_quote", "customer!@example.com"),
+        ("exact_authorized_quote", '"customer"@example.com'),
     ),
 )
 def test_direct_stable_constructor_rejects_unsafe_strings(
@@ -1472,6 +1664,20 @@ def test_direct_stable_constructor_rejects_unsafe_section_and_allows_unicode():
     )
     assert safe.original_document_name == "维修手册 café.pdf"
     assert safe.immutable_locator.model_dump(mode="json").get("blob_uri") is None
+
+    for safe_text in (
+        "Use @ marker for emphasis",
+        "Model α: performance",
+        "English Русский: summary",
+    ):
+        multilingual_values = dict(values)
+        multilingual_values["exact_authorized_quote"] = safe_text
+        multilingual_values["quote_hash"] = canonical_sha256(safe_text)
+        constructed = l6.L6StableCitationPresentation(
+            **multilingual_values,
+            stable_presentation_hash=canonical_sha256(multilingual_values),
+        )
+        assert constructed.exact_authorized_quote == safe_text
 
 
 @pytest.mark.unit
@@ -1761,19 +1967,10 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         round_trip=True,
     )
     cross_values["resolved_retrieval_scope_hash"] = "f" * 64
-    cross_receipt = l6.L6GraphExecutionReceipt(
-        **cross_values,
-        receipt_hash=canonical_sha256(cross_values),
-    )
-    cross_input = readiness_input.model_copy(
-        update={"graph_execution_receipt_hash": cross_receipt.receipt_hash}
-    )
-    with pytest.raises(ValueError, match="not authorized"):
-        l6.build_l6_readiness_report(
-            cross_input,
-            graph_receipt=cross_receipt,
-            evidence_output=evidence_output,
-            citation_collection=citation_collection,
+    with pytest.raises(ValidationError, match="authentication failed"):
+        l6.L6GraphExecutionReceipt(
+            **cross_values,
+            receipt_hash=canonical_sha256(cross_values),
         )
 
 

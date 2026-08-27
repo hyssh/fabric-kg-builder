@@ -48,7 +48,10 @@ included `L6InMemoryGraphReceiptAuthority` provides atomic process-local
 issue/verify-and-consume behavior with a unique receipt per Graph execution.
 Callers receive only the opaque receipt ID/hash; they cannot submit receipt
 contents. L7 may replace it with a durable atomic store implementing the same
-protocol.
+protocol. A durable or multi-process host must register its trusted HMAC or
+signature verifier with `register_l6_graph_receipt_authenticator` during server
+bootstrap; unknown authority IDs fail closed. The verifier is internal host
+configuration and is never exposed as an agent tool.
 
 L7 must deploy the endpoint and definition, verify project connection
 audiences/RBAC, run live Graph and Search acceptance, and confirm definition
