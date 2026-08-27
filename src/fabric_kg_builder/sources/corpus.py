@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -20,10 +22,11 @@ from fabric_kg_builder.contracts.base import (
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
 from fabric_kg_builder.model.ids import make_source_file_id
 
-from .adapter import AdapterError
+from .adapter import MAX_FILE_BYTES, AdapterError, FailureType
 from .router import route
 
 NonNegativeInt = Annotated[int, Field(ge=0)]
+_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 
 
 class SourceCorpusEntry(ContractModel):
@@ -142,6 +145,136 @@ class SourceCorpusManifest(ContractModel):
         if self.identity.content_hash != self.corpus_hash:
             raise ValueError("identity.content_hash must equal corpus_hash")
         return self
+
+
+@dataclass(frozen=True)
+class SourceAssetSnapshot:
+    """One bounded immutable byte snapshot validated against a corpus entry."""
+
+    entry: SourceCorpusEntry
+    original_bytes: bytes
+    adapter_name: str
+
+
+def read_verified_source_snapshot(
+    path: Path,
+    *,
+    entry: SourceCorpusEntry,
+    corpus_root_id: str | None = None,
+    max_bytes: int = MAX_FILE_BYTES,
+    _read_hook: Callable[[int], None] | None = None,
+) -> SourceAssetSnapshot:
+    """Read once, then validate the exact bytes against sealed corpus authority."""
+
+    if entry.disposition != "eligible" or entry.adapter_status != "supported":
+        raise AdapterError(
+            FailureType.CORRUPT,
+            f"source entry {entry.source_file_id} is not eligible for extraction",
+            source_locator=entry.relative_source_ref,
+        )
+    if entry.adapter_name is None:
+        raise AdapterError(
+            FailureType.CORRUPT,
+            f"source entry {entry.source_file_id} has no sealed adapter kind",
+            source_locator=entry.relative_source_ref,
+        )
+    if entry.byte_count > max_bytes:
+        raise AdapterError(
+            FailureType.TOO_LARGE,
+            f"source entry {entry.source_file_id} exceeds the byte snapshot limit",
+            source_locator=entry.relative_source_ref,
+        )
+
+    digest = hashlib.sha256()
+    byte_count = 0
+    chunks: list[bytes] = []
+    try:
+        with path.open("rb", buffering=0) as stream:
+            while chunk := stream.read(_SNAPSHOT_CHUNK_BYTES):
+                byte_count += len(chunk)
+                if byte_count > entry.byte_count or byte_count > max_bytes:
+                    raise AdapterError(
+                        FailureType.CORRUPT,
+                        f"source bytes changed for {entry.source_file_id}",
+                        source_locator=entry.relative_source_ref,
+                    )
+                digest.update(chunk)
+                chunks.append(chunk)
+                if _read_hook is not None:
+                    _read_hook(byte_count)
+    except AdapterError:
+        raise
+    except OSError as exc:
+        raise AdapterError(
+            FailureType.NOT_FOUND,
+            f"source bytes are unavailable for {entry.source_file_id}",
+            source_locator=entry.relative_source_ref,
+        ) from exc
+
+    original_byte_hash = digest.hexdigest()
+    expected_asset_id = (
+        deterministic_contract_id(
+            "asset",
+            {
+                "corpus_root_id": corpus_root_id,
+                "relative_source_ref": entry.relative_source_ref,
+            },
+        )
+        if corpus_root_id is not None
+        else entry.asset_id
+    )
+    expected_source_file_id = make_source_file_id(
+        entry.relative_source_ref,
+        original_byte_hash,
+    )
+    expected_asset_version_id = deterministic_contract_id(
+        "asset-version",
+        {
+            "asset_id": expected_asset_id,
+            "original_byte_hash": original_byte_hash,
+        },
+    )
+    expected_media_type = (
+        mimetypes.guess_type(Path(entry.relative_source_ref).name)[0]
+        or "application/octet-stream"
+    )
+    if (
+        byte_count != entry.byte_count
+        or original_byte_hash != entry.original_byte_hash
+        or expected_source_file_id != entry.source_file_id
+        or expected_asset_id != entry.asset_id
+        or expected_asset_version_id != entry.asset_version_id
+        or expected_media_type != entry.media_type
+    ):
+        raise AdapterError(
+            FailureType.CORRUPT,
+            f"source bytes or sealed identity changed for {entry.source_file_id}",
+            source_locator=entry.relative_source_ref,
+        )
+    return SourceAssetSnapshot(
+        entry=entry,
+        original_bytes=b"".join(chunks),
+        adapter_name=entry.adapter_name,
+    )
+
+
+def extract_verified_source_snapshot(snapshot: SourceAssetSnapshot) -> Any:
+    """Parse a private file containing only the already-verified snapshot bytes."""
+
+    suffix = Path(snapshot.entry.relative_source_ref).suffix
+    with tempfile.TemporaryDirectory(prefix="fabric-kg-source-") as temp_dir:
+        snapshot_path = Path(temp_dir) / f"source{suffix}"
+        snapshot_path.write_bytes(snapshot.original_bytes)
+        actual_adapter = route(snapshot_path)
+        if actual_adapter != snapshot.adapter_name:
+            raise AdapterError(
+                FailureType.MIME_MISMATCH,
+                f"sealed adapter kind changed for {snapshot.entry.source_file_id}",
+                source_locator=snapshot.entry.relative_source_ref,
+            )
+        from .router import extract
+
+        return extract(snapshot_path)
 
 
 class DesignSampleEntry(ContractModel):
