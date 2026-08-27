@@ -48,11 +48,15 @@ ephemerally by an L7 UI adapter after the L6 package has been validated and must
 not be persisted or included in a package/collection hash.
 
 The L6 tool host must keep the `L6GraphReceiptAuthority` server-side. Each
-`L6GraphQuery` carries opaque `l6r-sha256:<64-hex>` run and
-`grq-sha256:<64-hex>` request identities. The authority atomically claims the
-run plus exact request hash before calling Graph. Identical completed retries
-reuse the persisted result and receipt; changed requests and retries after a
-failed provider attempt fail without another Graph call. The included
+`L6GraphQuery` carries an opaque `l6r-sha256:<64-hex>` run identity; its request
+ID is derived exactly as `grq-sha256:<sha256(canonical request payload)>`.
+The authority atomically claims the run plus an execution fingerprint covering
+the query, resolved scopes, ACL/policy, L5 publication/read-back, crosswalk,
+Graph model, Runtime 1.1 budget, and RequiredMember authority before calling
+Graph. Only authority-identical completed retries reuse the persisted result
+and receipt. Any changed authority, provider abort, or invalid result consumes
+or rejects the run, wakes concurrent waiters, and performs no second Graph
+call. The included
 `L6InMemoryGraphReceiptAuthority` is the process-local test implementation.
 Callers receive only the opaque receipt ID/hash; they cannot submit receipt
 contents. A production multi-process host must use a durable adapter preserving

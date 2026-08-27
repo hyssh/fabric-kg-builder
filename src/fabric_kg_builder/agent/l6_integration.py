@@ -34,6 +34,7 @@ from fabric_kg_builder.contracts.runtime import (
     CitationPresentation,
     OntologyScopeEnvelope,
     QueryBudgetV1_1,
+    QUERY_BUDGET_V1_1_SCHEMA_HASH,
     ResolvedOntologyScope,
     ResolvedRetrievalScope,
     SearchCitationEnvelope,
@@ -142,7 +143,7 @@ class L6GraphQuery(_L6Model):
 
     @field_validator("graph_request_id")
     @classmethod
-    def _request_id(cls, value: str) -> str:
+    def _request_id_shape(cls, value: str) -> str:
         if not _GRAPH_REQUEST_ID_RE.fullmatch(value):
             raise ValueError("Graph request ID must be an opaque SHA-256 identifier")
         return value
@@ -165,10 +166,18 @@ class L6GraphQuery(_L6Model):
 
     @model_validator(mode="after")
     def _hash_matches(self) -> "L6GraphQuery":
-        expected = canonical_sha256(
+        payload_hash = canonical_sha256(
+            self.model_dump(
+                mode="json",
+                exclude={"graph_request_id", "request_hash"},
+            )
+        )
+        if self.graph_request_id != f"grq-sha256:{payload_hash}":
+            raise ValueError("Graph request ID differs from canonical request payload")
+        expected_request_hash = canonical_sha256(
             self.model_dump(mode="json", exclude={"request_hash"})
         )
-        if self.request_hash != expected:
+        if self.request_hash != expected_request_hash:
             raise ValueError("Graph request hash mismatch")
         if not self.required_canonical_ids:
             raise ValueError("Graph request requires canonical authority IDs")
@@ -176,6 +185,33 @@ class L6GraphQuery(_L6Model):
 
     @classmethod
     def seal(cls, **values: Any) -> "L6GraphQuery":
+        supplied_request_id = values.pop("graph_request_id", None)
+        values.pop("request_hash", None)
+        for field_name in (
+            "approved_graph_path_ids",
+            "relationship_semantic_ids",
+            "required_canonical_ids",
+            "required_assertion_ids",
+        ):
+            if field_name in values and isinstance(values[field_name], (list, tuple)):
+                values[field_name] = tuple(
+                    sorted(str(item) for item in values[field_name])
+                )
+        provisional = cls.model_construct(
+            **values,
+            graph_request_id="grq-sha256:" + "0" * 64,
+            request_hash="0" * 64,
+        )
+        payload_hash = canonical_sha256(
+            provisional.model_dump(
+                mode="json",
+                exclude={"graph_request_id", "request_hash"},
+            )
+        )
+        graph_request_id = f"grq-sha256:{payload_hash}"
+        if supplied_request_id is not None and supplied_request_id != graph_request_id:
+            raise ValueError("Graph request ID differs from canonical request payload")
+        values["graph_request_id"] = graph_request_id
         provisional = cls.model_construct(**values, request_hash="0" * 64)
         values["request_hash"] = canonical_sha256(
             provisional.model_dump(mode="json", exclude={"request_hash"})
@@ -367,6 +403,7 @@ class L6GraphExecutionReceipt(_L6Model):
     issued_at_milliseconds: int = Field(ge=0)
     authentication_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
     l6_run_id: str = Field(pattern=r"^l6r-sha256:[0-9a-f]{64}$")
+    graph_execution_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_request_id: str = Field(pattern=r"^grq-sha256:[0-9a-f]{64}$")
     graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -1442,6 +1479,115 @@ class L6RunRequest(_L6Model):
         return self
 
 
+def _graph_execution_fingerprint(
+    *,
+    graph_query: L6GraphQuery,
+    ontology_scope: ResolvedOntologyScope,
+    retrieval_scope: ResolvedRetrievalScope,
+    budget: QueryBudgetV1_1,
+    access: L6AccessContext,
+    authorities: "L6Authorities",
+) -> str:
+    """Hash every trusted authority that can change Graph execution semantics."""
+
+    return canonical_sha256(
+        {
+            "graph_query": graph_query.model_dump(mode="json"),
+            "ontology_scope": {
+                "id": ontology_scope.resolved_ontology_scope_id,
+                "hash": ontology_scope.resolved_scope_hash,
+                "canonical_key_set_hash": ontology_scope.canonical_key_set_hash,
+                "acl_scope_hash": ontology_scope.acl_scope_hash,
+                "asserted_publication_hash": ontology_scope.asserted_publication_hash,
+                "publication_crosswalk_hash": (
+                    ontology_scope.publication_crosswalk_hash
+                ),
+                "graph_model_hash": ontology_scope.graph_model_hash,
+                "serving_projection_hash": ontology_scope.serving_projection_hash,
+                "search_index_fingerprint": (
+                    ontology_scope.search_index_fingerprint
+                ),
+                "required_member_manifest": (
+                    ontology_scope.required_member_manifest.model_dump(mode="json")
+                ),
+                "authoritative_receipts": tuple(
+                    item.model_dump(mode="json")
+                    for item in ontology_scope.authoritative_receipts
+                ),
+            },
+            "retrieval_scope": {
+                "id": retrieval_scope.resolved_retrieval_scope_id,
+                "hash": retrieval_scope.retrieval_scope_hash,
+                "canonical_key_set_hash": retrieval_scope.canonical_key_set_hash,
+                "acl_scope_hash": retrieval_scope.acl_scope_hash,
+                "asserted_publication_hash": (
+                    retrieval_scope.asserted_publication_hash
+                ),
+                "publication_crosswalk_hash": (
+                    retrieval_scope.publication_crosswalk_hash
+                ),
+                "graph_model_hash": retrieval_scope.graph_model_hash,
+                "semantic_projection_hash": (
+                    retrieval_scope.semantic_projection_hash
+                ),
+                "search_index_fingerprint": (
+                    retrieval_scope.search_index_fingerprint
+                ),
+                "required_member_manifest": (
+                    retrieval_scope.required_member_manifest.model_dump(mode="json")
+                ),
+                "required_canonical_ids": retrieval_scope.canonical_member_ids,
+                "required_role_ids": retrieval_scope.required_role_ids,
+                "type_assertion_set_hash": retrieval_scope.type_assertion_set_hash,
+                "member_type_role_set_hash": (
+                    retrieval_scope.member_type_role_set_hash
+                ),
+            },
+            "access": {
+                "context_hash": canonical_sha256(access.model_dump(mode="json")),
+                "access_policy_id": authorities.access_policy.access_policy_id,
+                "access_policy_hash": authorities.access_policy.policy_hash,
+                "ontology_acl_scope_hash": ontology_scope.acl_scope_hash,
+                "retrieval_acl_scope_hash": retrieval_scope.acl_scope_hash,
+            },
+            "l5a": {
+                "compiled_fingerprint": authorities.l5a.compiled.fingerprint,
+                "receipt_hash": authorities.l5a.receipt.receipt_hash,
+                "output_manifest_hash": (
+                    authorities.l5a.output_manifest.manifest_hash
+                ),
+                "crosswalks_hash": canonical_sha256(
+                    tuple(
+                        item.model_dump(mode="json")
+                        for item in authorities.l5a.compiled.crosswalks
+                    )
+                ),
+            },
+            "l5b": {
+                "compiled_fingerprint": authorities.l5b.compiled.fingerprint,
+                "receipt_hash": authorities.l5b.receipt.receipt_hash,
+                "output_manifest_hash": (
+                    authorities.l5b.output_manifest.manifest_hash
+                ),
+                "index_fingerprint": authorities.l5b.compiled.index_fingerprint,
+            },
+            "governed_asset_hashes": tuple(
+                sorted(
+                    item.asset_reference_hash
+                    for item in authorities.governed_assets
+                )
+            ),
+            "runtime_budget": {
+                "query_budget_id": budget.query_budget_id,
+                "contract_version": budget.identity.contract_version,
+                "schema_hash": QUERY_BUDGET_V1_1_SCHEMA_HASH,
+                "budget_hash": budget.budget_hash,
+                "payload": budget.model_dump(mode="json"),
+            },
+        }
+    )
+
+
 class L6ScopeResolver(Protocol):
     def resolve(
         self, request: L6ScopeResolutionInput
@@ -1468,6 +1614,8 @@ class L6GraphReceiptAuthority(Protocol):
         ontology_scope: ResolvedOntologyScope,
         retrieval_scope: ResolvedRetrievalScope,
         budget: QueryBudgetV1_1,
+        access: L6AccessContext,
+        authorities: "L6Authorities",
         execute: Callable[[], L6GraphResult],
     ) -> L6GraphResult:
         """Atomically claim and persist one run-scoped Graph result or failure."""
@@ -1481,6 +1629,8 @@ class L6GraphReceiptAuthority(Protocol):
         ontology_scope: ResolvedOntologyScope,
         retrieval_scope: ResolvedRetrievalScope,
         budget: QueryBudgetV1_1,
+        access: L6AccessContext,
+        authorities: "L6Authorities",
     ) -> L6GraphExecutionReceipt: ...
 
     def verify_and_consume(
@@ -1740,6 +1890,7 @@ class L6InMemoryGraphReceiptAuthority:
     def _build_receipt(
         self,
         *,
+        graph_execution_fingerprint: str,
         graph_query: L6GraphQuery,
         graph_result: L6GraphResult,
         ontology_scope: ResolvedOntologyScope,
@@ -1770,6 +1921,7 @@ class L6InMemoryGraphReceiptAuthority:
             "authentication_algorithm": signing_key.metadata.algorithm,
             "issued_at_milliseconds": self._clock_milliseconds(),
             "l6_run_id": graph_query.l6_run_id,
+            "graph_execution_fingerprint": graph_execution_fingerprint,
             "graph_request_id": graph_query.graph_request_id,
             "graph_request_hash": graph_query.request_hash,
             "graph_result_hash": graph_result.response_hash,
@@ -1817,6 +1969,8 @@ class L6InMemoryGraphReceiptAuthority:
         ontology_scope: ResolvedOntologyScope,
         retrieval_scope: ResolvedRetrievalScope,
         budget: QueryBudgetV1_1,
+        access: L6AccessContext,
+        authorities: "L6Authorities",
         execute: Callable[[], L6GraphResult],
     ) -> L6GraphResult:
         if l6_run_id != graph_query.l6_run_id:
@@ -1827,17 +1981,27 @@ class L6InMemoryGraphReceiptAuthority:
             retrieval_scope,
             budget,
         )
+        execution_fingerprint = _graph_execution_fingerprint(
+            graph_query=graph_query,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            budget=budget,
+            access=access,
+            authorities=authorities,
+        )
         with self._run_condition:
             while True:
                 state = self._graph_runs.get(l6_run_id)
                 if state is None:
                     self._graph_runs[l6_run_id] = {
-                        "request_hash": graph_query.request_hash,
+                        "execution_fingerprint": execution_fingerprint,
                         "status": "executing",
                     }
                     break
-                if state["request_hash"] != graph_query.request_hash:
-                    raise ValueError("L6 run already claimed by another Graph request")
+                if state["execution_fingerprint"] != execution_fingerprint:
+                    raise ValueError(
+                        "L6 run already claimed by different Graph execution authority"
+                    )
                 if state["status"] == "completed":
                     return state["result"]
                 if state["status"] == "failed":
@@ -1846,15 +2010,22 @@ class L6InMemoryGraphReceiptAuthority:
 
         try:
             graph_result = execute()
-        except Exception:
+            _validate_graph_result(
+                graph_query,
+                ontology_scope,
+                graph_result,
+            )
+        except BaseException:
             with self._run_condition:
-                self._graph_runs[l6_run_id]["status"] = "failed"
+                state = self._graph_runs.get(l6_run_id)
+                if state is not None and state["status"] == "executing":
+                    state["status"] = "failed"
                 self._run_condition.notify_all()
             raise
 
         with self._run_condition:
             self._graph_runs[l6_run_id] = {
-                "request_hash": graph_query.request_hash,
+                "execution_fingerprint": execution_fingerprint,
                 "status": "completed",
                 "result": graph_result,
             }
@@ -1869,12 +2040,22 @@ class L6InMemoryGraphReceiptAuthority:
         ontology_scope: ResolvedOntologyScope,
         retrieval_scope: ResolvedRetrievalScope,
         budget: QueryBudgetV1_1,
+        access: L6AccessContext,
+        authorities: "L6Authorities",
     ) -> L6GraphExecutionReceipt:
+        execution_fingerprint = _graph_execution_fingerprint(
+            graph_query=graph_query,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            budget=budget,
+            access=access,
+            authorities=authorities,
+        )
         with self._run_condition:
             state = self._graph_runs.get(graph_query.l6_run_id)
             if (
                 state is None
-                or state["request_hash"] != graph_query.request_hash
+                or state["execution_fingerprint"] != execution_fingerprint
                 or state["status"] != "completed"
                 or state["result"] != graph_result
             ):
@@ -1883,6 +2064,7 @@ class L6InMemoryGraphReceiptAuthority:
             if prior is not None:
                 return prior
             receipt = self._build_receipt(
+                graph_execution_fingerprint=execution_fingerprint,
                 graph_query=graph_query,
                 graph_result=graph_result,
                 ontology_scope=ontology_scope,
@@ -2090,9 +2272,11 @@ class L6VerifiedGraphTool:
         *,
         delegate: L6GraphHost,
         graph_receipt_authority: L6GraphReceiptAuthority,
+        authorities: "L6Authorities",
     ) -> None:
         self._delegate = delegate
         self._graph_receipt_authority = graph_receipt_authority
+        self._authorities = authorities
 
     def execute(
         self,
@@ -2101,6 +2285,7 @@ class L6VerifiedGraphTool:
         ontology_scope: ResolvedOntologyScope,
         retrieval_scope: ResolvedRetrievalScope,
         budget: QueryBudgetV1_1,
+        access: L6AccessContext,
     ) -> L6GraphToolOutput:
         if (
             request.l6_run_id != request.graph_query.l6_run_id
@@ -2116,12 +2301,22 @@ class L6VerifiedGraphTool:
             retrieval_scope,
             budget,
         )
+        _validate_graph_execution_authorities(
+            self._authorities,
+            access,
+            L6ResolvedScopes(
+                ontology_scope=ontology_scope,
+                retrieval_scope=retrieval_scope,
+            ),
+        )
         result = self._graph_receipt_authority.execute_graph_once(
             l6_run_id=request.l6_run_id,
             graph_query=request.graph_query,
             ontology_scope=ontology_scope,
             retrieval_scope=retrieval_scope,
             budget=budget,
+            access=access,
+            authorities=self._authorities,
             execute=lambda: self._delegate.execute(request, scope=ontology_scope),
         )
         graph_complete, _ = _validate_graph_result(
@@ -2137,6 +2332,8 @@ class L6VerifiedGraphTool:
             ontology_scope=ontology_scope,
             retrieval_scope=retrieval_scope,
             budget=budget,
+            access=access,
+            authorities=self._authorities,
         )
         return L6GraphToolOutput(
             graph_result=result,
@@ -2393,14 +2590,10 @@ def _principal_scope_hash(
     return None
 
 
-def _validate_authorities(
+def _validate_graph_execution_authorities(
     authorities: L6Authorities,
     access: L6AccessContext,
     scopes: L6ResolvedScopes,
-    request_context: AgenticRetrievalRequestContextV1_1,
-    budget: QueryBudgetV1_1,
-    originating_context: AgenticRetrievalRequestContextV1_1 | None,
-    originating_budget: QueryBudgetV1_1 | None,
 ) -> None:
     source = authorities.l5a.compiled.source
     require_l5a_publication_receipt(source, authorities.l5a)
@@ -2454,6 +2647,19 @@ def _validate_authorities(
         graph_model_hash=ontology_scope.graph_model_hash,
         search_index_fingerprint=authorities.l5b.compiled.index_fingerprint,
     )
+
+
+def _validate_authorities(
+    authorities: L6Authorities,
+    access: L6AccessContext,
+    scopes: L6ResolvedScopes,
+    request_context: AgenticRetrievalRequestContextV1_1,
+    budget: QueryBudgetV1_1,
+    originating_context: AgenticRetrievalRequestContextV1_1 | None,
+    originating_budget: QueryBudgetV1_1 | None,
+) -> None:
+    _validate_graph_execution_authorities(authorities, access, scopes)
+    retrieval_scope = scopes.retrieval_scope
     request_context.validate_budget(budget)
     request_context.validate_scope(retrieval_scope)
     if originating_context is not None:
@@ -3237,6 +3443,8 @@ class L6AgentOrchestrator:
                 ontology_scope=scopes.ontology_scope,
                 retrieval_scope=scopes.retrieval_scope,
                 budget=request.query_budget,
+                access=request.access,
+                authorities=self._authorities,
                 execute=lambda: self._graph_host.execute(
                     graph_input,
                     scope=scopes.ontology_scope,
@@ -3292,6 +3500,8 @@ class L6AgentOrchestrator:
                 ontology_scope=scopes.ontology_scope,
                 retrieval_scope=scopes.retrieval_scope,
                 budget=request.query_budget,
+                access=request.access,
+                authorities=self._authorities,
             )
             L6GraphToolOutput(
                 graph_result=graph,
@@ -3701,6 +3911,46 @@ _L6_FABRIC_CONNECTION_RE = re.compile(
     re.IGNORECASE,
 )
 _L6_ARM_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._() -]{0,255}$")
+_L6_SCHEMELESS_ENDPOINT_RE = re.compile(
+    r"(?i)(?:^|[\s(])(?:localhost|(?:[a-z0-9-]+\.)+[a-z]{2,63}|"
+    r"(?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]{1,5})?[/\\][^\s]*"
+)
+
+
+def _l6_safe_agent_name(value: str) -> str:
+    error = "L6 agent name contains unsafe display text"
+    _l6_safe_stable_text(value, field_name="L6 agent name")
+    decoded = unquote(value)
+    if (
+        len(value) > 128
+        or decoded != value
+        or ".." in value
+        or not value[0].isalnum()
+        or not value[-1].isalnum()
+        or any(
+            not (
+                char.isalnum()
+                or unicodedata.category(char).startswith("M")
+                or char in " ._-"
+            )
+            for char in value
+        )
+    ):
+        raise ValueError(error)
+    return value
+
+
+def _l6_safe_definition_human_text(value: str) -> str:
+    _l6_safe_stable_text(value, field_name="L6 definition text")
+    decoded = value
+    for _ in range(5):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    if _L6_SCHEMELESS_ENDPOINT_RE.search(decoded):
+        raise ValueError("L6 definition text contains unsafe stable text")
+    return value
 
 
 def _l6_safe_connection_id(value: str) -> str:
@@ -3774,6 +4024,12 @@ def _validate_l6_definition_strings(
     if path and path[-1] == "project_connection_id":
         _l6_safe_connection_id(value)
         return
+    if path and path[-1] == "agent_name":
+        _l6_safe_agent_name(value)
+        return
+    if path and path[-1] in {"description", "instructions"}:
+        _l6_safe_definition_human_text(value)
+        return
     _l6_safe_stable_text(value, field_name="L6 definition text")
 
 
@@ -3802,7 +4058,7 @@ def _validate_l6_definition_structure(definition: Mapping[str, Any]) -> None:
     }:
         raise ValueError("L6 definition connections differ from the closed set")
     agent_name = definition.get("agent_name")
-    if not isinstance(agent_name, str) or len(agent_name) > 128:
+    if not isinstance(agent_name, str):
         raise ValueError("L6 agent name contains unsafe display text")
     _validate_l6_definition_strings(definition)
 
@@ -3815,9 +4071,7 @@ def build_l6_agent_definition(
 ) -> dict[str, Any]:
     """Build a local deployment definition using existing connection abstractions."""
 
-    if len(agent_name) > 128:
-        raise ValueError("L6 agent name contains unsafe display text")
-    _l6_safe_stable_text(agent_name, field_name="L6 agent name")
+    _l6_safe_agent_name(agent_name)
     _l6_safe_connection_id(fabric_data_agent_connection_id)
     _l6_safe_connection_id(foundry_remote_tool_connection_id)
     values: dict[str, Any] = {

@@ -40,6 +40,11 @@ def _stub_persisted_l5b_gate(monkeypatch):
         "_require_l6_evidence_publication",
         lambda *args, **kwargs: None,
     )
+    monkeypatch.setattr(
+        l6,
+        "_validate_graph_execution_authorities",
+        lambda *args, **kwargs: None,
+    )
 
 
 class _Resolver:
@@ -241,8 +246,6 @@ def _graph_query(scope, *, required_ids=GENERIC_MEMBER_IDS, run_seed="unit-l6"):
     run_id = "l6r-sha256:" + canonical_sha256({"run": run_seed})
     return l6.L6GraphQuery.seal(
         l6_run_id=run_id,
-        graph_request_id="grq-sha256:"
-        + canonical_sha256({"run_id": run_id, "request": "bounded-graph"}),
         canonical_scope_id=scope.canonical_scope_id,
         approved_graph_path_ids=("graph-path:aggregate-members",),
         relationship_semantic_ids=("relationship:has-member",),
@@ -258,13 +261,27 @@ def _graph_query(scope, *, required_ids=GENERIC_MEMBER_IDS, run_seed="unit-l6"):
     )
 
 
-def _issue_graph_receipt(store, query, graph, ontology, retrieval, budget):
+def _issue_graph_receipt(
+    store,
+    query,
+    graph,
+    ontology,
+    retrieval,
+    budget,
+    *,
+    access=None,
+    authorities=None,
+):
+    access = access or _access()
+    authorities = authorities or _authorities()
     completed = store.execute_graph_once(
         l6_run_id=query.l6_run_id,
         graph_query=query,
         ontology_scope=ontology,
         retrieval_scope=retrieval,
         budget=budget,
+        access=access,
+        authorities=authorities,
         execute=lambda: graph,
     )
     return store.issue(
@@ -273,6 +290,8 @@ def _issue_graph_receipt(store, query, graph, ontology, retrieval, budget):
         ontology_scope=ontology,
         retrieval_scope=retrieval,
         budget=budget,
+        access=access,
+        authorities=authorities,
     )
 
 
@@ -334,9 +353,25 @@ def _authorities():
         access_policy_id=policy.access_policy_id,
         access_policy_hash=policy.policy_hash,
     )
+    l5a = SimpleNamespace(
+        compiled=SimpleNamespace(
+            fingerprint="1" * 64,
+            crosswalks=(),
+        ),
+        receipt=SimpleNamespace(receipt_hash="2" * 64),
+        output_manifest=SimpleNamespace(manifest_hash="3" * 64),
+    )
+    l5b = SimpleNamespace(
+        compiled=SimpleNamespace(
+            fingerprint="4" * 64,
+            index_fingerprint="5" * 64,
+        ),
+        receipt=SimpleNamespace(receipt_hash="6" * 64),
+        output_manifest=SimpleNamespace(manifest_hash="7" * 64),
+    )
     return l6.L6Authorities(
-        l5a=SimpleNamespace(),
-        l5b=SimpleNamespace(),
+        l5a=l5a,
+        l5b=l5b,
         access_policy=policy,
         governed_assets=(asset,),
     )
@@ -788,6 +823,8 @@ def test_server_side_receipt_authority_reuses_one_run_receipt():
         ontology_scope=ontology,
         retrieval_scope=retrieval,
         budget=budget,
+        access=_access(),
+        authorities=_authorities(),
     )
     assert second == receipt
     with pytest.raises(ValueError, match="replayed"):
@@ -1749,8 +1786,6 @@ def test_graph_budget_and_k_are_enforced_before_host(monkeypatch):
     run_id = "l6r-sha256:" + canonical_sha256({"run": "over-budget"})
     query = l6.L6GraphQuery.seal(
         l6_run_id=run_id,
-        graph_request_id="grq-sha256:"
-        + canonical_sha256({"run_id": run_id, "request": "over-budget"}),
         canonical_scope_id=ontology.canonical_scope_id,
         approved_graph_path_ids=("graph-path:aggregate-members",),
         relationship_semantic_ids=("relationship:has-member",),
@@ -2356,6 +2391,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
     graph_tool = l6.L6VerifiedGraphTool(
         delegate=graph_host,
         graph_receipt_authority=store,
+        authorities=_authorities(),
     )
     graph_input = l6.L6GraphToolInput(
         l6_run_id=query.l6_run_id,
@@ -2368,6 +2404,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         ontology_scope=scopes.ontology_scope,
         retrieval_scope=scopes.retrieval_scope,
         budget=budget,
+        access=_access(),
     )
     assert graph_output.graph_execution_receipt.graph_result_hash == (
         graph_output.graph_result.response_hash
@@ -2499,6 +2536,7 @@ def _standalone_graph_tool(query, graph, store=None, host=None):
     tool = l6.L6VerifiedGraphTool(
         delegate=delegate,
         graph_receipt_authority=authority,
+        authorities=_authorities(),
     )
     request = l6.L6GraphToolInput(
         l6_run_id=query.l6_run_id,
@@ -2510,6 +2548,7 @@ def _standalone_graph_tool(query, graph, store=None, host=None):
         "ontology_scope": ontology,
         "retrieval_scope": retrieval,
         "budget": budget,
+        "access": _access(),
     }
     return tool, delegate, authority, request, kwargs
 
@@ -2590,12 +2629,10 @@ def test_same_run_rejects_different_graph_request_before_provider_call():
     tool.execute(request, **kwargs)
     changed_values = query.model_dump(
         mode="python",
-        exclude={"request_hash"},
+        exclude={"graph_request_id", "request_hash"},
         round_trip=True,
     )
-    changed_values["graph_request_id"] = "grq-sha256:" + canonical_sha256(
-        {"request": "changed"}
-    )
+    changed_values["max_result_records"] -= 1
     changed = l6.L6GraphQuery.seal(**changed_values)
     changed_request = request.model_copy(
         update={"graph_query": changed}
@@ -2603,9 +2640,10 @@ def test_same_run_rejects_different_graph_request_before_provider_call():
     changed_tool = l6.L6VerifiedGraphTool(
         delegate=host,
         graph_receipt_authority=store,
+        authorities=_authorities(),
     )
 
-    with pytest.raises(ValueError, match="another Graph request"):
+    with pytest.raises(ValueError, match="different Graph execution authority"):
         changed_tool.execute(changed_request, **kwargs)
     assert host.calls == 1
 
@@ -2634,6 +2672,246 @@ def test_failed_graph_run_is_consumed_and_identical_retry_is_closed():
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "dimension",
+    (
+        "ontology_scope",
+        "retrieval_scope",
+        "acl",
+        "publication",
+        "graph_model",
+        "l5a_readback",
+        "budget",
+    ),
+)
+def test_same_run_rejects_changed_execution_authority_fingerprint(dimension):
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology, run_seed=f"fingerprint-{dimension}")
+    graph = _graph_result(ontology, query)
+    _, _, budget, _, _ = _evidence()
+    access = _access()
+    authorities = _authorities()
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    calls = [0]
+
+    def execute():
+        calls[0] += 1
+        return graph
+
+    first = {
+        "l6_run_id": query.l6_run_id,
+        "graph_query": query,
+        "ontology_scope": ontology,
+        "retrieval_scope": retrieval,
+        "budget": budget,
+        "access": access,
+        "authorities": authorities,
+        "execute": execute,
+    }
+    assert store.execute_graph_once(**first) == graph
+    changed = dict(first)
+    if dimension == "ontology_scope":
+        values = ontology.model_dump(
+            mode="python",
+            exclude={"resolved_scope_hash"},
+            round_trip=True,
+        )
+        values["resolved_ontology_scope_id"] += "-other"
+        changed["ontology_scope"] = seal(
+            type(ontology),
+            "resolved_scope_hash",
+            values,
+        )
+    elif dimension == "retrieval_scope":
+        values = retrieval.model_dump(
+            mode="python",
+            exclude={"retrieval_scope_hash"},
+            round_trip=True,
+        )
+        values["resolved_retrieval_scope_id"] += "-other"
+        changed["retrieval_scope"] = seal(
+            type(retrieval),
+            "retrieval_scope_hash",
+            values,
+        )
+    elif dimension == "acl":
+        changed["access"] = access.model_copy(
+            update={"access_policy_hash": "8" * 64}
+        )
+    elif dimension == "publication":
+        values = ontology.model_dump(
+            mode="python",
+            exclude={"resolved_scope_hash"},
+            round_trip=True,
+        )
+        values["asserted_publication_hash"] = "8" * 64
+        changed["ontology_scope"] = seal(
+            type(ontology),
+            "resolved_scope_hash",
+            values,
+        )
+    elif dimension == "graph_model":
+        values = ontology.model_dump(
+            mode="python",
+            exclude={"resolved_scope_hash"},
+            round_trip=True,
+        )
+        values["graph_model_hash"] = "8" * 64
+        changed["ontology_scope"] = seal(
+            type(ontology),
+            "resolved_scope_hash",
+            values,
+        )
+    elif dimension == "l5a_readback":
+        changed["authorities"] = l6.L6Authorities(
+            l5a=SimpleNamespace(
+                compiled=authorities.l5a.compiled,
+                receipt=SimpleNamespace(receipt_hash="8" * 64),
+                output_manifest=authorities.l5a.output_manifest,
+            ),
+            l5b=authorities.l5b,
+            access_policy=authorities.access_policy,
+            governed_assets=authorities.governed_assets,
+        )
+    else:
+        values = budget.model_dump(
+            mode="python",
+            exclude={"budget_hash"},
+            round_trip=True,
+        )
+        values["max_output_tokens"] += 1
+        changed["budget"] = seal(type(budget), "budget_hash", values)
+
+    with pytest.raises(ValueError, match="different Graph execution authority"):
+        store.execute_graph_once(**changed)
+    assert calls == [1]
+
+
+@pytest.mark.unit
+def test_graph_receipt_binds_execution_authority_fingerprint():
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology, run_seed="receipt-fingerprint")
+    graph = _graph_result(ontology, query)
+    _, _, budget, _, _ = _evidence()
+    access = _access()
+    authorities = _authorities()
+    store = l6.L6InMemoryGraphReceiptAuthority()
+
+    receipt = _issue_graph_receipt(
+        store,
+        query,
+        graph,
+        ontology,
+        retrieval,
+        budget,
+        access=access,
+        authorities=authorities,
+    )
+
+    assert receipt.graph_execution_fingerprint == l6._graph_execution_fingerprint(
+        graph_query=query,
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+        access=access,
+        authorities=authorities,
+    )
+
+
+@pytest.mark.unit
+def test_provider_baseexception_wakes_concurrent_waiter_and_consumes_run():
+    class _ProviderAbort(BaseException):
+        pass
+
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology, run_seed="baseexception")
+    _, _, budget, _, _ = _evidence()
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = [0]
+    kwargs = {
+        "l6_run_id": query.l6_run_id,
+        "graph_query": query,
+        "ontology_scope": ontology,
+        "retrieval_scope": retrieval,
+        "budget": budget,
+        "access": _access(),
+        "authorities": _authorities(),
+    }
+
+    def abort():
+        calls[0] += 1
+        entered.set()
+        assert release.wait(timeout=5)
+        raise _ProviderAbort()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(store.execute_graph_once, **kwargs, execute=abort)
+        assert entered.wait(timeout=5)
+        waiter = pool.submit(
+            store.execute_graph_once,
+            **kwargs,
+            execute=lambda: pytest.fail("waiter called provider"),
+        )
+        release.set()
+        with pytest.raises(_ProviderAbort):
+            owner.result(timeout=2)
+        with pytest.raises(ValueError, match="previously failed"):
+            waiter.result(timeout=2)
+    assert calls == [1]
+
+
+@pytest.mark.unit
+def test_result_validation_failure_wakes_waiter_and_consumes_run():
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology, run_seed="invalid-result")
+    graph = _graph_result(ontology, query).model_copy(
+        update={"graph_request_hash": "8" * 64}
+    )
+    _, _, budget, _, _ = _evidence()
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    entered = threading.Event()
+    release = threading.Event()
+    kwargs = {
+        "l6_run_id": query.l6_run_id,
+        "graph_query": query,
+        "ontology_scope": ontology,
+        "retrieval_scope": retrieval,
+        "budget": budget,
+        "access": _access(),
+        "authorities": _authorities(),
+    }
+
+    def invalid_result():
+        entered.set()
+        assert release.wait(timeout=5)
+        return graph
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(
+            store.execute_graph_once,
+            **kwargs,
+            execute=invalid_result,
+        )
+        assert entered.wait(timeout=5)
+        waiter = pool.submit(
+            store.execute_graph_once,
+            **kwargs,
+            execute=lambda: pytest.fail("waiter called provider"),
+        )
+        release.set()
+        with pytest.raises(ValueError, match="accounting or request binding"):
+            owner.result(timeout=2)
+        with pytest.raises(ValueError, match="previously failed"):
+            waiter.result(timeout=2)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "unsafe_id",
     (
         "graph-request:l6",
@@ -2646,20 +2924,54 @@ def test_failed_graph_run_is_consumed_and_identical_retry_is_closed():
         "principal:user@example.com",
         "user@example.com",
         "grq-sha256:%30",
+        "grq-sha256:" + "a" * 64,
         "grq-sha256:" + "a" * 65,
         "grq-sha256:" + "a" * 63 + "\u202e",
     ),
 )
 def test_graph_request_id_rejects_nonopaque_metadata(unsafe_id):
     ontology = resolved_ontology_scope()
-    values = _graph_query(ontology).model_dump(
+    query = _graph_query(ontology)
+    values = query.model_dump(
         mode="python",
-        exclude={"request_hash"},
         round_trip=True,
     )
     values["graph_request_id"] = unsafe_id
-    with pytest.raises(ValidationError, match="opaque SHA-256 identifier"):
-        l6.L6GraphQuery.seal(**values)
+    with pytest.raises(ValidationError, match="Graph request ID"):
+        l6.L6GraphQuery.model_validate(values)
+
+
+@pytest.mark.unit
+def test_graph_request_id_is_exact_canonical_payload_hash():
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology, run_seed="canonical-request-id")
+    payload = query.model_dump(
+        mode="json",
+        exclude={"graph_request_id", "request_hash"},
+    )
+    assert query.graph_request_id == f"grq-sha256:{canonical_sha256(payload)}"
+    assert query.request_hash == canonical_sha256(
+        query.model_dump(mode="json", exclude={"request_hash"})
+    )
+
+    mutated = query.model_dump(mode="python", round_trip=True)
+    mutated["max_result_records"] -= 1
+    with pytest.raises(ValidationError, match="canonical request payload"):
+        l6.L6GraphQuery.model_validate(mutated)
+
+    collision = dict(mutated)
+    collision["graph_request_id"] = "grq-sha256:" + "a" * 64
+    with pytest.raises(ValidationError, match="canonical request payload"):
+        l6.L6GraphQuery.model_validate(collision)
+
+    resealed = l6.L6GraphQuery.seal(
+        **{
+            key: value
+            for key, value in mutated.items()
+            if key not in {"graph_request_id", "request_hash"}
+        }
+    )
+    assert resealed.graph_request_id != query.graph_request_id
 
 
 @pytest.mark.unit
@@ -2777,6 +3089,15 @@ def test_agent_definition_rejects_unsafe_connection_metadata(unsafe_value):
         "Agent user@example.com",
         "Agent\u202e",
         "https://provider.example/agent",
+        "api.example.com/agent",
+        "localhost:8080/agent",
+        "team/agent",
+        "team\\agent",
+        "agent?mode=test",
+        "agent#fragment",
+        "agent..name",
+        "user@host/agent",
+        "api%2Eexample%2Ecom%2Fagent",
     ),
 )
 def test_agent_definition_rejects_unsafe_display_name(unsafe_name):
@@ -2803,6 +3124,15 @@ def test_persistence_recursively_rejects_tampered_definition_text(tmp_path: Path
     )
     with pytest.raises(ValueError, match="unsafe stable text"):
         l6.persist_l6_agent_definition(tmp_path / "agent.json", tampered)
+
+    endpoint_tools = [dict(item) for item in definition["tools"]]
+    endpoint_tools[0]["description"] = "Read api.example.com/private from here"
+    endpoint = {**definition, "tools": tuple(endpoint_tools)}
+    endpoint["definition_hash"] = canonical_sha256(
+        {key: value for key, value in endpoint.items() if key != "definition_hash"}
+    )
+    with pytest.raises(ValueError, match="unsafe stable text"):
+        l6.persist_l6_agent_definition(tmp_path / "agent.json", endpoint)
 
     renamed_tools = [dict(item) for item in definition["tools"]]
     renamed_tools[0]["name"] = "fabric_kg_unapproved_tool"
