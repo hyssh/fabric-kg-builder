@@ -26,10 +26,19 @@ from tests.unit.test_l6_agent_integration import (
 def test_l6_fake_hosts_end_to_end(monkeypatch):
     """Exercise the complete L6 sequence with fake Graph and sealed-L5b hosts."""
 
-    monkeypatch.setattr(l6, "_validate_authorities", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         l6,
         "_require_l6_evidence_publication",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        l6,
+        "require_l5a_publication_receipt",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        l6,
+        "require_l5b_publication_receipt",
         lambda *args, **kwargs: None,
     )
     ontology = resolved_ontology_scope()

@@ -13,6 +13,10 @@ this stage.
 Pass only the resulting stable project connection IDs to
 `build_l6_agent_definition`. Credentials, workspace secrets, ACL principals,
 signed URLs, and provider metadata must not be embedded.
+Accepted references are repo-defined `connection:<opaque>` IDs, stable UUIDs,
+Fabric `fabric:workspace/<uuid>/item/<uuid>` references, or complete Azure ARM
+resource IDs. Query strings, fragments, userinfo, encoded variants, traversal,
+emails, principal strings, endpoint URLs, and credential material are rejected.
 
 ```python
 from pathlib import Path
@@ -43,12 +47,20 @@ Never attach an authorized asset URL to them. Any short-lived URL must be added
 ephemerally by an L7 UI adapter after the L6 package has been validated and must
 not be persisted or included in a package/collection hash.
 
-The L6 tool host must keep the `L6GraphReceiptAuthority` server-side. The
-included `L6InMemoryGraphReceiptAuthority` provides atomic process-local
-issue/verify-and-consume behavior with a unique receipt per Graph execution.
+The L6 tool host must keep the `L6GraphReceiptAuthority` server-side. Each
+`L6GraphQuery` carries an opaque `l6r-sha256:<64-hex>` run identity; its request
+ID is derived exactly as `grq-sha256:<sha256(canonical request payload)>`.
+The authority atomically claims the run plus an execution fingerprint covering
+the query, resolved scopes, ACL/policy, L5 publication/read-back, crosswalk,
+Graph model, Runtime 1.1 budget, and RequiredMember authority before calling
+Graph. Only authority-identical completed retries reuse the persisted result
+and receipt. Any changed authority, provider abort, or invalid result consumes
+or rejects the run, wakes concurrent waiters, and performs no second Graph
+call. The included
+`L6InMemoryGraphReceiptAuthority` is the process-local test implementation.
 Callers receive only the opaque receipt ID/hash; they cannot submit receipt
-contents. L7 may replace it with a durable atomic store implementing the same
-protocol. A durable or multi-process host injects an immutable
+contents. A production multi-process host must use a durable adapter preserving
+the same atomic claim/completion/failure transitions. A durable host injects an immutable
 `L6AuthorityKeyringSnapshot` through `L6AuthorityKeyringProvider`. Snapshots
 carry authority ID/version/algorithm, validity window, state, and verifier;
 atomic versioned replacement supports rotation, disable, and revocation.

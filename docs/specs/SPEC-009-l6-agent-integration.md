@@ -24,10 +24,23 @@ activate schema-2 CLI behavior or change schema-1 behavior.
 2. Verify intact L5a and L5b persisted publication/read-back authority.
 3. Verify exact access policy, principal scope hash, governed assets, project
    scope, Graph/Search ACL equality, and all serving/publication fingerprints.
-4. Execute one canonical Graph request bounded by approved paths,
-   relationships, K, record count, and RequiredMember authority.
-5. The server issues a unique opaque `L6GraphExecutionReceipt` after validating
-   the completed Graph result. The receipt binds request/result/scope,
+4. Derive `graph_request_id` as
+   `grq-sha256:<sha256(canonical request payload)>`, where the payload excludes
+   only the derived ID and self-hash. Claim an opaque
+   `l6r-sha256:<64-hex>` run identity and one exact execution fingerprint at
+   the trusted receipt authority. The fingerprint binds the canonical query,
+   both resolved scope hashes, ACL/access policy, L5a/L5b publication,
+   crosswalk, Graph model, read-back receipts, Runtime 1.1 budget
+   ID/version/schema/hash, and RequiredMember authority. Then execute one Graph
+   request bounded by approved paths, relationships, K, record count, and
+   RequiredMember authority. The claim is atomic across tool instances.
+   A byte-identical, authority-identical completed retry returns the persisted
+   result and receipt without another provider call. A different request,
+   scope, policy, publication, model, budget, or RequiredMember authority fails
+   before Graph. Provider `BaseException` and result-validation failures
+   atomically consume the run and wake all waiters before re-raising.
+5. The server issues one opaque `L6GraphExecutionReceipt` after validating
+   the completed Graph result. The receipt binds run/request/result/scope,
    publication/ACL hashes, canonical IDs, assertion count, and typed accounting.
    A trusted atomic store validates all expected bindings and consumes the
    receipt once. Missing, forged, stale, replayed, or cross-scope receipts cause
@@ -140,7 +153,14 @@ are never completeness or relationship proof.
 ## Persistence and deployment parity
 
 `build_l6_agent_definition` creates deterministic instructions, five explicit
-tool schemas, connection requirements, and call limits.
+tool schemas, connection requirements, and call limits. Agent display text is
+NFC-safe under a display-name grammar and excludes controls, bidi formatting,
+secrets, URLs, scheme-less endpoints/paths, traversal, query/fragment syntax,
+principals, emails, and provider metadata. Descriptions/instructions use a
+separate safe human-text policy. Connection references accept stable repo-defined
+opaque IDs, UUIDs, Fabric workspace/item UUID pairs, and structurally valid
+Azure ARM resource IDs only. A recursive pre-persistence scan revalidates every
+string and the exact closed tool/connection names.
 `persist_l6_agent_definition` verifies the definition hash, writes canonical
 JSON, and reads back exact bytes and semantic content.
 
