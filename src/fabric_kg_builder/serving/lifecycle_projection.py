@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import resource
 import shutil
 import tempfile
 import time
@@ -72,6 +71,7 @@ from fabric_kg_builder.enrichment.schema2_validation_stage import (
     l3_input_fingerprint,
 )
 from fabric_kg_builder.model.arrow_schemas import L4_PROJECTION_TABLE_SCHEMAS
+from fabric_kg_builder.platform import process_resource_usage
 from fabric_kg_builder.semantic.source_tables import (
     L4_ACCEPTED_VERSIONS,
     L4_PROJECTION_CODE_VERSION,
@@ -2005,10 +2005,7 @@ def _metrics(
     started: float,
     storage_write_bytes: int,
 ) -> StageResourceMetrics:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    peak_rss = int(usage.ru_maxrss)
-    if os.uname().sysname != "Darwin":
-        peak_rss *= 1024
+    usage = process_resource_usage()
     values = {
         "identity": _identity(
             source,
@@ -2022,7 +2019,7 @@ def _metrics(
         "stage_name": L4_STAGE_NAME,
         "wall_ms": max(0, int((time.perf_counter() - started) * 1000)),
         "cpu_ms": max(0, int(time.process_time() * 1000)),
-        "peak_rss_bytes": peak_rss,
+        "peak_rss_bytes": usage.peak_rss_bytes,
         "storage_read_bytes": source.output_manifest.total_byte_count,
         "storage_write_bytes": storage_write_bytes,
         "network_request_bytes": 0,

@@ -17,7 +17,6 @@ import json
 import math
 import os
 import re
-import resource
 import shutil
 import tempfile
 import time
@@ -65,6 +64,7 @@ from fabric_kg_builder.contracts.runtime import (
     SearchCitationEnvelope,
     SourceCallReceipt,
 )
+from fabric_kg_builder.platform import process_resource_usage
 from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
 from fabric_kg_builder.serving.structured_publication import (
     L5aStageResult,
@@ -1838,10 +1838,7 @@ def _metrics(
     storage_write_bytes: int,
     cache_hits: int,
 ) -> StageResourceMetrics:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    peak_rss = int(usage.ru_maxrss)
-    if os.uname().sysname != "Darwin":
-        peak_rss *= 1024
+    usage = process_resource_usage()
     values = {
         "identity": _identity(compiled.source, "c0.stage_resource_metrics"),
         "resource_metrics_id": deterministic_contract_id(
@@ -1857,7 +1854,7 @@ def _metrics(
         "stage_name": L5B_STAGE_NAME,
         "wall_ms": max(0, int((time.perf_counter() - started) * 1000)),
         "cpu_ms": max(0, int((time.process_time() - cpu_started) * 1000)),
-        "peak_rss_bytes": max(0, peak_rss - rss_started),
+        "peak_rss_bytes": max(0, usage.peak_rss_bytes - rss_started),
         "storage_read_bytes": (
             compiled.source.manifest.total_byte_count
             + compiled.l5a_result.output_manifest.total_byte_count
@@ -2358,8 +2355,7 @@ def run_l5b(
 
     started = time.perf_counter()
     cpu_started = time.process_time()
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    rss_started = int(usage.ru_maxrss) * (1 if os.uname().sysname == "Darwin" else 1024)
+    rss_started = process_resource_usage().peak_rss_bytes
     started_at = datetime.now(timezone.utc)
     compiled = compile_l5b_publication(
         source,

@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import os
-import resource
 import shutil
 import tempfile
 import time
@@ -49,6 +48,7 @@ from fabric_kg_builder.contracts.resources import (
 )
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.domain.service import compute_contract_hash
+from fabric_kg_builder.platform import process_resource_usage
 from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
 
 L5A_STAGE_NAME = "schema2-structured-publication"
@@ -2744,10 +2744,7 @@ def _metrics(
     fabric_rows_written: int,
     cache_hits: int,
 ) -> StageResourceMetrics:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    peak_rss = int(usage.ru_maxrss)
-    if os.uname().sysname != "Darwin":
-        peak_rss *= 1024
+    usage = process_resource_usage()
     values = {
         "identity": _identity(
             compiled.source,
@@ -2766,7 +2763,7 @@ def _metrics(
         "stage_name": L5A_STAGE_NAME,
         "wall_ms": max(0, int((time.perf_counter() - started) * 1000)),
         "cpu_ms": max(0, int((time.process_time() - cpu_started) * 1000)),
-        "peak_rss_bytes": peak_rss,
+        "peak_rss_bytes": usage.peak_rss_bytes,
         "storage_read_bytes": compiled.source.manifest.total_byte_count,
         "storage_write_bytes": storage_write_bytes,
         "network_request_bytes": accounting.network_request_bytes,
