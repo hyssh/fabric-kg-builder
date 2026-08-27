@@ -21,6 +21,7 @@
 | 10 | 2026-08-25 | Copilot | Required exact collection-policy binding to the sealed `CompletenessRequirementV2`, full leaf re-derivation for every candidate kind against interrupted-run forgery, and leaf fingerprints bound to the complete canonical `SourceUnit` artifact; registered EXT-115 and EXT-116. |
 | 11 | 2026-08-26 | Copilot | Added the isolated local L4 audit and asserted-only serving projection gate (§15.5); L5 deployment/publication, runtime, and schema-2 CLI activation remain excluded. |
 | 12 | 2026-08-25 | Copilot | Added the isolated L5a structured publication gate (§15.6) with persisted target definitions, bounded fake-client lifecycle, exact read-back equivalence, corruption-safe reuse, and no Search/L6/L7 activation. |
+| 13 | 2026-08-26 | Copilot | Added the L5b Runtime 1.1 and L6 bounded agent-integration gates (§15.7–15.8), including complete/partial/abstain, exact citations, call bounds, config read-back, and RDF inactivity. |
 
 ---
 
@@ -1565,6 +1566,50 @@ PYTHONPATH=src pytest -q \
   tests/unit/test_l5a_structured_publication.py \
   tests/unit/test_schema2_projection_stage.py \
   tests/contract/test_c0_publish_contracts.py
+```
+
+### 15.7 L5b Runtime 1.1 evidence gate
+
+The L5b gate remains the authoritative Search evidence-plane test surface. It
+must cover intact L5a/L5b publication authority, agentic and exact authorized
+direct retrieval, all `QueryBudgetV1_1` dimensions, candidate and operation
+accounting, spoofed documents, ACL and publication drift, truncation, warnings,
+source failures, Unicode-safe exact quotes, citation collisions, and exact
+`AgenticRetrievalCoverageReceiptV1_1` validation.
+
+```text
+PYTHONPATH=src python3 -m pytest -q \
+  tests/unit/test_l5b_evidence_retrieval.py \
+  tests/contract/test_c0_runtime_contracts.py
+```
+
+### 15.8 L6 bounded agent-integration gate
+
+The L6 gate uses fake scope, Graph, and sealed-L5b hosts. No live deployment,
+model call, Graph call, Search call, embedding call, vector call, or RDF
+projection occurs. Required cases are:
+
+- exact complete Graph plus complete RequiredMember/citation coverage;
+- partial Graph coverage with exact safe missing authority IDs;
+- Graph empty, source error, out-of-scope return, warning, truncation, stale
+  scope/hash, policy mismatch/collision, and unauthorized principal;
+- Search spoof, ACL mismatch, truncation, warning, source failure, duplicate or
+  misassigned citation, and stale envelope/presentation hash;
+- Runtime 1.1 budget exhaustion and Graph/Search overexecution;
+- one authorized direct fallback route with exact origin binding;
+- multiple manifests/scopes, multi-endpoint relationships, K bounds, and
+  Unicode-safe citation/question handling;
+- explicit five-tool schemas, zero-synthesis output assertions, deterministic
+  instructions, local definition hash/read-back equivalence, and config drift;
+- at most one Graph request, at most one selected L5b retrieval request, zero
+  fabric-kg synthesis calls, unchanged schema-1 behavior, and RDF inactivity.
+
+```text
+PYTHONPATH=src python3 -m pytest -q \
+  tests/unit/test_l6_agent_integration.py
+
+PYTHONPATH=src python3 -m pytest -q -m integration \
+  tests/integration/test_l6_agent_integration.py
 ```
 
 L4 validation command:
