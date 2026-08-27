@@ -9,6 +9,7 @@ from fabric_kg_builder.agent.metadata import AgentMetadata, load_agent_metadata
 from fabric_kg_builder.agent.l6_integration import (
     L6AgentOrchestrator,
     L6Authorities,
+    L6CanonicalAgentDefinition,
     build_l6_agent_definition,
     build_l6_agent_instructions,
     build_l6_tool_definitions,
@@ -25,6 +26,7 @@ __all__ = [
     "normalize_citations",
     "L6AgentOrchestrator",
     "L6Authorities",
+    "L6CanonicalAgentDefinition",
     "build_l6_agent_definition",
     "build_l6_agent_instructions",
     "build_l6_tool_definitions",

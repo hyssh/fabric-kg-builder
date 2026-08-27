@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from urllib.parse import unquote, urlparse
@@ -22,6 +22,7 @@ from urllib.parse import unquote, urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from fabric_kg_builder.contracts.base import (
+    FrozenDict,
     canonical_json,
     canonical_sha256,
     normalize_nfc,
@@ -41,17 +42,29 @@ from fabric_kg_builder.contracts.runtime import (
 )
 from fabric_kg_builder.serving.evidence_retrieval import (
     CheckpointIntegritySigner,
+    L5B_PUBLICATION_CODE_VERSION,
+    L5B_STAGE_CONTRACT_VERSION,
+    L5B_TARGET_VERSION,
     L5bRetrievalResult,
     L5bStageResult,
     require_l5b_publication_receipt,
 )
 from fabric_kg_builder.serving.structured_publication import (
+    L5A_PUBLICATION_CODE_VERSION,
+    L5A_STAGE_CONTRACT_VERSION,
+    L5A_TARGET_VERSION,
     L5aStageResult,
     require_l5a_publication_receipt,
 )
 
 L6_TOOLSET_VERSION = "1.0.0"
 L6_INSTRUCTIONS_VERSION = "l6-evidence-first-v1"
+L6_DEFINITION_SCHEMA_VERSION = "1.0.0"
+L6_DEFINITION_TEMPLATE_VERSION = "l6-agent-definition-v1"
+L6_AGENT_NAME_POLICY = "safe-display-name-v1"
+L6_RUNTIME_COVERAGE_RECEIPT_V1_1_SCHEMA_HASH = (
+    "92d39c05d33a360bd542386af022a382ba18788efe4a1fe5b0728c42b5aec652"
+)
 
 L6_TOOL_RESOLVE_SCOPE = "fabric_kg_resolve_ontology_scope"
 L6_TOOL_EXECUTE_GRAPH = "fabric_kg_execute_bounded_graph_scope"
@@ -3865,7 +3878,8 @@ def build_l6_agent_instructions() -> str:
             "Never call Search before a valid Ontology/Graph scope and Graph result.",
             "Never broaden canonical IDs, relationships, paths, K, ACLs, or budgets.",
             "Tool outputs are evidence only. Do not treat rank or top-k as completeness.",
-            "Synthesize at most once from the returned L6SynthesisInput.",
+            "L6 performs zero local synthesis. A downstream boundary may synthesize "
+            "at most once from the returned L6SynthesisInput.",
             "Every factual statement must be supported by an exact Graph assertion "
             "and/or its policy-approved CitationPresentation.",
             "If readiness is partial, explicitly identify only the safe missing "
@@ -4064,34 +4078,160 @@ def _validate_l6_definition_strings(
     _l6_safe_stable_text(value, field_name="L6 definition text")
 
 
-def _validate_l6_definition_structure(definition: Mapping[str, Any]) -> None:
-    tools = definition.get("tools")
-    expected_tool_names = (
-        L6_TOOL_RESOLVE_SCOPE,
-        L6_TOOL_EXECUTE_GRAPH,
-        L6_TOOL_RETRIEVE_EVIDENCE,
-        L6_TOOL_ASSEMBLE_CITATIONS,
-        L6_TOOL_REPORT_READINESS,
-    )
-    if (
-        not isinstance(tools, (list, tuple))
-        or tuple(
-            item.get("name") if isinstance(item, Mapping) else None
-            for item in tools
+def _l6_authority_reference(
+    *,
+    authority: str,
+    stage_contract_version: str,
+    publication_code_version: str,
+    target_version: str,
+) -> dict[str, str]:
+    values = {
+        "authority": authority,
+        "stage_contract_version": stage_contract_version,
+        "publication_code_version": publication_code_version,
+        "target_version": target_version,
+    }
+    return {**values, "authority_hash": canonical_sha256(values)}
+
+
+def _l6_definition_template_authority() -> dict[str, Any]:
+    runtime = {
+        "authority": "C0.Runtime",
+        "contract_version": "1.1.0",
+        "query_budget_schema_hash": QUERY_BUDGET_V1_1_SCHEMA_HASH,
+        "coverage_receipt_schema_hash": (
+            L6_RUNTIME_COVERAGE_RECEIPT_V1_1_SCHEMA_HASH
+        ),
+    }
+    runtime["authority_hash"] = canonical_sha256(runtime)
+    instructions = build_l6_agent_instructions()
+    return {
+        "schema_version": L6_DEFINITION_SCHEMA_VERSION,
+        "template_version": L6_DEFINITION_TEMPLATE_VERSION,
+        "agent_name_policy": L6_AGENT_NAME_POLICY,
+        "agent_name": "{trusted_agent_name}",
+        "toolset_version": L6_TOOLSET_VERSION,
+        "instructions_version": L6_INSTRUCTIONS_VERSION,
+        "instructions_hash": canonical_sha256(instructions),
+        "instructions": instructions,
+        "tools": build_l6_tool_definitions(),
+        "connections": {
+            "fabric_data_agent": {
+                "type": "fabric_data_agent",
+                "project_connection_id": "{trusted_fabric_connection_id}",
+                "required": True,
+            },
+            "l6_remote_tool": {
+                "type": "foundry_remote_tool",
+                "project_connection_id": "{trusted_remote_tool_connection_id}",
+                "required": True,
+            },
+        },
+        "limits": {
+            "graph_requests": 1,
+            "selected_search_requests": 1,
+            "local_synthesis_calls": 0,
+            "downstream_boundary_calls": 1,
+        },
+        "authorities": {
+            "runtime_1_1": runtime,
+            "l5a": _l6_authority_reference(
+                authority="L5a",
+                stage_contract_version=L5A_STAGE_CONTRACT_VERSION,
+                publication_code_version=L5A_PUBLICATION_CODE_VERSION,
+                target_version=L5A_TARGET_VERSION,
+            ),
+            "l5b": _l6_authority_reference(
+                authority="L5b",
+                stage_contract_version=L5B_STAGE_CONTRACT_VERSION,
+                publication_code_version=L5B_PUBLICATION_CODE_VERSION,
+                target_version=L5B_TARGET_VERSION,
+            ),
+        },
+    }
+
+
+L6_DEFINITION_TEMPLATE_CODE_HASH = canonical_sha256(
+    _l6_definition_template_authority()
+)
+
+
+def _build_l6_definition_values(
+    *,
+    agent_name: str,
+    fabric_data_agent_connection_id: str,
+    foundry_remote_tool_connection_id: str,
+) -> dict[str, Any]:
+    _l6_safe_agent_name(agent_name)
+    _l6_safe_connection_id(fabric_data_agent_connection_id)
+    _l6_safe_connection_id(foundry_remote_tool_connection_id)
+    values = _l6_definition_template_authority()
+    values["agent_name"] = agent_name
+    values["template_code_hash"] = L6_DEFINITION_TEMPLATE_CODE_HASH
+    values["connections"]["fabric_data_agent"][
+        "project_connection_id"
+    ] = fabric_data_agent_connection_id
+    values["connections"]["l6_remote_tool"][
+        "project_connection_id"
+    ] = foundry_remote_tool_connection_id
+    values["definition_hash"] = canonical_sha256(values)
+    _validate_l6_definition_strings(values)
+    return values
+
+
+def _freeze_l6_definition(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return FrozenDict(
+            {
+                str(key): _freeze_l6_definition(item)
+                for key, item in value.items()
+            }
         )
-        != expected_tool_names
-    ):
-        raise ValueError("L6 definition tool names differ from the closed toolset")
-    connections = definition.get("connections")
-    if not isinstance(connections, Mapping) or set(connections) != {
-        "fabric_data_agent",
-        "l6_remote_tool",
-    }:
-        raise ValueError("L6 definition connections differ from the closed set")
-    agent_name = definition.get("agent_name")
-    if not isinstance(agent_name, str):
-        raise ValueError("L6 agent name contains unsafe display text")
-    _validate_l6_definition_strings(definition)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_l6_definition(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
+class L6CanonicalAgentDefinition(Mapping[str, Any]):
+    """Immutable canonical definition derived only from trusted deployment inputs."""
+
+    agent_name: str
+    fabric_data_agent_connection_id: str
+    foundry_remote_tool_connection_id: str
+    _values: FrozenDict[str, Any] = field(init=False, repr=False)
+    _canonical_bytes: bytes = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        values = _build_l6_definition_values(
+            agent_name=self.agent_name,
+            fabric_data_agent_connection_id=self.fabric_data_agent_connection_id,
+            foundry_remote_tool_connection_id=self.foundry_remote_tool_connection_id,
+        )
+        frozen = _freeze_l6_definition(values)
+        object.__setattr__(self, "_values", frozen)
+        object.__setattr__(
+            self,
+            "_canonical_bytes",
+            (canonical_json(values) + "\n").encode("utf-8"),
+        )
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return self._canonical_bytes
+
+    @property
+    def definition_hash(self) -> str:
+        return str(self._values["definition_hash"])
 
 
 def build_l6_agent_definition(
@@ -4099,67 +4239,69 @@ def build_l6_agent_definition(
     agent_name: str,
     fabric_data_agent_connection_id: str,
     foundry_remote_tool_connection_id: str,
-) -> dict[str, Any]:
-    """Build a local deployment definition using existing connection abstractions."""
+) -> L6CanonicalAgentDefinition:
+    """Build the sole canonical L6 deployment definition authority."""
 
-    _l6_safe_agent_name(agent_name)
-    _l6_safe_connection_id(fabric_data_agent_connection_id)
-    _l6_safe_connection_id(foundry_remote_tool_connection_id)
-    values: dict[str, Any] = {
-        "schema_version": "1.0.0",
-        "toolset_version": L6_TOOLSET_VERSION,
-        "agent_name": agent_name,
-        "instructions_version": L6_INSTRUCTIONS_VERSION,
-        "instructions": build_l6_agent_instructions(),
-        "tools": build_l6_tool_definitions(),
-        "connections": {
-            "fabric_data_agent": {
-                "project_connection_id": fabric_data_agent_connection_id,
-                "required": True,
-            },
-            "l6_remote_tool": {
-                "project_connection_id": foundry_remote_tool_connection_id,
-                "required": True,
-            },
-        },
-        "limits": {
-            "graph_requests": 1,
-            "retrieval_requests": 1,
-            "downstream_synthesis_calls": 1,
-        },
-        "definition_hash": "",
-    }
-    values["definition_hash"] = canonical_sha256(
-        {key: value for key, value in values.items() if key != "definition_hash"}
+    return L6CanonicalAgentDefinition(
+        agent_name=agent_name,
+        fabric_data_agent_connection_id=fabric_data_agent_connection_id,
+        foundry_remote_tool_connection_id=foundry_remote_tool_connection_id,
     )
-    _validate_l6_definition_structure(values)
-    return values
 
 
 def persist_l6_agent_definition(
     path: Path,
     definition: Mapping[str, Any],
+    *,
+    expected_definition: L6CanonicalAgentDefinition | None = None,
 ) -> str:
-    """Persist and read back one canonical definition, failing on any drift."""
+    """Persist only bytes exactly equal to a trusted canonical definition."""
 
-    _validate_l6_definition_structure(definition)
-    expected_hash = str(definition.get("definition_hash", ""))
+    if expected_definition is None:
+        if type(definition) is not L6CanonicalAgentDefinition:
+            raise ValueError("L6 agent definition lacks canonical authority")
+        expected_definition = definition
+    if type(expected_definition) is not L6CanonicalAgentDefinition:
+        raise ValueError("L6 agent definition lacks canonical authority")
+    trusted_expected = L6CanonicalAgentDefinition(
+        agent_name=expected_definition.agent_name,
+        fabric_data_agent_connection_id=(
+            expected_definition.fabric_data_agent_connection_id
+        ),
+        foundry_remote_tool_connection_id=(
+            expected_definition.foundry_remote_tool_connection_id
+        ),
+    )
+    expected_bytes = trusted_expected.canonical_bytes
+    candidate_bytes = (canonical_json(dict(definition)) + "\n").encode("utf-8")
+    if candidate_bytes != expected_bytes:
+        raise ValueError("L6 agent definition differs from canonical authority")
+    expected_hash = trusted_expected.definition_hash
+    parsed_expected = json.loads(expected_bytes)
     calculated_hash = canonical_sha256(
         {
             key: value
-            for key, value in definition.items()
+            for key, value in parsed_expected.items()
             if key != "definition_hash"
         }
     )
     if expected_hash != calculated_hash:
-        raise ValueError("L6 agent definition hash mismatch")
+        raise ValueError("L6 canonical agent definition hash mismatch")
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = canonical_json(definition) + "\n"
-    path.write_text(payload, encoding="utf-8")
-    read_back = json.loads(path.read_text(encoding="utf-8"))
+    path.write_bytes(expected_bytes)
+    persisted_bytes = path.read_bytes()
+    read_back = json.loads(persisted_bytes)
     if (
-        canonical_json(read_back) != canonical_json(definition)
-        or path.read_text(encoding="utf-8") != payload
+        persisted_bytes != expected_bytes
+        or read_back != parsed_expected
+        or canonical_sha256(
+            {
+                key: value
+                for key, value in read_back.items()
+                if key != "definition_hash"
+            }
+        )
+        != expected_hash
     ):
         raise ValueError("L6 agent definition read-back drift")
     return expected_hash
