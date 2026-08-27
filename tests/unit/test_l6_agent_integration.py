@@ -96,12 +96,19 @@ class _GraphReceiptStore(l6.L6InMemoryGraphReceiptAuthority):
         super().__init__()
         self.verify_calls = 0
 
-    def verify_and_consume(self, receipt_id, receipt_hash, expectation):
+    def verify_and_consume(
+        self,
+        receipt_id,
+        receipt_hash,
+        expectation,
+        retrieval_claim_hash,
+    ):
         self.verify_calls += 1
         return super().verify_and_consume(
             receipt_id,
             receipt_hash,
             expectation,
+            retrieval_claim_hash,
         )
 
 
@@ -374,6 +381,33 @@ def _standalone_evidence_boundary():
     return tool, delegate, store, request, kwargs
 
 
+def _claimed_evidence_capability():
+    tool, _, store, request, kwargs = _standalone_evidence_boundary()
+    output = tool.retrieve(request, **kwargs)
+    collection = l6.assemble_l6_citation_collection(
+        l6.L6CitationToolInput(
+            coverage_receipt_id=output.coverage.coverage_receipt_id,
+            coverage_receipt_hash=output.coverage.coverage_receipt_hash,
+            citation_envelope_ids=tuple(
+                sorted(
+                    item.search_citation_envelope_id
+                    for item in output.citations
+                )
+            ),
+        ),
+        citations=output.citations,
+        presentations=output.presentations,
+        coverage=output.coverage,
+        context=kwargs["context"],
+        budget=kwargs["budget"],
+        retrieval_scope=kwargs["retrieval_scope"],
+        originating_context=kwargs["originating_context"],
+        originating_budget=kwargs["originating_budget"],
+    )
+    graph_receipt = store._receipts[request.graph_execution_receipt_id]
+    return store, graph_receipt, output, collection
+
+
 @pytest.mark.unit
 def test_complete_path_is_zero_synthesis_and_one_graph_one_search(monkeypatch):
     evidence_result, context, budget, _, _ = _evidence()
@@ -510,6 +544,165 @@ def test_evidence_receipt_is_authenticated_bound_and_single_use(monkeypatch):
 
 
 @pytest.mark.unit
+def test_one_idempotent_evidence_capability_per_graph_receipt():
+    store, graph_receipt, output, collection = _claimed_evidence_capability()
+    first = store.issue_evidence(
+        graph_receipt=graph_receipt,
+        evidence_output=output,
+        citation_collection=collection,
+    )
+    second = store.issue_evidence(
+        graph_receipt=graph_receipt,
+        evidence_output=output,
+        citation_collection=collection,
+    )
+    assert first == second
+    store.verify_and_consume_evidence(first)
+    with pytest.raises(ValueError):
+        store.issue_evidence(
+            graph_receipt=graph_receipt,
+            evidence_output=output,
+            citation_collection=collection,
+        )
+
+
+@pytest.mark.unit
+def test_evidence_capability_rejects_wrong_claim_and_unconsumed_graph():
+    store, graph_receipt, output, collection = _claimed_evidence_capability()
+    values = output.model_dump(
+        mode="python",
+        exclude={"output_hash"},
+        round_trip=True,
+    )
+    values["retrieval_claim_hash"] = "f" * 64
+    wrong_claim = l6.L6EvidenceToolOutput(
+        **values,
+        output_hash=canonical_sha256(values),
+    )
+    with pytest.raises(ValueError, match="retrieval claim"):
+        store.issue_evidence(
+            graph_receipt=graph_receipt,
+            evidence_output=wrong_claim,
+            citation_collection=collection,
+        )
+
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology)
+    _, _, budget, _, _ = _evidence()
+    unconsumed = store.issue(
+        graph_query=query,
+        graph_result=_graph_result(ontology, query),
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+    )
+    with pytest.raises(ValueError):
+        store.issue_evidence(
+            graph_receipt=unconsumed,
+            evidence_output=output,
+            citation_collection=collection,
+        )
+
+
+@pytest.mark.unit
+def test_concurrent_evidence_issuers_receive_one_capability():
+    store, graph_receipt, output, collection = _claimed_evidence_capability()
+    barrier = threading.Barrier(5)
+
+    def issue():
+        barrier.wait()
+        return store.issue_evidence(
+            graph_receipt=graph_receipt,
+            evidence_output=output,
+            citation_collection=collection,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(issue) for _ in range(4)]
+        barrier.wait()
+        receipts = [future.result() for future in futures]
+    assert len({item.evidence_execution_receipt_id for item in receipts}) == 1
+
+
+@pytest.mark.unit
+def test_graph_revocation_invalidates_evidence_signed_by_new_active_key():
+    store, graph_receipt, output, collection = _claimed_evidence_capability()
+    now = store._clock_milliseconds()
+    new_key = b"evidence-rotation-key".ljust(32, b"\0")
+    new_authenticator = l6._L6HmacGraphReceiptAuthenticator(new_key)
+    new_metadata = l6.L6AuthorityKeyMetadata(
+        authority_id="gxra-sha256:" + canonical_sha256(new_key.hex()),
+        authority_version=2,
+        algorithm="HMAC-SHA256",
+        not_before_milliseconds=now - 1,
+        not_after_milliseconds=now + 100_000,
+        state="active",
+    )
+    old_key = store.keyring_provider.snapshot().keys[0]
+    store.keyring_provider.replace(
+        l6.L6AuthorityKeyringSnapshot(
+            snapshot_version=2,
+            keys=(
+                old_key,
+                l6.L6TrustedAuthorityKey(
+                    metadata=new_metadata,
+                    authenticator=new_authenticator,
+                ),
+            ),
+        )
+    )
+    evidence_receipt = store.issue_evidence(
+        graph_receipt=graph_receipt,
+        evidence_output=output,
+        citation_collection=collection,
+    )
+    assert evidence_receipt.authority_version == 2
+    store.keyring_provider.replace(
+        l6.L6AuthorityKeyringSnapshot(
+            snapshot_version=3,
+            keys=(
+                l6.L6TrustedAuthorityKey(
+                    metadata=old_key.metadata.model_copy(
+                        update={"state": "revoked"}
+                    ),
+                    authenticator=old_key.authenticator,
+                ),
+                l6.L6TrustedAuthorityKey(
+                    metadata=new_metadata,
+                    authenticator=new_authenticator,
+                ),
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="Graph receipt authentication"):
+        store.verify_and_consume_evidence(evidence_receipt)
+
+
+@pytest.mark.unit
+def test_evidence_issue_uses_one_keyring_snapshot():
+    store, graph_receipt, output, collection = _claimed_evidence_capability()
+    original = store.keyring_provider
+
+    class _CountingProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot(self):
+            self.calls += 1
+            return original.snapshot()
+
+    counting = _CountingProvider()
+    store.keyring_provider = counting
+    store.issue_evidence(
+        graph_receipt=graph_receipt,
+        evidence_output=output,
+        citation_collection=collection,
+    )
+    assert counting.calls == 1
+
+
+@pytest.mark.unit
 def test_standalone_retrieval_requires_graph_receipt_fields():
     with pytest.raises(ValidationError):
         l6.L6EvidenceToolInput(
@@ -577,6 +770,7 @@ def test_server_side_receipt_authority_issues_unique_single_use_receipts():
             retrieval,
             _evidence()[1],
         ),
+        "a" * 64,
     ) == receipt
     second = store.issue(
         graph_query=query,
@@ -596,6 +790,7 @@ def test_server_side_receipt_authority_issues_unique_single_use_receipts():
                 retrieval,
                 _evidence()[1],
             ),
+            "a" * 64,
         )
     assert store.verify_and_consume(
         second.graph_execution_receipt_id,
@@ -605,6 +800,7 @@ def test_server_side_receipt_authority_issues_unique_single_use_receipts():
             retrieval,
             _evidence()[1],
         ),
+        "b" * 64,
     ) == second
 
 
@@ -1804,6 +2000,7 @@ def test_complete_evidence_output_rejects_empty_citations():
     values = {
         "graph_execution_receipt_id": "gxr-sha256:" + "a" * 64,
         "graph_execution_receipt_hash": "b" * 64,
+        "retrieval_claim_hash": "c" * 64,
         "citations": (),
         "presentations": (),
         "coverage_receipt": evidence_result.coverage,
@@ -1866,6 +2063,7 @@ def test_evidence_output_rejects_self_rehashed_forged_stable_presentation():
     values = {
         "graph_execution_receipt_id": "gxr-sha256:" + "a" * 64,
         "graph_execution_receipt_hash": "b" * 64,
+        "retrieval_claim_hash": "c" * 64,
         "citations": evidence_result.citations,
         "presentations": (forged, *stable[1:]),
         "coverage_receipt": evidence_result.coverage,
@@ -2206,6 +2404,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         "graph_execution_receipt_hash": (
             graph_output.graph_execution_receipt.receipt_hash
         ),
+        "retrieval_claim_hash": "c" * 64,
         "citations": evidence_result.citations,
         "presentations": _stable_presentations(evidence_result),
         "coverage_receipt": evidence_result.coverage,
@@ -2213,6 +2412,12 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
     evidence_output = l6.L6EvidenceToolOutput(
         **evidence_output_values,
         output_hash=canonical_sha256(evidence_output_values),
+    )
+    store.verify_and_consume(
+        graph_output.graph_execution_receipt.graph_execution_receipt_id,
+        graph_output.graph_execution_receipt.receipt_hash,
+        l6._receipt_expectation(ontology, retrieval, context),
+        evidence_output.retrieval_claim_hash,
     )
     evidence_receipt = store.issue_evidence(
         graph_receipt=graph_output.graph_execution_receipt,

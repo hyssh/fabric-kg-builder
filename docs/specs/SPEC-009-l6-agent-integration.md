@@ -110,6 +110,22 @@ stable collection hash. Readiness verifies this chain without consuming it.
 The downstream `validate_trusted` acceptance consumes it atomically, so the same
 package cannot authorize a second synthesis call.
 
+Authority state is explicit and lock-protected:
+`issued -> consumed_for_retrieval -> evidence_receipt_issued ->
+evidence_consumed`. Local request/context/scope validation occurs before the
+Graph receipt claim, so malformed requests do not burn it. The claim hashes the
+exact retrieval request, scope, context, and budget. Evidence issuance requires
+that claim and stores exactly one Graph-to-evidence capability. A byte-identical
+retry returns the same unconsumed receipt; different, duplicate-after-consume,
+unclaimed, or concurrent competing issuance cannot mint another capability.
+
+Evidence issuance captures one immutable keyring snapshot under the authority
+lock and uses it for both Graph receipt verification and active-key signing.
+Final synthesis acceptance captures one current snapshot, revalidates both the
+bound Graph and evidence receipt signatures/windows/states, and then consumes
+atomically. Rotation or Graph-key revocation between issuance and consume
+therefore fails closed even when the evidence-signing key remains active.
+
 The citation collection seals a source binding for each presentation:
 `(presentation_id, source_envelope_id, source_envelope_hash,
 stable_presentation_hash)`. Evidence output, collection assembly, readiness,

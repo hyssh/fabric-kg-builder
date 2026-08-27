@@ -464,6 +464,7 @@ class L6EvidenceToolInput(_L6Model):
 class L6EvidenceToolOutput(_L6Model):
     graph_execution_receipt_id: str
     graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retrieval_claim_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     citations: tuple[SearchCitationEnvelope, ...]
     presentations: tuple["L6StableCitationPresentation", ...]
     coverage_receipt: AgenticRetrievalCoverageReceiptV1_1
@@ -998,6 +999,8 @@ class L6EvidenceExecutionReceipt(_L6Model):
     graph_execution_receipt_id: str
     graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_authority_id: str
+    keyring_snapshot_version: int = Field(ge=1)
+    retrieval_claim_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     coverage_receipt_id: str
     coverage_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -1327,6 +1330,9 @@ class L6SynthesisInput(_L6Model):
                         "graph_execution_receipt_hash": (
                             self.graph_execution_receipt.receipt_hash
                         ),
+                        "retrieval_claim_hash": (
+                            self.evidence_execution_receipt.retrieval_claim_hash
+                        ),
                         "citations": self.search_citations,
                         "presentations": self.citation_collection.presentations,
                         "coverage_receipt": self.coverage_receipt,
@@ -1438,6 +1444,7 @@ class L6GraphReceiptAuthority(Protocol):
         receipt_id: str,
         receipt_hash: str,
         expectation: L6GraphReceiptExpectation,
+        retrieval_claim_hash: str,
     ) -> L6GraphExecutionReceipt: ...
 
     def issue_evidence(
@@ -1557,9 +1564,17 @@ class L6AuthorityKeyringSnapshot:
             and item.metadata.not_before_milliseconds <= now_milliseconds
             <= item.metadata.not_after_milliseconds
         )
-        if len(active) != 1:
-            raise ValueError("keyring requires exactly one active signing key")
-        return active[0]
+        if not active:
+            raise ValueError("keyring requires an active signing key")
+        highest_version = max(item.metadata.authority_version for item in active)
+        newest = tuple(
+            item
+            for item in active
+            if item.metadata.authority_version == highest_version
+        )
+        if len(newest) != 1:
+            raise ValueError("keyring active signing version is ambiguous")
+        return newest[0]
 
 
 class L6AuthorityKeyringProvider:
@@ -1583,10 +1598,14 @@ class L6AuthorityKeyringProvider:
 def _verify_graph_receipt_trust(
     receipt: L6GraphExecutionReceipt,
     *,
-    keyring_provider: L6AuthorityKeyringProvider,
+    keyring_provider: L6AuthorityKeyringProvider | None = None,
+    snapshot: L6AuthorityKeyringSnapshot | None = None,
     now_milliseconds: int,
 ) -> None:
-    if not keyring_provider.snapshot().verify(
+    trusted_snapshot = snapshot or (
+        keyring_provider.snapshot() if keyring_provider is not None else None
+    )
+    if trusted_snapshot is None or not trusted_snapshot.verify(
         authority_id=receipt.authority_id,
         authority_version=receipt.authority_version,
         algorithm=receipt.authentication_algorithm,
@@ -1601,10 +1620,14 @@ def _verify_graph_receipt_trust(
 def _verify_evidence_receipt_trust(
     receipt: L6EvidenceExecutionReceipt,
     *,
-    keyring_provider: L6AuthorityKeyringProvider,
+    keyring_provider: L6AuthorityKeyringProvider | None = None,
+    snapshot: L6AuthorityKeyringSnapshot | None = None,
     now_milliseconds: int,
 ) -> None:
-    if not keyring_provider.snapshot().verify(
+    trusted_snapshot = snapshot or (
+        keyring_provider.snapshot() if keyring_provider is not None else None
+    )
+    if trusted_snapshot is None or not trusted_snapshot.verify(
         authority_id=receipt.authority_id,
         authority_version=receipt.authority_version,
         algorithm=receipt.authentication_algorithm,
@@ -1631,9 +1654,12 @@ class L6InMemoryGraphReceiptAuthority:
     ) -> None:
         self._lock = threading.Lock()
         self._receipts: dict[str, L6GraphExecutionReceipt] = {}
-        self._consumed: set[str] = set()
+        self._graph_states: dict[str, str] = {}
+        self._retrieval_claims: dict[str, str] = {}
         self._evidence_receipts: dict[str, L6EvidenceExecutionReceipt] = {}
-        self._consumed_evidence: set[str] = set()
+        self._graph_to_evidence: dict[
+            str, tuple[str, L6EvidenceExecutionReceipt]
+        ] = {}
         self._authority_key = secrets.token_bytes(32)
         self._clock_milliseconds = clock_milliseconds or (
             lambda: int(time.time() * 1000)
@@ -1738,6 +1764,7 @@ class L6InMemoryGraphReceiptAuthority:
             if receipt_id in self._receipts:
                 raise RuntimeError("Graph receipt authority nonce collision")
             self._receipts[receipt_id] = receipt
+            self._graph_states[receipt_id] = "issued"
         return receipt
 
     def verify_and_consume(
@@ -1745,22 +1772,26 @@ class L6InMemoryGraphReceiptAuthority:
         receipt_id: str,
         receipt_hash: str,
         expectation: L6GraphReceiptExpectation,
+        retrieval_claim_hash: str,
     ) -> L6GraphExecutionReceipt:
         with self._lock:
             receipt = self._receipts.get(receipt_id)
+            snapshot = self.keyring_provider.snapshot()
             if (
                 receipt is None
                 or receipt.receipt_hash != receipt_hash
-                or receipt_id in self._consumed
+                or self._graph_states.get(receipt_id) != "issued"
                 or not _receipt_matches_expectation(receipt, expectation)
+                or not re.fullmatch(r"[0-9a-f]{64}", retrieval_claim_hash)
             ):
                 raise ValueError("Graph execution receipt is invalid or replayed")
             _verify_graph_receipt_trust(
                 receipt,
-                keyring_provider=self.keyring_provider,
+                snapshot=snapshot,
                 now_milliseconds=self._clock_milliseconds(),
             )
-            self._consumed.add(receipt_id)
+            self._graph_states[receipt_id] = "consumed_for_retrieval"
+            self._retrieval_claims[receipt_id] = retrieval_claim_hash
             return receipt
 
     def issue_evidence(
@@ -1770,16 +1801,6 @@ class L6InMemoryGraphReceiptAuthority:
         evidence_output: L6EvidenceToolOutput,
         citation_collection: L6CitationPresentationCollection,
     ) -> L6EvidenceExecutionReceipt:
-        persisted_graph = self._receipts.get(
-            graph_receipt.graph_execution_receipt_id
-        )
-        if persisted_graph != graph_receipt:
-            raise ValueError("evidence requires persisted Graph receipt authority")
-        _verify_graph_receipt_trust(
-            graph_receipt,
-            keyring_provider=self.keyring_provider,
-            now_milliseconds=self._clock_milliseconds(),
-        )
         if (
             evidence_output.graph_execution_receipt_id
             != graph_receipt.graph_execution_receipt_id
@@ -1791,44 +1812,94 @@ class L6InMemoryGraphReceiptAuthority:
             != tuple(evidence_output.presentations)
         ):
             raise ValueError("evidence chain differs from Graph authority")
-        signing_key = self.keyring_provider.snapshot().active_signing_key(
-            self._clock_milliseconds()
-        )
-        receipt_id = "exr-sha256:" + secrets.token_hex(32)
-        values = {
-            "evidence_execution_receipt_id": receipt_id,
-            "authority_id": signing_key.metadata.authority_id,
-            "authority_version": signing_key.metadata.authority_version,
-            "authentication_algorithm": signing_key.metadata.algorithm,
-            "issued_at_milliseconds": self._clock_milliseconds(),
-            "graph_execution_receipt_id": graph_receipt.graph_execution_receipt_id,
-            "graph_execution_receipt_hash": graph_receipt.receipt_hash,
-            "graph_authority_id": graph_receipt.authority_id,
-            "evidence_output_hash": evidence_output.output_hash,
-            "coverage_receipt_id": evidence_output.coverage.coverage_receipt_id,
-            "coverage_receipt_hash": evidence_output.coverage.coverage_receipt_hash,
-            "citation_envelope_hashes": citation_collection.citation_envelope_hashes,
-            "source_response_hashes": citation_collection.source_response_hashes,
-            "search_index_fingerprint": (
-                citation_collection.search_index_fingerprint
-            ),
-            "asserted_publication_hash": (
-                citation_collection.asserted_publication_hash
-            ),
-            "required_canonical_id_set_hash": (
-                evidence_output.coverage.required_canonical_id_set_hash
-            ),
-            "citation_collection_hash": citation_collection.collection_hash,
-        }
-        authentication_tag = signing_key.authenticator.sign(values)
-        sealed = {**values, "authentication_tag": authentication_tag}
-        receipt = L6EvidenceExecutionReceipt(
-            **sealed,
-            receipt_hash=canonical_sha256(sealed),
+        graph_id = graph_receipt.graph_execution_receipt_id
+        evidence_fingerprint = canonical_sha256(
+            {
+                "graph_receipt": graph_receipt.receipt_hash,
+                "retrieval_claim": evidence_output.retrieval_claim_hash,
+                "evidence_output": evidence_output.output_hash,
+                "collection": citation_collection.collection_hash,
+            }
         )
         with self._lock:
+            snapshot = self.keyring_provider.snapshot()
+            now = self._clock_milliseconds()
+            if (
+                self._receipts.get(graph_id) != graph_receipt
+                or self._graph_states.get(graph_id) == "evidence_consumed"
+                or self._retrieval_claims.get(graph_id)
+                != evidence_output.retrieval_claim_hash
+            ):
+                raise ValueError(
+                    "evidence requires exact consumed Graph retrieval claim"
+                )
+            existing = self._graph_to_evidence.get(graph_id)
+            if existing is not None:
+                prior_fingerprint, prior_receipt = existing
+                if (
+                    prior_fingerprint == evidence_fingerprint
+                    and self._graph_states.get(graph_id)
+                    == "evidence_receipt_issued"
+                ):
+                    return prior_receipt
+                raise ValueError("Graph receipt already has an evidence capability")
+            if self._graph_states.get(graph_id) != "consumed_for_retrieval":
+                raise ValueError(
+                    "evidence requires consumed Graph retrieval authority"
+                )
+            _verify_graph_receipt_trust(
+                graph_receipt,
+                snapshot=snapshot,
+                now_milliseconds=now,
+            )
+            signing_key = snapshot.active_signing_key(now)
+            receipt_id = "exr-sha256:" + secrets.token_hex(32)
+            values = {
+                "evidence_execution_receipt_id": receipt_id,
+                "authority_id": signing_key.metadata.authority_id,
+                "authority_version": signing_key.metadata.authority_version,
+                "authentication_algorithm": signing_key.metadata.algorithm,
+                "issued_at_milliseconds": now,
+                "keyring_snapshot_version": snapshot.snapshot_version,
+                "retrieval_claim_hash": evidence_output.retrieval_claim_hash,
+                "graph_execution_receipt_id": graph_id,
+                "graph_execution_receipt_hash": graph_receipt.receipt_hash,
+                "graph_authority_id": graph_receipt.authority_id,
+                "evidence_output_hash": evidence_output.output_hash,
+                "coverage_receipt_id": evidence_output.coverage.coverage_receipt_id,
+                "coverage_receipt_hash": (
+                    evidence_output.coverage.coverage_receipt_hash
+                ),
+                "citation_envelope_hashes": (
+                    citation_collection.citation_envelope_hashes
+                ),
+                "source_response_hashes": (
+                    citation_collection.source_response_hashes
+                ),
+                "search_index_fingerprint": (
+                    citation_collection.search_index_fingerprint
+                ),
+                "asserted_publication_hash": (
+                    citation_collection.asserted_publication_hash
+                ),
+                "required_canonical_id_set_hash": (
+                    evidence_output.coverage.required_canonical_id_set_hash
+                ),
+                "citation_collection_hash": citation_collection.collection_hash,
+            }
+            authentication_tag = signing_key.authenticator.sign(values)
+            sealed = {**values, "authentication_tag": authentication_tag}
+            receipt = L6EvidenceExecutionReceipt(
+                **sealed,
+                receipt_hash=canonical_sha256(sealed),
+            )
             self._evidence_receipts[receipt_id] = receipt
-        return receipt
+            self._graph_to_evidence[graph_id] = (
+                evidence_fingerprint,
+                receipt,
+            )
+            self._graph_states[graph_id] = "evidence_receipt_issued"
+            return receipt
 
     def verify_and_consume_evidence(
         self,
@@ -1840,16 +1911,32 @@ class L6InMemoryGraphReceiptAuthority:
             )
             if (
                 persisted != receipt
-                or receipt.evidence_execution_receipt_id
-                in self._consumed_evidence
+                or self._graph_states.get(
+                    receipt.graph_execution_receipt_id
+                )
+                != "evidence_receipt_issued"
             ):
                 raise ValueError("evidence execution receipt is invalid or replayed")
+            snapshot = self.keyring_provider.snapshot()
+            now = self._clock_milliseconds()
+            graph_receipt = self._receipts.get(
+                receipt.graph_execution_receipt_id
+            )
+            if graph_receipt is None:
+                raise ValueError("evidence Graph authority is unavailable")
+            _verify_graph_receipt_trust(
+                graph_receipt,
+                snapshot=snapshot,
+                now_milliseconds=now,
+            )
             _verify_evidence_receipt_trust(
                 receipt,
-                keyring_provider=self.keyring_provider,
-                now_milliseconds=self._clock_milliseconds(),
+                snapshot=snapshot,
+                now_milliseconds=now,
             )
-            self._consumed_evidence.add(receipt.evidence_execution_receipt_id)
+            self._graph_states[
+                receipt.graph_execution_receipt_id
+            ] = "evidence_consumed"
 
 
 class L6VerifiedScopeTool:
@@ -2065,10 +2152,19 @@ class L6VerifiedEvidenceTool:
             retrieval_scope,
             context,
         )
+        retrieval_claim_hash = canonical_sha256(
+            {
+                "request": request.model_dump(mode="json"),
+                "scope": retrieval_scope.retrieval_scope_hash,
+                "context": context.request_context_hash,
+                "budget": budget.budget_hash,
+            }
+        )
         receipt = self._graph_receipt_authority.verify_and_consume(
             request.graph_execution_receipt_id,
             request.graph_execution_receipt_hash,
             expectation,
+            retrieval_claim_hash,
         )
         _validate_graph_execution_receipt(
             receipt,
@@ -2112,6 +2208,7 @@ class L6VerifiedEvidenceTool:
         output_values = {
             "graph_execution_receipt_id": receipt.graph_execution_receipt_id,
             "graph_execution_receipt_hash": receipt.receipt_hash,
+            "retrieval_claim_hash": retrieval_claim_hash,
             "citations": result.citations,
             "presentations": stable_presentations,
             "coverage_receipt": result.coverage,
