@@ -24,10 +24,15 @@ activate schema-2 CLI behavior or change schema-1 behavior.
 2. Verify intact L5a and L5b persisted publication/read-back authority.
 3. Verify exact access policy, principal scope hash, governed assets, project
    scope, Graph/Search ACL equality, and all serving/publication fingerprints.
-4. Execute one canonical Graph request bounded by approved paths,
-   relationships, K, record count, and RequiredMember authority.
-5. The server issues a unique opaque `L6GraphExecutionReceipt` after validating
-   the completed Graph result. The receipt binds request/result/scope,
+4. Claim an opaque `l6r-sha256:<64-hex>` run identity and exact Graph request
+   hash at the trusted receipt authority, then execute one canonical Graph
+   request bounded by approved paths, relationships, K, record count, and
+   RequiredMember authority. The claim is atomic across tool instances.
+   A byte-identical completed retry returns the persisted result and receipt
+   without another provider call. A different request or a retry after provider
+   failure fails before Graph; failed attempts consume the run.
+5. The server issues one opaque `L6GraphExecutionReceipt` after validating
+   the completed Graph result. The receipt binds run/request/result/scope,
    publication/ACL hashes, canonical IDs, assertion count, and typed accounting.
    A trusted atomic store validates all expected bindings and consumes the
    receipt once. Missing, forged, stale, replayed, or cross-scope receipts cause
@@ -140,7 +145,12 @@ are never completeness or relationship proof.
 ## Persistence and deployment parity
 
 `build_l6_agent_definition` creates deterministic instructions, five explicit
-tool schemas, connection requirements, and call limits.
+tool schemas, connection requirements, and call limits. Agent display text is
+NFC-safe and excludes controls, bidi formatting, secrets, URLs, principals,
+emails, and provider metadata. Connection references accept stable repo-defined
+opaque IDs, UUIDs, Fabric workspace/item UUID pairs, and structurally valid
+Azure ARM resource IDs only. A recursive pre-persistence scan revalidates every
+string and the exact closed tool/connection names.
 `persist_l6_agent_definition` verifies the definition hash, writes canonical
 JSON, and reads back exact bytes and semantic content.
 

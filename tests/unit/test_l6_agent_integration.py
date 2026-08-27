@@ -237,9 +237,12 @@ def _evidence(mode="agentic_preview", *, status="complete", observed=None):
     )
 
 
-def _graph_query(scope, *, required_ids=GENERIC_MEMBER_IDS):
+def _graph_query(scope, *, required_ids=GENERIC_MEMBER_IDS, run_seed="unit-l6"):
+    run_id = "l6r-sha256:" + canonical_sha256({"run": run_seed})
     return l6.L6GraphQuery.seal(
-        graph_request_id="graph-request:l6",
+        l6_run_id=run_id,
+        graph_request_id="grq-sha256:"
+        + canonical_sha256({"run_id": run_id, "request": "bounded-graph"}),
         canonical_scope_id=scope.canonical_scope_id,
         approved_graph_path_ids=("graph-path:aggregate-members",),
         relationship_semantic_ids=("relationship:has-member",),
@@ -252,6 +255,24 @@ def _graph_query(scope, *, required_ids=GENERIC_MEMBER_IDS):
         ),
         relationship_k=3,
         max_result_records=100,
+    )
+
+
+def _issue_graph_receipt(store, query, graph, ontology, retrieval, budget):
+    completed = store.execute_graph_once(
+        l6_run_id=query.l6_run_id,
+        graph_query=query,
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+        execute=lambda: graph,
+    )
+    return store.issue(
+        graph_query=query,
+        graph_result=completed,
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
     )
 
 
@@ -347,12 +368,8 @@ def _standalone_evidence_boundary():
     graph = _graph_result(ontology, query)
     store = _GraphReceiptStore()
     authorities = _authorities()
-    receipt = store.issue(
-        graph_query=query,
-        graph_result=graph,
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    receipt = _issue_graph_receipt(
+        store, query, graph, ontology, retrieval, budget
     )
     delegate = _EvidenceHost(evidence_result)
     tool = l6.L6VerifiedEvidenceTool(
@@ -588,14 +605,11 @@ def test_evidence_capability_rejects_wrong_claim_and_unconsumed_graph():
 
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
-    query = _graph_query(ontology)
+    query = _graph_query(ontology, run_seed="unconsumed-evidence")
     _, _, budget, _, _ = _evidence()
-    unconsumed = store.issue(
-        graph_query=query,
-        graph_result=_graph_result(ontology, query),
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    graph = _graph_result(ontology, query)
+    unconsumed = _issue_graph_receipt(
+        store, query, graph, ontology, retrieval, budget
     )
     with pytest.raises(ValueError):
         store.issue_evidence(
@@ -748,19 +762,15 @@ def test_standalone_retrieval_rejects_replayed_graph_receipt():
 
 
 @pytest.mark.unit
-def test_server_side_receipt_authority_issues_unique_single_use_receipts():
+def test_server_side_receipt_authority_reuses_one_run_receipt():
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
     query = _graph_query(ontology)
     graph = _graph_result(ontology, query)
     store = l6.L6InMemoryGraphReceiptAuthority()
     _, _, budget, _, _ = _evidence()
-    receipt = store.issue(
-        graph_query=query,
-        graph_result=graph,
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    receipt = _issue_graph_receipt(
+        store, query, graph, ontology, retrieval, budget
     )
     assert store.verify_and_consume(
         receipt.graph_execution_receipt_id,
@@ -779,8 +789,7 @@ def test_server_side_receipt_authority_issues_unique_single_use_receipts():
         retrieval_scope=retrieval,
         budget=budget,
     )
-    assert second != receipt
-    assert second.graph_execution_receipt_id != receipt.graph_execution_receipt_id
+    assert second == receipt
     with pytest.raises(ValueError, match="replayed"):
         store.verify_and_consume(
             receipt.graph_execution_receipt_id,
@@ -792,16 +801,6 @@ def test_server_side_receipt_authority_issues_unique_single_use_receipts():
             ),
             "a" * 64,
         )
-    assert store.verify_and_consume(
-        second.graph_execution_receipt_id,
-        second.receipt_hash,
-        l6._receipt_expectation(
-            ontology,
-            retrieval,
-            _evidence()[1],
-        ),
-        "b" * 64,
-    ) == second
 
 
 @pytest.mark.unit
@@ -811,12 +810,9 @@ def test_external_receipt_authenticator_supports_multi_process_verification():
     query = _graph_query(ontology)
     graph = _graph_result(ontology, query)
     _, _, budget, _, _ = _evidence()
-    receipt = l6.L6InMemoryGraphReceiptAuthority().issue(
-        graph_query=query,
-        graph_result=graph,
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    receipt = _issue_graph_receipt(
+        store, query, graph, ontology, retrieval, budget
     )
     key = b"durable-verifier-key".ljust(32, b"\0")
     authority_id = "gxra-sha256:" + canonical_sha256(key.hex())
@@ -889,12 +885,13 @@ def test_server_receipt_authority_rejects_narrowed_graph_query():
         returned_ids=narrowed_ids,
     )
     with pytest.raises(ValueError, match="exact resolved member"):
-        l6.L6InMemoryGraphReceiptAuthority().issue(
-            graph_query=narrowed,
-            graph_result=narrowed_graph,
-            ontology_scope=ontology,
-            retrieval_scope=retrieval,
-            budget=budget,
+        _issue_graph_receipt(
+            l6.L6InMemoryGraphReceiptAuthority(),
+            narrowed,
+            narrowed_graph,
+            ontology,
+            retrieval,
+            budget,
         )
 
 
@@ -910,12 +907,9 @@ def test_keyring_revocation_and_disable_fail_closed(state):
     retrieval = resolved_retrieval_scope()
     query = _graph_query(ontology)
     _, _, budget, _, _ = _evidence()
-    receipt = store.issue(
-        graph_query=query,
-        graph_result=_graph_result(ontology, query),
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    graph = _graph_result(ontology, query)
+    receipt = _issue_graph_receipt(
+        store, query, graph, ontology, retrieval, budget
     )
     metadata = store._metadata.model_copy(update={"state": state})
     store.keyring_provider.replace(
@@ -948,12 +942,9 @@ def test_keyring_expiry_not_yet_valid_and_rotation():
     retrieval = resolved_retrieval_scope()
     query = _graph_query(ontology)
     _, _, budget, _, _ = _evidence()
-    receipt = store.issue(
-        graph_query=query,
-        graph_result=_graph_result(ontology, query),
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    graph = _graph_result(ontology, query)
+    receipt = _issue_graph_receipt(
+        store, query, graph, ontology, retrieval, budget
     )
     clock[0] = 1_101
     with pytest.raises(ValueError, match="authentication failed"):
@@ -1014,12 +1005,15 @@ def test_keyring_expiry_not_yet_valid_and_rotation():
         )
     )
     clock[0] = 1_500
-    rotated = store.issue(
-        graph_query=query,
-        graph_result=_graph_result(ontology, query),
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
+    rotated_query = _graph_query(ontology, run_seed="rotated-key")
+    rotated_graph = _graph_result(ontology, rotated_query)
+    rotated = _issue_graph_receipt(
+        store,
+        rotated_query,
+        rotated_graph,
+        ontology,
+        retrieval,
+        budget,
     )
     assert rotated.authority_id == new_authority_id
     assert rotated.authority_version == 2
@@ -1752,8 +1746,11 @@ def test_direct_fallback_requires_and_preserves_exact_origin(monkeypatch):
 def test_graph_budget_and_k_are_enforced_before_host(monkeypatch):
     evidence_result, context, budget, _, _ = _evidence()
     ontology = resolved_ontology_scope()
+    run_id = "l6r-sha256:" + canonical_sha256({"run": "over-budget"})
     query = l6.L6GraphQuery.seal(
-        graph_request_id="graph-request:l6-over-budget",
+        l6_run_id=run_id,
+        graph_request_id="grq-sha256:"
+        + canonical_sha256({"run_id": run_id, "request": "over-budget"}),
         canonical_scope_id=ontology.canonical_scope_id,
         approved_graph_path_ids=("graph-path:aggregate-members",),
         relationship_semantic_ids=("relationship:has-member",),
@@ -2361,6 +2358,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         graph_receipt_authority=store,
     )
     graph_input = l6.L6GraphToolInput(
+        l6_run_id=query.l6_run_id,
         resolved_ontology_scope_id=ontology.resolved_ontology_scope_id,
         resolved_ontology_scope_hash=ontology.resolved_scope_hash,
         graph_query=query,
@@ -2492,6 +2490,178 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         )
 
 
+def _standalone_graph_tool(query, graph, store=None, host=None):
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    _, _, budget, _, _ = _evidence()
+    authority = store or l6.L6InMemoryGraphReceiptAuthority()
+    delegate = host or _GraphHost(graph)
+    tool = l6.L6VerifiedGraphTool(
+        delegate=delegate,
+        graph_receipt_authority=authority,
+    )
+    request = l6.L6GraphToolInput(
+        l6_run_id=query.l6_run_id,
+        resolved_ontology_scope_id=ontology.resolved_ontology_scope_id,
+        resolved_ontology_scope_hash=ontology.resolved_scope_hash,
+        graph_query=query,
+    )
+    kwargs = {
+        "ontology_scope": ontology,
+        "retrieval_scope": retrieval,
+        "budget": budget,
+    }
+    return tool, delegate, authority, request, kwargs
+
+
+@pytest.mark.unit
+def test_standalone_graph_retry_reuses_receipt_without_provider_call():
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology, run_seed="sequential-duplicate")
+    graph = _graph_result(ontology, query)
+    tool, host, _, request, kwargs = _standalone_graph_tool(query, graph)
+
+    first = tool.execute(request, **kwargs)
+    second = tool.execute(request, **kwargs)
+
+    assert second == first
+    assert host.calls == 1
+
+
+@pytest.mark.unit
+def test_two_graph_tool_instances_share_one_run_authority():
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology, run_seed="two-tool-instances")
+    graph = _graph_result(ontology, query)
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    host = _GraphHost(graph)
+    first, _, _, request, kwargs = _standalone_graph_tool(
+        query, graph, store=store, host=host
+    )
+    second, _, _, _, _ = _standalone_graph_tool(
+        query, graph, store=store, host=host
+    )
+
+    outputs = (first.execute(request, **kwargs), second.execute(request, **kwargs))
+
+    assert outputs[0] == outputs[1]
+    assert host.calls == 1
+
+
+@pytest.mark.unit
+def test_concurrent_standalone_graph_duplicate_has_one_provider_call():
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology, run_seed="concurrent-duplicate")
+    graph = _graph_result(ontology, query)
+
+    class _BlockingGraphHost(_GraphHost):
+        def __init__(self, result):
+            super().__init__(result)
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, request, *, scope):
+            self.calls += 1
+            self.entered.set()
+            assert self.release.wait(timeout=5)
+            return self.result
+
+    host = _BlockingGraphHost(graph)
+    tool, _, _, request, kwargs = _standalone_graph_tool(
+        query, graph, host=host
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(tool.execute, request, **kwargs)
+        assert host.entered.wait(timeout=5)
+        second = pool.submit(tool.execute, request, **kwargs)
+        host.release.set()
+        outputs = (first.result(), second.result())
+
+    assert outputs[0] == outputs[1]
+    assert host.calls == 1
+
+
+@pytest.mark.unit
+def test_same_run_rejects_different_graph_request_before_provider_call():
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology, run_seed="different-request")
+    graph = _graph_result(ontology, query)
+    tool, host, store, request, kwargs = _standalone_graph_tool(query, graph)
+    tool.execute(request, **kwargs)
+    changed_values = query.model_dump(
+        mode="python",
+        exclude={"request_hash"},
+        round_trip=True,
+    )
+    changed_values["graph_request_id"] = "grq-sha256:" + canonical_sha256(
+        {"request": "changed"}
+    )
+    changed = l6.L6GraphQuery.seal(**changed_values)
+    changed_request = request.model_copy(
+        update={"graph_query": changed}
+    )
+    changed_tool = l6.L6VerifiedGraphTool(
+        delegate=host,
+        graph_receipt_authority=store,
+    )
+
+    with pytest.raises(ValueError, match="another Graph request"):
+        changed_tool.execute(changed_request, **kwargs)
+    assert host.calls == 1
+
+
+@pytest.mark.unit
+def test_failed_graph_run_is_consumed_and_identical_retry_is_closed():
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology, run_seed="failed-run")
+    graph = _graph_result(ontology, query)
+
+    class _FailingGraphHost(_GraphHost):
+        def execute(self, request, *, scope):
+            self.calls += 1
+            raise RuntimeError("provider detail must not escape")
+
+    host = _FailingGraphHost(graph)
+    tool, _, _, request, kwargs = _standalone_graph_tool(
+        query, graph, host=host
+    )
+    with pytest.raises(RuntimeError, match="provider detail"):
+        tool.execute(request, **kwargs)
+    with pytest.raises(ValueError, match="previously failed"):
+        tool.execute(request, **kwargs)
+    assert host.calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "unsafe_id",
+    (
+        "graph-request:l6",
+        "https://provider.example/query",
+        "/path/request",
+        "request?sig=secret",
+        "request#fragment",
+        "client_secret=secret",
+        "Bearer token",
+        "principal:user@example.com",
+        "user@example.com",
+        "grq-sha256:%30",
+        "grq-sha256:" + "a" * 65,
+        "grq-sha256:" + "a" * 63 + "\u202e",
+    ),
+)
+def test_graph_request_id_rejects_nonopaque_metadata(unsafe_id):
+    ontology = resolved_ontology_scope()
+    values = _graph_query(ontology).model_dump(
+        mode="python",
+        exclude={"request_hash"},
+        round_trip=True,
+    )
+    values["graph_request_id"] = unsafe_id
+    with pytest.raises(ValidationError, match="opaque SHA-256 identifier"):
+        l6.L6GraphQuery.seal(**values)
+
+
 @pytest.mark.unit
 def test_tool_schemas_instructions_and_definition_readback(tmp_path: Path):
     definitions = l6.build_l6_tool_definitions()
@@ -2543,3 +2713,102 @@ def test_tool_schemas_instructions_and_definition_readback(tmp_path: Path):
     drifted = {**definition, "agent_name": "drifted"}
     with pytest.raises(ValueError, match="hash mismatch"):
         l6.persist_l6_agent_definition(path, drifted)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("fabric_id", "remote_id"),
+    (
+        (
+            "/subscriptions/00000000-0000-4000-8000-000000000001/"
+            "resourceGroups/kg-rg/providers/Microsoft.Fabric/capacities/kg-cap",
+            "connection:remote-tool",
+        ),
+        (
+            "fabric:workspace/00000000-0000-4000-8000-000000000001/"
+            "item/00000000-0000-4000-8000-000000000002",
+            "00000000-0000-4000-8000-000000000003",
+        ),
+    ),
+)
+def test_agent_definition_accepts_stable_arm_and_fabric_connections(
+    fabric_id, remote_id
+):
+    definition = l6.build_l6_agent_definition(
+        agent_name="KG evidence agent",
+        fabric_data_agent_connection_id=fabric_id,
+        foundry_remote_tool_connection_id=remote_id,
+    )
+    assert definition["connections"]["fabric_data_agent"][
+        "project_connection_id"
+    ] == fabric_id
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "unsafe_value",
+    (
+        "https://storage.example/file?sig=secret",
+        "connection:tool?client_secret=secret",
+        "Bearer token",
+        "principal:user@example.com",
+        "user@example.com",
+        "connection:tool\u202e",
+        "connection%3Atool",
+        "/subscriptions//resourceGroups/rg/providers/Microsoft.X/type/name",
+        "/subscriptions/sub/resourceGroups/../providers/Microsoft.X/type/name",
+    ),
+)
+def test_agent_definition_rejects_unsafe_connection_metadata(unsafe_value):
+    with pytest.raises(ValueError, match="unsafe stable identity"):
+        l6.build_l6_agent_definition(
+            agent_name="KG evidence agent",
+            fabric_data_agent_connection_id=unsafe_value,
+            foundry_remote_tool_connection_id="connection:remote-tool",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "unsafe_name",
+    (
+        "Agent client_secret=secret",
+        "Agent principal:user@example.com",
+        "Agent user@example.com",
+        "Agent\u202e",
+        "https://provider.example/agent",
+    ),
+)
+def test_agent_definition_rejects_unsafe_display_name(unsafe_name):
+    with pytest.raises(ValueError, match="unsafe"):
+        l6.build_l6_agent_definition(
+            agent_name=unsafe_name,
+            fabric_data_agent_connection_id="connection:fabric",
+            foundry_remote_tool_connection_id="connection:remote-tool",
+        )
+
+
+@pytest.mark.unit
+def test_persistence_recursively_rejects_tampered_definition_text(tmp_path: Path):
+    definition = l6.build_l6_agent_definition(
+        agent_name="KG evidence agent",
+        fabric_data_agent_connection_id="connection:fabric",
+        foundry_remote_tool_connection_id="connection:remote-tool",
+    )
+    tampered_tools = [dict(item) for item in definition["tools"]]
+    tampered_tools[0]["description"] = "client_secret=do-not-store"
+    tampered = {**definition, "tools": tuple(tampered_tools)}
+    tampered["definition_hash"] = canonical_sha256(
+        {key: value for key, value in tampered.items() if key != "definition_hash"}
+    )
+    with pytest.raises(ValueError, match="unsafe stable text"):
+        l6.persist_l6_agent_definition(tmp_path / "agent.json", tampered)
+
+    renamed_tools = [dict(item) for item in definition["tools"]]
+    renamed_tools[0]["name"] = "fabric_kg_unapproved_tool"
+    renamed = {**definition, "tools": tuple(renamed_tools)}
+    renamed["definition_hash"] = canonical_sha256(
+        {key: value for key, value in renamed.items() if key != "definition_hash"}
+    )
+    with pytest.raises(ValueError, match="closed toolset"):
+        l6.persist_l6_agent_definition(tmp_path / "agent.json", renamed)

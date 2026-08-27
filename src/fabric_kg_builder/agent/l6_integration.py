@@ -16,7 +16,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Protocol, Sequence
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -60,6 +60,8 @@ L6_TOOL_REPORT_READINESS = "fabric_kg_report_coverage_readiness"
 
 _OPAQUE_OPERATION_ID_RE = re.compile(r"^op-sha256:[0-9a-f]{64}$")
 _GRAPH_RECEIPT_ID_RE = re.compile(r"^gxr-sha256:[0-9a-f]{64}$")
+_GRAPH_REQUEST_ID_RE = re.compile(r"^grq-sha256:[0-9a-f]{64}$")
+_L6_RUN_ID_RE = re.compile(r"^l6r-sha256:[0-9a-f]{64}$")
 
 ReadinessStatus = Literal["complete", "partial", "abstain"]
 ReasonCode = Literal[
@@ -89,7 +91,12 @@ L6SafeGraphCode = Literal[
 
 
 class _L6Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        hide_input_in_errors=True,
+    )
 
 
 class L6AccessContext(_L6Model):
@@ -115,7 +122,8 @@ class L6ResolvedScopes(_L6Model):
 class L6GraphQuery(_L6Model):
     """Canonical bounded Graph request; no display names or generated GQL."""
 
-    graph_request_id: str = Field(min_length=1)
+    l6_run_id: str
+    graph_request_id: str
     canonical_scope_id: str = Field(min_length=1)
     approved_graph_path_ids: tuple[str, ...]
     relationship_semantic_ids: tuple[str, ...]
@@ -124,6 +132,20 @@ class L6GraphQuery(_L6Model):
     relationship_k: Literal[1, 2, 3, 4]
     max_result_records: int = Field(ge=1)
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("l6_run_id")
+    @classmethod
+    def _run_id(cls, value: str) -> str:
+        if not _L6_RUN_ID_RE.fullmatch(value):
+            raise ValueError("L6 run ID must be an opaque SHA-256 identifier")
+        return value
+
+    @field_validator("graph_request_id")
+    @classmethod
+    def _request_id(cls, value: str) -> str:
+        if not _GRAPH_REQUEST_ID_RE.fullmatch(value):
+            raise ValueError("Graph request ID must be an opaque SHA-256 identifier")
+        return value
 
     @field_validator(
         "approved_graph_path_ids",
@@ -278,7 +300,7 @@ class L6OperationAccounting(_L6Model):
 
 
 class L6GraphResult(_L6Model):
-    graph_request_id: str
+    graph_request_id: str = Field(pattern=r"^grq-sha256:[0-9a-f]{64}$")
     graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     canonical_scope_id: str
     assertions: tuple[L6GraphAssertion, ...] = ()
@@ -344,7 +366,8 @@ class L6GraphExecutionReceipt(_L6Model):
     authentication_algorithm: Literal["HMAC-SHA256"] = "HMAC-SHA256"
     issued_at_milliseconds: int = Field(ge=0)
     authentication_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
-    graph_request_id: str
+    l6_run_id: str = Field(pattern=r"^l6r-sha256:[0-9a-f]{64}$")
+    graph_request_id: str = Field(pattern=r"^grq-sha256:[0-9a-f]{64}$")
     graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     resolved_ontology_scope_id: str
@@ -417,6 +440,7 @@ class L6GraphReceiptExpectation(_L6Model):
 
 
 class L6GraphToolInput(_L6Model):
+    l6_run_id: str = Field(pattern=r"^l6r-sha256:[0-9a-f]{64}$")
     resolved_ontology_scope_id: str
     resolved_ontology_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_query: L6GraphQuery
@@ -996,6 +1020,8 @@ class L6EvidenceExecutionReceipt(_L6Model):
     authentication_algorithm: Literal["HMAC-SHA256"] = "HMAC-SHA256"
     issued_at_milliseconds: int = Field(ge=0)
     authentication_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
+    l6_run_id: str = Field(pattern=r"^l6r-sha256:[0-9a-f]{64}$")
+    graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_execution_receipt_id: str
     graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_authority_id: str
@@ -1200,8 +1226,9 @@ class L6SynthesisInput(_L6Model):
     resolved_ontology_scope_hash: str
     resolved_retrieval_scope_id: str
     resolved_retrieval_scope_hash: str
-    graph_request_id: str
-    graph_request_hash: str
+    l6_run_id: str = Field(pattern=r"^l6r-sha256:[0-9a-f]{64}$")
+    graph_request_id: str = Field(pattern=r"^grq-sha256:[0-9a-f]{64}$")
+    graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_response_hash: str | None = None
     graph_execution_receipt: L6GraphExecutionReceipt | None = None
     graph_assertions: tuple[L6GraphAssertion, ...] = ()
@@ -1307,6 +1334,7 @@ class L6SynthesisInput(_L6Model):
                 != self.graph_execution_receipt.resolved_retrieval_scope_id
                 or self.resolved_retrieval_scope_hash
                 != self.graph_execution_receipt.resolved_retrieval_scope_hash
+                or self.l6_run_id != self.graph_execution_receipt.l6_run_id
                 or self.graph_request_id
                 != self.graph_execution_receipt.graph_request_id
                 or self.graph_request_hash
@@ -1321,6 +1349,9 @@ class L6SynthesisInput(_L6Model):
                 != self.graph_execution_receipt.graph_execution_receipt_id
                 or self.evidence_execution_receipt.graph_execution_receipt_hash
                 != self.graph_execution_receipt.receipt_hash
+                or self.evidence_execution_receipt.l6_run_id != self.l6_run_id
+                or self.evidence_execution_receipt.graph_request_hash
+                != self.graph_request_hash
                 or self.evidence_execution_receipt.evidence_output_hash
                 != canonical_sha256(
                     {
@@ -1427,7 +1458,20 @@ class L6GraphHost(Protocol):
 
 
 class L6GraphReceiptAuthority(Protocol):
-    """Opaque trusted store; implementations enforce single consumption."""
+    """Durable adapter boundary enforcing one Graph execution per L6 run."""
+
+    def execute_graph_once(
+        self,
+        *,
+        l6_run_id: str,
+        graph_query: L6GraphQuery,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        budget: QueryBudgetV1_1,
+        execute: Callable[[], L6GraphResult],
+    ) -> L6GraphResult:
+        """Atomically claim and persist one run-scoped Graph result or failure."""
+        ...
 
     def issue(
         self,
@@ -1640,10 +1684,10 @@ def _verify_evidence_receipt_trust(
 
 
 class L6InMemoryGraphReceiptAuthority:
-    """Atomic process-local receipt authority for a single L6 tool host.
+    """Atomic process-local implementation of the durable authority protocol.
 
-    L7 may replace this with a durable store implementing the same protocol.
-    Receipt contents are never accepted from callers.
+    Production adapters must preserve the same run claim, wait, completion, and
+    failure transitions in durable storage across hosts and processes.
     """
 
     def __init__(
@@ -1653,6 +1697,8 @@ class L6InMemoryGraphReceiptAuthority:
         validity_milliseconds: int = 300_000,
     ) -> None:
         self._lock = threading.Lock()
+        self._run_condition = threading.Condition(self._lock)
+        self._graph_runs: dict[str, dict[str, Any]] = {}
         self._receipts: dict[str, L6GraphExecutionReceipt] = {}
         self._graph_states: dict[str, str] = {}
         self._retrieval_claims: dict[str, str] = {}
@@ -1691,7 +1737,7 @@ class L6InMemoryGraphReceiptAuthority:
             )
         )
 
-    def issue(
+    def _build_receipt(
         self,
         *,
         graph_query: L6GraphQuery,
@@ -1723,6 +1769,7 @@ class L6InMemoryGraphReceiptAuthority:
             "authority_version": signing_key.metadata.authority_version,
             "authentication_algorithm": signing_key.metadata.algorithm,
             "issued_at_milliseconds": self._clock_milliseconds(),
+            "l6_run_id": graph_query.l6_run_id,
             "graph_request_id": graph_query.graph_request_id,
             "graph_request_hash": graph_query.request_hash,
             "graph_result_hash": graph_result.response_hash,
@@ -1760,12 +1807,94 @@ class L6InMemoryGraphReceiptAuthority:
             **sealed_values,
             receipt_hash=canonical_sha256(sealed_values),
         )
-        with self._lock:
-            if receipt_id in self._receipts:
-                raise RuntimeError("Graph receipt authority nonce collision")
-            self._receipts[receipt_id] = receipt
-            self._graph_states[receipt_id] = "issued"
         return receipt
+
+    def execute_graph_once(
+        self,
+        *,
+        l6_run_id: str,
+        graph_query: L6GraphQuery,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        budget: QueryBudgetV1_1,
+        execute: Callable[[], L6GraphResult],
+    ) -> L6GraphResult:
+        if l6_run_id != graph_query.l6_run_id:
+            raise ValueError("Graph execution run identity mismatch")
+        _validate_graph_query(
+            graph_query,
+            ontology_scope,
+            retrieval_scope,
+            budget,
+        )
+        with self._run_condition:
+            while True:
+                state = self._graph_runs.get(l6_run_id)
+                if state is None:
+                    self._graph_runs[l6_run_id] = {
+                        "request_hash": graph_query.request_hash,
+                        "status": "executing",
+                    }
+                    break
+                if state["request_hash"] != graph_query.request_hash:
+                    raise ValueError("L6 run already claimed by another Graph request")
+                if state["status"] == "completed":
+                    return state["result"]
+                if state["status"] == "failed":
+                    raise ValueError("L6 run Graph execution previously failed")
+                self._run_condition.wait()
+
+        try:
+            graph_result = execute()
+        except Exception:
+            with self._run_condition:
+                self._graph_runs[l6_run_id]["status"] = "failed"
+                self._run_condition.notify_all()
+            raise
+
+        with self._run_condition:
+            self._graph_runs[l6_run_id] = {
+                "request_hash": graph_query.request_hash,
+                "status": "completed",
+                "result": graph_result,
+            }
+            self._run_condition.notify_all()
+        return graph_result
+
+    def issue(
+        self,
+        *,
+        graph_query: L6GraphQuery,
+        graph_result: L6GraphResult,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        budget: QueryBudgetV1_1,
+    ) -> L6GraphExecutionReceipt:
+        with self._run_condition:
+            state = self._graph_runs.get(graph_query.l6_run_id)
+            if (
+                state is None
+                or state["request_hash"] != graph_query.request_hash
+                or state["status"] != "completed"
+                or state["result"] != graph_result
+            ):
+                raise ValueError("Graph receipt requires exact completed run authority")
+            prior = state.get("receipt")
+            if prior is not None:
+                return prior
+            receipt = self._build_receipt(
+                graph_query=graph_query,
+                graph_result=graph_result,
+                ontology_scope=ontology_scope,
+                retrieval_scope=retrieval_scope,
+                budget=budget,
+            )
+            if receipt.graph_execution_receipt_id in self._receipts:
+                raise RuntimeError("Graph receipt authority nonce collision")
+            self._receipts[receipt.graph_execution_receipt_id] = receipt
+            self._graph_states[receipt.graph_execution_receipt_id] = "issued"
+            state["receipt"] = receipt
+            return receipt
 
     def verify_and_consume(
         self,
@@ -1860,6 +1989,8 @@ class L6InMemoryGraphReceiptAuthority:
                 "authority_version": signing_key.metadata.authority_version,
                 "authentication_algorithm": signing_key.metadata.algorithm,
                 "issued_at_milliseconds": now,
+                "l6_run_id": graph_receipt.l6_run_id,
+                "graph_request_hash": graph_receipt.graph_request_hash,
                 "keyring_snapshot_version": snapshot.snapshot_version,
                 "retrieval_claim_hash": evidence_output.retrieval_claim_hash,
                 "graph_execution_receipt_id": graph_id,
@@ -1972,7 +2103,8 @@ class L6VerifiedGraphTool:
         budget: QueryBudgetV1_1,
     ) -> L6GraphToolOutput:
         if (
-            request.resolved_ontology_scope_id
+            request.l6_run_id != request.graph_query.l6_run_id
+            or request.resolved_ontology_scope_id
             != ontology_scope.resolved_ontology_scope_id
             or request.resolved_ontology_scope_hash
             != ontology_scope.resolved_scope_hash
@@ -1984,7 +2116,14 @@ class L6VerifiedGraphTool:
             retrieval_scope,
             budget,
         )
-        result = self._delegate.execute(request, scope=ontology_scope)
+        result = self._graph_receipt_authority.execute_graph_once(
+            l6_run_id=request.l6_run_id,
+            graph_query=request.graph_query,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            budget=budget,
+            execute=lambda: self._delegate.execute(request, scope=ontology_scope),
+        )
         graph_complete, _ = _validate_graph_result(
             request.graph_query,
             ontology_scope,
@@ -2987,6 +3126,7 @@ class L6AgentOrchestrator:
             "resolved_ontology_scope_hash": "0" * 64,
             "resolved_retrieval_scope_id": "unresolved",
             "resolved_retrieval_scope_hash": "0" * 64,
+            "l6_run_id": request.graph_query.l6_run_id,
             "graph_request_id": request.graph_query.graph_request_id,
             "graph_request_hash": request.graph_query.request_hash,
         }
@@ -3012,6 +3152,7 @@ class L6AgentOrchestrator:
             "resolved_ontology_scope_hash": scopes.ontology_scope.resolved_scope_hash,
             "resolved_retrieval_scope_id": scopes.retrieval_scope.resolved_retrieval_scope_id,
             "resolved_retrieval_scope_hash": scopes.retrieval_scope.retrieval_scope_hash,
+            "l6_run_id": request.graph_query.l6_run_id,
             "graph_request_id": request.graph_query.graph_request_id,
             "graph_request_hash": request.graph_query.request_hash,
         }
@@ -3084,14 +3225,22 @@ class L6AgentOrchestrator:
             return self._abstain(base, failure, started)
 
         graph_input = L6GraphToolInput(
+            l6_run_id=request.graph_query.l6_run_id,
             resolved_ontology_scope_id=scopes.ontology_scope.resolved_ontology_scope_id,
             resolved_ontology_scope_hash=scopes.ontology_scope.resolved_scope_hash,
             graph_query=request.graph_query,
         )
         try:
-            graph = self._graph_host.execute(
-                graph_input,
-                scope=scopes.ontology_scope,
+            graph = self._graph_receipt_authority.execute_graph_once(
+                l6_run_id=request.graph_query.l6_run_id,
+                graph_query=request.graph_query,
+                ontology_scope=scopes.ontology_scope,
+                retrieval_scope=scopes.retrieval_scope,
+                budget=request.query_budget,
+                execute=lambda: self._graph_host.execute(
+                    graph_input,
+                    scope=scopes.ontology_scope,
+                ),
             )
             graph_complete, graph_missing = _validate_graph_result(
                 request.graph_query,
@@ -3463,7 +3612,7 @@ class L6AgentOrchestrator:
 def build_l6_agent_instructions() -> str:
     """Return deterministic cite-or-partial/abstain downstream instructions."""
 
-    return "\n".join(
+    return " ".join(
         [
             f"Fabric KG evidence-first tools ({L6_INSTRUCTIONS_VERSION}).",
             "Use tools in this exact order: resolve ontology scope; execute one "
@@ -3539,6 +3688,125 @@ def build_l6_tool_definitions() -> tuple[dict[str, Any], ...]:
     )
 
 
+_L6_CONNECTION_OPAQUE_RE = re.compile(
+    r"^(?:connection|project-connection):[a-z0-9][a-z0-9._-]{0,127}$"
+)
+_L6_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_L6_FABRIC_CONNECTION_RE = re.compile(
+    r"^fabric:workspace/[0-9a-f-]{36}/item/[0-9a-f-]{36}$",
+    re.IGNORECASE,
+)
+_L6_ARM_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._() -]{0,255}$")
+
+
+def _l6_safe_connection_id(value: str) -> str:
+    error = "L6 connection ID contains unsafe stable identity"
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2048
+        or value != value.strip()
+        or value != normalize_nfc(value)
+        or unquote(value) != value
+        or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for char in value
+        )
+        or any(marker in value for marker in ("?", "#", "\\", "@", "://", "="))
+        or _l6_contains_international_email(value)
+        or _L6_CREDENTIAL_RE.search(_l6_security_skeleton(value))
+    ):
+        raise ValueError(error)
+    try:
+        reject_secret_text(value, field_name="connection ID")
+    except ValueError as exc:
+        raise ValueError(error) from exc
+    if _L6_UUID_RE.fullmatch(value) or _L6_CONNECTION_OPAQUE_RE.fullmatch(value):
+        return value
+    if _L6_FABRIC_CONNECTION_RE.fullmatch(value):
+        workspace_id, item_id = value.split("/")[1], value.split("/")[3]
+        if _L6_UUID_RE.fullmatch(workspace_id) and _L6_UUID_RE.fullmatch(item_id):
+            return value
+        raise ValueError(error)
+    if value.startswith("/"):
+        segments = value.split("/")[1:]
+        if (
+            len(segments) < 8
+            or len(segments) % 2
+            or any(
+                not segment
+                or segment in {".", ".."}
+                or not _L6_ARM_SEGMENT_RE.fullmatch(segment)
+                for segment in segments
+            )
+            or segments[0].casefold() != "subscriptions"
+            or segments[2].casefold() != "resourcegroups"
+            or segments[4].casefold() != "providers"
+            or "." not in segments[5]
+        ):
+            raise ValueError(error)
+        return value
+    raise ValueError(error)
+
+
+def _validate_l6_definition_strings(
+    value: Any,
+    *,
+    path: tuple[str, ...] = (),
+) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("L6 definition contains an unsafe field name")
+            _l6_safe_stable_text(key, field_name="definition field name")
+            _validate_l6_definition_strings(item, path=(*path, key))
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_l6_definition_strings(item, path=(*path, str(index)))
+        return
+    if not isinstance(value, str):
+        return
+    if path and path[-1] == "project_connection_id":
+        _l6_safe_connection_id(value)
+        return
+    _l6_safe_stable_text(value, field_name="L6 definition text")
+
+
+def _validate_l6_definition_structure(definition: Mapping[str, Any]) -> None:
+    tools = definition.get("tools")
+    expected_tool_names = (
+        L6_TOOL_RESOLVE_SCOPE,
+        L6_TOOL_EXECUTE_GRAPH,
+        L6_TOOL_RETRIEVE_EVIDENCE,
+        L6_TOOL_ASSEMBLE_CITATIONS,
+        L6_TOOL_REPORT_READINESS,
+    )
+    if (
+        not isinstance(tools, (list, tuple))
+        or tuple(
+            item.get("name") if isinstance(item, Mapping) else None
+            for item in tools
+        )
+        != expected_tool_names
+    ):
+        raise ValueError("L6 definition tool names differ from the closed toolset")
+    connections = definition.get("connections")
+    if not isinstance(connections, Mapping) or set(connections) != {
+        "fabric_data_agent",
+        "l6_remote_tool",
+    }:
+        raise ValueError("L6 definition connections differ from the closed set")
+    agent_name = definition.get("agent_name")
+    if not isinstance(agent_name, str) or len(agent_name) > 128:
+        raise ValueError("L6 agent name contains unsafe display text")
+    _validate_l6_definition_strings(definition)
+
+
 def build_l6_agent_definition(
     *,
     agent_name: str,
@@ -3547,14 +3815,11 @@ def build_l6_agent_definition(
 ) -> dict[str, Any]:
     """Build a local deployment definition using existing connection abstractions."""
 
-    if not all(
-        (
-            agent_name.strip(),
-            fabric_data_agent_connection_id.strip(),
-            foundry_remote_tool_connection_id.strip(),
-        )
-    ):
-        raise ValueError("L6 agent name and both connection IDs are required")
+    if len(agent_name) > 128:
+        raise ValueError("L6 agent name contains unsafe display text")
+    _l6_safe_stable_text(agent_name, field_name="L6 agent name")
+    _l6_safe_connection_id(fabric_data_agent_connection_id)
+    _l6_safe_connection_id(foundry_remote_tool_connection_id)
     values: dict[str, Any] = {
         "schema_version": "1.0.0",
         "toolset_version": L6_TOOLSET_VERSION,
@@ -3582,6 +3847,7 @@ def build_l6_agent_definition(
     values["definition_hash"] = canonical_sha256(
         {key: value for key, value in values.items() if key != "definition_hash"}
     )
+    _validate_l6_definition_structure(values)
     return values
 
 
@@ -3591,6 +3857,7 @@ def persist_l6_agent_definition(
 ) -> str:
     """Persist and read back one canonical definition, failing on any drift."""
 
+    _validate_l6_definition_structure(definition)
     expected_hash = str(definition.get("definition_hash", ""))
     calculated_hash = canonical_sha256(
         {
