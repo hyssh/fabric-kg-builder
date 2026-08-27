@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,8 +43,9 @@ from fabric_kg_builder.sources.corpus import (
     DesignSampleManifest,
     SourceCorpusEntry,
     SourceCorpusManifest,
+    SourceSnapshotIntegrityError,
     extract_verified_source_snapshot,
-    read_verified_source_snapshot,
+    open_verified_source_snapshot,
 )
 
 L2_STAGE_NAME = "Schema-Constrained Extraction"
@@ -128,7 +128,8 @@ class CorpusAsset:
 
     asset: AssetRow
     version: AssetVersionRow
-    original_bytes: bytes
+    consumed_byte_hash: str
+    consumed_byte_count: int
     adapter_name: str
     adapter_version: str
     elements: tuple[SourceElement, ...]
@@ -189,18 +190,23 @@ class IndexedSourceCorpusReader:
                 f"landed bytes are unavailable for {entry.source_file_id}",
             ) from exc
         try:
-            snapshot = read_verified_source_snapshot(
+            with open_verified_source_snapshot(
                 source_path,
                 entry=entry,
-            )
+            ) as snapshot:
+                extraction = extract_verified_source_snapshot(snapshot)
+                adapted = extraction.adapter_result
         except AdapterError as exc:
+            if isinstance(exc, SourceSnapshotIntegrityError):
+                raise L2StageError(
+                    "L2_ASSET_CONTENT_MISMATCH",
+                    f"landed bytes differ for {entry.source_file_id}",
+                ) from exc
             raise L2StageError(
-                "L2_ASSET_CONTENT_MISMATCH",
-                f"landed bytes differ for {entry.source_file_id}",
+                "L2_SOURCE_ADAPTER_FAILED",
+                f"adapter failed for {entry.source_file_id}: {type(exc).__name__}",
             ) from exc
-        try:
-            adapted = extract_verified_source_snapshot(snapshot)
-        except (AdapterError, OSError, UnicodeError, ValueError, ImportError) as exc:
+        except (OSError, UnicodeError, ValueError, ImportError) as exc:
             raise L2StageError(
                 "L2_SOURCE_ADAPTER_FAILED",
                 f"adapter failed for {entry.source_file_id}: {type(exc).__name__}",
@@ -235,7 +241,8 @@ class IndexedSourceCorpusReader:
         return CorpusAsset(
             asset=asset,
             version=version,
-            original_bytes=snapshot.original_bytes,
+            consumed_byte_hash=extraction.consumed_byte_hash,
+            consumed_byte_count=extraction.consumed_byte_count,
             adapter_name=adapter_name,
             adapter_version=adapter_version,
             elements=elements,
@@ -678,10 +685,9 @@ def materialize_source_corpus(
             continue
 
         asset = reader.read(entry)
-        digest = hashlib.sha256(asset.original_bytes).hexdigest()
         if (
-            digest != entry.original_byte_hash
-            or len(asset.original_bytes) != entry.byte_count
+            asset.consumed_byte_hash != entry.original_byte_hash
+            or asset.consumed_byte_count != entry.byte_count
             or asset.version.content_hash != entry.original_byte_hash
             or asset.version.size_bytes != entry.byte_count
         ):

@@ -37,10 +37,11 @@ from fabric_kg_builder.sources.adapter import AdapterError, FailureType
 from fabric_kg_builder.sources.corpus import (
     DesignSampleEntry,
     DesignSampleManifest,
+    SourceSnapshotIntegrityError,
     SourceCorpusManifest,
     build_design_sample_manifest,
     extract_verified_source_snapshot,
-    read_verified_source_snapshot,
+    open_verified_source_snapshot,
 )
 from fabric_kg_builder.sources.evidence_verifier import (
     mint_source_unit,
@@ -564,41 +565,42 @@ def build_l1_design_artifacts(
                 if root.is_file()
                 else root / Path(corpus_entry.relative_source_ref)
             )
-            snapshot = read_verified_source_snapshot(
+            with open_verified_source_snapshot(
                 path,
                 entry=corpus_entry,
                 corpus_root_id=corpus.corpus_root_id,
-            )
-            try:
-                result = extract_verified_source_snapshot(snapshot)
-            except (AdapterError, OSError, UnicodeError, ValueError, ImportError) as exc:
-                if (
-                    isinstance(exc, AdapterError)
-                    and exc.failure_type is FailureType.MIME_MISMATCH
-                ):
-                    raise
-                warning_type = (
-                    exc.failure_type.value
-                    if isinstance(exc, AdapterError)
-                    else type(exc).__name__.casefold()
-                )
-                warnings.append(
-                    SourceProfileWarning(
-                        warning_id=deterministic_contract_id(
-                            "source-warning",
-                            {
-                                "source_file_id": corpus_entry.source_file_id,
-                                "warning_type": warning_type,
-                            },
-                        ),
-                        warning_type=warning_type,
-                        source_file_id=corpus_entry.source_file_id,
-                        message=redact_secret_text(
-                            f"Design sampling failed for {corpus_entry.relative_source_ref}: {exc}"
-                        ),
+            ) as snapshot:
+                try:
+                    extraction = extract_verified_source_snapshot(snapshot)
+                    result = extraction.adapter_result
+                except (AdapterError, OSError, UnicodeError, ValueError, ImportError) as exc:
+                    if isinstance(exc, SourceSnapshotIntegrityError) or (
+                        isinstance(exc, AdapterError)
+                        and exc.failure_type is FailureType.MIME_MISMATCH
+                    ):
+                        raise
+                    warning_type = (
+                        exc.failure_type.value
+                        if isinstance(exc, AdapterError)
+                        else type(exc).__name__.casefold()
                     )
-                )
-                continue
+                    warnings.append(
+                        SourceProfileWarning(
+                            warning_id=deterministic_contract_id(
+                                "source-warning",
+                                {
+                                    "source_file_id": corpus_entry.source_file_id,
+                                    "warning_type": warning_type,
+                                },
+                            ),
+                            warning_type=warning_type,
+                            source_file_id=corpus_entry.source_file_id,
+                            message=redact_secret_text(
+                                f"Design sampling failed for {corpus_entry.relative_source_ref}: {exc}"
+                            ),
+                        )
+                    )
+                    continue
 
             elements = sorted(
                 result.document_elements,
