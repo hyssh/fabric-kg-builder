@@ -1289,6 +1289,49 @@ def test_sealed_output_is_deeply_immutable(monkeypatch):
 
 
 @pytest.mark.unit
+def test_synthesis_input_rejects_rehashed_citation_not_in_coverage(monkeypatch):
+    evidence_result, context, budget, _, _ = _evidence()
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology)
+    orchestrator, _, _, _ = _orchestrator(
+        monkeypatch,
+        _graph_result(ontology, query),
+        evidence_result,
+    )
+    result = orchestrator.run(
+        l6.L6RunRequest(
+            question="detail",
+            ontology_scope_envelope=ontology_scope(),
+            graph_query=query,
+            request_context=context,
+            query_budget=budget,
+            access=_access(),
+        )
+    )
+    citation_values = result.search_citations[0].model_dump(
+        mode="python",
+        exclude={"citation_hash"},
+        round_trip=True,
+    )
+    citation_values["original_document_name"] = "FORGED"
+    forged = SearchCitationEnvelope(
+        **citation_values,
+        citation_hash=canonical_sha256(citation_values),
+    )
+    values = result.model_dump(
+        mode="python",
+        exclude={"package_hash"},
+        round_trip=True,
+    )
+    values["search_citations"] = (forged, *result.search_citations[1:])
+    with pytest.raises(ValidationError):
+        l6.L6SynthesisInput(
+            **values,
+            package_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
 def test_complete_evidence_output_rejects_empty_citations():
     evidence_result, _, _, _, _ = _evidence()
     values = {
@@ -1332,7 +1375,7 @@ def test_transient_url_cannot_enter_stable_presentation():
     forged_values["citation_presentation_id"] = (
         "https://private.example/file?sig=secret"
     )
-    with pytest.raises(ValidationError, match="ID mismatch"):
+    with pytest.raises(ValidationError, match="unsafe stable text"):
         l6.L6StableCitationPresentation(
             **forged_values,
             stable_presentation_hash=canonical_sha256(forged_values),
@@ -1365,6 +1408,70 @@ def test_evidence_output_rejects_self_rehashed_forged_stable_presentation():
             **values,
             output_hash=canonical_sha256(values),
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field_name", "unsafe_value"),
+    (
+        ("original_document_name", "https://private.example/file?sig=secret"),
+        ("exact_authorized_quote", "See file://private/path"),
+        ("source_id", "principal:user@example.com"),
+        ("chunk_id", "provider:internal-backend"),
+        (
+            "original_document_name",
+            "%68%74%74%70%73%3A%2F%2Fprivate.example%2Ffile%3Fsig%3Dsecret",
+        ),
+        ("exact_authorized_quote", "ＡＰＩ＿ＫＥＹ=secret"),
+        ("source_id", "prіncipal:user"),
+        ("source_id", "principaӏ:user"),
+        ("exact_authorized_quote", "tоken=secret"),
+        ("exact_authorized_quote", "toкen=secret"),
+    ),
+)
+def test_direct_stable_constructor_rejects_unsafe_strings(
+    field_name,
+    unsafe_value,
+):
+    evidence_result, _, _, _, _ = _evidence()
+    stable = _stable_presentations(evidence_result)[0]
+    values = stable.model_dump(
+        mode="python",
+        exclude={"stable_presentation_hash"},
+        round_trip=True,
+    )
+    values[field_name] = unsafe_value
+    with pytest.raises(ValidationError, match="unsafe stable text"):
+        l6.L6StableCitationPresentation(
+            **values,
+            stable_presentation_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
+def test_direct_stable_constructor_rejects_unsafe_section_and_allows_unicode():
+    evidence_result, _, _, _, _ = _evidence()
+    stable = _stable_presentations(evidence_result)[0]
+    values = stable.model_dump(
+        mode="python",
+        exclude={"stable_presentation_hash"},
+        round_trip=True,
+    )
+    values["section_path"] = ("section:维修 café", "https://private.example")
+    with pytest.raises(ValidationError, match="unsafe stable text"):
+        l6.L6StableCitationPresentation(
+            **values,
+            stable_presentation_hash=canonical_sha256(values),
+        )
+
+    values["section_path"] = ("section:维修 café",)
+    values["original_document_name"] = "维修手册 café.pdf"
+    safe = l6.L6StableCitationPresentation(
+        **values,
+        stable_presentation_hash=canonical_sha256(values),
+    )
+    assert safe.original_document_name == "维修手册 café.pdf"
+    assert safe.immutable_locator.model_dump(mode="json").get("blob_uri") is None
 
 
 @pytest.mark.unit
@@ -1417,6 +1524,21 @@ def test_citation_collection_exact_cardinality_and_hash():
     assert collection.collection_hash == canonical_sha256(
         collection.model_dump(mode="json", exclude={"collection_hash"})
     )
+    collection_values = collection.model_dump(
+        mode="python",
+        exclude={"collection_hash"},
+        round_trip=True,
+    )
+    bindings = list(collection.presentation_source_bindings)
+    binding_values = bindings[0].model_dump(mode="python")
+    binding_values["source_citation_envelope_hash"] = "f" * 64
+    bindings[0] = l6.L6PresentationSourceBinding.model_validate(binding_values)
+    collection_values["presentation_source_bindings"] = tuple(bindings)
+    with pytest.raises(ValidationError, match="source binding"):
+        l6.L6CitationPresentationCollection(
+            **collection_values,
+            collection_hash=canonical_sha256(collection_values),
+        )
 
     with pytest.raises(ValueError):
         l6.assemble_l6_citation_collection(

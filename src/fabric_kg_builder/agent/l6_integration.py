@@ -11,14 +11,20 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
-from fabric_kg_builder.contracts.identity import ImmutableSourceLocator
+from fabric_kg_builder.contracts.base import (
+    canonical_json,
+    canonical_sha256,
+    normalize_nfc,
+    reject_secret_text,
+)
 from fabric_kg_builder.contracts.publication import AccessPolicy, GovernedAssetReference
 from fabric_kg_builder.contracts.runtime import (
     AgenticRetrievalCoverageReceiptV1_1,
@@ -468,6 +474,7 @@ class L6EvidenceToolOutput(_L6Model):
             raise ValueError(
                 "complete evidence output requires non-empty verified citations"
             )
+        self.coverage_receipt.validate_citations(self.citations)
         citations_by_id = {
             item.search_citation_envelope_id: item for item in self.citations
         }
@@ -478,6 +485,8 @@ class L6EvidenceToolOutput(_L6Model):
             if citation is None:
                 raise ValueError("stable presentation has no citation authority")
             presentation.validate_citation(citation)
+            if presentation != L6StableCitationPresentation.from_citation(citation):
+                raise ValueError("stable presentation is not canonical citation output")
         expected = canonical_sha256(
             self.model_dump(mode="json", exclude={"output_hash"})
         )
@@ -515,6 +524,189 @@ class L6CitationEnvelopeHash(_L6Model):
     search_citation_envelope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class L6PresentationSourceBinding(_L6Model):
+    citation_presentation_id: str
+    source_citation_envelope_id: str
+    source_citation_envelope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stable_presentation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+_L6_UNSAFE_URI_SCHEMES = {
+    "blob",
+    "data",
+    "file",
+    "ftp",
+    "ftps",
+    "http",
+    "https",
+    "javascript",
+}
+_L6_PROVIDER_METADATA_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:principal|provider|tenant|subscription|"
+    r"authorization|bearer)\s*[:=]"
+)
+_L6_EMAIL_RE = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
+_L6_CREDENTIAL_RE = re.compile(
+    r"(?i)(?:api[\s_-]*key|access[\s_-]*key|account[\s_-]*key|"
+    r"client[\s_-]*secret|password|passwd|pwd|token|credential|"
+    r"connection[\s_-]*(?:string|str)|sas|sig|signature)\s*[:=]"
+)
+_L6_CONFUSABLE_TRANSLATION = str.maketrans(
+    {
+        # Common Cyrillic/Greek homoglyphs used to disguise security metadata.
+        "а": "a", "ɑ": "a", "Α": "a", "α": "a",
+        "В": "b", "Β": "b", "β": "b",
+        "с": "c", "ϲ": "c", "С": "c",
+        "ԁ": "d",
+        "е": "e", "Ε": "e", "ε": "e",
+        "һ": "h", "Η": "h", "η": "h",
+        "і": "i", "Ι": "i", "ι": "i",
+        "ј": "j",
+        "к": "k", "Κ": "k", "κ": "k",
+        "ӏ": "l", "ⅼ": "l", "λ": "l",
+        "м": "m", "Μ": "m", "μ": "m",
+        "п": "n", "Ν": "n", "ν": "n",
+        "о": "o", "Ο": "o", "ο": "o",
+        "р": "p", "Ρ": "p", "ρ": "p",
+        "ѕ": "s", "Ѕ": "s",
+        "т": "t", "Τ": "t", "τ": "t",
+        "υ": "u",
+        "х": "x", "Χ": "x", "χ": "x",
+        "у": "y", "Υ": "y", "γ": "y",
+    }
+)
+
+
+def _l6_security_skeleton(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold().translate(
+        _L6_CONFUSABLE_TRANSLATION
+    )
+
+
+def _l6_mixed_confusable_key(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value)
+    for delimiter in (":", "="):
+        if delimiter not in normalized:
+            continue
+        prefix = normalized.split(delimiter, 1)[0]
+        has_ascii_latin = any(
+            "a" <= char.casefold() <= "z" for char in prefix
+        )
+        has_confusable_script = any(
+            unicodedata.category(char).startswith("L")
+            and (
+                "CYRILLIC" in unicodedata.name(char, "")
+                or "GREEK" in unicodedata.name(char, "")
+            )
+            for char in prefix
+        )
+        if has_ascii_latin and has_confusable_script:
+            return True
+    return False
+
+
+def _l6_safe_stable_text(value: str, *, field_name: str) -> str:
+    """Input-free rejection of URL, secret, principal, and control metadata."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or value != normalize_nfc(value)
+    ):
+        raise ValueError(f"{field_name} contains unsafe stable text")
+    decoded = value
+    try:
+        for _ in range(5):
+            next_value = unquote(decoded, errors="strict")
+            if next_value == decoded:
+                break
+            decoded = next_value
+        else:
+            raise ValueError(f"{field_name} contains unsafe stable text")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{field_name} contains unsafe stable text") from exc
+    for candidate in (value, decoded):
+        try:
+            reject_secret_text(candidate, field_name=field_name)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} contains unsafe stable text") from exc
+        normalized = unicodedata.normalize("NFKC", candidate)
+        skeleton = _l6_security_skeleton(candidate)
+        parsed = urlparse(normalized)
+        if (
+            any(
+                unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+                for char in candidate
+            )
+            or parsed.netloc
+            or parsed.scheme.casefold() in _L6_UNSAFE_URI_SCHEMES
+            or "://" in normalized
+            or normalized.startswith(("/", "\\", "~"))
+            or re.match(r"^[A-Za-z]:[\\/]", normalized)
+            or _L6_PROVIDER_METADATA_RE.search(normalized)
+            or _L6_PROVIDER_METADATA_RE.search(skeleton)
+            or _L6_EMAIL_RE.search(normalized)
+            or _L6_CREDENTIAL_RE.search(normalized)
+            or _L6_CREDENTIAL_RE.search(skeleton)
+            or _l6_mixed_confusable_key(normalized)
+        ):
+            raise ValueError(f"{field_name} contains unsafe stable text")
+    return value
+
+
+class L6StableSourceLocator(_L6Model):
+    """URL-free persisted locator view for sealed L6 display output."""
+
+    locator_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    blob_version_id: str | None = None
+    page: int | None = Field(default=None, ge=0)
+    sheet: str | None = None
+    slide: int | None = Field(default=None, ge=0)
+    section_path: tuple[str, ...] = ()
+    cell_range: str | None = None
+    char_start: int | None = Field(default=None, ge=0)
+    char_end: int | None = Field(default=None, ge=0)
+    sheet_zone: str | None = None
+    tile_id: str | None = None
+    coordinate_system: str | None = None
+    native_layer_id: str | None = None
+    native_object_id: str | None = None
+
+    @model_validator(mode="after")
+    def _safe_fields(self) -> "L6StableSourceLocator":
+        for field_name, value in self.model_dump(mode="python").items():
+            if isinstance(value, str):
+                _l6_safe_stable_text(value, field_name=field_name)
+            elif isinstance(value, tuple):
+                for item in value:
+                    _l6_safe_stable_text(item, field_name=field_name)
+        return self
+
+    @classmethod
+    def from_citation(
+        cls,
+        citation: SearchCitationEnvelope,
+    ) -> "L6StableSourceLocator":
+        locator = citation.immutable_locator
+        return cls(
+            locator_hash=locator.locator_hash,
+            blob_version_id=locator.blob_version_id,
+            page=locator.page,
+            sheet=locator.sheet,
+            slide=locator.slide,
+            section_path=tuple(locator.section_path or ()),
+            cell_range=locator.cell_range,
+            char_start=locator.char_start,
+            char_end=locator.char_end,
+            sheet_zone=locator.sheet_zone,
+            tile_id=locator.tile_id,
+            coordinate_system=locator.coordinate_system,
+            native_layer_id=locator.native_layer_id,
+            native_object_id=locator.native_object_id,
+        )
+
+
 class L6StableCitationPresentation(_L6Model):
     """Stable citation display DTO with no transient/private URL state."""
 
@@ -531,7 +723,7 @@ class L6StableCitationPresentation(_L6Model):
     quote_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     page: int | None = Field(default=None, ge=0)
     section_path: tuple[str, ...] = ()
-    immutable_locator: ImmutableSourceLocator
+    immutable_locator: L6StableSourceLocator
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     asset_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     governed_asset_reference_id: str | None = None
@@ -543,6 +735,23 @@ class L6StableCitationPresentation(_L6Model):
 
     @model_validator(mode="after")
     def _stable_hash(self) -> "L6StableCitationPresentation":
+        for field_name in (
+            "citation_presentation_id",
+            "search_citation_envelope_id",
+            "original_document_name",
+            "source_id",
+            "source_file_id",
+            "source_unit_id",
+            "chunk_id",
+            "exact_authorized_quote",
+            "governed_asset_reference_id",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                _l6_safe_stable_text(value, field_name=field_name)
+        for field_name in ("evidence_span_ids", "section_path"):
+            for value in getattr(self, field_name):
+                _l6_safe_stable_text(value, field_name=field_name)
         expected_id = "l6cp-sha256:" + canonical_sha256(
             {
                 "citation_id": self.search_citation_envelope_id,
@@ -573,7 +782,8 @@ class L6StableCitationPresentation(_L6Model):
             or self.quote_hash != citation.quote_hash
             or self.page != citation.page
             or self.section_path != citation.section_path
-            or self.immutable_locator != citation.immutable_locator
+            or self.immutable_locator
+            != L6StableSourceLocator.from_citation(citation)
             or self.content_hash != citation.content_hash
             or self.asset_hash != citation.asset_hash
             or self.governed_asset_reference_id
@@ -592,6 +802,13 @@ class L6StableCitationPresentation(_L6Model):
         if presentation.transient_authorized_asset_url is not None:
             raise ValueError("transient citation URLs cannot enter sealed L6 output")
         presentation.validate_citation(citation)
+        return cls.from_citation(citation)
+
+    @classmethod
+    def from_citation(
+        cls,
+        citation: SearchCitationEnvelope,
+    ) -> "L6StableCitationPresentation":
         values = {
             "citation_presentation_id": "l6cp-sha256:"
             + canonical_sha256(
@@ -600,28 +817,26 @@ class L6StableCitationPresentation(_L6Model):
                     "citation_hash": citation.citation_hash,
                 }
             ),
-            "search_citation_envelope_id": presentation.search_citation_envelope_id,
-            "search_citation_envelope_hash": (
-                presentation.search_citation_envelope_hash
-            ),
-            "original_document_name": presentation.original_document_name,
-            "source_id": presentation.source_id,
-            "source_file_id": presentation.source_file_id,
-            "source_unit_id": presentation.source_unit_id,
-            "chunk_id": presentation.chunk_id,
-            "evidence_span_ids": presentation.evidence_span_ids,
-            "exact_authorized_quote": presentation.exact_authorized_quote,
-            "quote_hash": presentation.quote_hash,
-            "page": presentation.page,
-            "section_path": presentation.section_path,
-            "immutable_locator": presentation.immutable_locator,
-            "content_hash": presentation.content_hash,
-            "asset_hash": presentation.asset_hash,
+            "search_citation_envelope_id": citation.search_citation_envelope_id,
+            "search_citation_envelope_hash": citation.citation_hash,
+            "original_document_name": citation.original_document_name,
+            "source_id": citation.source_id,
+            "source_file_id": citation.source_file_id,
+            "source_unit_id": citation.source_unit_id,
+            "chunk_id": citation.chunk_id,
+            "evidence_span_ids": citation.evidence_span_ids,
+            "exact_authorized_quote": citation.exact_authorized_quote,
+            "quote_hash": citation.quote_hash,
+            "page": citation.page,
+            "section_path": citation.section_path,
+            "immutable_locator": L6StableSourceLocator.from_citation(citation),
+            "content_hash": citation.content_hash,
+            "asset_hash": citation.asset_hash,
             "governed_asset_reference_id": (
-                presentation.governed_asset_reference_id
+                citation.governed_asset_reference_id
             ),
             "governed_asset_reference_hash": (
-                presentation.governed_asset_reference_hash
+                citation.governed_asset_reference_hash
             ),
         }
         return cls(
@@ -633,6 +848,7 @@ class L6StableCitationPresentation(_L6Model):
 class L6CitationPresentationCollection(_L6Model):
     citation_envelope_ids: tuple[str, ...]
     citation_envelope_hashes: tuple[L6CitationEnvelopeHash, ...]
+    presentation_source_bindings: tuple[L6PresentationSourceBinding, ...]
     presentations: tuple[L6StableCitationPresentation, ...]
     coverage_receipt_id: str
     coverage_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -661,17 +877,45 @@ class L6CitationPresentationCollection(_L6Model):
         presentation_ids = tuple(
             sorted(item.search_citation_envelope_id for item in self.presentations)
         )
+        binding_ids = tuple(
+            item.source_citation_envelope_id
+            for item in self.presentation_source_bindings
+        )
+        presentation_by_id = {
+            item.search_citation_envelope_id: item for item in self.presentations
+        }
+        hashes_by_id = {
+            item.search_citation_envelope_id: item.search_citation_envelope_hash
+            for item in self.citation_envelope_hashes
+        }
         if (
             not requested
             or requested != tuple(sorted(requested))
             or len(requested) != len(set(requested))
             or hash_ids != requested
             or presentation_ids != requested
+            or binding_ids != requested
             or len(self.presentations) != len(requested)
+            or len(self.presentation_source_bindings) != len(requested)
         ):
             raise ValueError(
                 "citation presentation collection must exactly cover requested IDs"
             )
+        for binding in self.presentation_source_bindings:
+            presentation = presentation_by_id.get(
+                binding.source_citation_envelope_id
+            )
+            if presentation is None or (
+                binding.citation_presentation_id
+                != presentation.citation_presentation_id
+                or binding.source_citation_envelope_hash
+                != presentation.search_citation_envelope_hash
+                or binding.source_citation_envelope_hash
+                != hashes_by_id.get(binding.source_citation_envelope_id)
+                or binding.stable_presentation_hash
+                != presentation.stable_presentation_hash
+            ):
+                raise ValueError("presentation source binding mismatch")
         expected = canonical_sha256(
             self.model_dump(mode="json", exclude={"collection_hash"})
         )
@@ -859,11 +1103,26 @@ class L6SynthesisInput(_L6Model):
         ):
             raise ValueError("complete L6 output requires Graph and cited Search evidence")
         if self.status == "complete":
+            self.coverage_receipt.validate_citations(self.search_citations)
             citation_ids = tuple(
                 sorted(
                     item.search_citation_envelope_id
                     for item in self.search_citations
                 )
+            )
+            citations_by_id = {
+                item.search_citation_envelope_id: item
+                for item in self.search_citations
+            }
+            presentations_canonical = all(
+                presentation
+                == L6StableCitationPresentation.from_citation(
+                    citations_by_id[presentation.search_citation_envelope_id]
+                )
+                for presentation in self.citation_collection.presentations
+                if presentation.search_citation_envelope_id in citations_by_id
+            ) and len(self.citation_collection.presentations) == len(
+                citations_by_id
             )
             if (
                 self.readiness.status != "complete"
@@ -872,6 +1131,7 @@ class L6SynthesisInput(_L6Model):
                 or not self.graph_execution_receipt.graph_complete
                 or self.coverage_receipt.coverage_status != "complete"
                 or citation_ids != self.citation_collection.citation_envelope_ids
+                or not presentations_canonical
                 or self.citation_collection.coverage_receipt_id
                 != self.coverage_receipt.coverage_receipt_id
                 or self.citation_collection.coverage_receipt_hash
@@ -1705,15 +1965,27 @@ def assemble_l6_citation_collection(
         raise ValueError("citation collection has duplicate, missing, or extra IDs")
     ordered_presentations: list[L6StableCitationPresentation] = []
     hashes: list[L6CitationEnvelopeHash] = []
+    bindings: list[L6PresentationSourceBinding] = []
     for envelope_id in requested:
         citation = by_id[envelope_id]
         presentation = presentation_by_id[envelope_id]
         presentation.validate_citation(citation)
+        expected_presentation = L6StableCitationPresentation.from_citation(citation)
+        if presentation != expected_presentation:
+            raise ValueError("stable presentation is not canonical citation output")
         ordered_presentations.append(presentation)
         hashes.append(
             L6CitationEnvelopeHash(
                 search_citation_envelope_id=envelope_id,
                 search_citation_envelope_hash=citation.citation_hash,
+            )
+        )
+        bindings.append(
+            L6PresentationSourceBinding(
+                citation_presentation_id=presentation.citation_presentation_id,
+                source_citation_envelope_id=envelope_id,
+                source_citation_envelope_hash=citation.citation_hash,
+                stable_presentation_hash=presentation.stable_presentation_hash,
             )
         )
     response_hashes = tuple(
@@ -1728,6 +2000,7 @@ def assemble_l6_citation_collection(
     values = {
         "citation_envelope_ids": requested,
         "citation_envelope_hashes": tuple(hashes),
+        "presentation_source_bindings": tuple(bindings),
         "presentations": tuple(ordered_presentations),
         "coverage_receipt_id": coverage.coverage_receipt_id,
         "coverage_receipt_hash": coverage.coverage_receipt_hash,
@@ -1784,6 +2057,7 @@ def build_l6_readiness_report(
     ):
         raise ValueError("readiness coverage receipt mismatch")
     if citation_collection is not None:
+        coverage.validate_citations(evidence_output.citations)
         citation_ids = tuple(
             sorted(
                 item.search_citation_envelope_id
@@ -1819,6 +2093,13 @@ def build_l6_readiness_report(
                 }
             )
         )
+        canonical_presentations = tuple(
+            L6StableCitationPresentation.from_citation(citation)
+            for citation in sorted(
+                evidence_output.citations,
+                key=lambda item: item.search_citation_envelope_id,
+            )
+        )
         if (
             request.citation_collection_hash
             != citation_collection.collection_hash
@@ -1837,6 +2118,8 @@ def build_l6_readiness_report(
             or citation_ids != citation_collection.citation_envelope_ids
             or tuple(evidence_output.presentations)
             != tuple(citation_collection.presentations)
+            or tuple(citation_collection.presentations)
+            != canonical_presentations
             or envelope_hashes != collection_hashes
             or tuple(coverage.required_canonical_ids)
             != tuple(graph_receipt.returned_canonical_ids)

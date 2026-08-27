@@ -83,6 +83,21 @@ ID/hash references. Conversion rejects any populated transient URL. Ephemeral
 authorized URLs, if later required, belong only in an L7 UI adapter outside all
 sealed L6 hashes and outputs.
 
+Every public DTO construction path recursively validates stable strings and the
+URL-free locator view. HTTP/file/data and other URL schemes, signed/query
+credentials, encoded secret assignments, principal/provider/email metadata,
+control/format characters, and Latin/Cyrillic/Greek homoglyph mixing in
+security-key prefixes fail with input-free errors. Safe NFC Unicode display
+text remains supported.
+
+The citation collection seals a source binding for each presentation:
+`(presentation_id, source_envelope_id, source_envelope_hash,
+stable_presentation_hash)`. Evidence output, collection assembly, readiness,
+and synthesis rederive the canonical stable DTO from the exact immutable
+`SearchCitationEnvelope` set and validate that set against Runtime citation
+mappings. A collection without its authoritative citation objects is
+candidate-only and cannot make an L6 package synthesis-ready.
+
 Top-k ranking, vector similarity, display-name matching, and document proximity
 are never completeness or relationship proof.
 
