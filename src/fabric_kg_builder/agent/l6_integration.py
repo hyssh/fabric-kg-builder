@@ -1989,6 +1989,9 @@ class L6InMemoryGraphReceiptAuthority:
             access=access,
             authorities=authorities,
         )
+        wait_deadline = (
+            time.monotonic() + budget.max_runtime_milliseconds / 1000
+        )
         with self._run_condition:
             while True:
                 state = self._graph_runs.get(l6_run_id)
@@ -2006,7 +2009,12 @@ class L6InMemoryGraphReceiptAuthority:
                     return state["result"]
                 if state["status"] == "failed":
                     raise ValueError("L6 run Graph execution previously failed")
-                self._run_condition.wait()
+                remaining = wait_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "L6 Graph execution wait exceeded sealed runtime budget"
+                    )
+                self._run_condition.wait(timeout=remaining)
 
         try:
             graph_result = execute()
@@ -2659,7 +2667,9 @@ def _validate_authorities(
     originating_budget: QueryBudgetV1_1 | None,
 ) -> None:
     _validate_graph_execution_authorities(authorities, access, scopes)
+    ontology_scope = scopes.ontology_scope
     retrieval_scope = scopes.retrieval_scope
+    policy = authorities.access_policy
     request_context.validate_budget(budget)
     request_context.validate_scope(retrieval_scope)
     if originating_context is not None:

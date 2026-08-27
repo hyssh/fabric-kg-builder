@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import hashlib
 import hmac
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -42,7 +43,12 @@ def _stub_persisted_l5b_gate(monkeypatch):
     )
     monkeypatch.setattr(
         l6,
-        "_validate_graph_execution_authorities",
+        "require_l5a_publication_receipt",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        l6,
+        "require_l5b_publication_receipt",
         lambda *args, **kwargs: None,
     )
 
@@ -191,6 +197,8 @@ def _evidence(mode="agentic_preview", *, status="complete", observed=None):
         values.update(
             {
                 "canonical_scope_id": context.resolved_retrieval_scope_id,
+                "access_policy_id": "policy:l6",
+                "access_policy_hash": "f" * 64,
                 "canonical_assertion_ids": (
                     ontology.members[index].membership_assertion_ids[0],
                 ),
@@ -329,21 +337,38 @@ def _graph_result(scope, query, *, returned_ids=GENERIC_MEMBER_IDS, source_error
     )
 
 
+def _principal_scope():
+    values = {
+        "principal_type": "managed_identity",
+        "principal_id": "principal:l6",
+        "resource_scope_ids": ("resource:l6",),
+    }
+    return SimpleNamespace(
+        **values,
+        model_dump=lambda **kwargs: values,
+    )
+
+
 def _access():
+    principal_scope = _principal_scope()
     return l6.L6AccessContext(
-        principal_type="managed_identity",
-        principal_id="principal:l6",
-        principal_scope_hash="a" * 64,
+        principal_type=principal_scope.principal_type,
+        principal_id=principal_scope.principal_id,
+        principal_scope_hash=canonical_sha256(
+            principal_scope.model_dump(mode="json")
+        ),
         access_policy_id="policy:l6",
-        access_policy_hash="b" * 64,
+        access_policy_hash="f" * 64,
         project_scope_id="project:generic",
     )
 
 
 def _authorities():
     policy = SimpleNamespace(
-        access_policy_id="access-policy:evidence",
-        policy_hash=HASH_C,
+        access_policy_id="policy:l6",
+        policy_hash="f" * 64,
+        allowed_operations=("content", "metadata"),
+        principal_scopes=(_principal_scope(),),
     )
     asset = SimpleNamespace(
         governed_asset_reference_id="governed-asset:manual",
@@ -352,11 +377,14 @@ def _authorities():
         content_hash="b" * 64,
         access_policy_id=policy.access_policy_id,
         access_policy_hash=policy.policy_hash,
+        validate_access_policy=lambda candidate: None,
     )
     l5a = SimpleNamespace(
         compiled=SimpleNamespace(
+            source=SimpleNamespace(),
             fingerprint="1" * 64,
             crosswalks=(),
+            access_policy=policy,
         ),
         receipt=SimpleNamespace(receipt_hash="2" * 64),
         output_manifest=SimpleNamespace(manifest_hash="3" * 64),
@@ -364,7 +392,9 @@ def _authorities():
     l5b = SimpleNamespace(
         compiled=SimpleNamespace(
             fingerprint="4" * 64,
-            index_fingerprint="5" * 64,
+            index_fingerprint="a" * 64,
+            access_policy=policy,
+            governed_assets=(asset,),
         ),
         receipt=SimpleNamespace(receipt_hash="6" * 64),
         output_manifest=SimpleNamespace(manifest_hash="7" * 64),
@@ -378,7 +408,6 @@ def _authorities():
 
 
 def _orchestrator(monkeypatch, graph_result, evidence_result):
-    monkeypatch.setattr(l6, "_validate_authorities", lambda *args, **kwargs: None)
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
     resolver = _Resolver(ontology, retrieval)
@@ -1290,7 +1319,6 @@ def test_graph_source_error_is_sanitized_and_never_falls_back(monkeypatch):
             self.calls += 1
             raise RuntimeError("Bearer token-secret at https://provider.example")
 
-    monkeypatch.setattr(l6, "_validate_authorities", lambda *args, **kwargs: None)
     evidence = _EvidenceHost(evidence_result)
     graph = _SecretGraphHost()
     orchestrator = l6.L6AgentOrchestrator(
@@ -1458,7 +1486,7 @@ def test_citation_policy_or_asset_mismatch_abstains(monkeypatch):
         exclude={"citation_hash"},
         round_trip=True,
     )
-    citation_values["access_policy_hash"] = "f" * 64
+    citation_values["access_policy_hash"] = "8" * 64
     wrong = SearchCitationEnvelope(
         **citation_values,
         citation_hash=canonical_sha256(citation_values),
@@ -1522,7 +1550,6 @@ def test_retrieval_exception_records_attempt_with_incomplete_accounting(monkeypa
             self.calls += 1
             raise RuntimeError("api-key=must-not-leak")
 
-    monkeypatch.setattr(l6, "_validate_authorities", lambda *args, **kwargs: None)
     evidence = _FailingEvidenceHost()
     orchestrator = l6.L6AgentOrchestrator(
         resolver=_Resolver(ontology, resolved_retrieval_scope()),
@@ -2865,6 +2892,63 @@ def test_provider_baseexception_wakes_concurrent_waiter_and_consumes_run():
 
 
 @pytest.mark.unit
+def test_duplicate_waiter_times_out_under_budget_after_spurious_notify():
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology, run_seed="wait-timeout")
+    graph = _graph_result(ontology, query)
+    _, _, budget, _, _ = _evidence()
+    values = budget.model_dump(
+        mode="python",
+        exclude={"budget_hash"},
+        round_trip=True,
+    )
+    values["max_runtime_milliseconds"] = 50
+    budget = seal(type(budget), "budget_hash", values)
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = [0]
+    kwargs = {
+        "l6_run_id": query.l6_run_id,
+        "graph_query": query,
+        "ontology_scope": ontology,
+        "retrieval_scope": retrieval,
+        "budget": budget,
+        "access": _access(),
+        "authorities": _authorities(),
+    }
+
+    def hanging_owner():
+        calls[0] += 1
+        entered.set()
+        assert release.wait(timeout=5)
+        return graph
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(
+            store.execute_graph_once,
+            **kwargs,
+            execute=hanging_owner,
+        )
+        assert entered.wait(timeout=5)
+        waiter = pool.submit(
+            store.execute_graph_once,
+            **kwargs,
+            execute=lambda: pytest.fail("waiter called provider"),
+        )
+        time.sleep(0.01)
+        with store._run_condition:
+            store._run_condition.notify_all()
+        with pytest.raises(TimeoutError, match="sealed runtime budget"):
+            waiter.result(timeout=2)
+        assert not owner.done()
+        release.set()
+        assert owner.result(timeout=2) == graph
+    assert calls == [1]
+
+
+@pytest.mark.unit
 def test_result_validation_failure_wakes_waiter_and_consumes_run():
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
@@ -2972,6 +3056,53 @@ def test_graph_request_id_is_exact_canonical_payload_hash():
         }
     )
     assert resealed.graph_request_id != query.graph_request_id
+
+
+@pytest.mark.unit
+def test_real_authority_validation_accepts_valid_authorities():
+    _, context, budget, _, _ = _evidence()
+    scopes = l6.L6ResolvedScopes(
+        ontology_scope=resolved_ontology_scope(),
+        retrieval_scope=resolved_retrieval_scope(),
+    )
+    l6._validate_authorities(
+        _authorities(),
+        _access(),
+        scopes,
+        context,
+        budget,
+        None,
+        None,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("access_update", "expected"),
+    (
+        ({"access_policy_hash": "8" * 64}, "access policy authority mismatch"),
+        ({"principal_scope_hash": "8" * 64}, "principal scope"),
+        ({"project_scope_id": "project:other"}, "project scope"),
+    ),
+)
+def test_real_authority_validation_rejects_typed_access_mismatch(
+    access_update, expected
+):
+    _, context, budget, _, _ = _evidence()
+    scopes = l6.L6ResolvedScopes(
+        ontology_scope=resolved_ontology_scope(),
+        retrieval_scope=resolved_retrieval_scope(),
+    )
+    with pytest.raises(ValueError, match=expected):
+        l6._validate_authorities(
+            _authorities(),
+            _access().model_copy(update=access_update),
+            scopes,
+            context,
+            budget,
+            None,
+            None,
+        )
 
 
 @pytest.mark.unit
