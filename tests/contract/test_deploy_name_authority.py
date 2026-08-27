@@ -221,7 +221,9 @@ class TestSingleResolverInvariant:
 class TestDryRunRenderedBlock:
     """dry-run outputs include the 'Resolved item:' block for every named item."""
 
-    def test_render_block_present_in_deploy_ontology_mock_output(self, tmp_path):
+    def test_render_block_present_in_deploy_ontology_mock_output(
+        self, tmp_path, isolated_ontology_project
+    ):
         """deploy-ontology --mock with --manifest must print 'Resolved item:' block."""
         from tests.conftest import make_cli_runner, combined_output  # noqa: PLC0415
         cli = _import_cli()
@@ -241,8 +243,12 @@ class TestDryRunRenderedBlock:
             f"Expected 'Resolved item:' block in deploy-ontology --mock output.\n"
             f"Got: {output!r}"
         )
+        assert not (isolated_ontology_project / ".git").exists()
+        assert "test-workspace-id" in output
 
-    def test_render_block_contains_name_authority_line(self, tmp_path):
+    def test_render_block_contains_name_authority_line(
+        self, tmp_path, isolated_ontology_project
+    ):
         """The rendered block must include 'name authority:' line."""
         from tests.conftest import make_cli_runner, combined_output  # noqa: PLC0415
         cli = _import_cli()
@@ -262,7 +268,9 @@ class TestDryRunRenderedBlock:
             f"Expected 'name authority:' in output. Got: {output!r}"
         )
 
-    def test_render_block_contains_manifest_ontology_name(self, tmp_path):
+    def test_render_block_contains_manifest_ontology_name(
+        self, tmp_path, isolated_ontology_project
+    ):
         """The dry-run output must include the manifest's ontology display name."""
         from tests.conftest import make_cli_runner, combined_output  # noqa: PLC0415
         cli = _import_cli()

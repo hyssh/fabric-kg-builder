@@ -15,7 +15,6 @@ Mock targets
 from __future__ import annotations
 
 import json
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -35,30 +34,35 @@ from fabric_kg_builder.domain import (
 )
 
 # ---------------------------------------------------------------------------
-# Session setup: ensure per-environment config exists for CLI tests.
+# Isolated CLI project
 # ---------------------------------------------------------------------------
-# ontology/environments/{dev,test,prod}.json are gitignored (they hold real
-# resource IDs). A fresh checkout / CI only has the committed *.json.example
-# templates. Several CLI tests read these files via `--env dev`, so this
-# autouse, session-scoped fixture materializes them from the templates when
-# missing and removes only the copies it created.
 
 _REPO_ROOT = Path(__file__).parent.parent
-_ENV_DIR = _REPO_ROOT / "ontology" / "environments"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _ensure_env_configs() -> "object":
-    created: list[Path] = []
-    for env in ("dev", "test", "prod"):
-        target = _ENV_DIR / f"{env}.json"
-        template = _ENV_DIR / f"{env}.json.example"
-        if not target.exists() and template.exists():
-            shutil.copyfile(template, target)
-            created.append(target)
-    yield
-    for path in created:
-        path.unlink(missing_ok=True)
+@pytest.fixture()
+def isolated_ontology_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a clean CLI project with a non-secret Fabric environment config."""
+    env_dir = tmp_path / "ontology" / "environments"
+    env_dir.mkdir(parents=True)
+    (env_dir / "dev.json").write_text(
+        json.dumps(
+            {
+                "env": "dev",
+                "fabric": {
+                    "workspace_id": "test-workspace-id",
+                    "workspace_display_name": "test-workspace",
+                    "lakehouse_item_id": "test-lakehouse-id",
+                    "lakehouse_display_name": "test-lakehouse",
+                    "ontology_display_name": "test_ontology",
+                    "schema_name": "dbo",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 # ---------------------------------------------------------------------------
