@@ -1,7 +1,7 @@
 # L6 Agent Connection Guide
 
-L6 definitions are local artifacts in version 0.2.3. Do not deploy them from
-this stage.
+L6 definitions remain canonical artifacts in version 0.2.3. Deployment is an
+explicit L7 operation and never occurs during L6 compilation.
 
 ## Required existing connections
 
@@ -59,14 +59,62 @@ or rejects the run, wakes concurrent waiters, and performs no second Graph
 call. The included
 `L6InMemoryGraphReceiptAuthority` is the process-local test implementation.
 Callers receive only the opaque receipt ID/hash; they cannot submit receipt
-contents. A production multi-process host must use a durable adapter preserving
-the same atomic claim/completion/failure transitions. A durable host injects an immutable
+contents. A production multi-process host uses `AzureBlobL6GraphReceiptAuthority` to
+preserve the same atomic claim/completion/failure transitions with finite Blob
+leases and ETag compare-and-swap. A durable host injects an immutable
 `L6AuthorityKeyringSnapshot` through `L6AuthorityKeyringProvider`. Snapshots
 carry authority ID/version/algorithm, validity window, state, and verifier;
 atomic versioned replacement supports rotation, disable, and revocation.
 Unknown, inactive, early, or expired authority keys fail closed. Key material
 and verifiers are internal host configuration and are never exposed as tools.
 
-L7 must deploy the endpoint and definition, verify project connection
-audiences/RBAC, run live Graph and Search acceptance, and confirm definition
-read-back from Microsoft Foundry and Fabric Data Agent.
+## L7 safe deployment workflow
+
+Copy `.foundry/l7-deployment.json.example` to the ignored
+`.foundry/l7-deployment.json` and replace every placeholder. The endpoint must
+already be hosted on approved HTTPS compute; this release does not provision a
+new compute resource.
+
+```text
+fabric-kg app deploy-l6 \
+  --config .foundry/l7-deployment.json \
+  --definition build/agent/l6-agent-definition.json \
+  --plan build/release/l7-deployment-plan.json
+
+fabric-kg app deploy-l6 \
+  --config .foundry/l7-deployment.json \
+  --definition build/agent/l6-agent-definition.json \
+  --live \
+  --plan build/release/l7-deployment-plan.json \
+  --approve-live <exact-plan-hash>
+```
+
+Dry-run is the default and performs GET/read-only operations only. Live mode
+reads the exact unexpired plan from disk and rechecks identity, configuration,
+audience, resource ETags, Fabric definitions, and L5a/L5b/L6 hashes before its
+first mutation. `--resume` does not re-plan or accept changed state. Rollback is
+enabled by default and can affect only resources or versions created/updated by
+the approved attempt.
+
+Foundry does not return `CustomKeys` credential values from connection GET.
+L7 therefore uses a non-secret workspace/Data Agent binding commitment for
+readback and refuses to update a mismatched preexisting Fabric connection,
+because its redacted prior state cannot support a safe restore. Create a new
+connection name or reconcile it explicitly before planning.
+
+The RemoteTool process is exposed separately:
+
+```text
+fabric-kg app serve-l6 \
+  --config .foundry/l7-deployment.json \
+  --handler-factory my_package.l6_runtime:create_handler
+```
+
+The handler factory must return configured canonical L6 authorities. The host
+enforces Entra tenant/audience validation, strict request/response schemas,
+request size and deadline limits, sanitized errors, health/readiness, and zero
+synthesis. Assign Storage Blob Data Contributor (or a tighter custom role with
+read/write/lease permissions) to the host identity. Foundry and Fabric RBAC,
+RemoteTool application registration/audience, and compute hosting remain release
+prerequisites. Live Graph/Search acceptance is intentionally deferred to the
+0.2.4 successor.

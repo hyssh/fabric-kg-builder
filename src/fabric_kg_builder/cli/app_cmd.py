@@ -17,6 +17,7 @@ Design:
 from __future__ import annotations
 
 import datetime
+import importlib
 import json
 import os
 import subprocess
@@ -34,6 +35,16 @@ from fabric_kg_builder.agent.evaluator import (
     load_eval_dataset,
     run_evaluation,
     EvalCase,
+)
+from fabric_kg_builder.agent.l7_deployment import (
+    L7DeploymentError,
+    L7DeploymentExecutor,
+    L7DeploymentPlanner,
+    load_l7_config,
+    load_l7_plan,
+    persist_l7_plan,
+    persist_l7_receipt,
+    require_canonical_l6_definition,
 )
 from fabric_kg_builder.lineage.registry import AssetRegistry, record_deployment
 
@@ -201,6 +212,204 @@ def _record_app_lineage(
 )
 def app_cmd() -> None:
     """M8 agent and app deployment commands."""
+
+
+# ---------------------------------------------------------------------------
+# deploy-l6 / serve-l6
+# ---------------------------------------------------------------------------
+
+
+@app_cmd.command("deploy-l6")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Strict non-secret L7 JSON target configuration.",
+)
+@click.option(
+    "--definition",
+    "definition_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Persisted canonical L6 agent definition.",
+)
+@click.option(
+    "--dry-run/--live",
+    default=True,
+    show_default=True,
+    help="GET-only planning is the default; --live requires exact hash approval.",
+)
+@click.option(
+    "--plan",
+    "plan_path",
+    default="build/release/l7-deployment-plan.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Reuse only the exact persisted plan; never re-plan implicitly.",
+)
+@click.option(
+    "--approve-live",
+    default=None,
+    help="Exact unexpired plan hash required with --live.",
+)
+@click.option(
+    "--rollback/--no-rollback",
+    default=True,
+    show_default=True,
+    help="Rollback attempt-owned mutations after a failure.",
+)
+@click.option(
+    "--out",
+    "receipt_path",
+    default="build/release/l7-deployment-receipt.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def deploy_l6_cmd(
+    config_path: Path,
+    definition_path: Path,
+    dry_run: bool,
+    plan_path: Path,
+    resume: bool,
+    approve_live: str | None,
+    rollback: bool,
+    receipt_path: Path,
+) -> None:
+    """Plan or deploy the canonical L6 definition through the L7 authority."""
+    try:
+        config = load_l7_config(config_path)
+        definition = require_canonical_l6_definition(definition_path)
+        from fabric_kg_builder.agent.l7_adapters import (
+            build_default_azure_l7_adapters,
+        )
+
+        probe, mutations = build_default_azure_l7_adapters(config)
+        planner = L7DeploymentPlanner(probe)
+        if dry_run:
+            if approve_live:
+                raise L7DeploymentError(
+                    "--approve-live is invalid during GET-only dry-run"
+                )
+            plan = load_l7_plan(plan_path) if resume else planner.build(
+                config=config,
+                definition=definition,
+            )
+            if (
+                plan.config_hash != config.config_hash
+                or plan.l6_definition_hash != definition.definition_hash
+            ):
+                raise L7DeploymentError(
+                    "resume requires the exact config and L6 definition"
+                )
+            if resume:
+                fresh = planner.build(config=config, definition=definition)
+                if (
+                    fresh.tenant_id != plan.tenant_id
+                    or fresh.principal_id != plan.principal_id
+                    or fresh.readbacks != plan.readbacks
+                    or fresh.actions != plan.actions
+                    or fresh.l5a_definition_hash != plan.l5a_definition_hash
+                    or fresh.l5b_definition_hash != plan.l5b_definition_hash
+                ):
+                    raise L7DeploymentError(
+                        "resume state differs from the persisted plan"
+                    )
+            persist_l7_plan(plan_path, plan)
+            click.echo(f"plan_hash={plan.plan_hash}")
+            click.echo(f"plan_path={plan_path}")
+            click.echo("mode=dry-run; mutations=0")
+            click.echo(f"hosting_prerequisite={plan.hosting_prerequisite}")
+            return
+        if not approve_live:
+            raise L7DeploymentError(
+                "--live requires --approve-live <exact-plan-hash>"
+            )
+        plan = load_l7_plan(plan_path)
+        receipt = L7DeploymentExecutor(
+            planner=planner,
+            mutations=mutations,
+        ).execute(
+            plan=plan,
+            approve_live=approve_live,
+            config=config,
+            definition=definition,
+            rollback_on_failure=rollback,
+        )
+        persist_l7_receipt(receipt_path, receipt)
+        click.echo(f"status={receipt.status}")
+        click.echo(f"receipt_hash={receipt.receipt_hash}")
+        click.echo(f"receipt_path={receipt_path}")
+    except L7DeploymentError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@app_cmd.command("serve-l6")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--handler-factory",
+    required=True,
+    help="Import path module:callable returning an L6RemoteToolHandler.",
+)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8000, show_default=True, type=click.IntRange(1, 65535))
+@click.option("--max-body-bytes", default=1_048_576, show_default=True, type=int)
+@click.option("--timeout-seconds", default=30.0, show_default=True, type=float)
+def serve_l6_cmd(
+    config_path: Path,
+    handler_factory: str,
+    host: str,
+    port: int,
+    max_body_bytes: int,
+    timeout_seconds: float,
+) -> None:
+    """Serve canonical L6 tools; hosting infrastructure is a prerequisite."""
+    try:
+        config = load_l7_config(config_path)
+        module_name, separator, attribute = handler_factory.partition(":")
+        if not separator or not module_name or not attribute:
+            raise L7DeploymentError(
+                "--handler-factory must use module:callable syntax"
+            )
+        factory = getattr(importlib.import_module(module_name), attribute)
+        handler = factory()
+        from fabric_kg_builder.agent.l7_remote_tool import (
+            create_l6_remote_tool_app,
+        )
+        from fabric_kg_builder.app.auth import EntraAuthVerifier
+
+        api = create_l6_remote_tool_app(
+            handler=handler,
+            auth_verifier=EntraAuthVerifier(
+                tenant_id=config.tenant_id,
+                audience=config.remote_tool_audience,
+                allowed_caller_object_ids=(
+                    config.remote_tool_allowed_caller_object_ids
+                ),
+                required_app_role=config.remote_tool_required_app_role,
+            ),
+            max_body_bytes=max_body_bytes,
+            timeout_seconds=timeout_seconds,
+            external_endpoint=config.remote_tool_endpoint,
+        )
+        try:
+            import uvicorn
+        except ImportError as exc:
+            raise L7DeploymentError(
+                "uvicorn is required; install fabric-kg-builder[app]"
+            ) from exc
+        uvicorn.run(api, host=host, port=port)
+    except (ImportError, AttributeError, TypeError, L7DeploymentError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ env/
 # and resource names. Keep local; commit only the sanitized *.json.example.
 ontology/environments/*.json
 !ontology/environments/*.json.example
+.foundry/l7-deployment.json
+!.foundry/l7-deployment.json.example
 
 # Generated Parquet files (build-time artifacts)
 build/**/*.parquet

@@ -1612,6 +1612,32 @@ PYTHONPATH=src python3 -m pytest -q -m integration \
   tests/integration/test_l6_agent_integration.py
 ```
 
+### 15.9 L7 production deployment adapter foundation gate
+
+The L7 gate is offline and fake-backed. It must prove that dry-run performs only
+identity/GET probes; plan JSON is canonical, immutable, hashed, sanitized, and
+expires; live mode requires `--approve-live` equal to the exact persisted plan
+hash; and tenant, principal, config, audience, L5a/L5b/L6 hash, definition, or
+ETag drift fails before the first mutation. Resume accepts only the same plan
+and state.
+
+It also covers Blob lease/CAS concurrency, concurrent run claims, expired claim
+recovery, one-time receipt consumption, absent/rotated opaque signers,
+RemoteTool auth/schema/body/deadline/readiness/OpenAPI behavior, bearer header
+use without token disclosure, exact connection readback, conditional rollback,
+Foundry version readback, Fabric capability failure, accounting, redaction, and
+unchanged RDF inactivity.
+
+```text
+PYTHONPATH=src python3 -m pytest -q \
+  tests/unit/test_l6_blob_authority.py \
+  tests/unit/test_l7_deployment.py \
+  tests/unit/test_l7_remote_tool.py \
+  tests/unit/test_project_connections_l7.py \
+  tests/unit/test_l7_cli.py \
+  tests/unit/test_l6_agent_integration.py
+```
+
 L4 validation command:
 
 ```text

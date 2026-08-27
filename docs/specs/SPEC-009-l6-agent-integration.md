@@ -171,6 +171,17 @@ The definition requires:
 - managed identity/RBAC configured outside the definition;
 - no embedded token, key, signed URL, principal metadata, or provider secret.
 
-No resource is deployed by L6. L7 owns endpoint publication, project connection
-creation, live Data Agent/Foundry definition deployment, smoke tests, and
-post-deploy acceptance.
+No resource is deployed by L6. The L7 foundation consumes only
+`L6CanonicalAgentDefinition`; arbitrary legacy agent dictionaries are not a
+deployment authority. `AzureBlobL6GraphReceiptAuthority` provides the production
+multi-process run/receipt boundary with Entra-authenticated Blob access, finite
+leases, ETag compare-and-swap, crash recovery, one-time consumption, and an
+opaque injected signer provider. Signing keys never enter Blob state, receipts,
+logs, or repository configuration.
+
+L7 owns GET-only planning, endpoint publication prerequisites, project
+connection creation/update, Foundry version deployment, exact readback,
+attempt-owned rollback, and post-deploy acceptance. Fabric Data Agent mutation
+is not claimed by this foundation: the adapter verifies configured Fabric item
+IDs/types/definitions and reports an unsupported capability before any mutation
+when an exact readback is unavailable. RDF remains optional and inactive.

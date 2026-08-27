@@ -1,0 +1,39 @@
+{
+  "tenant_id": "<tenant-guid>",
+  "subscription_id": "<subscription-guid>",
+  "resource_group": "<resource-group>",
+  "expected_principal_id": "<managed-or-interactive-identity-object-guid>",
+  "foundry_account_name": "<foundry-account>",
+  "foundry_project_name": "<foundry-project>",
+  "foundry_project_endpoint": "https://<foundry-account>.services.ai.azure.com/api/projects/<foundry-project>",
+  "model_deployment": "<model-deployment>",
+  "fabric_workspace_id": "<fabric-workspace-guid>",
+  "fabric_items": [
+    {
+      "item_id": "<fabric-data-agent-guid>",
+      "item_type": "DataAgent",
+      "definition_hash": null
+    },
+    {
+      "item_id": "<lakehouse-guid>",
+      "item_type": "Lakehouse",
+      "definition_hash": "<64-hex-definition-hash>"
+    },
+    {
+      "item_id": "<ontology-guid>",
+      "item_type": "Ontology",
+      "definition_hash": "<64-hex-definition-hash>"
+    }
+  ],
+  "fabric_connection_name": "<fabric-data-agent-connection>",
+  "remote_tool_connection_name": "<l6-remote-tool-connection>",
+  "remote_tool_endpoint": "https://<existing-host>/",
+  "remote_tool_audience": "api://<application-id>",
+  "remote_tool_allowed_caller_object_ids": [
+    "<foundry-managed-identity-object-guid>"
+  ],
+  "remote_tool_required_app_role": "<remote-tool-invoke-app-role>",
+  "l5a_definition_hash": "<64-hex-l5a-definition-hash>",
+  "l5b_definition_hash": "<64-hex-l5b-definition-hash>",
+  "plan_ttl_seconds": 900
+}
