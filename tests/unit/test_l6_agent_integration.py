@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import hashlib
 import hmac
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from pydantic import ValidationError
@@ -406,6 +408,12 @@ def test_complete_path_is_zero_synthesis_and_one_graph_one_search(monkeypatch):
     assert "transient" not in str(
         result.citation_collection.model_dump(mode="json")
     ).casefold()
+    authority = orchestrator._graph_receipt_authority
+    result.validate_trusted(
+        receipt_authority=authority,
+    )
+    with pytest.raises(ValueError, match="replayed"):
+        result.validate_trusted(receipt_authority=authority)
     with pytest.raises(RuntimeError, match="exactly one run"):
         orchestrator.run(
             l6.L6RunRequest(
@@ -416,6 +424,88 @@ def test_complete_path_is_zero_synthesis_and_one_graph_one_search(monkeypatch):
                 query_budget=budget,
                 access=_access(),
             )
+        )
+
+
+@pytest.mark.unit
+def test_orchestrator_single_use_is_atomic_under_concurrency(monkeypatch):
+    evidence_result, context, budget, _, _ = _evidence()
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology)
+    orchestrator, _, graph, evidence = _orchestrator(
+        monkeypatch,
+        _graph_result(ontology, query),
+        evidence_result,
+    )
+    request = l6.L6RunRequest(
+        question="detail",
+        ontology_scope_envelope=ontology_scope(),
+        graph_query=query,
+        request_context=context,
+        query_budget=budget,
+        access=_access(),
+    )
+    start = threading.Barrier(3)
+
+    def invoke():
+        start.wait()
+        try:
+            return orchestrator.run(request)
+        except RuntimeError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(invoke) for _ in range(2)]
+        start.wait()
+        outcomes = [future.result() for future in futures]
+
+    assert sum(isinstance(item, l6.L6SynthesisInput) for item in outcomes) == 1
+    assert sum(isinstance(item, RuntimeError) for item in outcomes) == 1
+    assert graph.calls == 1
+    assert evidence.calls == 1
+
+
+@pytest.mark.unit
+def test_evidence_receipt_is_authenticated_bound_and_single_use(monkeypatch):
+    evidence_result, context, budget, _, _ = _evidence()
+    ontology = resolved_ontology_scope()
+    query = _graph_query(ontology)
+    orchestrator, _, _, _ = _orchestrator(
+        monkeypatch,
+        _graph_result(ontology, query),
+        evidence_result,
+    )
+    result = orchestrator.run(
+        l6.L6RunRequest(
+            question="detail",
+            ontology_scope_envelope=ontology_scope(),
+            graph_query=query,
+            request_context=context,
+            query_budget=budget,
+            access=_access(),
+        )
+    )
+    receipt = result.evidence_execution_receipt
+    authority = orchestrator._graph_receipt_authority
+    authority.verify_and_consume_evidence(receipt)
+    with pytest.raises(ValueError, match="replayed"):
+        authority.verify_and_consume_evidence(receipt)
+
+    values = receipt.model_dump(
+        mode="python",
+        exclude={"receipt_hash"},
+        round_trip=True,
+    )
+    values["graph_execution_receipt_hash"] = "f" * 64
+    forged = l6.L6EvidenceExecutionReceipt(
+        **values,
+        receipt_hash=canonical_sha256(values),
+    )
+    with pytest.raises(ValueError, match="authentication failed"):
+        l6._verify_evidence_receipt_trust(
+            forged,
+            keyring_provider=authority.keyring_provider,
+            now_milliseconds=authority._clock_milliseconds(),
         )
 
 
@@ -544,16 +634,14 @@ def test_external_receipt_authenticator_supports_multi_process_verification():
             ).hexdigest()
             return hmac.compare_digest(authentication_tag, expected)
 
-    l6.register_l6_graph_receipt_authenticator(
-        authority_id,
-        _DurableVerifier(),
-    )
     values = receipt.model_dump(
         mode="python",
         exclude={"authentication_tag", "receipt_hash"},
         round_trip=True,
     )
     values["authority_id"] = authority_id
+    values["authority_version"] = 7
+    values["issued_at_milliseconds"] = 1_000
     authentication_tag = hmac.new(
         key,
         canonical_json(values).encode("utf-8"),
@@ -565,6 +653,31 @@ def test_external_receipt_authenticator_supports_multi_process_verification():
         receipt_hash=canonical_sha256(sealed),
     )
     assert restored.authority_id == authority_id
+    snapshot = l6.L6AuthorityKeyringSnapshot(
+        snapshot_version=1,
+        keys=(
+            l6.L6TrustedAuthorityKey(
+                metadata=l6.L6AuthorityKeyMetadata(
+                    authority_id=authority_id,
+                    authority_version=7,
+                    algorithm="HMAC-SHA256",
+                    not_before_milliseconds=500,
+                    not_after_milliseconds=2_000,
+                    state="active",
+                ),
+                authenticator=_DurableVerifier(),
+            ),
+        ),
+    )
+    assert snapshot.verify(
+        authority_id=restored.authority_id,
+        authority_version=restored.authority_version,
+        algorithm=restored.authentication_algorithm,
+        issued_at_milliseconds=restored.issued_at_milliseconds,
+        payload=l6._graph_receipt_auth_payload(restored.model_dump(mode="json")),
+        authentication_tag=restored.authentication_tag,
+        now_milliseconds=1_500,
+    )
 
 
 @pytest.mark.unit
@@ -587,6 +700,183 @@ def test_server_receipt_authority_rejects_narrowed_graph_query():
             retrieval_scope=retrieval,
             budget=budget,
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("state", ("revoked", "disabled"))
+def test_keyring_revocation_and_disable_fail_closed(state):
+    clock = [1_000]
+    store = l6.L6InMemoryGraphReceiptAuthority(
+        clock_milliseconds=lambda: clock[0],
+        validity_milliseconds=1_000,
+    )
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology)
+    _, _, budget, _, _ = _evidence()
+    receipt = store.issue(
+        graph_query=query,
+        graph_result=_graph_result(ontology, query),
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+    )
+    metadata = store._metadata.model_copy(update={"state": state})
+    store.keyring_provider.replace(
+        l6.L6AuthorityKeyringSnapshot(
+            snapshot_version=2,
+            keys=(
+                l6.L6TrustedAuthorityKey(
+                    metadata=metadata,
+                    authenticator=store._authenticator,
+                ),
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="authentication failed"):
+        l6._verify_graph_receipt_trust(
+            receipt,
+            keyring_provider=store.keyring_provider,
+            now_milliseconds=clock[0],
+        )
+
+
+@pytest.mark.unit
+def test_keyring_expiry_not_yet_valid_and_rotation():
+    clock = [1_000]
+    store = l6.L6InMemoryGraphReceiptAuthority(
+        clock_milliseconds=lambda: clock[0],
+        validity_milliseconds=100,
+    )
+    ontology = resolved_ontology_scope()
+    retrieval = resolved_retrieval_scope()
+    query = _graph_query(ontology)
+    _, _, budget, _, _ = _evidence()
+    receipt = store.issue(
+        graph_query=query,
+        graph_result=_graph_result(ontology, query),
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+    )
+    clock[0] = 1_101
+    with pytest.raises(ValueError, match="authentication failed"):
+        l6._verify_graph_receipt_trust(
+            receipt,
+            keyring_provider=store.keyring_provider,
+            now_milliseconds=clock[0],
+        )
+    future_metadata = store._metadata.model_copy(
+        update={
+            "not_before_milliseconds": 2_000,
+            "not_after_milliseconds": 3_000,
+        }
+    )
+    store.keyring_provider.replace(
+        l6.L6AuthorityKeyringSnapshot(
+            snapshot_version=2,
+            keys=(
+                l6.L6TrustedAuthorityKey(
+                    metadata=future_metadata,
+                    authenticator=store._authenticator,
+                ),
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="authentication failed"):
+        l6._verify_graph_receipt_trust(
+            receipt,
+            keyring_provider=store.keyring_provider,
+            now_milliseconds=1_500,
+        )
+    new_key = b"rotated-signing-key".ljust(32, b"\0")
+    new_authenticator = l6._L6HmacGraphReceiptAuthenticator(new_key)
+    new_authority_id = "gxra-sha256:" + canonical_sha256(new_key.hex())
+    rotated_metadata = l6.L6AuthorityKeyMetadata(
+        authority_id=new_authority_id,
+        authority_version=2,
+        algorithm="HMAC-SHA256",
+        not_before_milliseconds=1_100,
+        not_after_milliseconds=3_000,
+        state="active",
+    )
+    store.keyring_provider.replace(
+        l6.L6AuthorityKeyringSnapshot(
+            snapshot_version=3,
+            keys=(
+                l6.L6TrustedAuthorityKey(
+                    metadata=store._metadata.model_copy(
+                        update={"state": "revoked"}
+                    ),
+                    authenticator=store._authenticator,
+                ),
+                l6.L6TrustedAuthorityKey(
+                    metadata=rotated_metadata,
+                    authenticator=new_authenticator,
+                ),
+            ),
+        )
+    )
+    clock[0] = 1_500
+    rotated = store.issue(
+        graph_query=query,
+        graph_result=_graph_result(ontology, query),
+        ontology_scope=ontology,
+        retrieval_scope=retrieval,
+        budget=budget,
+    )
+    assert rotated.authority_id == new_authority_id
+    assert rotated.authority_version == 2
+    l6._verify_graph_receipt_trust(
+        rotated,
+        keyring_provider=store.keyring_provider,
+        now_milliseconds=clock[0],
+    )
+
+
+@pytest.mark.unit
+def test_keyring_snapshot_replacement_is_atomic_under_concurrency():
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    provider = store.keyring_provider
+    errors = []
+
+    def reader():
+        for _ in range(500):
+            snapshot = provider.snapshot()
+            if not isinstance(snapshot.keys, tuple) or not snapshot.keys:
+                errors.append("partial snapshot")
+
+    def writer():
+        for version in range(2, 30):
+            prior = provider.snapshot()
+            provider.replace(
+                l6.L6AuthorityKeyringSnapshot(
+                    snapshot_version=version,
+                    keys=prior.keys,
+                )
+            )
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [pool.submit(reader) for _ in range(4)]
+        futures.append(pool.submit(writer))
+        for future in futures:
+            future.result()
+    assert errors == []
+    assert provider.snapshot().snapshot_version == 29
+
+
+@pytest.mark.unit
+def test_keyring_snapshot_normalizes_mutable_input_to_tuple():
+    store = l6.L6InMemoryGraphReceiptAuthority()
+    mutable_keys = list(store.keyring_provider.snapshot().keys)
+    snapshot = l6.L6AuthorityKeyringSnapshot(
+        snapshot_version=2,
+        keys=mutable_keys,
+    )
+    store.keyring_provider.replace(snapshot)
+    mutable_keys.clear()
+    assert isinstance(store.keyring_provider.snapshot().keys, tuple)
+    assert len(store.keyring_provider.snapshot().keys) == 1
 
 
 @pytest.mark.unit
@@ -1909,17 +2199,6 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         originating_context=origin,
         originating_budget=origin_budget,
     )
-    readiness_input = l6.L6ReadinessToolInput(
-        graph_execution_receipt_id=(
-            graph_output.graph_execution_receipt.graph_execution_receipt_id
-        ),
-        graph_execution_receipt_hash=(
-            graph_output.graph_execution_receipt.receipt_hash
-        ),
-        coverage_receipt_id=evidence_result.coverage.coverage_receipt_id,
-        coverage_receipt_hash=evidence_result.coverage.coverage_receipt_hash,
-        citation_collection_hash=citation_collection.collection_hash,
-    )
     evidence_output_values = {
         "graph_execution_receipt_id": (
             graph_output.graph_execution_receipt.graph_execution_receipt_id
@@ -1935,11 +2214,34 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         **evidence_output_values,
         output_hash=canonical_sha256(evidence_output_values),
     )
+    evidence_receipt = store.issue_evidence(
+        graph_receipt=graph_output.graph_execution_receipt,
+        evidence_output=evidence_output,
+        citation_collection=citation_collection,
+    )
+    readiness_input = l6.L6ReadinessToolInput(
+        graph_execution_receipt_id=(
+            graph_output.graph_execution_receipt.graph_execution_receipt_id
+        ),
+        graph_execution_receipt_hash=(
+            graph_output.graph_execution_receipt.receipt_hash
+        ),
+        coverage_receipt_id=evidence_result.coverage.coverage_receipt_id,
+        coverage_receipt_hash=evidence_result.coverage.coverage_receipt_hash,
+        citation_collection_hash=citation_collection.collection_hash,
+        evidence_execution_receipt_id=(
+            evidence_receipt.evidence_execution_receipt_id
+        ),
+        evidence_execution_receipt_hash=evidence_receipt.receipt_hash,
+    )
     report = l6.build_l6_readiness_report(
         readiness_input,
         graph_receipt=graph_output.graph_execution_receipt,
         evidence_output=evidence_output,
         citation_collection=citation_collection,
+        evidence_receipt=evidence_receipt,
+        keyring_provider=store.keyring_provider,
+        now_milliseconds=store._clock_milliseconds(),
     )
     assert report.readiness.status == "complete"
 
@@ -1951,6 +2253,9 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
             graph_receipt=graph_output.graph_execution_receipt,
             evidence_output=evidence_output,
             citation_collection=citation_collection,
+            evidence_receipt=evidence_receipt,
+            keyring_provider=store.keyring_provider,
+            now_milliseconds=store._clock_milliseconds(),
         )
     with pytest.raises(ValueError, match="citation collection"):
         l6.build_l6_readiness_report(
@@ -1960,6 +2265,9 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
             graph_receipt=graph_output.graph_execution_receipt,
             evidence_output=evidence_output,
             citation_collection=citation_collection,
+            evidence_receipt=evidence_receipt,
+            keyring_provider=store.keyring_provider,
+            now_milliseconds=store._clock_milliseconds(),
         )
     cross_values = graph_output.graph_execution_receipt.model_dump(
         mode="python",
@@ -1967,10 +2275,15 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         round_trip=True,
     )
     cross_values["resolved_retrieval_scope_hash"] = "f" * 64
-    with pytest.raises(ValidationError, match="authentication failed"):
-        l6.L6GraphExecutionReceipt(
-            **cross_values,
-            receipt_hash=canonical_sha256(cross_values),
+    cross_receipt = l6.L6GraphExecutionReceipt(
+        **cross_values,
+        receipt_hash=canonical_sha256(cross_values),
+    )
+    with pytest.raises(ValueError, match="authentication failed"):
+        l6._verify_graph_receipt_trust(
+            cross_receipt,
+            keyring_provider=store.keyring_provider,
+            now_milliseconds=store._clock_milliseconds(),
         )
 
 

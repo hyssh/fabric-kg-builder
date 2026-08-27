@@ -32,10 +32,11 @@ activate schema-2 CLI behavior or change schema-1 behavior.
    A trusted atomic store validates all expected bindings and consumes the
    receipt once. Missing, forged, stale, replayed, or cross-scope receipts cause
    zero Search calls and cannot consume a valid receipt for another scope.
-   Receipt payloads carry an authority-instance HMAC verified by the model
-   constructor, so a caller cannot alter and self-rehash scope, result, or
-   accounting fields. Non-abstain packages bind every duplicated scope,
-   request, result, and Runtime retrieval field to that authenticated receipt.
+   Receipt payloads carry an authority-instance HMAC. Model construction checks
+   syntax and self-hashes only; trusted Graph, readiness, and synthesis
+   acceptance operations verify authentication against an injected immutable
+   keyring snapshot. Non-abstain packages bind every duplicated scope, request,
+   result, and Runtime retrieval field to that authenticated receipt.
 6. Reject empty, failed, overexecuted, stale, or out-of-scope Graph responses
    without Search fallback.
 7. Execute one L5b route selected by the Runtime 1.1 request context. An
@@ -100,6 +101,14 @@ separators and punycode. Ordinary prose using `@` without an address-shaped
 domain remains valid. Mixed scripts are rejected only when their normalized
 security skeleton matches a prohibited credential/provider/principal prefix;
 ordinary multilingual headings remain valid.
+
+After L5b validation and stable citation assembly, the authority issues
+`L6EvidenceExecutionReceipt`. Its authenticated payload binds the Graph receipt
+and authority, exact evidence output hash, Runtime coverage ID/hash, citation
+IDs/hashes, source-response/Search-index/publication/required-member hashes, and
+stable collection hash. Readiness verifies this chain without consuming it.
+The downstream `validate_trusted` acceptance consumes it atomically, so the same
+package cannot authorize a second synthesis call.
 
 The citation collection seals a source binding for each presentation:
 `(presentation_id, source_envelope_id, source_envelope_hash,

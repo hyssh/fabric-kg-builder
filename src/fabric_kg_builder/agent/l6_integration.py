@@ -327,31 +327,6 @@ class L6GraphResult(_L6Model):
         return cls.model_validate(values)
 
 
-class L6GraphReceiptAuthenticator(Protocol):
-    """Server-registered receipt authenticator; never exposed as a tool."""
-
-    def verify(self, payload: Mapping[str, Any], authentication_tag: str) -> bool: ...
-
-
-_GRAPH_AUTHENTICATORS: dict[str, L6GraphReceiptAuthenticator] = {}
-_GRAPH_AUTHENTICATORS_LOCK = threading.Lock()
-
-
-def register_l6_graph_receipt_authenticator(
-    authority_id: str,
-    authenticator: L6GraphReceiptAuthenticator,
-) -> None:
-    """Register a trusted verifier during tool-host bootstrap."""
-
-    if not re.fullmatch(r"gxra-sha256:[0-9a-f]{64}", authority_id):
-        raise ValueError("Graph receipt authority ID must be opaque")
-    with _GRAPH_AUTHENTICATORS_LOCK:
-        existing = _GRAPH_AUTHENTICATORS.get(authority_id)
-        if existing is not None and existing is not authenticator:
-            raise RuntimeError("Graph receipt authenticator identity collision")
-        _GRAPH_AUTHENTICATORS[authority_id] = authenticator
-
-
 def _graph_receipt_auth_payload(values: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -365,6 +340,9 @@ class L6GraphExecutionReceipt(_L6Model):
 
     graph_execution_receipt_id: str
     authority_id: str = Field(pattern=r"^gxra-sha256:[0-9a-f]{64}$")
+    authority_version: int = Field(ge=1)
+    authentication_algorithm: Literal["HMAC-SHA256"] = "HMAC-SHA256"
+    issued_at_milliseconds: int = Field(ge=0)
     authentication_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_request_id: str
     graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -414,13 +392,6 @@ class L6GraphExecutionReceipt(_L6Model):
             raise ValueError("Graph receipt assertion count mismatch")
         if self.accounting.request_count != 1:
             raise ValueError("Graph receipt requires exactly one Graph request")
-        with _GRAPH_AUTHENTICATORS_LOCK:
-            authenticator = _GRAPH_AUTHENTICATORS.get(self.authority_id)
-        if authenticator is None:
-            raise ValueError("Graph receipt authority is not trusted")
-        payload = _graph_receipt_auth_payload(self.model_dump(mode="json"))
-        if not authenticator.verify(payload, self.authentication_tag):
-            raise ValueError("Graph receipt authentication failed")
         expected = canonical_sha256(
             self.model_dump(mode="json", exclude={"receipt_hash"})
         )
@@ -723,6 +694,7 @@ def _l6_safe_stable_text(value: str, *, field_name: str) -> str:
             )
             or parsed.netloc
             or parsed.scheme.casefold() in _L6_UNSAFE_URI_SCHEMES
+            or "=" in normalized
             or "://" in normalized
             or normalized.startswith(("/", "\\", "~"))
             or re.match(r"^[A-Za-z]:[\\/]", normalized)
@@ -1012,6 +984,52 @@ class L6CitationPresentationCollection(_L6Model):
         return self
 
 
+class L6EvidenceExecutionReceipt(_L6Model):
+    """Authenticated evidence/assembly chain accepted before synthesis."""
+
+    evidence_execution_receipt_id: str = Field(
+        pattern=r"^exr-sha256:[0-9a-f]{64}$"
+    )
+    authority_id: str = Field(pattern=r"^gxra-sha256:[0-9a-f]{64}$")
+    authority_version: int = Field(ge=1)
+    authentication_algorithm: Literal["HMAC-SHA256"] = "HMAC-SHA256"
+    issued_at_milliseconds: int = Field(ge=0)
+    authentication_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
+    graph_execution_receipt_id: str
+    graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    graph_authority_id: str
+    evidence_output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    coverage_receipt_id: str
+    coverage_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    citation_envelope_hashes: tuple[L6CitationEnvelopeHash, ...]
+    source_response_hashes: tuple[str, ...]
+    search_index_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    asserted_publication_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    required_canonical_id_set_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    citation_collection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _syntax(self) -> "L6EvidenceExecutionReceipt":
+        ids = tuple(
+            item.search_citation_envelope_id
+            for item in self.citation_envelope_hashes
+        )
+        if not ids or ids != tuple(sorted(ids)) or len(ids) != len(set(ids)):
+            raise ValueError("evidence receipt citation bindings are invalid")
+        if any(
+            not re.fullmatch(r"[0-9a-f]{64}", item)
+            for item in self.source_response_hashes
+        ):
+            raise ValueError("evidence receipt source hashes are invalid")
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"receipt_hash"})
+        )
+        if self.receipt_hash != expected:
+            raise ValueError("evidence execution receipt hash mismatch")
+        return self
+
+
 class L6ReadinessToolInput(_L6Model):
     graph_execution_receipt_id: str
     graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -1021,6 +1039,11 @@ class L6ReadinessToolInput(_L6Model):
         pattern=r"^[0-9a-f]{64}$",
     )
     citation_collection_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    evidence_execution_receipt_id: str | None = None
+    evidence_execution_receipt_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
@@ -1036,6 +1059,14 @@ class L6ReadinessToolInput(_L6Model):
         ):
             raise ValueError(
                 "coverage receipt and citation collection must be present together"
+            )
+        if (self.coverage_receipt_id is None) != (
+            self.evidence_execution_receipt_id is None
+        ) or (self.coverage_receipt_id is None) != (
+            self.evidence_execution_receipt_hash is None
+        ):
+            raise ValueError(
+                "coverage and evidence execution receipts must be present together"
             )
         if not _GRAPH_RECEIPT_ID_RE.fullmatch(
             self.graph_execution_receipt_id
@@ -1067,6 +1098,11 @@ class L6ReadinessReport(_L6Model):
         pattern=r"^[0-9a-f]{64}$",
     )
     citation_collection_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    evidence_execution_receipt_id: str | None = None
+    evidence_execution_receipt_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
@@ -1169,6 +1205,7 @@ class L6SynthesisInput(_L6Model):
     search_citations: tuple[SearchCitationEnvelope, ...] = ()
     citation_collection: L6CitationPresentationCollection | None = None
     coverage_receipt: AgenticRetrievalCoverageReceiptV1_1 | None = None
+    evidence_execution_receipt: L6EvidenceExecutionReceipt | None = None
     readiness: L6Readiness
     operation_accounting: L6RunAccounting
     synthesis_call_limit: Literal[0, 1] = 1
@@ -1190,12 +1227,14 @@ class L6SynthesisInput(_L6Model):
             ):
                 raise ValueError("abstain L6 output cannot expose synthesis evidence")
             return self
+
         if (
             not self.graph_assertions
             or not self.search_citations
             or self.citation_collection is None
             or self.graph_execution_receipt is None
             or self.coverage_receipt is None
+            or self.evidence_execution_receipt is None
             or self.synthesis_call_limit != 1
         ):
             raise ValueError(
@@ -1275,6 +1314,28 @@ class L6SynthesisInput(_L6Model):
                 != self.graph_execution_receipt.resolved_retrieval_scope_id
                 or self.coverage_receipt.resolved_retrieval_scope_hash
                 != self.graph_execution_receipt.resolved_retrieval_scope_hash
+                or self.evidence_execution_receipt.graph_execution_receipt_id
+                != self.graph_execution_receipt.graph_execution_receipt_id
+                or self.evidence_execution_receipt.graph_execution_receipt_hash
+                != self.graph_execution_receipt.receipt_hash
+                or self.evidence_execution_receipt.evidence_output_hash
+                != canonical_sha256(
+                    {
+                        "graph_execution_receipt_id": (
+                            self.graph_execution_receipt.graph_execution_receipt_id
+                        ),
+                        "graph_execution_receipt_hash": (
+                            self.graph_execution_receipt.receipt_hash
+                        ),
+                        "citations": self.search_citations,
+                        "presentations": self.citation_collection.presentations,
+                        "coverage_receipt": self.coverage_receipt,
+                    }
+                )
+                or self.evidence_execution_receipt.coverage_receipt_hash
+                != self.coverage_receipt.coverage_receipt_hash
+                or self.evidence_execution_receipt.citation_collection_hash
+                != self.citation_collection.collection_hash
                 or citation_ids != self.citation_collection.citation_envelope_ids
                 or not presentations_canonical
                 or self.citation_collection.coverage_receipt_id
@@ -1305,6 +1366,24 @@ class L6SynthesisInput(_L6Model):
             ):
                 raise ValueError("partial L6 output lacks typed coverage gaps")
         return self
+
+    def validate_trusted(
+        self,
+        *,
+        receipt_authority: "L6GraphReceiptAuthority",
+    ) -> None:
+        """Verify authenticated execution receipts before downstream synthesis."""
+
+        if self.status == "abstain":
+            return
+        if (
+            self.graph_execution_receipt is None
+            or self.evidence_execution_receipt is None
+        ):
+            raise ValueError("non-abstain package lacks execution receipts")
+        receipt_authority.verify_and_consume_evidence(
+            self.evidence_execution_receipt
+        )
 
 
 class L6RunRequest(_L6Model):
@@ -1361,22 +1440,180 @@ class L6GraphReceiptAuthority(Protocol):
         expectation: L6GraphReceiptExpectation,
     ) -> L6GraphExecutionReceipt: ...
 
+    def issue_evidence(
+        self,
+        *,
+        graph_receipt: L6GraphExecutionReceipt,
+        evidence_output: L6EvidenceToolOutput,
+        citation_collection: L6CitationPresentationCollection,
+    ) -> L6EvidenceExecutionReceipt: ...
+
+    def verify_and_consume_evidence(
+        self,
+        receipt: L6EvidenceExecutionReceipt,
+    ) -> None: ...
+
 
 @dataclass(frozen=True)
 class _L6HmacGraphReceiptAuthenticator:
     key: bytes
+
+    def sign(self, payload: Mapping[str, Any]) -> str:
+        return hmac.new(
+            self.key,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def verify(
         self,
         payload: Mapping[str, Any],
         authentication_tag: str,
     ) -> bool:
-        expected = hmac.new(
-            self.key,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        expected = self.sign(payload)
         return hmac.compare_digest(authentication_tag, expected)
+
+
+class L6AuthorityKeyMetadata(_L6Model):
+    authority_id: str = Field(pattern=r"^gxra-sha256:[0-9a-f]{64}$")
+    authority_version: int = Field(ge=1)
+    algorithm: Literal["HMAC-SHA256"] = "HMAC-SHA256"
+    not_before_milliseconds: int = Field(ge=0)
+    not_after_milliseconds: int = Field(ge=0)
+    state: Literal["active", "disabled", "revoked"]
+
+    @model_validator(mode="after")
+    def _window(self) -> "L6AuthorityKeyMetadata":
+        if self.not_after_milliseconds <= self.not_before_milliseconds:
+            raise ValueError("authority key validity window is invalid")
+        return self
+
+
+@dataclass(frozen=True)
+class L6TrustedAuthorityKey:
+    metadata: L6AuthorityKeyMetadata
+    authenticator: _L6HmacGraphReceiptAuthenticator
+
+
+@dataclass(frozen=True)
+class L6AuthorityKeyringSnapshot:
+    snapshot_version: int
+    keys: tuple[L6TrustedAuthorityKey, ...]
+
+    def __post_init__(self) -> None:
+        immutable_keys = tuple(self.keys)
+        if self.snapshot_version < 1 or not immutable_keys:
+            raise ValueError("keyring snapshot must be versioned and non-empty")
+        identities = tuple(
+            (
+                item.metadata.authority_id,
+                item.metadata.authority_version,
+            )
+            for item in immutable_keys
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("keyring authority identities must be unique")
+        object.__setattr__(self, "keys", immutable_keys)
+
+    def verify(
+        self,
+        *,
+        authority_id: str,
+        authority_version: int,
+        algorithm: str,
+        issued_at_milliseconds: int,
+        payload: Mapping[str, Any],
+        authentication_tag: str,
+        now_milliseconds: int,
+    ) -> bool:
+        matches = tuple(
+            item
+            for item in self.keys
+            if item.metadata.authority_id == authority_id
+            and item.metadata.authority_version == authority_version
+        )
+        if len(matches) != 1:
+            return False
+        key = matches[0]
+        metadata = key.metadata
+        return bool(
+            metadata.state == "active"
+            and metadata.algorithm == algorithm
+            and metadata.not_before_milliseconds <= issued_at_milliseconds
+            <= metadata.not_after_milliseconds
+            and metadata.not_before_milliseconds <= now_milliseconds
+            <= metadata.not_after_milliseconds
+            and key.authenticator.verify(payload, authentication_tag)
+        )
+
+    def active_signing_key(
+        self,
+        now_milliseconds: int,
+    ) -> L6TrustedAuthorityKey:
+        active = tuple(
+            item
+            for item in self.keys
+            if item.metadata.state == "active"
+            and item.metadata.not_before_milliseconds <= now_milliseconds
+            <= item.metadata.not_after_milliseconds
+        )
+        if len(active) != 1:
+            raise ValueError("keyring requires exactly one active signing key")
+        return active[0]
+
+
+class L6AuthorityKeyringProvider:
+    """Atomic immutable snapshot provider supporting rotation and revocation."""
+
+    def __init__(self, snapshot: L6AuthorityKeyringSnapshot) -> None:
+        self._lock = threading.Lock()
+        self._snapshot = snapshot
+
+    def snapshot(self) -> L6AuthorityKeyringSnapshot:
+        with self._lock:
+            return self._snapshot
+
+    def replace(self, snapshot: L6AuthorityKeyringSnapshot) -> None:
+        with self._lock:
+            if snapshot.snapshot_version <= self._snapshot.snapshot_version:
+                raise ValueError("keyring snapshot version must increase")
+            self._snapshot = snapshot
+
+
+def _verify_graph_receipt_trust(
+    receipt: L6GraphExecutionReceipt,
+    *,
+    keyring_provider: L6AuthorityKeyringProvider,
+    now_milliseconds: int,
+) -> None:
+    if not keyring_provider.snapshot().verify(
+        authority_id=receipt.authority_id,
+        authority_version=receipt.authority_version,
+        algorithm=receipt.authentication_algorithm,
+        issued_at_milliseconds=receipt.issued_at_milliseconds,
+        payload=_graph_receipt_auth_payload(receipt.model_dump(mode="json")),
+        authentication_tag=receipt.authentication_tag,
+        now_milliseconds=now_milliseconds,
+    ):
+        raise ValueError("Graph receipt authentication failed")
+
+
+def _verify_evidence_receipt_trust(
+    receipt: L6EvidenceExecutionReceipt,
+    *,
+    keyring_provider: L6AuthorityKeyringProvider,
+    now_milliseconds: int,
+) -> None:
+    if not keyring_provider.snapshot().verify(
+        authority_id=receipt.authority_id,
+        authority_version=receipt.authority_version,
+        algorithm=receipt.authentication_algorithm,
+        issued_at_milliseconds=receipt.issued_at_milliseconds,
+        payload=_graph_receipt_auth_payload(receipt.model_dump(mode="json")),
+        authentication_tag=receipt.authentication_tag,
+        now_milliseconds=now_milliseconds,
+    ):
+        raise ValueError("evidence receipt authentication failed")
 
 
 class L6InMemoryGraphReceiptAuthority:
@@ -1386,20 +1623,46 @@ class L6InMemoryGraphReceiptAuthority:
     Receipt contents are never accepted from callers.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock_milliseconds: Any | None = None,
+        validity_milliseconds: int = 300_000,
+    ) -> None:
         self._lock = threading.Lock()
         self._receipts: dict[str, L6GraphExecutionReceipt] = {}
         self._consumed: set[str] = set()
+        self._evidence_receipts: dict[str, L6EvidenceExecutionReceipt] = {}
+        self._consumed_evidence: set[str] = set()
         self._authority_key = secrets.token_bytes(32)
+        self._clock_milliseconds = clock_milliseconds or (
+            lambda: int(time.time() * 1000)
+        )
         self._authenticator = _L6HmacGraphReceiptAuthenticator(
             self._authority_key
         )
         self.authority_id = "gxra-sha256:" + canonical_sha256(
             self._authority_key.hex()
         )
-        register_l6_graph_receipt_authenticator(
-            self.authority_id,
-            self._authenticator,
+        now = self._clock_milliseconds()
+        self._metadata = L6AuthorityKeyMetadata(
+            authority_id=self.authority_id,
+            authority_version=1,
+            algorithm="HMAC-SHA256",
+            not_before_milliseconds=now,
+            not_after_milliseconds=now + validity_milliseconds,
+            state="active",
+        )
+        self.keyring_provider = L6AuthorityKeyringProvider(
+            L6AuthorityKeyringSnapshot(
+                snapshot_version=1,
+                keys=(
+                    L6TrustedAuthorityKey(
+                        metadata=self._metadata,
+                        authenticator=self._authenticator,
+                    ),
+                ),
+            )
         )
 
     def issue(
@@ -1424,10 +1687,16 @@ class L6InMemoryGraphReceiptAuthority:
         )
         if not graph_complete:
             raise ValueError("incomplete Graph result cannot mint a retrieval receipt")
+        signing_key = self.keyring_provider.snapshot().active_signing_key(
+            self._clock_milliseconds()
+        )
         receipt_id = "gxr-sha256:" + secrets.token_hex(32)
         values = {
             "graph_execution_receipt_id": receipt_id,
-            "authority_id": self.authority_id,
+            "authority_id": signing_key.metadata.authority_id,
+            "authority_version": signing_key.metadata.authority_version,
+            "authentication_algorithm": signing_key.metadata.algorithm,
+            "issued_at_milliseconds": self._clock_milliseconds(),
             "graph_request_id": graph_query.graph_request_id,
             "graph_request_hash": graph_query.request_hash,
             "graph_result_hash": graph_result.response_hash,
@@ -1456,11 +1725,7 @@ class L6InMemoryGraphReceiptAuthority:
             "accounting": graph_result.accounting,
             "execution_status": "succeeded",
         }
-        authentication_tag = hmac.new(
-            self._authority_key,
-            canonical_json(values).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        authentication_tag = signing_key.authenticator.sign(values)
         sealed_values = {
             **values,
             "authentication_tag": authentication_tag,
@@ -1490,8 +1755,101 @@ class L6InMemoryGraphReceiptAuthority:
                 or not _receipt_matches_expectation(receipt, expectation)
             ):
                 raise ValueError("Graph execution receipt is invalid or replayed")
+            _verify_graph_receipt_trust(
+                receipt,
+                keyring_provider=self.keyring_provider,
+                now_milliseconds=self._clock_milliseconds(),
+            )
             self._consumed.add(receipt_id)
             return receipt
+
+    def issue_evidence(
+        self,
+        *,
+        graph_receipt: L6GraphExecutionReceipt,
+        evidence_output: L6EvidenceToolOutput,
+        citation_collection: L6CitationPresentationCollection,
+    ) -> L6EvidenceExecutionReceipt:
+        persisted_graph = self._receipts.get(
+            graph_receipt.graph_execution_receipt_id
+        )
+        if persisted_graph != graph_receipt:
+            raise ValueError("evidence requires persisted Graph receipt authority")
+        _verify_graph_receipt_trust(
+            graph_receipt,
+            keyring_provider=self.keyring_provider,
+            now_milliseconds=self._clock_milliseconds(),
+        )
+        if (
+            evidence_output.graph_execution_receipt_id
+            != graph_receipt.graph_execution_receipt_id
+            or evidence_output.graph_execution_receipt_hash
+            != graph_receipt.receipt_hash
+            or citation_collection.coverage_receipt_hash
+            != evidence_output.coverage.coverage_receipt_hash
+            or tuple(citation_collection.presentations)
+            != tuple(evidence_output.presentations)
+        ):
+            raise ValueError("evidence chain differs from Graph authority")
+        signing_key = self.keyring_provider.snapshot().active_signing_key(
+            self._clock_milliseconds()
+        )
+        receipt_id = "exr-sha256:" + secrets.token_hex(32)
+        values = {
+            "evidence_execution_receipt_id": receipt_id,
+            "authority_id": signing_key.metadata.authority_id,
+            "authority_version": signing_key.metadata.authority_version,
+            "authentication_algorithm": signing_key.metadata.algorithm,
+            "issued_at_milliseconds": self._clock_milliseconds(),
+            "graph_execution_receipt_id": graph_receipt.graph_execution_receipt_id,
+            "graph_execution_receipt_hash": graph_receipt.receipt_hash,
+            "graph_authority_id": graph_receipt.authority_id,
+            "evidence_output_hash": evidence_output.output_hash,
+            "coverage_receipt_id": evidence_output.coverage.coverage_receipt_id,
+            "coverage_receipt_hash": evidence_output.coverage.coverage_receipt_hash,
+            "citation_envelope_hashes": citation_collection.citation_envelope_hashes,
+            "source_response_hashes": citation_collection.source_response_hashes,
+            "search_index_fingerprint": (
+                citation_collection.search_index_fingerprint
+            ),
+            "asserted_publication_hash": (
+                citation_collection.asserted_publication_hash
+            ),
+            "required_canonical_id_set_hash": (
+                evidence_output.coverage.required_canonical_id_set_hash
+            ),
+            "citation_collection_hash": citation_collection.collection_hash,
+        }
+        authentication_tag = signing_key.authenticator.sign(values)
+        sealed = {**values, "authentication_tag": authentication_tag}
+        receipt = L6EvidenceExecutionReceipt(
+            **sealed,
+            receipt_hash=canonical_sha256(sealed),
+        )
+        with self._lock:
+            self._evidence_receipts[receipt_id] = receipt
+        return receipt
+
+    def verify_and_consume_evidence(
+        self,
+        receipt: L6EvidenceExecutionReceipt,
+    ) -> None:
+        with self._lock:
+            persisted = self._evidence_receipts.get(
+                receipt.evidence_execution_receipt_id
+            )
+            if (
+                persisted != receipt
+                or receipt.evidence_execution_receipt_id
+                in self._consumed_evidence
+            ):
+                raise ValueError("evidence execution receipt is invalid or replayed")
+            _verify_evidence_receipt_trust(
+                receipt,
+                keyring_provider=self.keyring_provider,
+                now_milliseconds=self._clock_milliseconds(),
+            )
+            self._consumed_evidence.add(receipt.evidence_execution_receipt_id)
 
 
 class L6VerifiedScopeTool:
@@ -2216,6 +2574,9 @@ def build_l6_readiness_report(
     graph_receipt: L6GraphExecutionReceipt,
     evidence_output: L6EvidenceToolOutput | None,
     citation_collection: L6CitationPresentationCollection | None,
+    evidence_receipt: L6EvidenceExecutionReceipt | None,
+    keyring_provider: L6AuthorityKeyringProvider | None,
+    now_milliseconds: int | None,
 ) -> L6ReadinessReport:
     """Bind readiness to exact trusted Graph and optional Runtime receipts."""
 
@@ -2233,6 +2594,32 @@ def build_l6_readiness_report(
     if (evidence_output is None) != (citation_collection is None):
         raise ValueError(
             "readiness evidence and citation collection must be present together"
+        )
+    if (evidence_output is None) != (evidence_receipt is None):
+        raise ValueError(
+            "readiness evidence output and receipt must be present together"
+        )
+    if evidence_receipt is not None:
+        if keyring_provider is None or now_milliseconds is None:
+            raise ValueError("readiness requires trusted evidence receipt authority")
+        if (
+            request.evidence_execution_receipt_id
+            != evidence_receipt.evidence_execution_receipt_id
+            or request.evidence_execution_receipt_hash
+            != evidence_receipt.receipt_hash
+            or evidence_receipt.graph_execution_receipt_id
+            != graph_receipt.graph_execution_receipt_id
+            or evidence_receipt.graph_execution_receipt_hash
+            != graph_receipt.receipt_hash
+            or evidence_receipt.evidence_output_hash != evidence_output.output_hash
+            or evidence_receipt.citation_collection_hash
+            != citation_collection.collection_hash
+        ):
+            raise ValueError("readiness evidence receipt chain mismatch")
+        _verify_evidence_receipt_trust(
+            evidence_receipt,
+            keyring_provider=keyring_provider,
+            now_milliseconds=now_milliseconds,
         )
     if evidence_output is not None and (
         evidence_output.graph_execution_receipt_id
@@ -2395,6 +2782,14 @@ def build_l6_readiness_report(
             if citation_collection is not None
             else None
         ),
+        "evidence_execution_receipt_id": (
+            evidence_receipt.evidence_execution_receipt_id
+            if evidence_receipt is not None
+            else None
+        ),
+        "evidence_execution_receipt_hash": (
+            evidence_receipt.receipt_hash if evidence_receipt is not None else None
+        ),
         "readiness": readiness,
     }
     return L6ReadinessReport(
@@ -2481,11 +2876,13 @@ class L6AgentOrchestrator:
         self._graph_receipt_authority = graph_receipt_authority
         self._authorities = authorities
         self._used = False
+        self._use_lock = threading.Lock()
 
     def run(self, request: L6RunRequest) -> L6SynthesisInput:
-        if self._used:
-            raise RuntimeError("L6 orchestrator instances permit exactly one run")
-        self._used = True
+        with self._use_lock:
+            if self._used:
+                raise RuntimeError("L6 orchestrator instances permit exactly one run")
+            self._used = True
         started = time.monotonic()
         unresolved_base = {
             "canonical_scope_id": "unresolved",
@@ -2808,6 +3205,28 @@ class L6AgentOrchestrator:
                 originating_budget=request.originating_query_budget,
             )
         )
+        evidence_execution_receipt = None
+        if status != "abstain":
+            try:
+                evidence_execution_receipt = (
+                    self._graph_receipt_authority.issue_evidence(
+                        graph_receipt=graph_receipt,
+                        evidence_output=evidence,
+                        citation_collection=citation_collection,
+                    )
+                )
+            except Exception as exc:
+                del exc
+                return self._abstain(
+                    {**base, "graph_response_hash": graph.response_hash},
+                    _failure(
+                        "authority_invalid",
+                        "Trusted evidence execution receipt failed",
+                    ),
+                    started,
+                    graph=graph,
+                    evidence_attempted=True,
+                )
         return _seal_output(
             {
                 "status": status,
@@ -2818,6 +3237,7 @@ class L6AgentOrchestrator:
                 "search_citations": safe_citations,
                 "citation_collection": citation_collection,
                 "coverage_receipt": evidence.coverage,
+                "evidence_execution_receipt": evidence_execution_receipt,
                 "readiness": readiness,
                 "operation_accounting": accounting,
                 "synthesis_call_limit": 0 if status == "abstain" else 1,
@@ -2856,6 +3276,7 @@ class L6AgentOrchestrator:
                 "search_citations": (),
                 "citation_collection": None,
                 "coverage_receipt": None,
+                "evidence_execution_receipt": None,
                 "readiness": readiness,
                 "operation_accounting": L6RunAccounting(
                     graph=L6GraphRunAccounting(
@@ -2906,6 +3327,7 @@ class L6AgentOrchestrator:
                 "search_citations": (),
                 "citation_collection": None,
                 "coverage_receipt": None,
+                "evidence_execution_receipt": None,
                 "readiness": readiness,
                 "operation_accounting": L6RunAccounting(
                     graph=L6GraphRunAccounting(
