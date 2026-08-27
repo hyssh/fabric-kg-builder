@@ -377,7 +377,7 @@ class TestOneLakeWriterProjection:
 def _make_env_json(tmp_path: Path) -> Path:
     """Write a minimal environments/dev.json for CLI tests."""
     envs = tmp_path / "ontology" / "environments"
-    envs.mkdir(parents=True)
+    envs.mkdir(parents=True, exist_ok=True)
     cfg = {
         "fabric": {
             "workspace_id": "ws-test-abc",
@@ -392,6 +392,7 @@ def _make_env_json(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
+@pytest.mark.usefixtures("isolated_ontology_project")
 class TestDeployLakehouseMockOutput:
     def test_mock_reports_chunks_skipped(self, tmp_path: Path) -> None:
         """--mock output must mention chunks as excluded from the Lakehouse."""

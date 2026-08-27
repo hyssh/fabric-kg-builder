@@ -25,9 +25,7 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.deploy.fabric_ontology import create_or_get_ontology_item
 
-# Real environment config for assertions
 REPO_ROOT = Path(__file__).parent.parent.parent
-DEV_ENV_JSON = REPO_ROOT / "ontology" / "environments" / "dev.json"
 MODEL_YAML = REPO_ROOT / "ontology" / "model.yaml"
 IDS_LOCK = REPO_ROOT / "ontology" / "ids.lock.json"
 
@@ -49,6 +47,7 @@ def _compile_to(out: Path) -> int:
 
 
 @pytest.mark.unit
+@pytest.mark.usefixtures("isolated_ontology_project")
 class TestDeployOntologyCmd:
     """CliRunner tests for deploy-ontology (mock mode).
 
@@ -71,17 +70,14 @@ class TestDeployOntologyCmd:
 
     def test_mock_output_contains_workspace_id(self):
         """Mock output must include the workspace_id from dev.json."""
-        dev_cfg = json.loads(DEV_ENV_JSON.read_text())
-        expected_ws = dev_cfg["fabric"]["workspace_id"]
-
         runner = CliRunner()
         result = runner.invoke(cli, [
             "deploy-ontology",
             "--env", "dev",
             "--mock",
         ])
-        assert expected_ws in result.output, (
-            f"Expected workspace_id '{expected_ws}' in output.\n"
+        assert "test-workspace-id" in result.output, (
+            "Expected isolated workspace_id 'test-workspace-id' in output.\n"
             f"Actual output:\n{result.output}"
         )
 
@@ -157,22 +153,17 @@ class TestDeployOntologyCmd:
 
     def test_missing_env_config_exits_one(self):
         """deploy-ontology must exit 1 when env config JSON is missing (bad env path)."""
-        # Use a non-existent environment JSON by passing a fake environments-dir
-        # via the underlying config read (simulate via missing file scenario).
-        # We use 'prod' which should exist but we can't guarantee — instead
-        # verify the behavior is consistent: missing workspace_id from a blank JSON.
-        # Since we can't pass --environments-dir, just test that a bad env value
-        # is rejected by click's choice validation (returns non-zero).
         runner = CliRunner()
         result = runner.invoke(cli, [
             "deploy-ontology",
-            "--env", "notanenv",  # invalid choice
+            "--env", "missing",
             "--mock",
         ])
-        assert result.exit_code != 0, (
-            f"Expected non-zero exit for invalid env, got {result.exit_code}.\n"
+        assert result.exit_code == 1, (
+            f"Expected exit 1 for missing env config, got {result.exit_code}.\n"
             f"Output:\n{result.output}"
         )
+        assert "Environment config not found" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -513,4 +504,3 @@ class TestDeployOntologyCmdLive:
 
         assert result.exit_code == 0
         assert "ok-200" in result.output or "ok" in result.output.lower()
-
