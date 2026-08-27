@@ -2149,8 +2149,25 @@ def test_evidence_output_rejects_self_rehashed_forged_stable_presentation():
         ("exact_authorized_quote", "ＡＰＩ＿ＫＥＹ=secret"),
         ("source_id", "prіncipal:user"),
         ("source_id", "principaӏ:user"),
+        ("source_id", "prіncipΑl:user"),
+        ("source_id", "prοvider:service"),
+        ("source_id", "prοvіder:service"),
+        ("exact_authorized_quote", "Вearer: token"),
+        ("exact_authorized_quote", "вearer: token"),
+        ("exact_authorized_quote", "ВeΑrer: token"),
+        ("exact_authorized_quote", "%D0%92earer%3A%20token"),
+        ("exact_authorized_quote", "Ｂｅａｒｅｒ： token"),
         ("exact_authorized_quote", "tоken=secret"),
         ("exact_authorized_quote", "toкen=secret"),
+        ("exact_authorized_quote", "tοкen:secret"),
+        ("exact_authorized_quote", "pаsswοrd:secret"),
+        ("exact_authorized_quote", "аpi-кey:secret"),
+        ("exact_authorized_quote", "api-keΥ:secret"),
+        ("exact_authorized_quote", "access keΥ:secret"),
+        ("exact_authorized_quote", "account keΥ:secret"),
+        ("exact_authorized_quote", "аpi-кey%3Dsecret"),
+        ("exact_authorized_quote", "sυbscription:secret"),
+        ("exact_authorized_quote", "accoυnt key:secret"),
         ("exact_authorized_quote", "user@例子.公司"),
         ("exact_authorized_quote", "user@xn--fsqu00a.xn--55qx5d"),
         ("exact_authorized_quote", "用户@例子.公司"),
@@ -2185,6 +2202,14 @@ def test_direct_stable_constructor_rejects_unsafe_strings(
             **values,
             stable_presentation_hash=canonical_sha256(values),
         )
+
+
+@pytest.mark.unit
+def test_security_skeleton_confusable_map_is_closed_under_casefold():
+    for source_codepoint, expected_skeleton in l6._L6_CONFUSABLE_TRANSLATION.items():
+        source = chr(source_codepoint)
+        assert l6._l6_security_skeleton(source) == expected_skeleton
+        assert l6._l6_security_skeleton(source.casefold()) == expected_skeleton
 
 
 @pytest.mark.unit

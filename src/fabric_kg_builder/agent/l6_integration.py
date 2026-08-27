@@ -627,30 +627,50 @@ _L6_CREDENTIAL_RE = re.compile(
     r"client[\s_-]*secret|password|passwd|pwd|token|credential|"
     r"connection[\s_-]*(?:string|str)|sas|sig|signature)\s*[:=]"
 )
-_L6_CONFUSABLE_TRANSLATION = str.maketrans(
-    {
-        # Common Cyrillic/Greek homoglyphs used to disguise security metadata.
-        "а": "a", "ɑ": "a", "Α": "a", "α": "a",
-        "В": "b", "Β": "b", "β": "b",
-        "с": "c", "ϲ": "c", "С": "c",
-        "ԁ": "d",
-        "е": "e", "Ε": "e", "ε": "e",
-        "һ": "h", "Η": "h", "η": "h",
-        "і": "i", "Ι": "i", "ι": "i",
-        "ј": "j",
-        "к": "k", "Κ": "k", "κ": "k",
-        "ӏ": "l", "ⅼ": "l", "λ": "l",
-        "м": "m", "Μ": "m", "μ": "m",
-        "п": "n", "Ν": "n", "ν": "n",
-        "о": "o", "Ο": "o", "ο": "o",
-        "р": "p", "Ρ": "p", "ρ": "p",
-        "ѕ": "s", "Ѕ": "s",
-        "т": "t", "Τ": "t", "τ": "t",
-        "υ": "u",
-        "х": "x", "Χ": "x", "χ": "x",
-        "у": "y", "Υ": "y", "γ": "y",
-    }
+_L6_AMBIGUOUS_CONFUSABLE_CREDENTIAL_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:api|access|account)[\s_-]*keu\s*[:=]"
 )
+_L6_CONFUSABLES = {
+    # Common Cyrillic/Greek homoglyphs used to disguise security metadata.
+    "а": "a", "ɑ": "a", "Α": "a", "α": "a",
+    "В": "b", "Β": "b", "β": "b",
+    "с": "c", "ϲ": "c", "С": "c",
+    "ԁ": "d",
+    "е": "e", "Ε": "e", "ε": "e",
+    "һ": "h", "Η": "h", "η": "h",
+    "і": "i", "Ι": "i", "ι": "i",
+    "ј": "j",
+    "к": "k", "Κ": "k", "κ": "k",
+    "ӏ": "l", "ⅼ": "l", "λ": "l",
+    "м": "m", "Μ": "m", "μ": "m",
+    "п": "n", "Ν": "n", "ν": "n",
+    "о": "o", "Ο": "o", "ο": "o",
+    "р": "p", "Ρ": "p", "ρ": "p",
+    "ѕ": "s", "Ѕ": "s",
+    "т": "t", "Τ": "t", "τ": "t",
+    "Υ": "u", "υ": "u",
+    "х": "x", "Χ": "x", "χ": "x",
+    "у": "y", "γ": "y",
+}
+
+
+def _l6_build_confusable_translation() -> dict[int, str]:
+    translation: dict[int, str] = {}
+    for source, target in _L6_CONFUSABLES.items():
+        normalized = unicodedata.normalize("NFKC", source)
+        variants = (normalized, normalized.casefold())
+        if any(len(variant) != 1 for variant in variants):
+            raise RuntimeError("L6 confusable source must normalize to one code point")
+        for variant in variants:
+            codepoint = ord(variant)
+            existing = translation.get(codepoint)
+            if existing is not None and existing != target:
+                raise RuntimeError("L6 confusable mapping has conflicting skeletons")
+            translation[codepoint] = target
+    return translation
+
+
+_L6_CONFUSABLE_TRANSLATION = _l6_build_confusable_translation()
 
 
 def _l6_security_skeleton(value: str) -> str:
@@ -765,6 +785,7 @@ def _l6_safe_stable_text(value: str, *, field_name: str) -> str:
             or _l6_contains_international_email(normalized)
             or _L6_CREDENTIAL_RE.search(normalized)
             or _L6_CREDENTIAL_RE.search(skeleton)
+            or _L6_AMBIGUOUS_CONFUSABLE_CREDENTIAL_RE.search(skeleton)
         ):
             raise ValueError(f"{field_name} contains unsafe stable text")
     return value
