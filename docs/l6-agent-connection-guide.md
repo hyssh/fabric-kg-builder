@@ -38,6 +38,11 @@ route second, exact citations, and partial/abstain when authority or coverage is
 incomplete. The downstream agent may synthesize at most once from the returned
 structured package. Fabric-kg never performs that synthesis.
 
+Only `L6StableCitationPresentation` values may cross the sealed L6 boundary.
+Never attach an authorized asset URL to them. Any short-lived URL must be added
+ephemerally by an L7 UI adapter after the L6 package has been validated and must
+not be persisted or included in a package/collection hash.
+
 The L6 tool host must keep the `L6GraphReceiptAuthority` server-side. The
 included `L6InMemoryGraphReceiptAuthority` provides atomic process-local
 issue/verify-and-consume behavior with a unique receipt per Graph execution.

@@ -59,6 +59,13 @@ one downstream synthesis call.
 `complete` requires exact Graph required canonical IDs/assertions and complete
 L5b coverage with no warnings, truncation, source errors, ACL gaps, stale
 hashes, exhausted budgets, duplicate/missing citations, or unexpected IDs.
+It also requires a non-empty `L6EvidenceToolOutput` and the exact
+`L6CitationPresentationCollection` linked to that Graph receipt and Runtime
+receipt. Readiness verifies one-to-one equality across citation IDs, stable
+presentation source IDs, envelope hashes, source-response hashes, Search index,
+publication, and required member authority. A complete Runtime receipt with no
+verified citations is not synthesis-ready and fails closed; legitimate
+zero-result cases abstain.
 `partial` requires at least one verified Graph assertion and one verified
 citation presentation, with typed failures and exact safe missing authority
 IDs. All other outcomes abstain and expose no citations from a failed route.
@@ -67,6 +74,14 @@ All L6 result nesting is frozen and typed. Operation references are opaque
 SHA-256 objects; Graph warnings/errors use a closed code vocabulary. Raw
 provider URLs, queries, paths, principals, emails, secrets, control characters,
 and Unicode confusables never enter agent-visible accounting.
+
+Sealed L6 collections never embed C0 `CitationPresentation` objects because
+their private transient authorized URL is intentionally mutable. L6 converts a
+verified C0 presentation into `L6StableCitationPresentation`, an immutable DTO
+containing only persisted policy-approved fields and exact citation envelope
+ID/hash references. Conversion rejects any populated transient URL. Ephemeral
+authorized URLs, if later required, belong only in an L7 UI adapter outside all
+sealed L6 hashes and outputs.
 
 Top-k ranking, vector similarity, display-name matching, and document proximity
 are never completeness or relationship proof.

@@ -137,6 +137,7 @@ class _GraphReceiptStore:
             "resolved_retrieval_scope_hash": retrieval_scope.retrieval_scope_hash,
             "canonical_scope_id": ontology_scope.canonical_scope_id,
             "graph_model_hash": ontology_scope.graph_model_hash,
+            "search_index_fingerprint": ontology_scope.search_index_fingerprint,
             "asserted_publication_hash": ontology_scope.asserted_publication_hash,
             "publication_crosswalk_hash": (
                 ontology_scope.publication_crosswalk_hash
@@ -211,6 +212,20 @@ def _presentation_for(citation):
     return CitationPresentation(
         **values,
         presentation_hash=canonical_sha256(values),
+    )
+
+
+def _stable_presentations(evidence_result):
+    by_id = {
+        item.search_citation_envelope_id: item
+        for item in evidence_result.citations
+    }
+    return tuple(
+        l6.L6StableCitationPresentation.from_verified(
+            presentation,
+            by_id[presentation.search_citation_envelope_id],
+        )
+        for presentation in evidence_result.presentations
     )
 
 
@@ -458,10 +473,9 @@ def test_complete_path_is_zero_synthesis_and_one_graph_one_search(monkeypatch):
         result.operation_accounting.retrieval.delegated.double_counted_by_l6
         is False
     )
-    assert all(
-        presentation.transient_authorized_asset_url is None
-        for presentation in result.citation_collection.presentations
-    )
+    assert "transient" not in str(
+        result.citation_collection.model_dump(mode="json")
+    ).casefold()
     with pytest.raises(RuntimeError, match="exactly one run"):
         orchestrator.run(
             l6.L6RunRequest(
@@ -1269,6 +1283,88 @@ def test_sealed_output_is_deeply_immutable(monkeypatch):
         result.citation_collection.presentations[0] = (
             result.citation_collection.presentations[0]
         )
+    stable = result.citation_collection.presentations[0]
+    assert stable.__pydantic_private__ in (None, {})
+    assert "url" not in str(stable.model_dump(mode="json")).casefold()
+
+
+@pytest.mark.unit
+def test_complete_evidence_output_rejects_empty_citations():
+    evidence_result, _, _, _, _ = _evidence()
+    values = {
+        "graph_execution_receipt_id": "gxr-sha256:" + "a" * 64,
+        "graph_execution_receipt_hash": "b" * 64,
+        "citations": (),
+        "presentations": (),
+        "coverage_receipt": evidence_result.coverage,
+    }
+    with pytest.raises(ValidationError, match="non-empty verified citations"):
+        l6.L6EvidenceToolOutput(
+            **values,
+            output_hash=canonical_sha256(values),
+        )
+
+
+@pytest.mark.unit
+def test_transient_url_cannot_enter_stable_presentation():
+    evidence_result, _, _, _, _ = _evidence()
+    citation = evidence_result.citations[0]
+    transient = evidence_result.presentations[0].with_transient_authorized_asset_url(
+        "https://storage.example.test/file?sig=secret"
+    )
+    with pytest.raises(ValueError, match="transient citation URLs"):
+        l6.L6StableCitationPresentation.from_verified(transient, citation)
+    stable = l6.L6StableCitationPresentation.from_verified(
+        evidence_result.presentations[0],
+        citation,
+    )
+    payload = stable.model_dump(mode="json")
+    payload["transient_authorized_asset_url"] = (
+        "https://storage.example.test/file?sig=secret"
+    )
+    with pytest.raises(ValidationError):
+        l6.L6StableCitationPresentation.model_validate(payload)
+    forged_values = stable.model_dump(
+        mode="python",
+        exclude={"stable_presentation_hash"},
+        round_trip=True,
+    )
+    forged_values["citation_presentation_id"] = (
+        "https://private.example/file?sig=secret"
+    )
+    with pytest.raises(ValidationError, match="ID mismatch"):
+        l6.L6StableCitationPresentation(
+            **forged_values,
+            stable_presentation_hash=canonical_sha256(forged_values),
+        )
+
+
+@pytest.mark.unit
+def test_evidence_output_rejects_self_rehashed_forged_stable_presentation():
+    evidence_result, _, _, _, _ = _evidence()
+    stable = _stable_presentations(evidence_result)
+    forged_values = stable[0].model_dump(
+        mode="python",
+        exclude={"stable_presentation_hash"},
+        round_trip=True,
+    )
+    forged_values["original_document_name"] = "FORGED"
+    forged = l6.L6StableCitationPresentation(
+        **forged_values,
+        stable_presentation_hash=canonical_sha256(forged_values),
+    )
+    values = {
+        "graph_execution_receipt_id": "gxr-sha256:" + "a" * 64,
+        "graph_execution_receipt_hash": "b" * 64,
+        "citations": evidence_result.citations,
+        "presentations": (forged, *stable[1:]),
+        "coverage_receipt": evidence_result.coverage,
+    }
+    with pytest.raises(ValidationError, match="differs from citation authority"):
+        l6.L6EvidenceToolOutput(
+            **values,
+            output_hash=canonical_sha256(values),
+        )
 
 
 @pytest.mark.unit
@@ -1304,7 +1400,7 @@ def test_citation_collection_exact_cardinality_and_hash():
     collection = l6.assemble_l6_citation_collection(
         request,
         citations=evidence_result.citations,
-        presentations=evidence_result.presentations,
+        presentations=_stable_presentations(evidence_result),
         coverage=evidence_result.coverage,
         context=context,
         budget=budget,
@@ -1326,7 +1422,32 @@ def test_citation_collection_exact_cardinality_and_hash():
         l6.assemble_l6_citation_collection(
             request,
             citations=evidence_result.citations[:-1],
-            presentations=evidence_result.presentations,
+            presentations=_stable_presentations(evidence_result),
+            coverage=evidence_result.coverage,
+            context=context,
+            budget=budget,
+            retrieval_scope=retrieval,
+            originating_context=origin,
+            originating_budget=origin_budget,
+        )
+    stable_values = _stable_presentations(evidence_result)[0].model_dump(
+        mode="python",
+        exclude={"stable_presentation_hash"},
+        round_trip=True,
+    )
+    stable_values["original_document_name"] = "WRONG DOCUMENT"
+    wrong_stable = l6.L6StableCitationPresentation(
+        **stable_values,
+        stable_presentation_hash=canonical_sha256(stable_values),
+    )
+    with pytest.raises(ValueError, match="differs from citation authority"):
+        l6.assemble_l6_citation_collection(
+            request,
+            citations=evidence_result.citations,
+            presentations=(
+                wrong_stable,
+                *_stable_presentations(evidence_result)[1:],
+            ),
             coverage=evidence_result.coverage,
             context=context,
             budget=budget,
@@ -1339,9 +1460,9 @@ def test_citation_collection_exact_cardinality_and_hash():
             request,
             citations=evidence_result.citations,
             presentations=(
-                evidence_result.presentations[0],
-                evidence_result.presentations[0],
-                *evidence_result.presentations[2:],
+                _stable_presentations(evidence_result)[0],
+                _stable_presentations(evidence_result)[0],
+                *_stable_presentations(evidence_result)[2:],
             ),
             coverage=evidence_result.coverage,
             context=context,
@@ -1368,8 +1489,11 @@ def test_citation_collection_exact_cardinality_and_hash():
             request,
             citations=(unrelated, *evidence_result.citations[1:]),
             presentations=(
-                _presentation_for(unrelated),
-                *evidence_result.presentations[1:],
+                l6.L6StableCitationPresentation.from_verified(
+                    _presentation_for(unrelated),
+                    unrelated,
+                ),
+                *_stable_presentations(evidence_result)[1:],
             ),
             coverage=evidence_result.coverage,
             context=context,
@@ -1406,7 +1530,7 @@ def test_zero_source_abstention_accounting_is_representable():
 def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
-    evidence_result, _, budget, _, _ = _evidence()
+    evidence_result, context, budget, origin, origin_budget = _evidence()
     resolver = _Resolver(ontology, retrieval)
     scopes = l6.L6VerifiedScopeTool(resolver).resolve(
         l6.L6ScopeResolutionInput(
@@ -1436,6 +1560,27 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
     )
     assert graph_host.calls == 1
 
+    citation_request = l6.L6CitationToolInput(
+        coverage_receipt_id=evidence_result.coverage.coverage_receipt_id,
+        coverage_receipt_hash=evidence_result.coverage.coverage_receipt_hash,
+        citation_envelope_ids=tuple(
+            sorted(
+                item.search_citation_envelope_id
+                for item in evidence_result.citations
+            )
+        ),
+    )
+    citation_collection = l6.assemble_l6_citation_collection(
+        citation_request,
+        citations=evidence_result.citations,
+        presentations=_stable_presentations(evidence_result),
+        coverage=evidence_result.coverage,
+        context=context,
+        budget=budget,
+        retrieval_scope=retrieval,
+        originating_context=origin,
+        originating_budget=origin_budget,
+    )
     readiness_input = l6.L6ReadinessToolInput(
         graph_execution_receipt_id=(
             graph_output.graph_execution_receipt.graph_execution_receipt_id
@@ -1445,6 +1590,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         ),
         coverage_receipt_id=evidence_result.coverage.coverage_receipt_id,
         coverage_receipt_hash=evidence_result.coverage.coverage_receipt_hash,
+        citation_collection_hash=citation_collection.collection_hash,
     )
     evidence_output_values = {
         "graph_execution_receipt_id": (
@@ -1454,7 +1600,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
             graph_output.graph_execution_receipt.receipt_hash
         ),
         "citations": evidence_result.citations,
-        "presentations": evidence_result.presentations,
+        "presentations": _stable_presentations(evidence_result),
         "coverage_receipt": evidence_result.coverage,
     }
     evidence_output = l6.L6EvidenceToolOutput(
@@ -1465,6 +1611,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
         readiness_input,
         graph_receipt=graph_output.graph_execution_receipt,
         evidence_output=evidence_output,
+        citation_collection=citation_collection,
     )
     assert report.readiness.status == "complete"
 
@@ -1475,6 +1622,16 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
             ),
             graph_receipt=graph_output.graph_execution_receipt,
             evidence_output=evidence_output,
+            citation_collection=citation_collection,
+        )
+    with pytest.raises(ValueError, match="citation collection"):
+        l6.build_l6_readiness_report(
+            readiness_input.model_copy(
+                update={"citation_collection_hash": "e" * 64}
+            ),
+            graph_receipt=graph_output.graph_execution_receipt,
+            evidence_output=evidence_output,
+            citation_collection=citation_collection,
         )
     cross_values = graph_output.graph_execution_receipt.model_dump(
         mode="python",
@@ -1494,6 +1651,7 @@ def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
             cross_input,
             graph_receipt=cross_receipt,
             evidence_output=evidence_output,
+            citation_collection=citation_collection,
         )
 
 

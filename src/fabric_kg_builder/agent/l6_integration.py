@@ -18,6 +18,7 @@ from typing import Any, Literal, Mapping, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
+from fabric_kg_builder.contracts.identity import ImmutableSourceLocator
 from fabric_kg_builder.contracts.publication import AccessPolicy, GovernedAssetReference
 from fabric_kg_builder.contracts.runtime import (
     AgenticRetrievalCoverageReceiptV1_1,
@@ -331,6 +332,7 @@ class L6GraphExecutionReceipt(_L6Model):
     resolved_retrieval_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     canonical_scope_id: str
     graph_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    search_index_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     asserted_publication_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     publication_crosswalk_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     acl_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -384,6 +386,7 @@ class L6GraphReceiptExpectation(_L6Model):
     resolved_retrieval_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     canonical_scope_id: str
     graph_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    search_index_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     asserted_publication_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     publication_crosswalk_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     acl_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -441,12 +444,40 @@ class L6EvidenceToolOutput(_L6Model):
     graph_execution_receipt_id: str
     graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     citations: tuple[SearchCitationEnvelope, ...]
-    presentations: tuple[CitationPresentation, ...]
+    presentations: tuple["L6StableCitationPresentation", ...]
     coverage_receipt: AgenticRetrievalCoverageReceiptV1_1
     output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _output_hash(self) -> "L6EvidenceToolOutput":
+        citation_ids = tuple(
+            sorted(item.search_citation_envelope_id for item in self.citations)
+        )
+        presentation_ids = tuple(
+            sorted(item.search_citation_envelope_id for item in self.presentations)
+        )
+        if (
+            len(citation_ids) != len(set(citation_ids))
+            or len(presentation_ids) != len(set(presentation_ids))
+            or citation_ids != presentation_ids
+        ):
+            raise ValueError("evidence citations and stable presentations differ")
+        if self.coverage_receipt.coverage_status == "complete" and (
+            not citation_ids or not self.coverage_receipt.citation_mappings
+        ):
+            raise ValueError(
+                "complete evidence output requires non-empty verified citations"
+            )
+        citations_by_id = {
+            item.search_citation_envelope_id: item for item in self.citations
+        }
+        for presentation in self.presentations:
+            citation = citations_by_id.get(
+                presentation.search_citation_envelope_id
+            )
+            if citation is None:
+                raise ValueError("stable presentation has no citation authority")
+            presentation.validate_citation(citation)
         expected = canonical_sha256(
             self.model_dump(mode="json", exclude={"output_hash"})
         )
@@ -484,10 +515,125 @@ class L6CitationEnvelopeHash(_L6Model):
     search_citation_envelope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class L6StableCitationPresentation(_L6Model):
+    """Stable citation display DTO with no transient/private URL state."""
+
+    citation_presentation_id: str
+    search_citation_envelope_id: str
+    search_citation_envelope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    original_document_name: str
+    source_id: str
+    source_file_id: str
+    source_unit_id: str
+    chunk_id: str
+    evidence_span_ids: tuple[str, ...]
+    exact_authorized_quote: str
+    quote_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page: int | None = Field(default=None, ge=0)
+    section_path: tuple[str, ...] = ()
+    immutable_locator: ImmutableSourceLocator
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    asset_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    governed_asset_reference_id: str | None = None
+    governed_asset_reference_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    stable_presentation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _stable_hash(self) -> "L6StableCitationPresentation":
+        expected_id = "l6cp-sha256:" + canonical_sha256(
+            {
+                "citation_id": self.search_citation_envelope_id,
+                "citation_hash": self.search_citation_envelope_hash,
+            }
+        )
+        if self.citation_presentation_id != expected_id:
+            raise ValueError("stable citation presentation ID mismatch")
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"stable_presentation_hash"})
+        )
+        if self.stable_presentation_hash != expected:
+            raise ValueError("stable citation presentation hash mismatch")
+        return self
+
+    def validate_citation(self, citation: SearchCitationEnvelope) -> None:
+        if (
+            self.search_citation_envelope_id
+            != citation.search_citation_envelope_id
+            or self.search_citation_envelope_hash != citation.citation_hash
+            or self.original_document_name != citation.original_document_name
+            or self.source_id != citation.source_id
+            or self.source_file_id != citation.source_file_id
+            or self.source_unit_id != citation.source_unit_id
+            or self.chunk_id != citation.chunk_id
+            or self.evidence_span_ids != citation.evidence_span_ids
+            or self.exact_authorized_quote != citation.exact_authorized_quote
+            or self.quote_hash != citation.quote_hash
+            or self.page != citation.page
+            or self.section_path != citation.section_path
+            or self.immutable_locator != citation.immutable_locator
+            or self.content_hash != citation.content_hash
+            or self.asset_hash != citation.asset_hash
+            or self.governed_asset_reference_id
+            != citation.governed_asset_reference_id
+            or self.governed_asset_reference_hash
+            != citation.governed_asset_reference_hash
+        ):
+            raise ValueError("stable presentation differs from citation authority")
+
+    @classmethod
+    def from_verified(
+        cls,
+        presentation: CitationPresentation,
+        citation: SearchCitationEnvelope,
+    ) -> "L6StableCitationPresentation":
+        if presentation.transient_authorized_asset_url is not None:
+            raise ValueError("transient citation URLs cannot enter sealed L6 output")
+        presentation.validate_citation(citation)
+        values = {
+            "citation_presentation_id": "l6cp-sha256:"
+            + canonical_sha256(
+                {
+                    "citation_id": citation.search_citation_envelope_id,
+                    "citation_hash": citation.citation_hash,
+                }
+            ),
+            "search_citation_envelope_id": presentation.search_citation_envelope_id,
+            "search_citation_envelope_hash": (
+                presentation.search_citation_envelope_hash
+            ),
+            "original_document_name": presentation.original_document_name,
+            "source_id": presentation.source_id,
+            "source_file_id": presentation.source_file_id,
+            "source_unit_id": presentation.source_unit_id,
+            "chunk_id": presentation.chunk_id,
+            "evidence_span_ids": presentation.evidence_span_ids,
+            "exact_authorized_quote": presentation.exact_authorized_quote,
+            "quote_hash": presentation.quote_hash,
+            "page": presentation.page,
+            "section_path": presentation.section_path,
+            "immutable_locator": presentation.immutable_locator,
+            "content_hash": presentation.content_hash,
+            "asset_hash": presentation.asset_hash,
+            "governed_asset_reference_id": (
+                presentation.governed_asset_reference_id
+            ),
+            "governed_asset_reference_hash": (
+                presentation.governed_asset_reference_hash
+            ),
+        }
+        return cls(
+            **values,
+            stable_presentation_hash=canonical_sha256(values),
+        )
+
+
 class L6CitationPresentationCollection(_L6Model):
     citation_envelope_ids: tuple[str, ...]
     citation_envelope_hashes: tuple[L6CitationEnvelopeHash, ...]
-    presentations: tuple[CitationPresentation, ...]
+    presentations: tuple[L6StableCitationPresentation, ...]
     coverage_receipt_id: str
     coverage_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     search_index_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -542,6 +688,10 @@ class L6ReadinessToolInput(_L6Model):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    citation_collection_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
     @model_validator(mode="after")
     def _pairs(self) -> "L6ReadinessToolInput":
@@ -549,6 +699,12 @@ class L6ReadinessToolInput(_L6Model):
             self.coverage_receipt_hash is None
         ):
             raise ValueError("coverage receipt ID and hash must be present together")
+        if (self.coverage_receipt_id is None) != (
+            self.citation_collection_hash is None
+        ):
+            raise ValueError(
+                "coverage receipt and citation collection must be present together"
+            )
         if not _GRAPH_RECEIPT_ID_RE.fullmatch(
             self.graph_execution_receipt_id
         ):
@@ -575,6 +731,10 @@ class L6ReadinessReport(_L6Model):
     graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     coverage_receipt_id: str | None = None
     coverage_receipt_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    citation_collection_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
@@ -698,6 +858,34 @@ class L6SynthesisInput(_L6Model):
             or self.coverage_receipt is None
         ):
             raise ValueError("complete L6 output requires Graph and cited Search evidence")
+        if self.status == "complete":
+            citation_ids = tuple(
+                sorted(
+                    item.search_citation_envelope_id
+                    for item in self.search_citations
+                )
+            )
+            if (
+                self.readiness.status != "complete"
+                or not self.readiness.graph_complete
+                or not self.readiness.retrieval_complete
+                or not self.graph_execution_receipt.graph_complete
+                or self.coverage_receipt.coverage_status != "complete"
+                or citation_ids != self.citation_collection.citation_envelope_ids
+                or self.citation_collection.coverage_receipt_id
+                != self.coverage_receipt.coverage_receipt_id
+                or self.citation_collection.coverage_receipt_hash
+                != self.coverage_receipt.coverage_receipt_hash
+                or self.citation_collection.asserted_publication_hash
+                != self.graph_execution_receipt.asserted_publication_hash
+                or self.citation_collection.search_index_fingerprint
+                != self.graph_execution_receipt.search_index_fingerprint
+                or tuple(self.coverage_receipt.required_canonical_ids)
+                != tuple(self.graph_execution_receipt.returned_canonical_ids)
+            ):
+                raise ValueError(
+                    "complete L6 output has contradictory readiness or citation authority"
+                )
         return self
 
 
@@ -806,6 +994,7 @@ class L6InMemoryGraphReceiptAuthority:
             "resolved_retrieval_scope_hash": retrieval_scope.retrieval_scope_hash,
             "canonical_scope_id": ontology_scope.canonical_scope_id,
             "graph_model_hash": ontology_scope.graph_model_hash,
+            "search_index_fingerprint": ontology_scope.search_index_fingerprint,
             "asserted_publication_hash": ontology_scope.asserted_publication_hash,
             "publication_crosswalk_hash": (
                 ontology_scope.publication_crosswalk_hash
@@ -944,6 +1133,7 @@ def _receipt_expectation(
         resolved_retrieval_scope_hash=retrieval_scope.retrieval_scope_hash,
         canonical_scope_id=ontology_scope.canonical_scope_id,
         graph_model_hash=ontology_scope.graph_model_hash,
+        search_index_fingerprint=ontology_scope.search_index_fingerprint,
         asserted_publication_hash=ontology_scope.asserted_publication_hash,
         publication_crosswalk_hash=ontology_scope.publication_crosswalk_hash,
         acl_scope_hash=ontology_scope.acl_scope_hash,
@@ -1083,28 +1273,38 @@ class L6VerifiedEvidenceTool:
             originating_context=originating_context,
             originating_budget=originating_budget,
         )
-        output_values = {
-            "graph_execution_receipt_id": receipt.graph_execution_receipt_id,
-            "graph_execution_receipt_hash": receipt.receipt_hash,
-            "citations": result.citations,
-            "presentations": result.presentations,
-            "coverage_receipt": result.coverage,
-        }
-        output = L6EvidenceToolOutput(
-            **output_values,
-            output_hash=canonical_sha256(output_values),
-        )
-        output.coverage.validate_request_context(
+        result.coverage.validate_request_context(
             context,
             budget,
             originating_context=originating_context,
             originating_budget=originating_budget,
         )
         _validate_citations(
-            output,
+            result,
             self._authorities,
             ontology_scope,
             retrieval_scope,
+        )
+        citations_by_id = {
+            item.search_citation_envelope_id: item for item in result.citations
+        }
+        stable_presentations = tuple(
+            L6StableCitationPresentation.from_verified(
+                presentation,
+                citations_by_id[presentation.search_citation_envelope_id],
+            )
+            for presentation in result.presentations
+        )
+        output_values = {
+            "graph_execution_receipt_id": receipt.graph_execution_receipt_id,
+            "graph_execution_receipt_hash": receipt.receipt_hash,
+            "citations": result.citations,
+            "presentations": stable_presentations,
+            "coverage_receipt": result.coverage,
+        }
+        output = L6EvidenceToolOutput(
+            **output_values,
+            output_hash=canonical_sha256(output_values),
         )
         return output
 
@@ -1467,7 +1667,7 @@ def assemble_l6_citation_collection(
     request: L6CitationToolInput,
     *,
     citations: Sequence[SearchCitationEnvelope],
-    presentations: Sequence[CitationPresentation],
+    presentations: Sequence[L6StableCitationPresentation],
     coverage: AgenticRetrievalCoverageReceiptV1_1,
     context: AgenticRetrievalRequestContextV1_1,
     budget: QueryBudgetV1_1,
@@ -1503,7 +1703,7 @@ def assemble_l6_citation_collection(
         or tuple(sorted(presentation_by_id)) != requested
     ):
         raise ValueError("citation collection has duplicate, missing, or extra IDs")
-    ordered_presentations: list[CitationPresentation] = []
+    ordered_presentations: list[L6StableCitationPresentation] = []
     hashes: list[L6CitationEnvelopeHash] = []
     for envelope_id in requested:
         citation = by_id[envelope_id]
@@ -1546,6 +1746,7 @@ def build_l6_readiness_report(
     *,
     graph_receipt: L6GraphExecutionReceipt,
     evidence_output: L6EvidenceToolOutput | None,
+    citation_collection: L6CitationPresentationCollection | None,
 ) -> L6ReadinessReport:
     """Bind readiness to exact trusted Graph and optional Runtime receipts."""
 
@@ -1560,6 +1761,10 @@ def build_l6_readiness_report(
         if evidence_output is not None
         else None
     )
+    if (evidence_output is None) != (citation_collection is None):
+        raise ValueError(
+            "readiness evidence and citation collection must be present together"
+        )
     if evidence_output is not None and (
         evidence_output.graph_execution_receipt_id
         != graph_receipt.graph_execution_receipt_id
@@ -1568,13 +1773,78 @@ def build_l6_readiness_report(
     ):
         raise ValueError("readiness evidence was not authorized by this Graph receipt")
     if coverage is None:
-        if request.coverage_receipt_id is not None:
+        if (
+            request.coverage_receipt_id is not None
+            or request.citation_collection_hash is not None
+        ):
             raise ValueError("readiness request declares absent coverage")
     elif (
         request.coverage_receipt_id != coverage.coverage_receipt_id
         or request.coverage_receipt_hash != coverage.coverage_receipt_hash
     ):
         raise ValueError("readiness coverage receipt mismatch")
+    if citation_collection is not None:
+        citation_ids = tuple(
+            sorted(
+                item.search_citation_envelope_id
+                for item in evidence_output.citations
+            )
+        )
+        presentation_ids = tuple(
+            sorted(
+                item.search_citation_envelope_id
+                for item in evidence_output.presentations
+            )
+        )
+        envelope_hashes = tuple(
+            (item.search_citation_envelope_id, item.citation_hash)
+            for item in sorted(
+                evidence_output.citations,
+                key=lambda item: item.search_citation_envelope_id,
+            )
+        )
+        collection_hashes = tuple(
+            (
+                item.search_citation_envelope_id,
+                item.search_citation_envelope_hash,
+            )
+            for item in citation_collection.citation_envelope_hashes
+        )
+        source_response_hashes = tuple(
+            sorted(
+                {
+                    item.response_hash
+                    for item in coverage.source_calls
+                    if item.response_hash is not None
+                }
+            )
+        )
+        if (
+            request.citation_collection_hash
+            != citation_collection.collection_hash
+            or citation_collection.coverage_receipt_id
+            != coverage.coverage_receipt_id
+            or citation_collection.coverage_receipt_hash
+            != coverage.coverage_receipt_hash
+            or citation_collection.asserted_publication_hash
+            != graph_receipt.asserted_publication_hash
+            or citation_collection.search_index_fingerprint
+            != graph_receipt.search_index_fingerprint
+            or citation_collection.source_response_hashes
+            != source_response_hashes
+            or not citation_ids
+            or citation_ids != presentation_ids
+            or citation_ids != citation_collection.citation_envelope_ids
+            or tuple(evidence_output.presentations)
+            != tuple(citation_collection.presentations)
+            or envelope_hashes != collection_hashes
+            or tuple(coverage.required_canonical_ids)
+            != tuple(graph_receipt.returned_canonical_ids)
+        ):
+            raise ValueError(
+                "readiness citation collection differs from verified evidence authority"
+            )
+        coverage.validate_citations(evidence_output.citations)
     if coverage is not None and (
         coverage.resolved_retrieval_scope_id
         != graph_receipt.resolved_retrieval_scope_id
@@ -1583,7 +1853,11 @@ def build_l6_readiness_report(
     ):
         raise ValueError("readiness receipts belong to different scopes")
     retrieval_complete = (
-        coverage is not None and coverage.coverage_status == "complete"
+        coverage is not None
+        and coverage.coverage_status == "complete"
+        and citation_collection is not None
+        and bool(evidence_output.citations)
+        and bool(evidence_output.presentations)
     )
     coverage_abstains = (
         coverage is not None
@@ -1636,6 +1910,11 @@ def build_l6_readiness_report(
         ),
         "coverage_receipt_hash": (
             coverage.coverage_receipt_hash if coverage is not None else None
+        ),
+        "citation_collection_hash": (
+            citation_collection.collection_hash
+            if citation_collection is not None
+            else None
         ),
         "readiness": readiness,
     }
@@ -1950,18 +2229,6 @@ class L6AgentOrchestrator:
                 publication=self._authorities.l5b,
                 originating_context=request.originating_request_context,
                 originating_budget=request.originating_query_budget,
-            )
-            evidence.coverage.validate_request_context(
-                request.request_context,
-                request.query_budget,
-                originating_context=request.originating_request_context,
-                originating_budget=request.originating_query_budget,
-            )
-            _validate_citations(
-                evidence,
-                self._authorities,
-                scopes.ontology_scope,
-                scopes.retrieval_scope,
             )
         except Exception as exc:
             del exc
