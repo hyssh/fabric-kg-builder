@@ -80,7 +80,12 @@ class _Reader:
         return CorpusAsset(
             asset=asset,
             version=version,
-            original_bytes=content,
+            consumed_byte_hash=(
+                hashlib.sha256(content).hexdigest()
+                if self.mutate_bytes
+                else entry.original_byte_hash
+            ),
+            consumed_byte_count=len(content),
             adapter_name=entry.adapter_name or "markdown",
             adapter_version="1.0.0",
             elements=(
@@ -219,3 +224,8 @@ def test_indexed_reader_uses_immutable_blob_locator_not_mutable_source_uri(
     assert resolved.elements
     assert resolved.elements[0].locator.source_uri is None
     assert resolved.elements[0].locator.blob_uri == version.blob_uri
+
+    path.write_text("<p>changed landed bytes</p>", encoding="utf-8")
+    with pytest.raises(L2StageError) as exc_info:
+        reader.read(entry)
+    assert exc_info.value.code == "L2_ASSET_CONTENT_MISMATCH"

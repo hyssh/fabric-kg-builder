@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,12 +38,15 @@ from fabric_kg_builder.model.schemas import (
     AssetVersionRow,
     DocumentElementRow,
 )
+from fabric_kg_builder.sources.adapter import AdapterError
 from fabric_kg_builder.sources.corpus import (
     DesignSampleManifest,
     SourceCorpusEntry,
     SourceCorpusManifest,
+    SourceSnapshotIntegrityError,
+    extract_verified_source_snapshot,
+    open_verified_source_snapshot,
 )
-from fabric_kg_builder.sources.router import extract as extract_source
 
 L2_STAGE_NAME = "Schema-Constrained Extraction"
 L2_STATE_DIR = Path(".fkg") / "l2"
@@ -126,7 +128,8 @@ class CorpusAsset:
 
     asset: AssetRow
     version: AssetVersionRow
-    original_bytes: bytes
+    consumed_byte_hash: str
+    consumed_byte_count: int
     adapter_name: str
     adapter_version: str
     elements: tuple[SourceElement, ...]
@@ -181,34 +184,65 @@ class IndexedSourceCorpusReader:
         source_path = (self._source_root / entry.relative_source_ref).resolve()
         try:
             source_path.relative_to(self._source_root)
-            original_bytes = source_path.read_bytes()
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             raise L2StageError(
                 "L2_ASSET_VERSION_MISSING",
                 f"landed bytes are unavailable for {entry.source_file_id}",
             ) from exc
         try:
-            adapted = extract_source(source_path)
-        except Exception as exc:
+            with open_verified_source_snapshot(
+                source_path,
+                entry=entry,
+            ) as snapshot:
+                extraction = extract_verified_source_snapshot(snapshot)
+                adapted = extraction.adapter_result
+        except AdapterError as exc:
+            if isinstance(exc, SourceSnapshotIntegrityError):
+                raise L2StageError(
+                    "L2_ASSET_CONTENT_MISMATCH",
+                    f"landed bytes differ for {entry.source_file_id}",
+                ) from exc
+            raise L2StageError(
+                "L2_SOURCE_ADAPTER_FAILED",
+                f"adapter failed for {entry.source_file_id}: {type(exc).__name__}",
+            ) from exc
+        except (OSError, UnicodeError, ValueError, ImportError) as exc:
             raise L2StageError(
                 "L2_SOURCE_ADAPTER_FAILED",
                 f"adapter failed for {entry.source_file_id}: {type(exc).__name__}",
             ) from exc
         adapter_name = entry.adapter_name or type(adapted).__name__
         adapter_version = self._adapter_versions.get(adapter_name, "1.0.0")
+        eligible_rows = [
+            row for row in adapted.document_elements if _eligible_element_text(row)
+        ]
+        stable_element_ids = {
+            row.document_element_id: deterministic_contract_id(
+                "source-element",
+                {
+                    "asset_version_id": version.asset_version_id,
+                    "ordinal": index,
+                    "element_type": row.element_type,
+                    "content_hash": row.content_hash,
+                },
+            )
+            for index, row in enumerate(eligible_rows)
+        }
         elements = tuple(
             _source_element_from_row(
                 row,
                 version=version,
                 ordinal=index,
+                element_id=stable_element_ids[row.document_element_id],
+                parent_element_id=stable_element_ids.get(row.parent_element_id),
             )
-            for index, row in enumerate(adapted.document_elements)
-            if _eligible_element_text(row)
+            for index, row in enumerate(eligible_rows)
         )
         return CorpusAsset(
             asset=asset,
             version=version,
-            original_bytes=original_bytes,
+            consumed_byte_hash=extraction.consumed_byte_hash,
+            consumed_byte_count=extraction.consumed_byte_count,
             adapter_name=adapter_name,
             adapter_version=adapter_version,
             elements=elements,
@@ -546,21 +580,23 @@ def _source_element_from_row(
     *,
     version: AssetVersionRow,
     ordinal: int,
+    element_id: str,
+    parent_element_id: str | None,
 ) -> SourceElement:
     locator = ImmutableSourceLocator.from_authority(
         blob_uri=version.blob_uri,
         blob_version_id=version.blob_version_id or version.version_identity,
         page=row.page_number,
         section_path=row.section_path,
-        native_object_id=row.document_element_id,
+        native_object_id=element_id,
     )
     return SourceElement(
-        element_id=row.document_element_id,
+        element_id=element_id,
         unit_kind=_unit_kind(row),
         text=(row.content or row.title or "").strip(),
         ordinal=row.sort_order if row.sort_order is not None else ordinal,
         locator=locator,
-        parent_element_id=row.parent_element_id,
+        parent_element_id=parent_element_id,
     )
 
 
@@ -649,10 +685,9 @@ def materialize_source_corpus(
             continue
 
         asset = reader.read(entry)
-        digest = hashlib.sha256(asset.original_bytes).hexdigest()
         if (
-            digest != entry.original_byte_hash
-            or len(asset.original_bytes) != entry.byte_count
+            asset.consumed_byte_hash != entry.original_byte_hash
+            or asset.consumed_byte_count != entry.byte_count
             or asset.version.content_hash != entry.original_byte_hash
             or asset.version.size_bytes != entry.byte_count
         ):

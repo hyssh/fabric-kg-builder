@@ -33,12 +33,15 @@ from fabric_kg_builder.domain.contexts import (
     SourceProfileWarning,
 )
 from fabric_kg_builder.release.redact import redact_secret_text
-from fabric_kg_builder.sources.adapter import AdapterError
+from fabric_kg_builder.sources.adapter import AdapterError, FailureType
 from fabric_kg_builder.sources.corpus import (
     DesignSampleEntry,
     DesignSampleManifest,
+    SourceSnapshotIntegrityError,
     SourceCorpusManifest,
     build_design_sample_manifest,
+    extract_verified_source_snapshot,
+    open_verified_source_snapshot,
 )
 from fabric_kg_builder.sources.evidence_verifier import (
     mint_source_unit,
@@ -556,60 +559,48 @@ def build_l1_design_artifacts(
         warnings: list[SourceProfileWarning] = []
         kind_counts: Counter[str] = Counter()
 
-        relative_to_path = {
-            (
-                path.resolve().relative_to(root).as_posix()
-                if root.is_dir()
-                else path.name
-            ): path
-            for path in ([root] if root.is_file() else root.rglob("*"))
-            if path.is_file()
-        }
         for corpus_entry in _representative_entries(corpus, budget):
-            path = relative_to_path.get(corpus_entry.relative_source_ref)
-            if path is None:
-                warnings.append(
-                    SourceProfileWarning(
-                        warning_id=deterministic_contract_id(
-                            "source-warning",
-                            {
-                                "source_file_id": corpus_entry.source_file_id,
-                                "warning_type": "missing",
-                            },
-                        ),
-                        warning_type="missing",
-                        source_file_id=corpus_entry.source_file_id,
-                        message="Source disappeared after complete corpus inventory.",
+            path = (
+                root
+                if root.is_file()
+                else root / Path(corpus_entry.relative_source_ref)
+            )
+            with open_verified_source_snapshot(
+                path,
+                entry=corpus_entry,
+                corpus_root_id=corpus.corpus_root_id,
+            ) as snapshot:
+                try:
+                    extraction = extract_verified_source_snapshot(snapshot)
+                    result = extraction.adapter_result
+                except (AdapterError, OSError, UnicodeError, ValueError, ImportError) as exc:
+                    if isinstance(exc, SourceSnapshotIntegrityError) or (
+                        isinstance(exc, AdapterError)
+                        and exc.failure_type is FailureType.MIME_MISMATCH
+                    ):
+                        raise
+                    warning_type = (
+                        exc.failure_type.value
+                        if isinstance(exc, AdapterError)
+                        else type(exc).__name__.casefold()
                     )
-                )
-                continue
-            try:
-                from fabric_kg_builder.sources.router import extract
-
-                result = extract(path)
-            except (AdapterError, OSError, UnicodeError, ValueError, ImportError) as exc:
-                warning_type = (
-                    exc.failure_type.value
-                    if isinstance(exc, AdapterError)
-                    else type(exc).__name__.casefold()
-                )
-                warnings.append(
-                    SourceProfileWarning(
-                        warning_id=deterministic_contract_id(
-                            "source-warning",
-                            {
-                                "source_file_id": corpus_entry.source_file_id,
-                                "warning_type": warning_type,
-                            },
-                        ),
-                        warning_type=warning_type,
-                        source_file_id=corpus_entry.source_file_id,
-                        message=redact_secret_text(
-                            f"Design sampling failed for {corpus_entry.relative_source_ref}: {exc}"
-                        ),
+                    warnings.append(
+                        SourceProfileWarning(
+                            warning_id=deterministic_contract_id(
+                                "source-warning",
+                                {
+                                    "source_file_id": corpus_entry.source_file_id,
+                                    "warning_type": warning_type,
+                                },
+                            ),
+                            warning_type=warning_type,
+                            source_file_id=corpus_entry.source_file_id,
+                            message=redact_secret_text(
+                                f"Design sampling failed for {corpus_entry.relative_source_ref}: {exc}"
+                            ),
+                        )
                     )
-                )
-                continue
+                    continue
 
             elements = sorted(
                 result.document_elements,

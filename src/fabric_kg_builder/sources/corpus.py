@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
+import shutil
+import stat
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, BinaryIO, Callable, Iterator, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -20,10 +26,11 @@ from fabric_kg_builder.contracts.base import (
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
 from fabric_kg_builder.model.ids import make_source_file_id
 
-from .adapter import AdapterError
+from .adapter import MAX_FILE_BYTES, AdapterError, FailureType
 from .router import route
 
 NonNegativeInt = Annotated[int, Field(ge=0)]
+_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 
 
 class SourceCorpusEntry(ContractModel):
@@ -142,6 +149,264 @@ class SourceCorpusManifest(ContractModel):
         if self.identity.content_hash != self.corpus_hash:
             raise ValueError("identity.content_hash must equal corpus_hash")
         return self
+
+
+@dataclass(frozen=True)
+class SourceAssetSnapshot:
+    """Private snapshot whose held descriptor is the extraction authority."""
+
+    entry: SourceCorpusEntry
+    path: Path
+    adapter_name: str
+    byte_hash: str
+    byte_count: int
+    device: int
+    inode: int
+    _descriptor: BinaryIO
+
+
+@dataclass(frozen=True)
+class VerifiedSourceExtraction:
+    """Adapter output bound to the exact guarded snapshot consumed."""
+
+    adapter_result: Any
+    source_file_id: str
+    asset_version_id: str
+    adapter_name: str
+    consumed_byte_hash: str
+    consumed_byte_count: int
+
+
+class SourceSnapshotIntegrityError(AdapterError):
+    """Typed failure raised only when sealed snapshot authority is violated."""
+
+
+def _snapshot_error(snapshot: SourceAssetSnapshot, message: str) -> AdapterError:
+    return SourceSnapshotIntegrityError(
+        FailureType.CORRUPT,
+        f"{message} for {snapshot.entry.source_file_id}",
+        source_locator=snapshot.entry.relative_source_ref,
+    )
+
+
+def _write_all(stream: BinaryIO, chunk: bytes) -> None:
+    remaining = memoryview(chunk)
+    while remaining:
+        written = stream.write(remaining)
+        if written is None or written <= 0:
+            raise OSError("private snapshot write made no progress")
+        remaining = remaining[written:]
+
+
+def _hash_open_stream(stream: BinaryIO) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    stream.seek(0)
+    while chunk := stream.read(_SNAPSHOT_CHUNK_BYTES):
+        digest.update(chunk)
+        byte_count += len(chunk)
+    stream.seek(0)
+    return digest.hexdigest(), byte_count
+
+
+def _verify_snapshot(snapshot: SourceAssetSnapshot) -> None:
+    try:
+        descriptor_stat = os.fstat(snapshot._descriptor.fileno())
+        path_stat = snapshot.path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _snapshot_error(snapshot, "private snapshot became unavailable") from exc
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or descriptor_stat.st_dev != snapshot.device
+        or descriptor_stat.st_ino != snapshot.inode
+        or path_stat.st_dev != snapshot.device
+        or path_stat.st_ino != snapshot.inode
+    ):
+        raise _snapshot_error(snapshot, "private snapshot path or inode changed")
+    byte_hash, byte_count = _hash_open_stream(snapshot._descriptor)
+    if (
+        byte_hash != snapshot.byte_hash
+        or byte_count != snapshot.byte_count
+        or byte_hash != snapshot.entry.original_byte_hash
+        or byte_count != snapshot.entry.byte_count
+    ):
+        raise _snapshot_error(snapshot, "private snapshot bytes changed")
+
+
+def _remove_private_snapshot(temp_root: Path) -> None:
+    def make_writable_and_retry(
+        function: Callable[[str], None],
+        path: str,
+        _: tuple[type[BaseException], BaseException, object],
+    ) -> None:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        function(path)
+
+    shutil.rmtree(temp_root, onerror=make_writable_and_retry)
+
+
+@contextmanager
+def open_verified_source_snapshot(
+    path: Path,
+    *,
+    entry: SourceCorpusEntry,
+    corpus_root_id: str | None = None,
+    max_bytes: int = MAX_FILE_BYTES,
+    _read_hook: Callable[[int], None] | None = None,
+) -> Iterator[SourceAssetSnapshot]:
+    """Stream source bytes into one bounded private snapshot and hold its inode."""
+
+    if entry.disposition != "eligible" or entry.adapter_status != "supported":
+        raise SourceSnapshotIntegrityError(
+            FailureType.CORRUPT,
+            f"source entry {entry.source_file_id} is not eligible for extraction",
+            source_locator=entry.relative_source_ref,
+        )
+    if entry.adapter_name is None:
+        raise SourceSnapshotIntegrityError(
+            FailureType.CORRUPT,
+            f"source entry {entry.source_file_id} has no sealed adapter kind",
+            source_locator=entry.relative_source_ref,
+        )
+    if entry.byte_count > max_bytes:
+        raise SourceSnapshotIntegrityError(
+            FailureType.TOO_LARGE,
+            f"source entry {entry.source_file_id} exceeds the byte snapshot limit",
+            source_locator=entry.relative_source_ref,
+        )
+
+    temp_root = Path(tempfile.mkdtemp(prefix="fabric-kg-source-"))
+    os.chmod(temp_root, 0o700)
+    snapshot_path = temp_root / Path(entry.relative_source_ref).name
+    descriptor: BinaryIO | None = None
+    try:
+        descriptor = snapshot_path.open("xb+", buffering=0)
+        os.chmod(snapshot_path, 0o600)
+        digest = hashlib.sha256()
+        byte_count = 0
+        try:
+            with path.open("rb", buffering=0) as source_stream:
+                while chunk := source_stream.read(_SNAPSHOT_CHUNK_BYTES):
+                    byte_count += len(chunk)
+                    if byte_count > entry.byte_count or byte_count > max_bytes:
+                        raise SourceSnapshotIntegrityError(
+                            FailureType.CORRUPT,
+                            f"source bytes changed for {entry.source_file_id}",
+                            source_locator=entry.relative_source_ref,
+                        )
+                    digest.update(chunk)
+                    _write_all(descriptor, chunk)
+                    if _read_hook is not None:
+                        _read_hook(byte_count)
+        except AdapterError:
+            raise
+        except OSError as exc:
+            raise SourceSnapshotIntegrityError(
+                FailureType.NOT_FOUND,
+                f"source bytes are unavailable for {entry.source_file_id}",
+                source_locator=entry.relative_source_ref,
+            ) from exc
+
+        descriptor.flush()
+        os.fsync(descriptor.fileno())
+        os.chmod(snapshot_path, 0o400)
+        original_byte_hash = digest.hexdigest()
+        expected_asset_id = (
+            deterministic_contract_id(
+                "asset",
+                {
+                    "corpus_root_id": corpus_root_id,
+                    "relative_source_ref": entry.relative_source_ref,
+                },
+            )
+            if corpus_root_id is not None
+            else entry.asset_id
+        )
+        expected_source_file_id = make_source_file_id(
+            entry.relative_source_ref,
+            original_byte_hash,
+        )
+        expected_asset_version_id = deterministic_contract_id(
+            "asset-version",
+            {
+                "asset_id": expected_asset_id,
+                "original_byte_hash": original_byte_hash,
+            },
+        )
+        expected_media_type = (
+            mimetypes.guess_type(Path(entry.relative_source_ref).name)[0]
+            or "application/octet-stream"
+        )
+        if (
+            byte_count != entry.byte_count
+            or original_byte_hash != entry.original_byte_hash
+            or expected_source_file_id != entry.source_file_id
+            or expected_asset_id != entry.asset_id
+            or expected_asset_version_id != entry.asset_version_id
+            or expected_media_type != entry.media_type
+        ):
+            raise SourceSnapshotIntegrityError(
+                FailureType.CORRUPT,
+                f"source bytes or sealed identity changed for {entry.source_file_id}",
+                source_locator=entry.relative_source_ref,
+            )
+        descriptor_stat = os.fstat(descriptor.fileno())
+        snapshot = SourceAssetSnapshot(
+            entry=entry,
+            path=snapshot_path,
+            adapter_name=entry.adapter_name,
+            byte_hash=original_byte_hash,
+            byte_count=byte_count,
+            device=descriptor_stat.st_dev,
+            inode=descriptor_stat.st_ino,
+            _descriptor=descriptor,
+        )
+        yield snapshot
+    finally:
+        if descriptor is not None:
+            descriptor.close()
+        _remove_private_snapshot(temp_root)
+
+
+def extract_verified_source_snapshot(
+    snapshot: SourceAssetSnapshot,
+    *,
+    _consume_hook: Callable[[str, SourceAssetSnapshot], None] | None = None,
+) -> VerifiedSourceExtraction:
+    """Run a path adapter inside descriptor/inode and pre/post hash guards.
+
+    Existing adapters are trusted to parse the guarded path. The wrapper does
+    not claim that they consume every byte; it guarantees that the private inode
+    they could read equals the sealed snapshot before and after adapter use.
+    """
+
+    from .router import extract_with_adapter
+
+    _verify_snapshot(snapshot)
+    if _consume_hook is not None:
+        _consume_hook("before_route", snapshot)
+    actual_adapter = route(snapshot.path)
+    if actual_adapter != snapshot.adapter_name:
+        raise AdapterError(
+            FailureType.MIME_MISMATCH,
+            f"sealed adapter kind changed for {snapshot.entry.source_file_id}",
+            source_locator=snapshot.entry.relative_source_ref,
+        )
+    if _consume_hook is not None:
+        _consume_hook("before_adapter", snapshot)
+    _verify_snapshot(snapshot)
+    result = extract_with_adapter(snapshot.path, snapshot.adapter_name)
+    if _consume_hook is not None:
+        _consume_hook("after_adapter", snapshot)
+    _verify_snapshot(snapshot)
+    return VerifiedSourceExtraction(
+        adapter_result=result,
+        source_file_id=snapshot.entry.source_file_id,
+        asset_version_id=snapshot.entry.asset_version_id,
+        adapter_name=snapshot.adapter_name,
+        consumed_byte_hash=snapshot.byte_hash,
+        consumed_byte_count=snapshot.byte_count,
+    )
 
 
 class DesignSampleEntry(ContractModel):

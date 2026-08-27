@@ -101,17 +101,27 @@ def extract(path: str | Path) -> Any:
     - PNG/JPG/TIFF → ``AdapterResult`` from ``ImageAdapter``
     """
     extractor = route(path)
+    return extract_with_adapter(path, extractor)
+
+
+def extract_with_adapter(path: str | Path, extractor: str) -> Any:
+    """Dispatch a path to an already selected and validated adapter."""
+
     p = Path(path)
 
     # OOXML archive safety: validate before passing to any Office XML parser.
     # This guards against archive bombs, encrypted entries, and generic ZIPs
     # renamed to Office extensions (EXT-009).
     _OOXML_EXTRACTORS = frozenset({"docx_extractor", "pptx_extractor"})
+    legacy_excel = False
+    if extractor == "csv_loader" and p.suffix.lower() == ".xlsx" and p.exists():
+        from .media_type import detect_media_type  # noqa: PLC0415
+
+        legacy_excel = detect_media_type(p) == "application/vnd.ms-excel"
     if extractor in _OOXML_EXTRACTORS or (
         extractor == "csv_loader"
         and p.suffix.lower() == ".xlsx"
-        and detected_mime
-        != "application/vnd.ms-excel"
+        and not legacy_excel
     ):
         if p.exists():
             from .media_type import mime_for_extension, validate_ooxml_archive  # noqa: PLC0415
