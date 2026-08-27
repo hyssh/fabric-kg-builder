@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fabric_kg_builder.agent import l6_integration as l6
@@ -70,3 +72,20 @@ def test_l6_fake_hosts_end_to_end(monkeypatch):
     assert output.zero_synthesis is True
     assert graph.calls == evidence.calls == 1
     assert output.operation_accounting.downstream_synthesis_calls == 0
+
+
+@pytest.mark.integration
+@pytest.mark.offline
+def test_l6_canonical_definition_persists_and_reads_back_exactly(tmp_path):
+    definition = l6.build_l6_agent_definition(
+        agent_name="KG evidence agent",
+        fabric_data_agent_connection_id="connection:fabric",
+        foundry_remote_tool_connection_id="connection:remote-tool",
+    )
+    path = tmp_path / "l6-agent-definition.json"
+
+    definition_hash = l6.persist_l6_agent_definition(path, definition)
+
+    assert definition_hash == definition.definition_hash
+    assert path.read_bytes() == definition.canonical_bytes
+    assert json.loads(path.read_bytes()) == json.loads(definition.canonical_bytes)

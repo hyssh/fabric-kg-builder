@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import hashlib
@@ -3175,12 +3176,25 @@ def test_tool_schemas_instructions_and_definition_readback(tmp_path: Path):
     path = tmp_path / "l6-agent-definition.json"
     definition_hash = l6.persist_l6_agent_definition(path, definition)
     assert definition_hash == definition["definition_hash"]
+    assert path.read_bytes() == definition.canonical_bytes
     assert "0.2.4" not in path.read_text("utf-8")
     assert "rdf" not in path.read_text("utf-8").casefold()
+    assert definition["template_code_hash"] == l6.L6_DEFINITION_TEMPLATE_CODE_HASH
+    assert definition["authorities"]["runtime_1_1"][
+        "coverage_receipt_schema_hash"
+    ] == "92d39c05d33a360bd542386af022a382ba18788efe4a1fe5b0728c42b5aec652"
+    assert definition["limits"] == {
+        "graph_requests": 1,
+        "selected_search_requests": 1,
+        "local_synthesis_calls": 0,
+        "downstream_boundary_calls": 1,
+    }
 
     drifted = {**definition, "agent_name": "drifted"}
-    with pytest.raises(ValueError, match="hash mismatch"):
-        l6.persist_l6_agent_definition(path, drifted)
+    with pytest.raises(ValueError, match="canonical authority"):
+        l6.persist_l6_agent_definition(
+            path, drifted, expected_definition=definition
+        )
 
 
 @pytest.mark.unit
@@ -3278,8 +3292,12 @@ def test_persistence_recursively_rejects_tampered_definition_text(tmp_path: Path
     tampered["definition_hash"] = canonical_sha256(
         {key: value for key, value in tampered.items() if key != "definition_hash"}
     )
-    with pytest.raises(ValueError, match="unsafe stable text"):
-        l6.persist_l6_agent_definition(tmp_path / "agent.json", tampered)
+    with pytest.raises(ValueError, match="canonical authority"):
+        l6.persist_l6_agent_definition(
+            tmp_path / "agent.json",
+            tampered,
+            expected_definition=definition,
+        )
 
     endpoint_tools = [dict(item) for item in definition["tools"]]
     endpoint_tools[0]["description"] = "Read api.example.com/private from here"
@@ -3287,8 +3305,12 @@ def test_persistence_recursively_rejects_tampered_definition_text(tmp_path: Path
     endpoint["definition_hash"] = canonical_sha256(
         {key: value for key, value in endpoint.items() if key != "definition_hash"}
     )
-    with pytest.raises(ValueError, match="unsafe stable text"):
-        l6.persist_l6_agent_definition(tmp_path / "agent.json", endpoint)
+    with pytest.raises(ValueError, match="canonical authority"):
+        l6.persist_l6_agent_definition(
+            tmp_path / "agent.json",
+            endpoint,
+            expected_definition=definition,
+        )
 
     renamed_tools = [dict(item) for item in definition["tools"]]
     renamed_tools[0]["name"] = "fabric_kg_unapproved_tool"
@@ -3296,5 +3318,175 @@ def test_persistence_recursively_rejects_tampered_definition_text(tmp_path: Path
     renamed["definition_hash"] = canonical_sha256(
         {key: value for key, value in renamed.items() if key != "definition_hash"}
     )
-    with pytest.raises(ValueError, match="closed toolset"):
-        l6.persist_l6_agent_definition(tmp_path / "agent.json", renamed)
+    with pytest.raises(ValueError, match="canonical authority"):
+        l6.persist_l6_agent_definition(
+            tmp_path / "agent.json",
+            renamed,
+            expected_definition=definition,
+        )
+
+
+def _canonical_l6_definition():
+    return l6.build_l6_agent_definition(
+        agent_name="KG evidence agent",
+        fabric_data_agent_connection_id="connection:fabric",
+        foundry_remote_tool_connection_id="connection:remote-tool",
+    )
+
+
+def _mutable_l6_definition(definition):
+    return json.loads(definition.canonical_bytes)
+
+
+def _self_rehash(definition):
+    definition["definition_hash"] = canonical_sha256(
+        {key: value for key, value in definition.items() if key != "definition_hash"}
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mutation",
+    ("empty_graph_input_schema", "changed_instructions", "graph_requests_99"),
+)
+def test_l6_reproduced_self_rehashed_definitions_are_rejected(tmp_path, mutation):
+    expected = _canonical_l6_definition()
+    candidate = _mutable_l6_definition(expected)
+    if mutation == "empty_graph_input_schema":
+        candidate["tools"][1]["input_schema"] = {}
+    elif mutation == "changed_instructions":
+        candidate["instructions"] = "Use the tools safely."
+    else:
+        candidate["limits"]["graph_requests"] = 99
+    _self_rehash(candidate)
+
+    with pytest.raises(ValueError, match="canonical authority"):
+        l6.persist_l6_agent_definition(
+            tmp_path / "agent.json",
+            candidate,
+            expected_definition=expected,
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "description",
+        "schema_required",
+        "output_schema",
+        "instruction_whitespace",
+        "instruction_order",
+        "tool_order",
+        "connection",
+        "call_limits",
+        "extra_field",
+        "template_code_hash",
+        "runtime_authority",
+        "l5a_authority",
+        "l5b_authority",
+    ),
+)
+def test_l6_complete_definition_drift_is_rejected(tmp_path, mutation):
+    expected = _canonical_l6_definition()
+    candidate = _mutable_l6_definition(expected)
+    if mutation == "description":
+        candidate["tools"][0]["description"] += " Changed."
+    elif mutation == "schema_required":
+        candidate["tools"][1]["input_schema"]["required"] = []
+    elif mutation == "output_schema":
+        candidate["tools"][4]["output_schema"]["additionalProperties"] = True
+    elif mutation == "instruction_whitespace":
+        candidate["instructions"] += " "
+    elif mutation == "instruction_order":
+        first, second, *rest = candidate["instructions"].split(". ")
+        candidate["instructions"] = ". ".join((second, first, *rest))
+    elif mutation == "tool_order":
+        candidate["tools"][0], candidate["tools"][1] = (
+            candidate["tools"][1],
+            candidate["tools"][0],
+        )
+    elif mutation == "connection":
+        candidate["connections"]["l6_remote_tool"]["type"] = "fabric_data_agent"
+    elif mutation == "call_limits":
+        candidate["limits"]["selected_search_requests"] = 2
+    elif mutation == "extra_field":
+        candidate["unexpected"] = True
+    elif mutation == "template_code_hash":
+        candidate["template_code_hash"] = "0" * 64
+    elif mutation == "runtime_authority":
+        candidate["authorities"]["runtime_1_1"]["contract_version"] = "1.0.0"
+    elif mutation == "l5a_authority":
+        candidate["authorities"]["l5a"]["authority_hash"] = "0" * 64
+    else:
+        candidate["authorities"]["l5b"]["target_version"] = "9.9.9"
+    _self_rehash(candidate)
+
+    with pytest.raises(ValueError, match="canonical authority"):
+        l6.persist_l6_agent_definition(
+            tmp_path / "agent.json",
+            candidate,
+            expected_definition=expected,
+        )
+
+
+@pytest.mark.unit
+def test_l6_definition_is_deeply_immutable_and_key_order_is_canonicalized(tmp_path):
+    expected = _canonical_l6_definition()
+    with pytest.raises(TypeError, match="immutable"):
+        expected["limits"]["graph_requests"] = 99
+
+    reversed_candidate = {
+        key: value
+        for key, value in reversed(_mutable_l6_definition(expected).items())
+    }
+    result = l6.persist_l6_agent_definition(
+        tmp_path / "agent.json",
+        reversed_candidate,
+        expected_definition=expected,
+    )
+    assert result == expected.definition_hash
+    assert (tmp_path / "agent.json").read_bytes() == expected.canonical_bytes
+
+
+@pytest.mark.unit
+def test_l6_definition_readback_drift_fails_closed(tmp_path, monkeypatch):
+    expected = _canonical_l6_definition()
+    drifted = _mutable_l6_definition(expected)
+    drifted["agent_name"] = "Readback drift"
+    drifted_bytes = (canonical_json(drifted) + "\n").encode()
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: drifted_bytes)
+
+    with pytest.raises(ValueError, match="read-back drift"):
+        l6.persist_l6_agent_definition(tmp_path / "agent.json", expected)
+
+
+@pytest.mark.unit
+def test_l6_definition_rejects_duck_typed_canonical_authority(tmp_path):
+    expected = _canonical_l6_definition()
+    candidate = _mutable_l6_definition(expected)
+
+    class SpoofedAuthority:
+        canonical_bytes = expected.canonical_bytes
+        definition_hash = expected.definition_hash
+
+    with pytest.raises(ValueError, match="lacks canonical authority"):
+        l6.persist_l6_agent_definition(
+            tmp_path / "agent.json",
+            candidate,
+            expected_definition=SpoofedAuthority(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.unit
+def test_l6_definition_rejects_derived_canonical_authority(tmp_path):
+    class DerivedAuthority(l6.L6CanonicalAgentDefinition):
+        pass
+
+    derived = DerivedAuthority(
+        agent_name="KG evidence agent",
+        fabric_data_agent_connection_id="connection:fabric",
+        foundry_remote_tool_connection_id="connection:remote-tool",
+    )
+    with pytest.raises(ValueError, match="lacks canonical authority"):
+        l6.persist_l6_agent_definition(tmp_path / "agent.json", derived)
