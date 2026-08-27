@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import shutil
 import tempfile
 import time
@@ -33,6 +32,7 @@ from fabric_kg_builder.contracts.resources import (
     StageResourceMetrics,
     validate_receipt_resources,
 )
+from fabric_kg_builder.platform import process_resource_usage
 from fabric_kg_builder.sources.corpus import (
     DesignSampleManifest,
     SourceCorpusManifest,
@@ -1099,10 +1099,7 @@ def _resource_metrics(
             * 1000
         ),
     )
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    peak_rss = int(usage.ru_maxrss)
-    if os.uname().sysname != "Darwin":
-        peak_rss *= 1024
+    usage = process_resource_usage()
     metrics_id = deterministic_contract_id(
         "stage-resource-metrics",
         {
@@ -1120,8 +1117,8 @@ def _resource_metrics(
         "stage_id": "L1",
         "stage_name": L1_STAGE_NAME,
         "wall_ms": elapsed,
-        "cpu_ms": max(0, int((usage.ru_utime + usage.ru_stime) * 1000)),
-        "peak_rss_bytes": peak_rss,
+        "cpu_ms": max(0, int(usage.cpu_seconds * 1000)),
+        "peak_rss_bytes": usage.peak_rss_bytes,
         "storage_read_bytes": prepared.preflight.corpus.total_byte_count,
         "storage_write_bytes": storage_write_bytes,
         "network_request_bytes": 0,

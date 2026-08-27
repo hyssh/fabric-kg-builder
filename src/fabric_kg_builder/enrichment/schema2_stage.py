@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,6 +29,7 @@ from fabric_kg_builder.contracts.resources import (
 )
 from fabric_kg_builder.domain.models import CompletenessRequirementV2
 from fabric_kg_builder.domain.service import compute_contract_hash
+from fabric_kg_builder.platform import process_resource_usage
 
 from .schema2_extraction import (
     L2_EXTRACTOR_VERSION,
@@ -551,10 +551,7 @@ def _resource_metrics(
     storage_write_bytes: int,
     started: float,
 ) -> StageResourceMetrics:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    peak_rss = int(usage.ru_maxrss)
-    if os.uname().sysname != "Darwin":
-        peak_rss *= 1024
+    usage = process_resource_usage()
     metrics_id = deterministic_contract_id(
         "stage-resource-metrics",
         {
@@ -573,8 +570,8 @@ def _resource_metrics(
         "stage_id": "L2",
         "stage_name": L2_STAGE_NAME,
         "wall_ms": max(0, int((time.perf_counter() - started) * 1000)),
-        "cpu_ms": max(0, int((usage.ru_utime + usage.ru_stime) * 1000)),
-        "peak_rss_bytes": peak_rss,
+        "cpu_ms": max(0, int(usage.cpu_seconds * 1000)),
+        "peak_rss_bytes": usage.peak_rss_bytes,
         "storage_read_bytes": inputs.corpus_manifest.total_byte_count,
         "storage_write_bytes": storage_write_bytes,
         "network_request_bytes": 0,

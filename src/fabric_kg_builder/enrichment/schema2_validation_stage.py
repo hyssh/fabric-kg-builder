@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -48,6 +47,7 @@ from fabric_kg_builder.contracts.resources import (
 )
 from fabric_kg_builder.domain.models import CompletenessRequirementV2, DomainContractV2
 from fabric_kg_builder.domain.service import compute_contract_hash
+from fabric_kg_builder.platform import process_resource_usage
 from fabric_kg_builder.sources.corpus import DesignSampleManifest, SourceCorpusManifest
 
 from .schema2_evidence import (
@@ -3029,10 +3029,7 @@ def _resource_metrics(
     storage_write_bytes: int,
     started: float,
 ) -> StageResourceMetrics:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    peak_rss = int(usage.ru_maxrss)
-    if os.uname().sysname != "Darwin":
-        peak_rss *= 1024
+    usage = process_resource_usage()
     metrics_id = deterministic_contract_id(
         "stage-resource-metrics",
         {
@@ -3050,8 +3047,8 @@ def _resource_metrics(
         "stage_id": "L3",
         "stage_name": L3_STAGE_NAME,
         "wall_ms": max(0, int((time.perf_counter() - started) * 1000)),
-        "cpu_ms": max(0, int((usage.ru_utime + usage.ru_stime) * 1000)),
-        "peak_rss_bytes": peak_rss,
+        "cpu_ms": max(0, int(usage.cpu_seconds * 1000)),
+        "peak_rss_bytes": usage.peak_rss_bytes,
         "storage_read_bytes": storage_read_bytes,
         "storage_write_bytes": storage_write_bytes,
         # L3 is local-only: every remote dimension stays exactly zero.
