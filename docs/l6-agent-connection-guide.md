@@ -38,6 +38,13 @@ route second, exact citations, and partial/abstain when authority or coverage is
 incomplete. The downstream agent may synthesize at most once from the returned
 structured package. Fabric-kg never performs that synthesis.
 
+The L6 tool host must keep the `L6GraphReceiptAuthority` server-side. The
+included `L6InMemoryGraphReceiptAuthority` provides atomic process-local
+issue/verify-and-consume behavior with a unique receipt per Graph execution.
+Callers receive only the opaque receipt ID/hash; they cannot submit receipt
+contents. L7 may replace it with a durable atomic store implementing the same
+protocol.
+
 L7 must deploy the endpoint and definition, verify project connection
 audiences/RBAC, run live Graph and Search acceptance, and confirm definition
 read-back from Microsoft Foundry and Fabric Data Agent.

@@ -11,6 +11,7 @@ from tests.contract.test_c0_runtime_contracts import (
 from tests.unit.test_l6_agent_integration import (
     _EvidenceHost,
     _GraphHost,
+    _GraphReceiptStore,
     _Resolver,
     _access,
     _authorities,
@@ -26,6 +27,11 @@ def test_l6_fake_hosts_end_to_end(monkeypatch):
     """Exercise the complete L6 sequence with fake Graph and sealed-L5b hosts."""
 
     monkeypatch.setattr(l6, "_validate_authorities", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        l6,
+        "_require_l6_evidence_publication",
+        lambda *args, **kwargs: None,
+    )
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
     evidence_result, context, budget, _, _ = _evidence()
@@ -36,6 +42,7 @@ def test_l6_fake_hosts_end_to_end(monkeypatch):
         resolver=_Resolver(ontology, retrieval),
         graph_host=graph,
         evidence_host=evidence,
+        graph_receipt_authority=_GraphReceiptStore(),
         authorities=_authorities(),
     )
 
@@ -53,4 +60,4 @@ def test_l6_fake_hosts_end_to_end(monkeypatch):
     assert output.status == "complete"
     assert output.zero_synthesis is True
     assert graph.calls == evidence.calls == 1
-    assert output.operation_accounting["downstream_synthesis_calls"] == 0
+    assert output.operation_accounting.downstream_synthesis_calls == 0

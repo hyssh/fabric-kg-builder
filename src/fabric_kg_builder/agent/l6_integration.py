@@ -7,10 +7,13 @@ an answer, generates GQL, or invokes a downstream model.
 from __future__ import annotations
 
 import json
+import re
+import secrets
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -46,6 +49,9 @@ L6_TOOL_RETRIEVE_EVIDENCE = "fabric_kg_retrieve_scoped_evidence"
 L6_TOOL_ASSEMBLE_CITATIONS = "fabric_kg_assemble_citation_presentation"
 L6_TOOL_REPORT_READINESS = "fabric_kg_report_coverage_readiness"
 
+_OPAQUE_OPERATION_ID_RE = re.compile(r"^op-sha256:[0-9a-f]{64}$")
+_GRAPH_RECEIPT_ID_RE = re.compile(r"^gxr-sha256:[0-9a-f]{64}$")
+
 ReadinessStatus = Literal["complete", "partial", "abstain"]
 ReasonCode = Literal[
     "authority_invalid",
@@ -58,6 +64,18 @@ ReasonCode = Literal[
     "retrieval_incomplete",
     "scope_invalid",
     "source_failure",
+]
+L6SafeGraphCode = Literal[
+    "GRAPH_ACCOUNTING_INVALID",
+    "GRAPH_AUTHORIZATION_FAILED",
+    "GRAPH_BUDGET_EXHAUSTED",
+    "GRAPH_INVALID_RESPONSE",
+    "GRAPH_OUTPUT_TRUNCATED",
+    "GRAPH_PROVIDER_WARNING",
+    "GRAPH_RATE_LIMITED",
+    "GRAPH_SOURCE_FAILURE",
+    "GRAPH_TIMEOUT",
+    "GRAPH_WARNING",
 ]
 
 
@@ -171,30 +189,78 @@ class L6GraphAssertion(_L6Model):
         return cls.model_validate(values)
 
 
+class L6OpaqueOperationRef(_L6Model):
+    """Opaque operation evidence; provider IDs and text never cross L6."""
+
+    operation_id: str
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    status: Literal["succeeded", "partial", "failed"]
+
+    @field_validator("operation_id")
+    @classmethod
+    def _opaque_id(cls, value: str) -> str:
+        if not _OPAQUE_OPERATION_ID_RE.fullmatch(value):
+            raise ValueError("operation_id must be an opaque SHA-256 identifier")
+        return value
+
+    @classmethod
+    def from_hashes(
+        cls,
+        *,
+        request_hash: str,
+        response_hash: str | None,
+        status: Literal["succeeded", "partial", "failed"],
+    ) -> "L6OpaqueOperationRef":
+        return cls(
+            operation_id="op-sha256:"
+            + canonical_sha256(
+                {
+                    "request_hash": request_hash,
+                    "response_hash": response_hash,
+                    "status": status,
+                }
+            ),
+            request_hash=request_hash,
+            response_hash=response_hash,
+            status=status,
+        )
+
+
+def _sorted_unique_codes(value: object, *, field_name: str) -> object:
+    if isinstance(value, (list, tuple)):
+        values = tuple(sorted(str(item) for item in value))
+        if len(values) != len(set(values)):
+            raise ValueError(f"{field_name} values must be unique")
+        return values
+    return value
+
+
 class L6OperationAccounting(_L6Model):
-    operation_refs: tuple[str, ...]
+    operation_refs: tuple[L6OpaqueOperationRef, ...]
     request_count: int = Field(ge=0)
     request_bytes: int = Field(ge=0)
     response_bytes: int = Field(ge=0)
     retry_count: int = Field(ge=0)
     retry_wait_milliseconds: int = Field(ge=0)
     duration_milliseconds: int = Field(ge=0)
-    error_codes: tuple[str, ...] = ()
+    error_codes: tuple[L6SafeGraphCode, ...] = ()
 
-    @field_validator("operation_refs", "error_codes", mode="before")
+    @field_validator("error_codes", mode="before")
     @classmethod
-    def _sets(cls, value: object) -> object:
-        if isinstance(value, (list, tuple)):
-            values = tuple(sorted(str(item) for item in value))
-            if len(values) != len(set(values)):
-                raise ValueError("operation accounting values must be unique")
-            return values
-        return value
+    def _errors(cls, value: object) -> object:
+        return _sorted_unique_codes(value, field_name="error_codes")
 
     @model_validator(mode="after")
     def _counts_match(self) -> "L6OperationAccounting":
         if len(self.operation_refs) != self.request_count:
             raise ValueError("operation refs must exactly account for requests")
+        operation_ids = [item.operation_id for item in self.operation_refs]
+        if len(operation_ids) != len(set(operation_ids)):
+            raise ValueError("operation references must be unique")
         if self.retry_count > self.request_count:
             raise ValueError("retry count cannot exceed request count")
         if self.retry_count == 0 and self.retry_wait_milliseconds:
@@ -208,7 +274,7 @@ class L6GraphResult(_L6Model):
     canonical_scope_id: str
     assertions: tuple[L6GraphAssertion, ...] = ()
     returned_canonical_ids: tuple[str, ...] = ()
-    warning_codes: tuple[str, ...] = ()
+    warning_codes: tuple[L6SafeGraphCode, ...] = ()
     truncated: bool = False
     source_error: bool = False
     accounting: L6OperationAccounting
@@ -225,6 +291,11 @@ class L6GraphResult(_L6Model):
                 raise ValueError("Graph result sets must be unique")
             return values
         return value
+
+    @field_validator("warning_codes", mode="after")
+    @classmethod
+    def _warnings(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _sorted_unique_codes(value, field_name="warning_codes")
 
     @model_validator(mode="after")
     def _response_hash(self) -> "L6GraphResult":
@@ -247,10 +318,106 @@ class L6GraphResult(_L6Model):
         return cls.model_validate(values)
 
 
+class L6GraphExecutionReceipt(_L6Model):
+    """Trusted completed Graph execution capability consumed exactly once."""
+
+    graph_execution_receipt_id: str
+    graph_request_id: str
+    graph_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    graph_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resolved_ontology_scope_id: str
+    resolved_ontology_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resolved_retrieval_scope_id: str
+    resolved_retrieval_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_scope_id: str
+    graph_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    asserted_publication_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    publication_crosswalk_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acl_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    returned_canonical_ids: tuple[str, ...]
+    returned_assertion_ids: tuple[str, ...]
+    assertion_count: int = Field(ge=1)
+    graph_complete: bool
+    accounting: L6OperationAccounting
+    execution_status: Literal["succeeded"] = "succeeded"
+    receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator(
+        "returned_canonical_ids",
+        "returned_assertion_ids",
+        mode="before",
+    )
+    @classmethod
+    def _sets(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            values = tuple(sorted(str(item) for item in value))
+            if len(values) != len(set(values)):
+                raise ValueError("Graph receipt authority sets must be unique")
+            return values
+        return value
+
+    @field_validator("graph_execution_receipt_id")
+    @classmethod
+    def _receipt_id(cls, value: str) -> str:
+        if not _GRAPH_RECEIPT_ID_RE.fullmatch(value):
+            raise ValueError("Graph execution receipt ID must be opaque")
+        return value
+
+    @model_validator(mode="after")
+    def _receipt_invariants(self) -> "L6GraphExecutionReceipt":
+        if self.assertion_count != len(self.returned_assertion_ids):
+            raise ValueError("Graph receipt assertion count mismatch")
+        if self.accounting.request_count != 1:
+            raise ValueError("Graph receipt requires exactly one Graph request")
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"receipt_hash"})
+        )
+        if self.receipt_hash != expected:
+            raise ValueError("Graph execution receipt hash mismatch")
+        return self
+
+
+class L6GraphReceiptExpectation(_L6Model):
+    resolved_ontology_scope_id: str
+    resolved_ontology_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resolved_retrieval_scope_id: str
+    resolved_retrieval_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_scope_id: str
+    graph_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    asserted_publication_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    publication_crosswalk_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acl_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    returned_canonical_ids: tuple[str, ...]
+    returned_assertion_ids: tuple[str, ...]
+    graph_complete: Literal[True] = True
+
+
 class L6GraphToolInput(_L6Model):
     resolved_ontology_scope_id: str
     resolved_ontology_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_query: L6GraphQuery
+
+
+class L6GraphToolOutput(_L6Model):
+    graph_result: L6GraphResult
+    graph_execution_receipt: L6GraphExecutionReceipt
+
+    @model_validator(mode="after")
+    def _binding(self) -> "L6GraphToolOutput":
+        receipt = self.graph_execution_receipt
+        result = self.graph_result
+        if (
+            receipt.graph_request_id != result.graph_request_id
+            or receipt.graph_request_hash != result.graph_request_hash
+            or receipt.graph_result_hash != result.response_hash
+            or receipt.canonical_scope_id != result.canonical_scope_id
+            or receipt.returned_canonical_ids != result.returned_canonical_ids
+            or receipt.returned_assertion_ids
+            != tuple(sorted(item.assertion_id for item in result.assertions))
+            or receipt.accounting != result.accounting
+        ):
+            raise ValueError("Graph tool output receipt differs from completed result")
+        return self
 
 
 class L6EvidenceToolInput(_L6Model):
@@ -259,12 +426,37 @@ class L6EvidenceToolInput(_L6Model):
     resolved_retrieval_scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     request_context_id: str
     request_context_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    graph_execution_receipt_id: str
+    graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("graph_execution_receipt_id")
+    @classmethod
+    def _receipt_id(cls, value: str) -> str:
+        if not _GRAPH_RECEIPT_ID_RE.fullmatch(value):
+            raise ValueError("Graph execution receipt ID must be opaque")
+        return value
 
 
 class L6EvidenceToolOutput(_L6Model):
+    graph_execution_receipt_id: str
+    graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     citations: tuple[SearchCitationEnvelope, ...]
     presentations: tuple[CitationPresentation, ...]
     coverage_receipt: AgenticRetrievalCoverageReceiptV1_1
+    output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _output_hash(self) -> "L6EvidenceToolOutput":
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"output_hash"})
+        )
+        if self.output_hash != expected:
+            raise ValueError("evidence tool output hash mismatch")
+        return self
+
+    @property
+    def coverage(self) -> AgenticRetrievalCoverageReceiptV1_1:
+        return self.coverage_receipt
 
 
 class L6CitationToolInput(_L6Model):
@@ -272,10 +464,96 @@ class L6CitationToolInput(_L6Model):
     coverage_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     citation_envelope_ids: tuple[str, ...]
 
+    @field_validator("citation_envelope_ids", mode="before")
+    @classmethod
+    def _citation_ids(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            values = tuple(str(item) for item in value)
+            if not values:
+                raise ValueError("citation envelope IDs must be non-empty")
+            if values != tuple(sorted(values)):
+                raise ValueError("citation envelope IDs must be sorted")
+            if len(values) != len(set(values)):
+                raise ValueError("citation envelope IDs must be unique")
+            return values
+        return value
+
+
+class L6CitationEnvelopeHash(_L6Model):
+    search_citation_envelope_id: str
+    search_citation_envelope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class L6CitationPresentationCollection(_L6Model):
+    citation_envelope_ids: tuple[str, ...]
+    citation_envelope_hashes: tuple[L6CitationEnvelopeHash, ...]
+    presentations: tuple[CitationPresentation, ...]
+    coverage_receipt_id: str
+    coverage_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    search_index_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    asserted_publication_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_response_hashes: tuple[str, ...]
+    collection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("source_response_hashes", mode="before")
+    @classmethod
+    def _response_hashes(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            values = tuple(sorted(str(item) for item in value))
+            if not values or len(values) != len(set(values)):
+                raise ValueError("source response hashes must be non-empty and unique")
+            return values
+        return value
+
+    @model_validator(mode="after")
+    def _collection_invariants(self) -> "L6CitationPresentationCollection":
+        requested = tuple(self.citation_envelope_ids)
+        hash_ids = tuple(
+            item.search_citation_envelope_id
+            for item in self.citation_envelope_hashes
+        )
+        presentation_ids = tuple(
+            sorted(item.search_citation_envelope_id for item in self.presentations)
+        )
+        if (
+            not requested
+            or requested != tuple(sorted(requested))
+            or len(requested) != len(set(requested))
+            or hash_ids != requested
+            or presentation_ids != requested
+            or len(self.presentations) != len(requested)
+        ):
+            raise ValueError(
+                "citation presentation collection must exactly cover requested IDs"
+            )
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"collection_hash"})
+        )
+        if self.collection_hash != expected:
+            raise ValueError("citation presentation collection hash mismatch")
+        return self
+
 
 class L6ReadinessToolInput(_L6Model):
-    graph_request_id: str
+    graph_execution_receipt_id: str
+    graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     coverage_receipt_id: str | None = None
+    coverage_receipt_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def _pairs(self) -> "L6ReadinessToolInput":
+        if (self.coverage_receipt_id is None) != (
+            self.coverage_receipt_hash is None
+        ):
+            raise ValueError("coverage receipt ID and hash must be present together")
+        if not _GRAPH_RECEIPT_ID_RE.fullmatch(
+            self.graph_execution_receipt_id
+        ):
+            raise ValueError("Graph execution receipt ID must be opaque")
+        return self
 
 
 class L6Failure(_L6Model):
@@ -292,6 +570,96 @@ class L6Readiness(_L6Model):
     failures: tuple[L6Failure, ...] = ()
 
 
+class L6ReadinessReport(_L6Model):
+    graph_execution_receipt_id: str
+    graph_execution_receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    coverage_receipt_id: str | None = None
+    coverage_receipt_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    readiness: L6Readiness
+    report_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _hash(self) -> "L6ReadinessReport":
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"report_hash"})
+        )
+        if self.report_hash != expected:
+            raise ValueError("readiness report hash mismatch")
+        return self
+class L6GraphRunAccounting(_L6Model):
+    attempted: bool
+    accounting_complete: bool
+    operation: L6OperationAccounting | None = None
+    failure_code: Literal["GRAPH_HOST_ACCOUNTING_UNAVAILABLE"] | None = None
+
+    @model_validator(mode="after")
+    def _state(self) -> "L6GraphRunAccounting":
+        if self.operation is not None:
+            if not self.attempted or not self.accounting_complete or self.failure_code:
+                raise ValueError("completed Graph accounting state is inconsistent")
+        elif self.attempted:
+            if self.accounting_complete or self.failure_code is None:
+                raise ValueError("failed Graph attempt requires typed incomplete accounting")
+        elif not self.accounting_complete or self.failure_code is not None:
+            raise ValueError("unattempted Graph accounting must be complete and empty")
+        return self
+
+
+class L6DelegatedRetrievalAccounting(_L6Model):
+    request_context_id: str
+    coverage_receipt_id: str
+    source_call_count: int = Field(ge=0)
+    operation_refs: tuple[L6OpaqueOperationRef, ...]
+    agentic_retrieval_invocations: int = Field(ge=0)
+    agentic_source_calls: int = Field(ge=0)
+    direct_search_requests: int = Field(ge=0)
+    vector_search_requests: int = Field(ge=0)
+    embedding_calls: int = Field(ge=0)
+    embedding_items: int = Field(ge=0)
+    retry_count: int = Field(ge=0)
+    retry_wait_milliseconds: int = Field(ge=0)
+    output_bytes: int = Field(ge=0)
+    duration_milliseconds: int = Field(ge=0)
+    double_counted_by_l6: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _counts(self) -> "L6DelegatedRetrievalAccounting":
+        if self.source_call_count != len(self.operation_refs):
+            raise ValueError("delegated operation refs must equal source call count")
+        return self
+
+
+class L6RetrievalRunAccounting(_L6Model):
+    attempted: bool
+    accounting_complete: bool
+    delegated: L6DelegatedRetrievalAccounting | None = None
+    failure_code: Literal["L5B_HOST_ACCOUNTING_UNAVAILABLE"] | None = None
+
+    @model_validator(mode="after")
+    def _state(self) -> "L6RetrievalRunAccounting":
+        if self.delegated is not None:
+            if not self.attempted or not self.accounting_complete or self.failure_code:
+                raise ValueError("completed retrieval accounting state is inconsistent")
+        elif self.attempted:
+            if self.accounting_complete or self.failure_code is None:
+                raise ValueError(
+                    "failed retrieval attempt requires typed incomplete accounting"
+                )
+        elif not self.accounting_complete or self.failure_code is not None:
+            raise ValueError("unattempted retrieval accounting must be complete and empty")
+        return self
+
+
+class L6RunAccounting(_L6Model):
+    graph: L6GraphRunAccounting
+    retrieval: L6RetrievalRunAccounting
+    downstream_synthesis_calls: Literal[0] = 0
+    duration_milliseconds: int = Field(ge=0)
+
+
 class L6SynthesisInput(_L6Model):
     """Zero-synthesis evidence package for at most one downstream model call."""
 
@@ -304,12 +672,13 @@ class L6SynthesisInput(_L6Model):
     graph_request_id: str
     graph_request_hash: str
     graph_response_hash: str | None = None
+    graph_execution_receipt: L6GraphExecutionReceipt | None = None
     graph_assertions: tuple[L6GraphAssertion, ...] = ()
     search_citations: tuple[SearchCitationEnvelope, ...] = ()
-    citation_presentations: tuple[CitationPresentation, ...] = ()
-    coverage_receipt: Mapping[str, Any] | None = None
+    citation_collection: L6CitationPresentationCollection | None = None
+    coverage_receipt: AgenticRetrievalCoverageReceiptV1_1 | None = None
     readiness: L6Readiness
-    operation_accounting: Mapping[str, Any]
+    operation_accounting: L6RunAccounting
     synthesis_call_limit: Literal[1] = 1
     zero_synthesis: Literal[True] = True
     package_hash: str
@@ -324,7 +693,9 @@ class L6SynthesisInput(_L6Model):
         if self.status == "complete" and (
             not self.graph_assertions
             or not self.search_citations
-            or not self.citation_presentations
+            or self.citation_collection is None
+            or self.graph_execution_receipt is None
+            or self.coverage_receipt is None
         ):
             raise ValueError("complete L6 output requires Graph and cited Search evidence")
         return self
@@ -364,6 +735,186 @@ class L6GraphHost(Protocol):
     ) -> L6GraphResult: ...
 
 
+class L6GraphReceiptAuthority(Protocol):
+    """Opaque trusted store; implementations enforce single consumption."""
+
+    def issue(
+        self,
+        *,
+        graph_query: L6GraphQuery,
+        graph_result: L6GraphResult,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        budget: QueryBudgetV1_1,
+    ) -> L6GraphExecutionReceipt: ...
+
+    def verify_and_consume(
+        self,
+        receipt_id: str,
+        receipt_hash: str,
+        expectation: L6GraphReceiptExpectation,
+    ) -> L6GraphExecutionReceipt: ...
+
+
+class L6InMemoryGraphReceiptAuthority:
+    """Atomic process-local receipt authority for a single L6 tool host.
+
+    L7 may replace this with a durable store implementing the same protocol.
+    Receipt contents are never accepted from callers.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._receipts: dict[str, L6GraphExecutionReceipt] = {}
+        self._consumed: set[str] = set()
+
+    def issue(
+        self,
+        *,
+        graph_query: L6GraphQuery,
+        graph_result: L6GraphResult,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        budget: QueryBudgetV1_1,
+    ) -> L6GraphExecutionReceipt:
+        _validate_graph_query(
+            graph_query,
+            ontology_scope,
+            retrieval_scope,
+            budget,
+        )
+        graph_complete, _ = _validate_graph_result(
+            graph_query,
+            ontology_scope,
+            graph_result,
+        )
+        if not graph_complete:
+            raise ValueError("incomplete Graph result cannot mint a retrieval receipt")
+        receipt_id = "gxr-sha256:" + secrets.token_hex(32)
+        values = {
+            "graph_execution_receipt_id": receipt_id,
+            "graph_request_id": graph_query.graph_request_id,
+            "graph_request_hash": graph_query.request_hash,
+            "graph_result_hash": graph_result.response_hash,
+            "resolved_ontology_scope_id": (
+                ontology_scope.resolved_ontology_scope_id
+            ),
+            "resolved_ontology_scope_hash": ontology_scope.resolved_scope_hash,
+            "resolved_retrieval_scope_id": (
+                retrieval_scope.resolved_retrieval_scope_id
+            ),
+            "resolved_retrieval_scope_hash": retrieval_scope.retrieval_scope_hash,
+            "canonical_scope_id": ontology_scope.canonical_scope_id,
+            "graph_model_hash": ontology_scope.graph_model_hash,
+            "asserted_publication_hash": ontology_scope.asserted_publication_hash,
+            "publication_crosswalk_hash": (
+                ontology_scope.publication_crosswalk_hash
+            ),
+            "acl_scope_hash": ontology_scope.acl_scope_hash,
+            "returned_canonical_ids": graph_result.returned_canonical_ids,
+            "returned_assertion_ids": tuple(
+                sorted(item.assertion_id for item in graph_result.assertions)
+            ),
+            "assertion_count": len(graph_result.assertions),
+            "graph_complete": graph_complete,
+            "accounting": graph_result.accounting,
+            "execution_status": "succeeded",
+        }
+        receipt = L6GraphExecutionReceipt(
+            **values,
+            receipt_hash=canonical_sha256(values),
+        )
+        with self._lock:
+            if receipt_id in self._receipts:
+                raise RuntimeError("Graph receipt authority nonce collision")
+            self._receipts[receipt_id] = receipt
+        return receipt
+
+    def verify_and_consume(
+        self,
+        receipt_id: str,
+        receipt_hash: str,
+        expectation: L6GraphReceiptExpectation,
+    ) -> L6GraphExecutionReceipt:
+        with self._lock:
+            receipt = self._receipts.get(receipt_id)
+            if (
+                receipt is None
+                or receipt.receipt_hash != receipt_hash
+                or receipt_id in self._consumed
+                or not _receipt_matches_expectation(receipt, expectation)
+            ):
+                raise ValueError("Graph execution receipt is invalid or replayed")
+            self._consumed.add(receipt_id)
+            return receipt
+
+
+class L6VerifiedScopeTool:
+    """Standalone scope boundary returning only mutually validated C0 scopes."""
+
+    def __init__(self, resolver: L6ScopeResolver) -> None:
+        self._resolver = resolver
+
+    def resolve(self, request: L6ScopeResolutionInput) -> L6ResolvedScopes:
+        scopes = self._resolver.resolve(request)
+        _validate_scope_resolution(request.ontology_scope_envelope, scopes)
+        return scopes
+
+
+class L6VerifiedGraphTool:
+    """Standalone Graph boundary with server-side scope/budget and receipt issue."""
+
+    def __init__(
+        self,
+        *,
+        delegate: L6GraphHost,
+        graph_receipt_authority: L6GraphReceiptAuthority,
+    ) -> None:
+        self._delegate = delegate
+        self._graph_receipt_authority = graph_receipt_authority
+
+    def execute(
+        self,
+        request: L6GraphToolInput,
+        *,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        budget: QueryBudgetV1_1,
+    ) -> L6GraphToolOutput:
+        if (
+            request.resolved_ontology_scope_id
+            != ontology_scope.resolved_ontology_scope_id
+            or request.resolved_ontology_scope_hash
+            != ontology_scope.resolved_scope_hash
+        ):
+            raise ValueError("Graph tool input differs from server-side scope")
+        _validate_graph_query(
+            request.graph_query,
+            ontology_scope,
+            retrieval_scope,
+            budget,
+        )
+        result = self._delegate.execute(request, scope=ontology_scope)
+        graph_complete, _ = _validate_graph_result(
+            request.graph_query,
+            ontology_scope,
+            result,
+        )
+        if not graph_complete:
+            raise ValueError("incomplete Graph result cannot mint a retrieval receipt")
+        receipt = self._graph_receipt_authority.issue(
+            graph_query=request.graph_query,
+            graph_result=result,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            budget=budget,
+        )
+        return L6GraphToolOutput(
+            graph_result=result,
+            graph_execution_receipt=receipt,
+        )
+
+
 class L6EvidenceHost(Protocol):
     def retrieve(
         self,
@@ -379,6 +930,185 @@ class L6EvidenceHost(Protocol):
     ) -> L5bRetrievalResult: ...
 
 
+def _receipt_expectation(
+    ontology_scope: ResolvedOntologyScope,
+    retrieval_scope: ResolvedRetrievalScope,
+    context: AgenticRetrievalRequestContextV1_1,
+) -> L6GraphReceiptExpectation:
+    if context.acl_scope_hash != ontology_scope.acl_scope_hash:
+        raise ValueError("request context ACL differs from Graph authority")
+    return L6GraphReceiptExpectation(
+        resolved_ontology_scope_id=ontology_scope.resolved_ontology_scope_id,
+        resolved_ontology_scope_hash=ontology_scope.resolved_scope_hash,
+        resolved_retrieval_scope_id=retrieval_scope.resolved_retrieval_scope_id,
+        resolved_retrieval_scope_hash=retrieval_scope.retrieval_scope_hash,
+        canonical_scope_id=ontology_scope.canonical_scope_id,
+        graph_model_hash=ontology_scope.graph_model_hash,
+        asserted_publication_hash=ontology_scope.asserted_publication_hash,
+        publication_crosswalk_hash=ontology_scope.publication_crosswalk_hash,
+        acl_scope_hash=ontology_scope.acl_scope_hash,
+        returned_canonical_ids=retrieval_scope.canonical_member_ids,
+        returned_assertion_ids=ontology_scope.assertion_ids,
+        graph_complete=True,
+    )
+
+
+def _receipt_matches_expectation(
+    receipt: L6GraphExecutionReceipt,
+    expectation: L6GraphReceiptExpectation,
+) -> bool:
+    return all(
+        getattr(receipt, field_name) == getattr(expectation, field_name)
+        for field_name in type(expectation).model_fields
+    )
+
+
+def _validate_graph_execution_receipt(
+    receipt: L6GraphExecutionReceipt,
+    request: L6EvidenceToolInput,
+    *,
+    ontology_scope: ResolvedOntologyScope,
+    retrieval_scope: ResolvedRetrievalScope,
+    context: AgenticRetrievalRequestContextV1_1,
+) -> None:
+    if (
+        receipt.graph_execution_receipt_id
+        != request.graph_execution_receipt_id
+        or receipt.receipt_hash != request.graph_execution_receipt_hash
+        or receipt.resolved_ontology_scope_id
+        != ontology_scope.resolved_ontology_scope_id
+        or receipt.resolved_ontology_scope_hash != ontology_scope.resolved_scope_hash
+        or receipt.resolved_retrieval_scope_id
+        != retrieval_scope.resolved_retrieval_scope_id
+        or receipt.resolved_retrieval_scope_hash
+        != retrieval_scope.retrieval_scope_hash
+        or receipt.canonical_scope_id != ontology_scope.canonical_scope_id
+        or receipt.graph_model_hash != ontology_scope.graph_model_hash
+        or receipt.asserted_publication_hash
+        != ontology_scope.asserted_publication_hash
+        or receipt.publication_crosswalk_hash
+        != ontology_scope.publication_crosswalk_hash
+        or receipt.acl_scope_hash != ontology_scope.acl_scope_hash
+        or receipt.acl_scope_hash != context.acl_scope_hash
+        or not receipt.graph_complete
+        or tuple(receipt.returned_canonical_ids)
+        != tuple(retrieval_scope.canonical_member_ids)
+        or request.resolved_retrieval_scope_id
+        != retrieval_scope.resolved_retrieval_scope_id
+        or request.resolved_retrieval_scope_hash
+        != retrieval_scope.retrieval_scope_hash
+        or request.request_context_id != context.request_context_id
+        or request.request_context_hash != context.request_context_hash
+    ):
+        raise ValueError("Graph execution receipt differs from trusted retrieval authority")
+
+
+class L6VerifiedEvidenceTool:
+    """Standalone retrieval boundary requiring one consumed trusted Graph receipt."""
+
+    def __init__(
+        self,
+        *,
+        delegate: L6EvidenceHost,
+        graph_receipt_authority: L6GraphReceiptAuthority,
+        authorities: "L6Authorities",
+    ) -> None:
+        self._delegate = delegate
+        self._graph_receipt_authority = graph_receipt_authority
+        self._authorities = authorities
+
+    def retrieve(
+        self,
+        request: L6EvidenceToolInput,
+        *,
+        ontology_scope: ResolvedOntologyScope,
+        retrieval_scope: ResolvedRetrievalScope,
+        context: AgenticRetrievalRequestContextV1_1,
+        budget: QueryBudgetV1_1,
+        publication: L5bStageResult,
+        originating_context: AgenticRetrievalRequestContextV1_1 | None = None,
+        originating_budget: QueryBudgetV1_1 | None = None,
+    ) -> L6EvidenceToolOutput:
+        if publication is not self._authorities.l5b:
+            raise ValueError("evidence publication differs from trusted L5b authority")
+        _require_l6_evidence_publication(self._authorities, publication)
+        retrieval_scope.validate_resolved_scope(ontology_scope)
+        context.validate_budget(budget)
+        context.validate_scope(retrieval_scope)
+        if originating_context is not None:
+            if originating_budget is None:
+                raise ValueError("fallback origin budget is required")
+            originating_context.validate_budget(originating_budget)
+            context.validate_fallback_origin(originating_context)
+        elif (
+            originating_budget is not None
+            or context.fallback_for_request_context_id is not None
+        ):
+            raise ValueError("fallback retrieval omitted exact origin authority")
+        if (
+            request.resolved_retrieval_scope_id
+            != retrieval_scope.resolved_retrieval_scope_id
+            or request.resolved_retrieval_scope_hash
+            != retrieval_scope.retrieval_scope_hash
+            or request.request_context_id != context.request_context_id
+            or request.request_context_hash != context.request_context_hash
+        ):
+            raise ValueError(
+                "evidence request differs from server-side retrieval authority"
+            )
+        expectation = _receipt_expectation(
+            ontology_scope,
+            retrieval_scope,
+            context,
+        )
+        receipt = self._graph_receipt_authority.verify_and_consume(
+            request.graph_execution_receipt_id,
+            request.graph_execution_receipt_hash,
+            expectation,
+        )
+        _validate_graph_execution_receipt(
+            receipt,
+            request,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            context=context,
+        )
+        result = self._delegate.retrieve(
+            request,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            context=context,
+            budget=budget,
+            publication=publication,
+            originating_context=originating_context,
+            originating_budget=originating_budget,
+        )
+        output_values = {
+            "graph_execution_receipt_id": receipt.graph_execution_receipt_id,
+            "graph_execution_receipt_hash": receipt.receipt_hash,
+            "citations": result.citations,
+            "presentations": result.presentations,
+            "coverage_receipt": result.coverage,
+        }
+        output = L6EvidenceToolOutput(
+            **output_values,
+            output_hash=canonical_sha256(output_values),
+        )
+        output.coverage.validate_request_context(
+            context,
+            budget,
+            originating_context=originating_context,
+            originating_budget=originating_budget,
+        )
+        _validate_citations(
+            output,
+            self._authorities,
+            ontology_scope,
+            retrieval_scope,
+        )
+        return output
+
+
 @dataclass(frozen=True)
 class L6Authorities:
     l5a: L5aStageResult
@@ -386,6 +1116,19 @@ class L6Authorities:
     access_policy: AccessPolicy
     governed_assets: tuple[GovernedAssetReference, ...]
     checkpoint_integrity_signer: CheckpointIntegritySigner | None = None
+
+
+def _require_l6_evidence_publication(
+    authorities: L6Authorities,
+    publication: L5bStageResult,
+) -> None:
+    source = authorities.l5a.compiled.source
+    require_l5b_publication_receipt(
+        source,
+        authorities.l5a,
+        publication,
+        checkpoint_integrity_signer=authorities.checkpoint_integrity_signer,
+    )
 
 
 def _principal_scope_hash(
@@ -720,6 +1463,221 @@ def _validate_citations(
             raise ValueError("citation governed asset differs from sealed authority")
 
 
+def assemble_l6_citation_collection(
+    request: L6CitationToolInput,
+    *,
+    citations: Sequence[SearchCitationEnvelope],
+    presentations: Sequence[CitationPresentation],
+    coverage: AgenticRetrievalCoverageReceiptV1_1,
+    context: AgenticRetrievalRequestContextV1_1,
+    budget: QueryBudgetV1_1,
+    retrieval_scope: ResolvedRetrievalScope,
+    originating_context: AgenticRetrievalRequestContextV1_1 | None = None,
+    originating_budget: QueryBudgetV1_1 | None = None,
+) -> L6CitationPresentationCollection:
+    """Assemble exactly one verified presentation for each requested envelope."""
+
+    if (
+        request.coverage_receipt_id != coverage.coverage_receipt_id
+        or request.coverage_receipt_hash != coverage.coverage_receipt_hash
+    ):
+        raise ValueError("citation request differs from coverage authority")
+    context.validate_budget(budget)
+    context.validate_scope(retrieval_scope)
+    coverage.validate_request_context(
+        context,
+        budget,
+        originating_context=originating_context,
+        originating_budget=originating_budget,
+    )
+    coverage.validate_citations(citations)
+    by_id = {item.search_citation_envelope_id: item for item in citations}
+    presentation_by_id = {
+        item.search_citation_envelope_id: item for item in presentations
+    }
+    requested = request.citation_envelope_ids
+    if (
+        len(by_id) != len(citations)
+        or len(presentation_by_id) != len(presentations)
+        or tuple(sorted(by_id)) != requested
+        or tuple(sorted(presentation_by_id)) != requested
+    ):
+        raise ValueError("citation collection has duplicate, missing, or extra IDs")
+    ordered_presentations: list[CitationPresentation] = []
+    hashes: list[L6CitationEnvelopeHash] = []
+    for envelope_id in requested:
+        citation = by_id[envelope_id]
+        presentation = presentation_by_id[envelope_id]
+        presentation.validate_citation(citation)
+        ordered_presentations.append(presentation)
+        hashes.append(
+            L6CitationEnvelopeHash(
+                search_citation_envelope_id=envelope_id,
+                search_citation_envelope_hash=citation.citation_hash,
+            )
+        )
+    response_hashes = tuple(
+        sorted(
+            {
+                item.response_hash
+                for item in coverage.source_calls
+                if item.response_hash is not None
+            }
+        )
+    )
+    values = {
+        "citation_envelope_ids": requested,
+        "citation_envelope_hashes": tuple(hashes),
+        "presentations": tuple(ordered_presentations),
+        "coverage_receipt_id": coverage.coverage_receipt_id,
+        "coverage_receipt_hash": coverage.coverage_receipt_hash,
+        "search_index_fingerprint": context.search_index_fingerprint,
+        "asserted_publication_hash": context.asserted_publication_hash,
+        "source_response_hashes": response_hashes,
+    }
+    return L6CitationPresentationCollection(
+        **values,
+        collection_hash=canonical_sha256(values),
+    )
+
+
+def build_l6_readiness_report(
+    request: L6ReadinessToolInput,
+    *,
+    graph_receipt: L6GraphExecutionReceipt,
+    evidence_output: L6EvidenceToolOutput | None,
+) -> L6ReadinessReport:
+    """Bind readiness to exact trusted Graph and optional Runtime receipts."""
+
+    if (
+        request.graph_execution_receipt_id
+        != graph_receipt.graph_execution_receipt_id
+        or request.graph_execution_receipt_hash != graph_receipt.receipt_hash
+    ):
+        raise ValueError("readiness Graph receipt mismatch")
+    coverage = (
+        evidence_output.coverage_receipt
+        if evidence_output is not None
+        else None
+    )
+    if evidence_output is not None and (
+        evidence_output.graph_execution_receipt_id
+        != graph_receipt.graph_execution_receipt_id
+        or evidence_output.graph_execution_receipt_hash
+        != graph_receipt.receipt_hash
+    ):
+        raise ValueError("readiness evidence was not authorized by this Graph receipt")
+    if coverage is None:
+        if request.coverage_receipt_id is not None:
+            raise ValueError("readiness request declares absent coverage")
+    elif (
+        request.coverage_receipt_id != coverage.coverage_receipt_id
+        or request.coverage_receipt_hash != coverage.coverage_receipt_hash
+    ):
+        raise ValueError("readiness coverage receipt mismatch")
+    if coverage is not None and (
+        coverage.resolved_retrieval_scope_id
+        != graph_receipt.resolved_retrieval_scope_id
+        or coverage.resolved_retrieval_scope_hash
+        != graph_receipt.resolved_retrieval_scope_hash
+    ):
+        raise ValueError("readiness receipts belong to different scopes")
+    retrieval_complete = (
+        coverage is not None and coverage.coverage_status == "complete"
+    )
+    coverage_abstains = (
+        coverage is not None
+        and coverage.coverage_status in {"invalid", "abstain"}
+    )
+    status: ReadinessStatus = (
+        "complete"
+        if graph_receipt.graph_complete and retrieval_complete
+        else "partial"
+        if (
+            coverage is not None
+            and coverage.coverage_status == "partial"
+            and bool(coverage.citation_mappings)
+            and graph_receipt.execution_status == "succeeded"
+            and bool(graph_receipt.returned_canonical_ids)
+            and not coverage_abstains
+        )
+        else "abstain"
+    )
+    failures: list[L6Failure] = []
+    if not graph_receipt.graph_complete:
+        failures.append(
+            _failure(
+                "graph_incomplete",
+                "Graph receipt does not prove exact authority coverage",
+            )
+        )
+    if not retrieval_complete:
+        failures.append(
+            _failure(
+                "retrieval_incomplete",
+                "Runtime 1.1 receipt does not prove complete evidence coverage",
+                coverage.missing_canonical_ids if coverage is not None else (),
+            )
+        )
+    readiness = L6Readiness(
+        status=status,
+        graph_complete=graph_receipt.graph_complete,
+        retrieval_complete=retrieval_complete,
+        safe_missing_authority_ids=(
+            coverage.missing_canonical_ids if coverage is not None else ()
+        ),
+        failures=tuple(failures),
+    )
+    values = {
+        "graph_execution_receipt_id": graph_receipt.graph_execution_receipt_id,
+        "graph_execution_receipt_hash": graph_receipt.receipt_hash,
+        "coverage_receipt_id": (
+            coverage.coverage_receipt_id if coverage is not None else None
+        ),
+        "coverage_receipt_hash": (
+            coverage.coverage_receipt_hash if coverage is not None else None
+        ),
+        "readiness": readiness,
+    }
+    return L6ReadinessReport(
+        **values,
+        report_hash=canonical_sha256(values),
+    )
+
+
+def _delegated_accounting(
+    context: AgenticRetrievalRequestContextV1_1,
+    coverage: AgenticRetrievalCoverageReceiptV1_1,
+) -> L6DelegatedRetrievalAccounting:
+    return L6DelegatedRetrievalAccounting(
+        request_context_id=context.request_context_id,
+        coverage_receipt_id=coverage.coverage_receipt_id,
+        source_call_count=len(coverage.source_calls),
+        operation_refs=tuple(
+            L6OpaqueOperationRef.from_hashes(
+                request_hash=item.request_hash,
+                response_hash=item.response_hash,
+                status=item.status,
+            )
+            for item in coverage.source_calls
+        ),
+        agentic_retrieval_invocations=(
+            coverage.budget.observed_agentic_retrieval_invocations
+        ),
+        agentic_source_calls=coverage.budget.observed_agentic_source_calls,
+        direct_search_requests=coverage.budget.observed_direct_search_requests,
+        vector_search_requests=coverage.budget.observed_vector_search_requests,
+        embedding_calls=coverage.budget.observed_embedding_calls,
+        embedding_items=coverage.budget.observed_embedding_items,
+        retry_count=coverage.budget.observed_retry_count,
+        retry_wait_milliseconds=(
+            coverage.budget.observed_retry_wait_milliseconds
+        ),
+        output_bytes=coverage.budget.observed_output_bytes,
+        duration_milliseconds=coverage.budget.observed_runtime_milliseconds,
+    )
+
+
 def _failure(
     reason_code: ReasonCode,
     detail: str,
@@ -733,7 +1691,13 @@ def _failure(
 
 
 def _seal_output(values: dict[str, Any]) -> L6SynthesisInput:
-    values["package_hash"] = canonical_sha256(values)
+    provisional = L6SynthesisInput.model_construct(
+        **values,
+        package_hash="0" * 64,
+    )
+    values["package_hash"] = canonical_sha256(
+        provisional.model_dump(mode="json", exclude={"package_hash"})
+    )
     return L6SynthesisInput.model_validate(values)
 
 
@@ -746,11 +1710,17 @@ class L6AgentOrchestrator:
         resolver: L6ScopeResolver,
         graph_host: L6GraphHost,
         evidence_host: L6EvidenceHost,
+        graph_receipt_authority: L6GraphReceiptAuthority,
         authorities: L6Authorities,
     ) -> None:
         self._resolver = resolver
         self._graph_host = graph_host
-        self._evidence_host = evidence_host
+        self._evidence_tool = L6VerifiedEvidenceTool(
+            delegate=evidence_host,
+            graph_receipt_authority=graph_receipt_authority,
+            authorities=authorities,
+        )
+        self._graph_receipt_authority = graph_receipt_authority
         self._authorities = authorities
         self._used = False
 
@@ -906,6 +1876,58 @@ class L6AgentOrchestrator:
                 started,
                 graph=graph,
             )
+        if not graph_complete:
+            return self._incomplete_graph(
+                {**base, "graph_response_hash": graph.response_hash},
+                graph=graph,
+                missing=graph_missing,
+                started=started,
+            )
+
+        try:
+            graph_receipt = self._graph_receipt_authority.issue(
+                graph_query=request.graph_query,
+                graph_result=graph,
+                ontology_scope=scopes.ontology_scope,
+                retrieval_scope=scopes.retrieval_scope,
+                budget=request.query_budget,
+            )
+            L6GraphToolOutput(
+                graph_result=graph,
+                graph_execution_receipt=graph_receipt,
+            )
+            _validate_graph_execution_receipt(
+                graph_receipt,
+                L6EvidenceToolInput(
+                    question=request.question,
+                    resolved_retrieval_scope_id=(
+                        scopes.retrieval_scope.resolved_retrieval_scope_id
+                    ),
+                    resolved_retrieval_scope_hash=(
+                        scopes.retrieval_scope.retrieval_scope_hash
+                    ),
+                    request_context_id=request.request_context.request_context_id,
+                    request_context_hash=request.request_context.request_context_hash,
+                    graph_execution_receipt_id=(
+                        graph_receipt.graph_execution_receipt_id
+                    ),
+                    graph_execution_receipt_hash=graph_receipt.receipt_hash,
+                ),
+                ontology_scope=scopes.ontology_scope,
+                retrieval_scope=scopes.retrieval_scope,
+                context=request.request_context,
+            )
+        except Exception as exc:
+            del exc
+            return self._abstain(
+                {**base, "graph_response_hash": graph.response_hash},
+                _failure(
+                    "authority_invalid",
+                    "Trusted Graph execution receipt issuance failed",
+                ),
+                started,
+                graph=graph,
+            )
 
         evidence_input = L6EvidenceToolInput(
             question=request.question,
@@ -913,9 +1935,13 @@ class L6AgentOrchestrator:
             resolved_retrieval_scope_hash=scopes.retrieval_scope.retrieval_scope_hash,
             request_context_id=request.request_context.request_context_id,
             request_context_hash=request.request_context.request_context_hash,
+            graph_execution_receipt_id=(
+                graph_receipt.graph_execution_receipt_id
+            ),
+            graph_execution_receipt_hash=graph_receipt.receipt_hash,
         )
         try:
-            evidence = self._evidence_host.retrieve(
+            evidence = self._evidence_tool.retrieve(
                 evidence_input,
                 ontology_scope=scopes.ontology_scope,
                 retrieval_scope=scopes.retrieval_scope,
@@ -995,57 +2021,110 @@ class L6AgentOrchestrator:
             ),
             failures=tuple(failures),
         )
-        accounting = {
-            "l6_graph": graph.accounting.model_dump(mode="json"),
-            "l5b_delegated": {
-                "request_context_id": request.request_context.request_context_id,
-                "coverage_receipt_id": evidence.coverage.coverage_receipt_id,
-                "source_call_count": len(evidence.coverage.source_calls),
-                "operation_refs": [
-                    item.source_call_id for item in evidence.coverage.source_calls
-                ],
-                "agentic_retrieval_invocations": (
-                    evidence.coverage.budget.observed_agentic_retrieval_invocations
-                ),
-                "agentic_source_calls": (
-                    evidence.coverage.budget.observed_agentic_source_calls
-                ),
-                "direct_search_requests": (
-                    evidence.coverage.budget.observed_direct_search_requests
-                ),
-                "vector_search_requests": (
-                    evidence.coverage.budget.observed_vector_search_requests
-                ),
-                "embedding_calls": evidence.coverage.budget.observed_embedding_calls,
-                "embedding_items": evidence.coverage.budget.observed_embedding_items,
-                "retry_count": evidence.coverage.budget.observed_retry_count,
-                "retry_wait_milliseconds": (
-                    evidence.coverage.budget.observed_retry_wait_milliseconds
-                ),
-                "output_bytes": evidence.coverage.budget.observed_output_bytes,
-                "duration_milliseconds": (
-                    evidence.coverage.budget.observed_runtime_milliseconds
-                ),
-                "double_counted_by_l6": False,
-            },
-            "downstream_synthesis_calls": 0,
-            "duration_milliseconds": int(
-                (time.monotonic() - started) * 1000
+        accounting = L6RunAccounting(
+            graph=L6GraphRunAccounting(
+                attempted=True,
+                accounting_complete=True,
+                operation=graph.accounting,
             ),
-        }
+            retrieval=L6RetrievalRunAccounting(
+                attempted=True,
+                accounting_complete=True,
+                delegated=_delegated_accounting(
+                    request.request_context,
+                    evidence.coverage,
+                ),
+            ),
+            duration_milliseconds=int((time.monotonic() - started) * 1000),
+        )
         safe_citations = () if status == "abstain" else evidence.citations
-        safe_presentations = () if status == "abstain" else evidence.presentations
+        citation_collection = (
+            None
+            if status == "abstain"
+            else assemble_l6_citation_collection(
+                L6CitationToolInput(
+                    coverage_receipt_id=evidence.coverage.coverage_receipt_id,
+                    coverage_receipt_hash=evidence.coverage.coverage_receipt_hash,
+                    citation_envelope_ids=tuple(
+                        sorted(
+                            item.search_citation_envelope_id
+                            for item in evidence.citations
+                        )
+                    ),
+                ),
+                citations=evidence.citations,
+                presentations=evidence.presentations,
+                coverage=evidence.coverage,
+                context=request.request_context,
+                budget=request.query_budget,
+                retrieval_scope=scopes.retrieval_scope,
+                originating_context=request.originating_request_context,
+                originating_budget=request.originating_query_budget,
+            )
+        )
         return _seal_output(
             {
                 "status": status,
                 **base,
                 "graph_response_hash": graph.response_hash,
+                "graph_execution_receipt": graph_receipt,
                 "graph_assertions": graph.assertions,
                 "search_citations": safe_citations,
-                "citation_presentations": safe_presentations,
-                "coverage_receipt": evidence.coverage.model_dump(mode="json"),
+                "citation_collection": citation_collection,
+                "coverage_receipt": evidence.coverage,
                 "readiness": readiness,
                 "operation_accounting": accounting,
+                "synthesis_call_limit": 1,
+                "zero_synthesis": True,
+            }
+        )
+
+    @staticmethod
+    def _incomplete_graph(
+        base: dict[str, Any],
+        *,
+        graph: L6GraphResult,
+        missing: Sequence[str],
+        started: float,
+    ) -> L6SynthesisInput:
+        readiness = L6Readiness(
+            status="abstain",
+            graph_complete=False,
+            retrieval_complete=False,
+            safe_missing_authority_ids=tuple(sorted(set(missing))),
+            failures=(
+                _failure(
+                    "graph_incomplete",
+                    "Graph did not cover the exact required authority set",
+                    missing,
+                ),
+            ),
+        )
+        return _seal_output(
+            {
+                "status": "abstain",
+                **base,
+                "graph_response_hash": graph.response_hash,
+                "graph_execution_receipt": None,
+                "graph_assertions": graph.assertions,
+                "search_citations": (),
+                "citation_collection": None,
+                "coverage_receipt": None,
+                "readiness": readiness,
+                "operation_accounting": L6RunAccounting(
+                    graph=L6GraphRunAccounting(
+                        attempted=True,
+                        accounting_complete=True,
+                        operation=graph.accounting,
+                    ),
+                    retrieval=L6RetrievalRunAccounting(
+                        attempted=False,
+                        accounting_complete=True,
+                    ),
+                    duration_milliseconds=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                ),
                 "synthesis_call_limit": 1,
                 "zero_synthesis": True,
             }
@@ -1079,46 +2158,37 @@ class L6AgentOrchestrator:
                 ),
                 "graph_assertions": (),
                 "search_citations": (),
-                "citation_presentations": (),
+                "citation_collection": None,
                 "coverage_receipt": None,
                 "readiness": readiness,
-                "operation_accounting": {
-                    "l6_graph": (
-                        graph.accounting.model_dump(mode="json")
-                        if graph is not None
-                        else {
-                            "attempted": graph_attempted,
-                            "accounting_complete": not graph_attempted,
-                            "request_count": None if graph_attempted else 0,
-                            "operation_refs": (),
-                            "failure_code": (
-                                "GRAPH_HOST_ACCOUNTING_UNAVAILABLE"
-                                if graph_attempted
-                                else None
-                            ),
-                        }
+                "operation_accounting": L6RunAccounting(
+                    graph=L6GraphRunAccounting(
+                        attempted=graph is not None or graph_attempted,
+                        accounting_complete=(
+                            graph is not None or not graph_attempted
+                        ),
+                        operation=(
+                            graph.accounting if graph is not None else None
+                        ),
+                        failure_code=(
+                            "GRAPH_HOST_ACCOUNTING_UNAVAILABLE"
+                            if graph is None and graph_attempted
+                            else None
+                        ),
                     ),
-                    "l5b_delegated": (
-                        {
-                            "attempted": evidence_attempted,
-                            "accounting_complete": not evidence_attempted,
-                            "request_count": None if evidence_attempted else 0,
-                            "operation_refs": (),
-                            "failure_code": (
-                                "L5B_HOST_ACCOUNTING_UNAVAILABLE"
-                                if evidence_attempted
-                                else None
-                            ),
-                            "double_counted_by_l6": False,
-                        }
-                        if evidence_attempted
-                        else None
+                    retrieval=L6RetrievalRunAccounting(
+                        attempted=evidence_attempted,
+                        accounting_complete=not evidence_attempted,
+                        failure_code=(
+                            "L5B_HOST_ACCOUNTING_UNAVAILABLE"
+                            if evidence_attempted
+                            else None
+                        ),
                     ),
-                    "downstream_synthesis_calls": 0,
-                    "duration_milliseconds": int(
+                    duration_milliseconds=int(
                         (time.monotonic() - started) * 1000
                     ),
-                },
+                ),
                 "synthesis_call_limit": 1,
                 "zero_synthesis": True,
             }
@@ -1134,6 +2204,9 @@ def build_l6_agent_instructions() -> str:
             "Use tools in this exact order: resolve ontology scope; execute one "
             "bounded Graph scope request; retrieve evidence once under that exact "
             "resolved scope; assemble verified citation presentations; report readiness.",
+            "Evidence retrieval requires a single-use trusted Graph execution receipt "
+            "issued by the server after the bounded Graph request succeeds. Missing, "
+            "forged, stale, replayed, or cross-scope receipts must not call Search.",
             "Never call Search before a valid Ontology/Graph scope and Graph result.",
             "Never broaden canonical IDs, relationships, paths, K, ACLs, or budgets.",
             "Tool outputs are evidence only. Do not treat rank or top-k as completeness.",
@@ -1165,12 +2238,13 @@ def build_l6_tool_definitions() -> tuple[dict[str, Any], ...]:
             "Execute at most one bounded canonical Graph path request after valid "
             "scope resolution. Display names and raw GQL are not accepted.",
             L6GraphToolInput,
-            L6GraphResult,
+            L6GraphToolOutput,
         ),
         (
             L6_TOOL_RETRIEVE_EVIDENCE,
-            "Retrieve exact L5b evidence once under the resolved Graph scope. "
-            "Returns sealed citations and a Runtime 1.1 coverage receipt.",
+            "Retrieve exact L5b evidence once under the resolved Graph scope and a "
+            "single-use trusted Graph execution receipt. Returns sealed citations "
+            "and a Runtime 1.1 coverage receipt.",
             L6EvidenceToolInput,
             L6EvidenceToolOutput,
         ),
@@ -1179,14 +2253,14 @@ def build_l6_tool_definitions() -> tuple[dict[str, Any], ...]:
             "Validate one-to-one citation envelope and presentation hash links. "
             "No answer text is generated.",
             L6CitationToolInput,
-            CitationPresentation,
+            L6CitationPresentationCollection,
         ),
         (
             L6_TOOL_REPORT_READINESS,
             "Report complete, partial, or abstain from exact Graph and RequiredMember "
             "coverage. Ranked top-k is never completeness proof.",
             L6ReadinessToolInput,
-            L6Readiness,
+            L6ReadinessReport,
         ),
     )
     return tuple(

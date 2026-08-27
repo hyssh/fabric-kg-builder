@@ -26,14 +26,20 @@ activate schema-2 CLI behavior or change schema-1 behavior.
    scope, Graph/Search ACL equality, and all serving/publication fingerprints.
 4. Execute one canonical Graph request bounded by approved paths,
    relationships, K, record count, and RequiredMember authority.
-5. Reject empty, failed, overexecuted, stale, or out-of-scope Graph responses
+5. The server issues a unique opaque `L6GraphExecutionReceipt` after validating
+   the completed Graph result. The receipt binds request/result/scope,
+   publication/ACL hashes, canonical IDs, assertion count, and typed accounting.
+   A trusted atomic store validates all expected bindings and consumes the
+   receipt once. Missing, forged, stale, replayed, or cross-scope receipts cause
+   zero Search calls and cannot consume a valid receipt for another scope.
+6. Reject empty, failed, overexecuted, stale, or out-of-scope Graph responses
    without Search fallback.
-6. Execute one L5b route selected by the Runtime 1.1 request context. An
+7. Execute one L5b route selected by the Runtime 1.1 request context. An
    authorized direct fallback must bind its exact originating context and
    budget; it does not follow a prior runtime retrieval call.
-7. Validate the Runtime receipt plus one-to-one
+8. Validate the Runtime receipt plus one-to-one
    `SearchCitationEnvelope`/`CitationPresentation` hash links.
-8. Emit complete, partial, or abstain as structured zero-synthesis JSON.
+9. Emit complete, partial, or abstain as structured zero-synthesis JSON.
 
 ## Tool parity
 
@@ -41,9 +47,9 @@ activate schema-2 CLI behavior or change schema-1 behavior.
 |---|---|---:|
 | `fabric_kg_resolve_ontology_scope` | Resolve cached/local canonical authority | 0 |
 | `fabric_kg_execute_bounded_graph_scope` | Execute one approved Graph path request | 1 maximum |
-| `fabric_kg_retrieve_scoped_evidence` | Delegate one selected sealed L5b retrieval route | 0; L5b owns accounting |
-| `fabric_kg_assemble_citation_presentation` | Validate exact citation/presentation links | 0 |
-| `fabric_kg_report_coverage_readiness` | Report exact complete/partial/abstain state | 0 |
+| `fabric_kg_retrieve_scoped_evidence` | Consume one trusted Graph receipt, then delegate one sealed L5b route | 0; L5b owns accounting |
+| `fabric_kg_assemble_citation_presentation` | Return an exact immutable presentation collection for sorted unique envelope IDs | 0 |
+| `fabric_kg_report_coverage_readiness` | Compute same-scope complete/partial/abstain from trusted Graph and Runtime receipts | 0 |
 
 Fabric-kg makes zero synthesis calls. The emitted package declares a maximum of
 one downstream synthesis call.
@@ -56,6 +62,11 @@ hashes, exhausted budgets, duplicate/missing citations, or unexpected IDs.
 `partial` requires at least one verified Graph assertion and one verified
 citation presentation, with typed failures and exact safe missing authority
 IDs. All other outcomes abstain and expose no citations from a failed route.
+
+All L6 result nesting is frozen and typed. Operation references are opaque
+SHA-256 objects; Graph warnings/errors use a closed code vocabulary. Raw
+provider URLs, queries, paths, principals, emails, secrets, control characters,
+and Unicode confusables never enter agent-visible accounting.
 
 Top-k ranking, vector similarity, display-name matching, and document proximity
 are never completeness or relationship proof.
