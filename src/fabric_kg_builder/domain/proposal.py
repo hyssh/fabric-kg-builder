@@ -294,38 +294,37 @@ def domain_proposal_candidates_schema() -> dict[str, Any]:
         raise ProposalArtifactError("proposal route schema is unavailable")
     route["allOf"] = [
         {
-            "if": {
-                "anyOf": [
-                    {"not": {"required": ["start_type_id"]}},
-                    {
-                        "properties": {
-                            "start_type_id": {"type": "null"}
+            "oneOf": [
+                {
+                    "required": ["start_type_id", "end_type_id"],
+                    "properties": {
+                        "start_type_id": {
+                            "type": "string",
+                            "minLength": 1,
                         },
-                        "required": ["start_type_id"],
-                    },
-                    {"not": {"required": ["end_type_id"]}},
-                    {
-                        "properties": {
-                            "end_type_id": {"type": "null"}
+                        "end_type_id": {
+                            "type": "string",
+                            "minLength": 1,
                         },
-                        "required": ["end_type_id"],
+                        "unsupported_reason": {"type": "null"},
                     },
-                ]
-            },
-            "then": {
-                "required": ["unsupported_reason"],
-                "properties": {
-                    "unsupported_reason": {
-                        "type": "string",
-                        "minLength": 1,
-                    }
                 },
-            },
-            "else": {
-                "properties": {
-                    "unsupported_reason": {"type": "null"}
-                }
-            },
+                {
+                    "required": [
+                        "start_type_id",
+                        "end_type_id",
+                        "unsupported_reason",
+                    ],
+                    "properties": {
+                        "start_type_id": {"type": "null"},
+                        "end_type_id": {"type": "null"},
+                        "unsupported_reason": {
+                            "type": "string",
+                            "minLength": 1,
+                        },
+                    },
+                },
+            ]
         }
     ]
     return schema
