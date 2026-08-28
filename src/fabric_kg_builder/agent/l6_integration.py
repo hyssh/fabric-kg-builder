@@ -1650,7 +1650,7 @@ class L6GraphReceiptAuthority(Protocol):
         budget: QueryBudgetV1_1,
         access: L6AccessContext,
         authorities: "L6Authorities",
-        execute: Callable[[], L6GraphResult],
+        execute: Callable[[], L6GraphResult] | None,
     ) -> L6GraphResult:
         """Atomically claim and persist one run-scoped Graph result or failure."""
         ...
@@ -3481,6 +3481,13 @@ class L6AgentOrchestrator:
             graph_query=request.graph_query,
         )
         try:
+            configured_transport = bool(
+                getattr(
+                    self._graph_receipt_authority,
+                    "uses_configured_transport",
+                    False,
+                )
+            )
             graph = self._graph_receipt_authority.execute_graph_once(
                 l6_run_id=request.graph_query.l6_run_id,
                 graph_query=request.graph_query,
@@ -3489,9 +3496,13 @@ class L6AgentOrchestrator:
                 budget=request.query_budget,
                 access=request.access,
                 authorities=self._authorities,
-                execute=lambda: self._graph_host.execute(
-                    graph_input,
-                    scope=scopes.ontology_scope,
+                execute=(
+                    None
+                    if configured_transport
+                    else lambda: self._graph_host.execute(
+                        graph_input,
+                        scope=scopes.ontology_scope,
+                    )
                 ),
             )
             graph_complete, graph_missing = _validate_graph_result(

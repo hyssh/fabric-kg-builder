@@ -176,8 +176,11 @@ No resource is deployed by L6. The L7 foundation consumes only
 deployment authority. `AzureBlobL6GraphReceiptAuthority` provides the production
 multi-process run/receipt boundary with Entra-authenticated Blob access, finite
 leases, ETag compare-and-swap, crash recovery, one-time consumption, and an
-opaque injected signer provider. Signing keys never enter Blob state, receipts,
-logs, or repository configuration.
+opaque injected signer provider. Its production Graph path requires a
+deadline-aware cancellable transport with bounded connect/read operations;
+synchronous callbacks are test-only and rejected by production configuration.
+Deadline expiry atomically fails the run and ignores late results. Signing keys
+never enter Blob state, receipts, logs, or repository configuration.
 
 L7 owns GET-only planning, endpoint publication prerequisites, project
 connection creation/update, Foundry version deployment, exact readback,

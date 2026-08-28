@@ -1623,15 +1623,20 @@ and state.
 
 It also covers Blob lease/CAS concurrency, concurrent run claims, expired claim
 recovery, one-time receipt consumption, absent/rotated opaque signers,
-RemoteTool auth/schema/body/deadline/readiness/OpenAPI behavior, bearer header
-use without token disclosure, exact connection readback, conditional rollback,
-Foundry version readback, Fabric capability failure, accounting, redaction, and
-unchanged RDF inactivity.
+deadline-aware/cancellable Graph transport and ignored late results, RemoteTool
+auth-first bounded streaming/framing/encoding/disconnect/schema/deadline and
+authenticated readiness/OpenAPI behavior, bearer header use without token
+disclosure, signed durable CustomKeys ownership, transaction-journal rollback
+under network/parser/interrupt failures, mandatory canonical Fabric definition
+bytes plus POST/LRO readback, Foundry version readback, accounting, redaction,
+and unchanged RDF inactivity.
 
 ```text
 PYTHONPATH=src python3 -m pytest -q \
   tests/unit/test_l6_blob_authority.py \
   tests/unit/test_l7_deployment.py \
+  tests/unit/test_l7_adapters.py \
+  tests/unit/test_l7_ownership.py \
   tests/unit/test_l7_remote_tool.py \
   tests/unit/test_project_connections_l7.py \
   tests/unit/test_l7_cli.py \

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import re
+import secrets
+import time
 from typing import Any, Callable, Literal, Mapping
+
+from requests import RequestException
 
 from fabric_kg_builder.contracts.base import canonical_sha256
 
@@ -27,6 +32,7 @@ class ProjectConnection:
     binding_hash: str = ""
     etag: str = ""
     properties_hash: str = ""
+    attempt_id: str = ""
     action: Literal["created", "updated", "adopted", "read"] = "read"
 
 
@@ -44,6 +50,8 @@ class FoundryProjectConnectionClient:
         credential: Any | None = None,
         request: Callable[..., Any] | None = None,
         transport: Callable[..., Any] | None = None,
+        reconciliation_timeout_seconds: float = 10.0,
+        reconciliation_poll_seconds: float = 0.25,
     ) -> None:
         if not all((subscription_id, resource_group, account_name, project_name)):
             raise ValueError(
@@ -58,8 +66,17 @@ class FoundryProjectConnectionClient:
         self._credential = credential
         self._legacy_put_request = request
         self._transport = transport
+        if (
+            reconciliation_timeout_seconds <= 0
+            or reconciliation_poll_seconds <= 0
+            or reconciliation_poll_seconds > reconciliation_timeout_seconds
+        ):
+            raise ValueError("connection reconciliation timing is invalid")
+        self._reconciliation_timeout = reconciliation_timeout_seconds
+        self._reconciliation_poll = reconciliation_poll_seconds
         self._read_properties: dict[str, dict[str, Any]] = {}
         self._rollback_properties: dict[str, dict[str, Any]] = {}
+        self._pending_attempts: dict[str, dict[str, str]] = {}
 
     def connection_id(self, name: str) -> str:
         if not name or "/" in name:
@@ -128,20 +145,42 @@ class FoundryProjectConnectionClient:
             f"?api-version={_API_VERSION}"
         )
         if sender is self._legacy_put_request:
+            try:
+                return sender(
+                    url,
+                    method=method,
+                    headers=request_headers,
+                    json=json_body,
+                    timeout=60,
+                )
+            except (
+                ConnectionError,
+                RequestException,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ProjectConnectionError(
+                    "Foundry project connection transport failed"
+                ) from exc
+        try:
             return sender(
+                method,
                 url,
-                method=method,
                 headers=request_headers,
                 json=json_body,
                 timeout=60,
             )
-        return sender(
-            method,
-            url,
-            headers=request_headers,
-            json=json_body,
-            timeout=60,
-        )
+        except (
+            ConnectionError,
+            RequestException,
+            TimeoutError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ProjectConnectionError(
+                "Foundry project connection transport failed"
+            ) from exc
 
     @staticmethod
     def _response_json(response: Any, operation: str) -> dict[str, Any]:
@@ -176,6 +215,8 @@ class FoundryProjectConnectionClient:
             if isinstance(properties.get("metadata"), Mapping)
             else {}
         )
+        semantic_metadata = dict(metadata)
+        semantic_metadata.pop("l7AttemptId", None)
         committed_binding_hash = str(metadata.get("bindingHash") or "")
         if not binding_hash and re.fullmatch(
             r"[0-9a-f]{64}",
@@ -193,7 +234,7 @@ class FoundryProjectConnectionClient:
                         properties.get("isSharedToAll", False)
                     ),
                     "audience": str(properties.get("audience") or ""),
-                    "metadata": metadata,
+                    "metadata": semantic_metadata,
                     "binding_hash": binding_hash,
                 }
             ),
@@ -220,6 +261,11 @@ class FoundryProjectConnectionClient:
                 f"Foundry project connection '{name}' stable ID mismatch"
             )
         properties_hash, binding_hash = self._desired_hash(properties)
+        metadata = (
+            properties.get("metadata")
+            if isinstance(properties.get("metadata"), Mapping)
+            else {}
+        )
         etag = str(
             body.get("etag")
             or getattr(response, "headers", {}).get("ETag")
@@ -233,6 +279,7 @@ class FoundryProjectConnectionClient:
             target=str(properties.get("target") or ""),
             audience=str(properties.get("audience") or ""),
             binding_hash=binding_hash,
+            attempt_id=str(metadata.get("l7AttemptId") or ""),
             etag=etag,
             properties_hash=properties_hash,
             action=action,
@@ -270,6 +317,15 @@ class FoundryProjectConnectionClient:
     ) -> ProjectConnection:
         resource_id = self.connection_id(name)
         desired_hash, _ = self._desired_hash(properties)
+        attempt_id = "op-sha256:" + secrets.token_hex(32)
+        attempt_properties = dict(properties)
+        attempt_metadata = (
+            dict(properties.get("metadata"))
+            if isinstance(properties.get("metadata"), Mapping)
+            else {}
+        )
+        attempt_metadata["l7AttemptId"] = attempt_id
+        attempt_properties["metadata"] = attempt_metadata
         existing = self.get(name)
         if create_only and existing is not None:
             raise ProjectConnectionError(
@@ -310,29 +366,76 @@ class FoundryProjectConnectionClient:
                 )
             action = "created"
             conditional_headers = {"If-None-Match": "*"}
-        response = self._send(
-            "PUT",
-            resource_id,
-            headers=conditional_headers,
-            json_body={"name": name, "properties": properties},
-        )
+        self._pending_attempts[name] = {
+            "resource_id": resource_id,
+            "action": action,
+            "desired_hash": desired_hash,
+            "attempt_id": attempt_id,
+        }
+        try:
+            response = self._send(
+                "PUT",
+                resource_id,
+                headers=conditional_headers,
+                json_body={"name": name, "properties": attempt_properties},
+            )
+        except BaseException as exc:
+            try:
+                self._reconcile_uncertain_mutation(
+                    name=name,
+                    resource_id=resource_id,
+                    action=action,
+                    desired_hash=desired_hash,
+                    attempt_id=attempt_id,
+                )
+            except BaseException as rollback_exc:
+                exc.add_note(
+                    "uncertain connection reconciliation failed: "
+                    f"{type(rollback_exc).__name__}"
+                )
+            else:
+                self._pending_attempts.pop(name, None)
+            if isinstance(
+                exc,
+                (KeyboardInterrupt, SystemExit, asyncio.CancelledError),
+            ):
+                raise
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' transport outcome "
+                "was reconciled and rolled back"
+            ) from exc
         if response.status_code not in (200, 201):
+            if response.status_code == 202 or response.status_code >= 500:
+                self._reconcile_uncertain_mutation(
+                    name=name,
+                    resource_id=resource_id,
+                    action=action,
+                    desired_hash=desired_hash,
+                    attempt_id=attempt_id,
+                )
+                self._pending_attempts.pop(name, None)
+            else:
+                self._pending_attempts.pop(name, None)
             raise ProjectConnectionError(
                 f"Foundry project connection '{name}' failed with HTTP "
                 f"{response.status_code}"
             )
-        mutation_body = self._response_json(response, "connection PUT")
         after_etag = str(
-            mutation_body.get("etag")
-            or getattr(response, "headers", {}).get("ETag")
+            getattr(response, "headers", {}).get("ETag")
             or getattr(response, "headers", {}).get("etag")
             or ""
         )
-        if not after_etag:
-            raise ProjectConnectionError(
-                f"Foundry project connection '{name}' mutation omitted ETag"
-            )
         try:
+            mutation_body = self._response_json(response, "connection PUT")
+            after_etag = str(
+                after_etag
+                or mutation_body.get("etag")
+                or ""
+            )
+            if not after_etag:
+                raise ProjectConnectionError(
+                    f"Foundry project connection '{name}' mutation omitted ETag"
+                )
             readback = self.get(name)
             if (
                 readback is None
@@ -341,40 +444,215 @@ class FoundryProjectConnectionClient:
                 or readback.audience != str(properties.get("audience", ""))
                 or readback.properties_hash != desired_hash
                 or readback.etag != after_etag
+                or readback.attempt_id != attempt_id
             ):
                 raise ProjectConnectionError(
                     f"Foundry project connection '{name}' readback mismatch"
                 )
-        except ProjectConnectionError as exc:
-            if action == "created":
-                rollback = self._send(
-                    "DELETE",
-                    resource_id,
-                    headers={"If-Match": after_etag},
+        except BaseException as exc:
+            if not after_etag:
+                self._reconcile_uncertain_mutation(
+                    name=name,
+                    resource_id=resource_id,
+                    action=action,
+                    desired_hash=desired_hash,
+                    attempt_id=attempt_id,
                 )
-            else:
-                previous = self._rollback_properties.get(name)
-                if not previous:
-                    raise ProjectConnectionError(
-                        f"Foundry project connection '{name}' lacks rollback state"
-                    ) from exc
-                rollback = self._send(
-                    "PUT",
-                    resource_id,
-                    headers={"If-Match": after_etag},
-                    json_body={"name": name, "properties": previous},
-                )
-            if rollback.status_code not in (200, 201, 202, 204):
+                self._pending_attempts.pop(name, None)
+                if isinstance(
+                    exc,
+                    (KeyboardInterrupt, SystemExit, asyncio.CancelledError),
+                ):
+                    raise
                 raise ProjectConnectionError(
-                    f"Foundry project connection '{name}' readback and rollback failed"
+                    f"Foundry project connection '{name}' mutation outcome "
+                    "was reconciled and rolled back"
                 ) from exc
-            raise
+            try:
+                if action == "created":
+                    rollback = self._send(
+                        "DELETE",
+                        resource_id,
+                        headers={"If-Match": after_etag},
+                    )
+                else:
+                    previous = self._rollback_properties.get(name)
+                    if not previous:
+                        raise ProjectConnectionError(
+                            f"Foundry project connection '{name}' lacks rollback state"
+                        )
+                    rollback = self._send(
+                        "PUT",
+                        resource_id,
+                        headers={"If-Match": after_etag},
+                        json_body={"name": name, "properties": previous},
+                    )
+                if rollback.status_code not in (200, 201, 202, 204):
+                    raise ProjectConnectionError(
+                        f"Foundry project connection '{name}' rollback failed"
+                    )
+                self._pending_attempts.pop(name, None)
+            except BaseException as rollback_exc:
+                exc.add_note(
+                    "conditional connection rollback also failed: "
+                    f"{type(rollback_exc).__name__}"
+                )
+            if isinstance(
+                exc,
+                (KeyboardInterrupt, SystemExit, asyncio.CancelledError),
+            ):
+                raise
+            if isinstance(exc, ProjectConnectionError):
+                raise
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' readback failed"
+            ) from exc
+        self._pending_attempts.pop(name, None)
         return ProjectConnection(
             **{
                 **readback.__dict__,
                 "action": action,
             }
         )
+
+    def rollback_pending(self, name: str) -> None:
+        pending = self._pending_attempts.get(name)
+        if pending is None:
+            return
+        action = pending["action"]
+        if action not in {"created", "updated"}:
+            raise ProjectConnectionError(
+                "pending connection attempt has invalid action authority"
+            )
+        self._reconcile_uncertain_mutation(
+            name=name,
+            resource_id=pending["resource_id"],
+            action=action,
+            desired_hash=pending["desired_hash"],
+            attempt_id=pending["attempt_id"],
+        )
+        self._pending_attempts.pop(name, None)
+
+    def _reconcile_uncertain_mutation(
+        self,
+        *,
+        name: str,
+        resource_id: str,
+        action: Literal["created", "updated"],
+        desired_hash: str,
+        attempt_id: str,
+    ) -> None:
+        current: ProjectConnection | None = None
+        last_error: ProjectConnectionError | None = None
+        deadline = time.monotonic() + self._reconciliation_timeout
+        stable_absence = 0
+        continuously_absent = True
+        continuously_previous = True
+        previous = self._rollback_properties.get(name)
+        previous_hash = (
+            self._desired_hash(previous)[0]
+            if isinstance(previous, Mapping) and previous
+            else ""
+        )
+        while time.monotonic() < deadline:
+            try:
+                current = self.get(name)
+                last_error = None
+                if current is not None:
+                    continuously_absent = False
+                    if (
+                        action == "updated"
+                        and current.properties_hash == previous_hash
+                    ):
+                        time.sleep(
+                            min(
+                                self._reconciliation_poll,
+                                max(0.0, deadline - time.monotonic()),
+                            )
+                        )
+                        continue
+                    if action == "updated":
+                        continuously_previous = False
+                    break
+                stable_absence += 1
+                if action == "updated":
+                    continuously_previous = False
+            except ProjectConnectionError as exc:
+                last_error = exc
+                stable_absence = 0
+                continuously_absent = False
+                continuously_previous = False
+            time.sleep(
+                min(
+                    self._reconciliation_poll,
+                    max(0.0, deadline - time.monotonic()),
+                )
+            )
+        if last_error is not None:
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' uncertain mutation "
+                "could not be reconciled"
+            ) from last_error
+        if action == "created":
+            if current is None:
+                if stable_absence < 2 or not continuously_absent:
+                    raise ProjectConnectionError(
+                        f"Foundry project connection '{name}' absence "
+                        "was not stable during reconciliation"
+                    )
+                return
+            if (
+                current.properties_hash != desired_hash
+                or current.attempt_id != attempt_id
+                or not current.etag
+            ):
+                raise ProjectConnectionError(
+                    f"Foundry project connection '{name}' uncertain create "
+                    "does not match this attempt"
+                )
+            rollback = self._send(
+                "DELETE",
+                resource_id,
+                headers={"If-Match": current.etag},
+            )
+            if rollback.status_code not in (200, 202, 204, 404):
+                raise ProjectConnectionError(
+                    f"Foundry project connection '{name}' uncertain create "
+                    "rollback failed"
+                )
+            return
+        if current is None or not previous:
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' uncertain update "
+                "lacks restorable state"
+            )
+        if current.properties_hash == previous_hash:
+            if not continuously_previous:
+                raise ProjectConnectionError(
+                    f"Foundry project connection '{name}' previous state "
+                    "was not continuously stable during reconciliation"
+                )
+            return
+        if (
+            current.properties_hash != desired_hash
+            or current.attempt_id != attempt_id
+            or not current.etag
+        ):
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' uncertain update "
+                "does not match this attempt"
+            )
+        rollback = self._send(
+            "PUT",
+            resource_id,
+            headers={"If-Match": current.etag},
+            json_body={"name": name, "properties": previous},
+        )
+        if rollback.status_code not in (200, 201, 202):
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' uncertain update "
+                "rollback failed"
+            )
 
     def upsert_fabric_data_agent(
         self,

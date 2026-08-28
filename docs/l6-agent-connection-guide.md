@@ -91,29 +91,48 @@ fabric-kg app deploy-l6 \
 
 Dry-run is the default and performs GET/read-only operations only. Live mode
 reads the exact unexpired plan from disk and rechecks identity, configuration,
-audience, resource ETags, Fabric definitions, and L5a/L5b/L6 hashes before its
-first mutation. `--resume` does not re-plan or accept changed state. Rollback is
-enabled by default and can affect only resources or versions created/updated by
-the approved attempt.
+audience, resource ETags, canonical Fabric definition bytes/hashes, signed
+connection ownership, and L5a/L5b/L6 hashes before its first mutation.
+Authenticated RemoteTool readiness is checked again immediately before mutation
+and before success. `--resume` does not re-plan or accept changed state.
+Rollback is mandatory and journals every attempted mutation; there is no live
+opt-out after the first mutation.
 
 Foundry does not return `CustomKeys` credential values from connection GET.
-L7 therefore uses a non-secret workspace/Data Agent binding commitment for
-readback and refuses to update a mismatched preexisting Fabric connection,
-because its redacted prior state cannot support a safe restore. Create a new
-connection name or reconcile it explicitly before planning.
+Mutable `metadata.bindingHash` is not adoption authority. A preexisting
+connection requires an independently signed durable Blob receipt for the exact
+connection ID, ETag, category, target, audience, workspace, and Data Agent.
+Without it, use a new release-owned connection name. Configure the opaque
+authority factory as `FABRIC_KG_L7_OWNERSHIP_FACTORY=module:callable`; key
+material remains outside config, Blob state, logs, plans, and receipts.
+Configure
+`FABRIC_KG_L7_REMOTE_PROBE_CREDENTIAL_FACTORY=module:callable` separately; it
+must return a credential for the actual allowed Foundry managed identity.
+The deployer credential is never substituted for this caller proof.
+
+Every Fabric target in `.foundry/l7-deployment.json` must set
+`definition_path`, `definition_hash`, and `definition_bytes_hash`. The file must
+be canonical JSON. A `null` hash, type-only readback, or unavailable Data
+Agent/Graph `getDefinition` API is a capability NO-GO.
 
 The RemoteTool process is exposed separately:
 
 ```text
 fabric-kg app serve-l6 \
   --config .foundry/l7-deployment.json \
-  --handler-factory my_package.l6_runtime:create_handler
+  --definition build/agent/l6-agent-definition.json \
+  --handler-factory my_package.l6_runtime:create_handler \
+  --readiness-authority-factory my_package.l6_runtime:create_readiness
 ```
 
 The handler factory must return configured canonical L6 authorities. The host
 enforces Entra tenant/audience validation, strict request/response schemas,
 request size and deadline limits, sanitized errors, health/readiness, and zero
-synthesis. Assign Storage Blob Data Contributor (or a tighter custom role with
+synthesis. `/health` is operational only; live authority comes exclusively from
+authenticated `/ready` with exact caller/app-role, OpenAPI, L6 definition, and
+durable backend hashes. Reverse-proxy body limits are defense-in-depth; the
+application still authenticates first and incrementally bounds streamed input.
+Assign Storage Blob Data Contributor (or a tighter custom role with
 read/write/lease permissions) to the host identity. Foundry and Fabric RBAC,
 RemoteTool application registration/audience, and compute hosting remain release
 prerequisites. Live Graph/Search acceptance is intentionally deferred to the

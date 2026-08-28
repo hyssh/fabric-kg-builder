@@ -18,32 +18,60 @@ Dry-run is the default. It performs identity and GET/readback operations only,
 then persists canonical JSON containing exact tenant, subscription, resource
 group, principal, Fabric workspace/items, Foundry project, connection
 category/target/audience, model deployment authority, L5a/L5b/L6 hashes,
-ownership, ETags, actions, rollback intent, expiry, and plan hash. Signed URLs,
-tokens, signing keys, raw provider errors, and credential values are forbidden.
+canonical Fabric definition file-byte hashes, signed ownership authority,
+authenticated RemoteTool readiness, ETags, actions, rollback intent, expiry,
+and plan hash. Signed URLs, tokens, signing keys, raw provider errors, and
+credential values are forbidden.
 
 Live deployment requires `--approve-live <exact-plan-hash>` and the matching
 unexpired plan file. Before its first mutation it repeats all probes and rejects
 identity, configuration, resource, ETag, audience, or definition drift.
-`--resume` accepts only identical persisted state.
+`--resume` accepts only identical persisted state. Authenticated readiness is
+rechecked immediately before the first mutation and again before success.
 
 ## Adapters
 
 - Azure Blob provides durable L6 run and receipt authority with finite leases,
   optimistic ETag/CAS, bounded waits, crash recovery, and atomic one-time
-  receipt consumption. An opaque injected signer provider owns key material.
+  receipt consumption. Production Graph execution requires a configured
+  deadline-aware cancellable transport with bounded connect/read timeouts,
+  absolute monotonic deadline, remaining timeout, and cancellation signal.
+  Deadline expiry stops renewal, atomically fails the run, releases its lease,
+  and ignores late transport results. An opaque injected signer provider owns
+  key material.
 - The RemoteTool FastAPI host publishes the same five canonical L6 schemas used
-  by the L6 definition. It validates Entra auth, body size, deadlines, response
-  schemas, health/readiness, and performs no synthesis.
+  by the L6 definition. It validates Entra auth before consuming tool bodies,
+  enforces unambiguous request framing and bounded streaming under a monotonic
+  ingress deadline, then applies a separate cooperative tool deadline. It
+  validates response schemas, exposes health/readiness, and performs no
+  synthesis. Reverse-proxy request limits and timeouts are required
+  defense-in-depth, but are not the authority for ingress acceptance; the host
+  remains fail-closed.
+  `/health` is non-authoritative. `/ready` requires the same Entra
+  authentication and returns a short-lived, hash-sealed observation of the
+  authorized caller, exact OpenAPI and L6 definition hashes, and durable
+  authority backend identity; missing or mismatched authorities return 503.
 - Foundry project connections use ARM bearer tokens in memory, exact GET
   readback, `If-Match`/`If-None-Match`, and conditional attempt-owned rollback.
-  Because Foundry GET redacts `CustomKeys` credentials, L7 records a non-secret
-  binding commitment for exact adoption and refuses to update a mismatched
-  preexisting Fabric connection that cannot be restored safely.
+  Because Foundry GET redacts `CustomKeys` credentials, mutable connection
+  metadata is never ownership authority. Adoption requires an independently
+  signed Azure Blob ownership receipt binding exact connection ID/ETag,
+  category, target, audience, workspace, and Data Agent. Missing, forged, stale,
+  or mismatched receipts are a collision/NO-GO. Attempt-created connections
+  persist their receipt from known request and exact readback.
 - The Foundry adapter creates a version from canonical instructions, model,
   limits, Fabric connection, and exact OpenAPI RemoteTool definition, then
   checks version/hash readback.
-- Fabric is readback-only here. Exact item IDs/types and configured definitions
-  are verified. Unsupported Data Agent mutation fails before any other mutation.
+- Fabric is readback-only here. Every target requires canonical expected
+  definition bytes plus canonical and byte hashes, followed by POST
+  `getDefinition` exact readback (including bounded LRO polling). `null`,
+  existence/type-only evidence, or an item API without definition readback is
+  unverifiable and blocks planning/live success.
+- Every mutation is journaled before and after its adapter call. Any
+  `BaseException` after the first mutation triggers all conditional rollback
+  attempts, including reconciliation of journal entries whose adapter call never
+  returned. Rollback errors are recorded without hiding the original
+  interrupt/cancellation/failure.
 
 ## Receipt and release blockers
 
@@ -51,7 +79,10 @@ Successful deployment emits a sealed receipt with created/updated/adopted
 resources, before/after ETags, readback hashes, rollback state, and bounded
 remote accounting. A failed attempt cannot emit a succeeded receipt.
 
-Release still requires an existing HTTPS host, Entra application audience,
+Live remains NO-GO until an existing HTTPS host returns the exact authenticated
+readiness authority through a distinct credential bound to the allowed Foundry
+managed identity; the deployment credential is not caller proof. Release still
+requires Entra application audience,
 Storage Blob data/lease permissions, Foundry project and connection permissions,
 Fabric workspace read permissions, confirmation of the current preview API
 surface, and installed-CLI live acceptance in the 0.2.4 successor.

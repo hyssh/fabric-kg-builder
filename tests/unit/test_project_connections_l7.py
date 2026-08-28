@@ -24,10 +24,29 @@ class _Requests:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.attempt_id = None
 
     def __call__(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
-        return self.responses.pop(0)
+        if method == "PUT":
+            metadata = kwargs.get("json", {}).get("properties", {}).get(
+                "metadata",
+                {},
+            )
+            self.attempt_id = metadata.get("l7AttemptId")
+        response = self.responses.pop(0)
+        if (
+            method == "GET"
+            and self.attempt_id
+            and isinstance(response._body, dict)
+            and isinstance(response._body.get("properties"), dict)
+        ):
+            properties = dict(response._body["properties"])
+            metadata = dict(properties.get("metadata") or {})
+            metadata["l7AttemptId"] = self.attempt_id
+            properties["metadata"] = metadata
+            response._body = {**response._body, "properties": properties}
+        return response
 
 
 def _client(request):
@@ -271,3 +290,333 @@ def test_redacted_custom_keys_connection_cannot_be_updated_destructively():
             expected_etag="etag",
         )
     assert [call[0] for call in request.calls] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_exception"),
+    [
+        (ValueError("parser"), ProjectConnectionError),
+        (KeyboardInterrupt(), KeyboardInterrupt),
+    ],
+)
+def test_any_post_put_non_success_conditionally_rolls_back(
+    failure,
+    expected_exception,
+):
+    class BrokenResponse(_Response):
+        def json(self):
+            raise failure
+
+    request = _Requests(
+        [
+            _Response(404),
+            BrokenResponse(201, headers={"ETag": "created-etag"}),
+            _Response(204),
+        ]
+    )
+    with pytest.raises(expected_exception):
+        _client(request).upsert_remote_tool(
+            name="remote",
+            target="https://example.test/l6",
+            audience="api://l6",
+            create_only=True,
+        )
+    assert [call[0] for call in request.calls] == ["GET", "PUT", "DELETE"]
+    assert request.calls[-1][2]["headers"]["If-Match"] == "created-etag"
+
+
+def test_transport_connection_error_is_sanitized():
+    def request(method, url, **kwargs):
+        del method, url, kwargs
+        raise ConnectionError("provider endpoint and body")
+
+    with pytest.raises(ProjectConnectionError, match="transport failed"):
+        _client(request).get("remote")
+
+
+def test_commit_then_connection_transport_error_reconciles_and_deletes():
+    resource_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/account/projects/project/"
+        "connections/remote"
+    )
+
+    class Transport:
+        def __init__(self):
+            self.value = None
+            self.calls = []
+
+        def __call__(self, method, url, **kwargs):
+            self.calls.append(method)
+            if method == "GET" and self.value is None:
+                return _Response(404)
+            if method == "PUT":
+                self.value = {
+                    "id": resource_id,
+                    "etag": "committed-etag",
+                    "properties": kwargs["json"]["properties"],
+                }
+                raise ConnectionError("response lost after commit")
+            if method == "GET":
+                return _Response(200, self.value)
+            if method == "DELETE":
+                self.value = None
+                return _Response(204)
+            raise AssertionError(method)
+
+    transport = Transport()
+    with pytest.raises(ProjectConnectionError, match="reconciled"):
+        _client(transport).upsert_remote_tool(
+            name="remote",
+            target="https://example.test/l6",
+            audience="api://l6",
+            create_only=True,
+        )
+    assert transport.calls == ["GET", "PUT", "GET", "DELETE"]
+    assert transport.value is None
+
+
+def test_commit_then_http_5xx_reconciles_and_deletes():
+    resource_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/account/projects/project/"
+        "connections/remote"
+    )
+
+    class Transport:
+        def __init__(self):
+            self.value = None
+            self.calls = []
+
+        def __call__(self, method, url, **kwargs):
+            self.calls.append(method)
+            if method == "GET" and self.value is None:
+                return _Response(404)
+            if method == "PUT":
+                self.value = {
+                    "id": resource_id,
+                    "etag": "committed-etag",
+                    "properties": kwargs["json"]["properties"],
+                }
+                return _Response(503)
+            if method == "GET":
+                return _Response(200, self.value)
+            if method == "DELETE":
+                self.value = None
+                return _Response(204)
+            raise AssertionError(method)
+
+    transport = Transport()
+    with pytest.raises(ProjectConnectionError, match="HTTP 503"):
+        _client(transport).upsert_remote_tool(
+            name="remote",
+            target="https://example.test/l6",
+            audience="api://l6",
+            create_only=True,
+        )
+    assert transport.calls == ["GET", "PUT", "GET", "DELETE"]
+    assert transport.value is None
+
+
+def test_delayed_connection_commit_is_observed_before_absence_is_accepted():
+    resource_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/account/projects/project/"
+        "connections/remote"
+    )
+
+    class Transport:
+        def __init__(self):
+            self.value = None
+            self.calls = []
+            self.reconcile_gets = 0
+
+        def __call__(self, method, url, **kwargs):
+            self.calls.append(method)
+            if method == "GET" and self.value is None:
+                if "PUT" not in self.calls:
+                    return _Response(404)
+                self.reconcile_gets += 1
+                if self.reconcile_gets == 1:
+                    return _Response(404)
+                self.value = {
+                    "id": resource_id,
+                    "etag": "delayed-etag",
+                    "properties": kwargs.get("json", {}),
+                }
+                # Use the exact request captured by the preceding PUT.
+                put = next(
+                    call
+                    for call in reversed(self.recorded)
+                    if call[0] == "PUT"
+                )
+                self.value["properties"] = put[1]["json"]["properties"]
+                return _Response(200, self.value)
+            if method == "PUT":
+                self.recorded = getattr(self, "recorded", [])
+                self.recorded.append((method, kwargs))
+                return _Response(503)
+            if method == "DELETE":
+                self.value = None
+                return _Response(204)
+            raise AssertionError(method)
+
+    transport = Transport()
+    with pytest.raises(ProjectConnectionError, match="HTTP 503"):
+        FoundryProjectConnectionClient(
+            subscription_id="sub",
+            resource_group="rg",
+            account_name="account",
+            project_name="project",
+            tenant_id="tenant",
+            credential=SimpleNamespace(
+                tenant_id="tenant",
+                get_token=lambda scope: SimpleNamespace(token="opaque-token"),
+            ),
+            transport=transport,
+            reconciliation_timeout_seconds=1,
+            reconciliation_poll_seconds=0.001,
+        ).upsert_remote_tool(
+            name="remote",
+            target="https://example.test/l6",
+            audience="api://l6",
+            create_only=True,
+        )
+    assert transport.reconcile_gets == 2
+    assert transport.value is None
+
+
+def test_delayed_connection_update_is_restored_after_consistency_window():
+    resource_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/account/projects/project/"
+        "connections/remote"
+    )
+    previous = {
+        "authType": "ProjectManagedIdentity",
+        "category": "RemoteTool",
+        "target": "https://old.example/l6",
+        "isSharedToAll": True,
+        "audience": "api://old",
+        "metadata": {"ApiType": "Azure"},
+    }
+
+    class Transport:
+        def __init__(self):
+            self.value = {
+                "id": resource_id,
+                "etag": "old-etag",
+                "properties": previous,
+            }
+            self.put_count = 0
+            self.reconcile_gets = 0
+
+        def __call__(self, method, url, **kwargs):
+            if method == "GET":
+                if self.put_count == 1:
+                    self.reconcile_gets += 1
+                    if self.reconcile_gets == 2:
+                        self.value = {
+                            "id": resource_id,
+                            "etag": "new-etag",
+                            "properties": self.attempted,
+                        }
+                return _Response(200, self.value)
+            if method == "PUT":
+                self.put_count += 1
+                if self.put_count == 1:
+                    self.attempted = kwargs["json"]["properties"]
+                    return _Response(503)
+                self.value = {
+                    "id": resource_id,
+                    "etag": "restored-etag",
+                    "properties": kwargs["json"]["properties"],
+                }
+                return _Response(200, self.value)
+            raise AssertionError(method)
+
+    transport = Transport()
+    with pytest.raises(ProjectConnectionError, match="HTTP 503"):
+        FoundryProjectConnectionClient(
+            subscription_id="sub",
+            resource_group="rg",
+            account_name="account",
+            project_name="project",
+            tenant_id="tenant",
+            credential=SimpleNamespace(
+                tenant_id="tenant",
+                get_token=lambda scope: SimpleNamespace(token="opaque-token"),
+            ),
+            transport=transport,
+            reconciliation_timeout_seconds=1,
+            reconciliation_poll_seconds=0.001,
+        ).upsert_remote_tool(
+            name="remote",
+            target="https://new.example/l6",
+            audience="api://new",
+            expected_etag="old-etag",
+        )
+    assert transport.reconcile_gets == 2
+    assert transport.value["properties"] == previous
+
+
+def test_uncertain_update_requires_continuously_stable_previous_state():
+    resource_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.CognitiveServices/accounts/account/projects/project/"
+        "connections/remote"
+    )
+    previous = {
+        "authType": "ProjectManagedIdentity",
+        "category": "RemoteTool",
+        "target": "https://old.example/l6",
+        "isSharedToAll": True,
+        "audience": "api://old",
+        "metadata": {"ApiType": "Azure"},
+    }
+
+    class Transport:
+        def __init__(self):
+            self.value = {
+                "id": resource_id,
+                "etag": "old-etag",
+                "properties": previous,
+            }
+            self.put_seen = False
+            self.reconcile_gets = 0
+
+        def __call__(self, method, url, **kwargs):
+            if method == "GET":
+                if self.put_seen:
+                    self.reconcile_gets += 1
+                    if self.reconcile_gets == 2:
+                        raise ConnectionError("transient gap")
+                return _Response(200, self.value)
+            if method == "PUT":
+                self.put_seen = True
+                return _Response(503)
+            raise AssertionError(method)
+
+    with pytest.raises(
+        ProjectConnectionError,
+        match="continuously stable",
+    ):
+        FoundryProjectConnectionClient(
+            subscription_id="sub",
+            resource_group="rg",
+            account_name="account",
+            project_name="project",
+            tenant_id="tenant",
+            credential=SimpleNamespace(
+                tenant_id="tenant",
+                get_token=lambda scope: SimpleNamespace(token="opaque-token"),
+            ),
+            transport=Transport(),
+            reconciliation_timeout_seconds=0.01,
+            reconciliation_poll_seconds=0.001,
+        ).upsert_remote_tool(
+            name="remote",
+            target="https://new.example/l6",
+            audience="api://new",
+            expected_etag="old-etag",
+        )

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 import re
 import secrets
 import threading
@@ -98,6 +99,43 @@ class L6OpaqueSignerProvider(Protocol):
 
 
 @dataclass(frozen=True)
+class L6GraphTransportRequest:
+    """The complete, immutable authority context for one Graph request."""
+
+    l6_run_id: str
+    graph_query: l6.L6GraphQuery
+    ontology_scope: l6.ResolvedOntologyScope
+    retrieval_scope: l6.ResolvedRetrievalScope
+    budget: l6.QueryBudgetV1_1
+    access: l6.L6AccessContext
+    authorities: "l6.L6Authorities"
+
+
+class L6DeadlineAwareGraphTransport(Protocol):
+    """Cancellable Graph I/O with bounded connect and read operations.
+
+    Implementations must use finite positive ``connect_timeout_seconds`` and
+    ``read_timeout_seconds`` and clamp every blocking operation to the smaller
+    of its configured timeout and the current time remaining before
+    ``deadline_monotonic``. They must also abort promptly when ``cancellation``
+    is set. The authority does not pretend that abandoning a worker thread
+    cancels transport I/O; cancellation is an explicit transport capability.
+    """
+
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
+
+    def execute_graph(
+        self,
+        request: L6GraphTransportRequest,
+        *,
+        deadline_monotonic: float,
+        remaining_timeout_seconds: float,
+        cancellation: threading.Event,
+    ) -> l6.L6GraphResult: ...
+
+
+@dataclass(frozen=True)
 class _BlobDocument:
     value: dict[str, Any]
     etag: str
@@ -105,6 +143,8 @@ class _BlobDocument:
 
 class AzureBlobL6GraphReceiptAuthority:
     """Multi-process L6 run and one-time Graph receipt authority."""
+
+    uses_configured_transport = True
 
     def __init__(
         self,
@@ -119,6 +159,8 @@ class AzureBlobL6GraphReceiptAuthority:
         clock_milliseconds: Callable[[], int] | None = None,
         monotonic: Callable[[], float] | None = None,
         sleep: Callable[[float], None] | None = None,
+        graph_transport: L6DeadlineAwareGraphTransport | None = None,
+        allow_test_legacy_callback: bool = False,
     ) -> None:
         if not 15 <= lease_seconds <= 60:
             raise ValueError("lease_seconds must be between 15 and 60")
@@ -135,6 +177,27 @@ class AzureBlobL6GraphReceiptAuthority:
         self._clock = clock_milliseconds or (lambda: int(time.time() * 1000))
         self._monotonic = monotonic or time.monotonic
         self._sleep = sleep or time.sleep
+        self._graph_transport = graph_transport
+        self._allow_test_legacy_callback = allow_test_legacy_callback
+        if graph_transport is None and not allow_test_legacy_callback:
+            raise ValueError(
+                "production L6 Blob authority requires a deadline-aware "
+                "cancellable Graph transport"
+            )
+        if graph_transport is not None:
+            for name in ("connect_timeout_seconds", "read_timeout_seconds"):
+                value = getattr(graph_transport, name, None)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise ValueError(
+                        "Graph transport requires finite positive connect/read timeouts"
+                    )
+            if not callable(getattr(graph_transport, "execute_graph", None)):
+                raise TypeError("Graph transport is not deadline-aware and cancellable")
 
     @classmethod
     def from_account_url(
@@ -407,8 +470,24 @@ class AzureBlobL6GraphReceiptAuthority:
         budget: l6.QueryBudgetV1_1,
         access: l6.L6AccessContext,
         authorities: "l6.L6Authorities",
-        execute: Callable[[], l6.L6GraphResult],
+        execute: Callable[[], l6.L6GraphResult] | None = None,
     ) -> l6.L6GraphResult:
+        """Execute through the configured cancellable transport.
+
+        ``execute`` exists only for in-memory unit tests created with
+        ``allow_test_legacy_callback=True``. Production authorities reject it;
+        synchronous callbacks cannot provide cancellation or bounded I/O.
+        """
+
+        if execute is not None and not self._allow_test_legacy_callback:
+            raise TypeError(
+                "production Graph execution requires a deadline-aware "
+                "cancellable transport"
+            )
+        if execute is None and self._graph_transport is None:
+            raise TypeError(
+                "Graph execution requires a deadline-aware cancellable transport"
+            )
         if l6_run_id != graph_query.l6_run_id:
             raise ValueError("Graph execution run identity mismatch")
         l6._validate_graph_query(
@@ -443,38 +522,81 @@ class AzureBlobL6GraphReceiptAuthority:
 
         stop_renewal = threading.Event()
         renewal_failed = threading.Event()
+        cancellation = threading.Event()
 
         def renew() -> None:
-            while not stop_renewal.wait(self._lease_seconds / 3):
+            interval = self._lease_seconds / 3
+            while True:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    cancellation.set()
+                    return
+                if stop_renewal.wait(min(interval, remaining)):
+                    return
+                if self._monotonic() >= deadline:
+                    cancellation.set()
+                    return
                 try:
                     lease.renew()
                 except HttpResponseError:
                     renewal_failed.set()
+                    cancellation.set()
                     return
 
         renewal = threading.Thread(target=renew, daemon=True)
         renewal.start()
-        try:
-            callback_returned = False
+        finished = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        request = L6GraphTransportRequest(
+            l6_run_id=l6_run_id,
+            graph_query=graph_query,
+            ontology_scope=ontology_scope,
+            retrieval_scope=retrieval_scope,
+            budget=budget,
+            access=access,
+            authorities=authorities,
+        )
+
+        def invoke() -> None:
             try:
-                result = execute()
-                callback_returned = True
+                if execute is not None:
+                    outcome["result"] = execute()
+                else:
+                    transport = self._graph_transport
+                    assert transport is not None
+                    remaining = max(0.0, deadline - self._monotonic())
+                    outcome["result"] = transport.execute_graph(
+                        request,
+                        deadline_monotonic=deadline,
+                        remaining_timeout_seconds=remaining,
+                        cancellation=cancellation,
+                    )
+            except BaseException:
+                # Transport details can contain endpoints, tokens, or response
+                # bodies. Only a fixed public failure crosses this boundary.
+                outcome["failed"] = True
             finally:
-                if not callback_returned and not renewal_failed.is_set():
-                    self._fail_owned_run(
-                        blob=blob,
-                        lease=lease,
-                        owner_hash=owner_hash,
-                        l6_run_id=l6_run_id,
-                        fingerprint=fingerprint,
-                    )
-            try:
-                l6._validate_graph_result(graph_query, ontology_scope, result)
-                if self._monotonic() > deadline:
-                    raise TimeoutError(
-                        "L6 Graph execution exceeded sealed runtime budget"
-                    )
-            except (ValueError, TimeoutError):
+                finished.set()
+
+        worker = threading.Thread(target=invoke, daemon=True)
+        worker.start()
+        try:
+            deadline_expired = False
+            while not finished.is_set():
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    deadline_expired = True
+                    break
+                finished.wait(remaining)
+
+            # The deadline wins every race. A result published at or after it
+            # is deliberately ignored and can never transition the run.
+            if self._monotonic() >= deadline:
+                deadline_expired = True
+            if deadline_expired:
+                cancellation.set()
+                stop_renewal.set()
                 if not renewal_failed.is_set():
                     self._fail_owned_run(
                         blob=blob,
@@ -483,10 +605,51 @@ class AzureBlobL6GraphReceiptAuthority:
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
                     )
-                raise
+                raise TimeoutError(
+                    "L6 Graph execution exceeded sealed runtime budget"
+                )
             if renewal_failed.is_set():
                 raise L6BlobConflictError(
                     "durable L6 authority lease was lost during execution"
+                )
+            if outcome.get("failed"):
+                cancellation.set()
+                if not renewal_failed.is_set():
+                    self._fail_owned_run(
+                        blob=blob,
+                        lease=lease,
+                        owner_hash=owner_hash,
+                        l6_run_id=l6_run_id,
+                        fingerprint=fingerprint,
+                    )
+                raise L6BlobAuthorityError("Graph transport execution failed")
+            result = outcome.get("result")
+            try:
+                l6._validate_graph_result(graph_query, ontology_scope, result)
+            except Exception:
+                cancellation.set()
+                if not renewal_failed.is_set():
+                    self._fail_owned_run(
+                        blob=blob,
+                        lease=lease,
+                        owner_hash=owner_hash,
+                        l6_run_id=l6_run_id,
+                        fingerprint=fingerprint,
+                    )
+                raise ValueError("Graph transport returned an invalid result") from None
+            if self._monotonic() >= deadline:
+                cancellation.set()
+                stop_renewal.set()
+                if not renewal_failed.is_set():
+                    self._fail_owned_run(
+                        blob=blob,
+                        lease=lease,
+                        owner_hash=owner_hash,
+                        l6_run_id=l6_run_id,
+                        fingerprint=fingerprint,
+                    )
+                raise TimeoutError(
+                    "L6 Graph execution exceeded sealed runtime budget"
                 )
             latest = self._read(blob, lease=lease)
             if (
@@ -512,6 +675,7 @@ class AzureBlobL6GraphReceiptAuthority:
             )
             return result
         finally:
+            cancellation.set()
             stop_renewal.set()
             renewal.join(timeout=1)
             self._release(lease)

@@ -8,6 +8,7 @@ import json
 from types import MappingProxyType
 from types import SimpleNamespace
 import threading
+import time
 
 import pytest
 from azure.core.exceptions import (
@@ -20,7 +21,9 @@ from azure.core.exceptions import (
 from fabric_kg_builder.agent import l6_integration as l6
 from fabric_kg_builder.agent.l6_blob_authority import (
     AzureBlobL6GraphReceiptAuthority,
+    L6BlobAuthorityError,
     L6BlobConflictError,
+    L6GraphTransportRequest,
     L6BlobSigningError,
     L6OpaqueSigningMetadata,
 )
@@ -28,6 +31,7 @@ from fabric_kg_builder.contracts.base import canonical_sha256
 from tests.contract.test_c0_runtime_contracts import (
     resolved_ontology_scope,
     resolved_retrieval_scope,
+    seal,
 )
 from tests.unit import test_l6_agent_integration as fixtures
 
@@ -69,6 +73,7 @@ class _Lease:
                 or stored.lease_expires <= self._backend.now[0]
             ):
                 raise _http_error(412)
+            self._backend.renewals += 1
             stored.lease_expires = (
                 self._backend.now[0] + self._backend.lease_seconds * 1000
             )
@@ -172,6 +177,7 @@ class _BlobService:
         self.next_lease = 0
         self.lease_seconds = 15
         self.conflict_next_cas = False
+        self.renewals = 0
         self.container = _Container(self)
 
     def get_container_client(self, name):
@@ -249,6 +255,7 @@ def setup():
         signer_provider=provider,
         lease_seconds=15,
         clock_milliseconds=lambda: now[0],
+        allow_test_legacy_callback=True,
     )
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
@@ -281,6 +288,14 @@ def _issue(authority, graph, values):
         access=values["access"],
         authorities=values["authorities"],
     )
+
+
+def _budget_with_runtime(budget, milliseconds):
+    values = budget.model_dump(
+        mode="python", exclude={"budget_hash"}, round_trip=True
+    )
+    values["max_runtime_milliseconds"] = milliseconds
+    return seal(type(budget), "budget_hash", values)
 
 
 def _expectation(receipt):
@@ -346,6 +361,198 @@ def _evidence_capability(authority, graph, values):
     return graph_receipt, output, collection
 
 
+class _CancellableTransport:
+    connect_timeout_seconds = 0.02
+    read_timeout_seconds = 0.02
+
+    def __init__(self, graph, *, late_release=None):
+        self.graph = graph
+        self.late_release = late_release
+        self.entered = threading.Event()
+        self.cancelled = threading.Event()
+        self.returned = threading.Event()
+        self.calls = []
+
+    def execute_graph(
+        self,
+        request,
+        *,
+        deadline_monotonic,
+        remaining_timeout_seconds,
+        cancellation,
+    ):
+        self.calls.append(
+            (
+                request,
+                deadline_monotonic,
+                remaining_timeout_seconds,
+                cancellation,
+            )
+        )
+        self.entered.set()
+        assert cancellation.wait(2)
+        self.cancelled.set()
+        if self.late_release is not None:
+            assert self.late_release.wait(2)
+        self.returned.set()
+        return self.graph
+
+
+def _production_authority(backend, provider, transport):
+    return AzureBlobL6GraphReceiptAuthority(
+        blob_service_client=backend,
+        container_name="authority",
+        signer_provider=provider,
+        lease_seconds=15,
+        graph_transport=transport,
+    )
+
+
+@pytest.mark.unit
+def test_production_construction_requires_cancellable_graph_transport(setup):
+    _, backend, provider, _, _, _ = setup
+    with pytest.raises(ValueError, match="requires a deadline-aware"):
+        AzureBlobL6GraphReceiptAuthority(
+            blob_service_client=backend,
+            container_name="authority",
+            signer_provider=provider,
+            lease_seconds=15,
+        )
+
+
+@pytest.mark.unit
+def test_production_rejects_uncooperative_callback_before_claim(setup):
+    _, backend, provider, _, graph, values = setup
+    authority = _production_authority(backend, provider, _CancellableTransport(graph))
+
+    with pytest.raises(TypeError, match="deadline-aware cancellable transport"):
+        authority.execute_graph_once(**values, execute=lambda: graph)
+
+    assert backend.blobs == {}
+
+
+@pytest.mark.unit
+def test_production_construction_rejects_unbounded_transport(setup):
+    _, backend, provider, _, _, _ = setup
+
+    class UnboundedTransport:
+        def execute_graph(self, request, **kwargs):
+            del request, kwargs
+
+    with pytest.raises(ValueError, match="finite positive connect/read timeouts"):
+        _production_authority(backend, provider, UnboundedTransport())
+
+
+@pytest.mark.unit
+def test_deadline_cancels_transport_fails_run_and_ignores_late_result(setup):
+    _, backend, provider, _, graph, values = setup
+    late_release = threading.Event()
+    transport = _CancellableTransport(graph, late_release=late_release)
+    authority = _production_authority(backend, provider, transport)
+    values = {
+        **values,
+        "budget": _budget_with_runtime(values["budget"], 60),
+    }
+
+    with pytest.raises(TimeoutError, match="sealed runtime budget"):
+        authority.execute_graph_once(**values)
+
+    assert transport.cancelled.wait(1)
+    request, deadline, remaining, cancellation = transport.calls[0]
+    assert isinstance(request, L6GraphTransportRequest)
+    assert request == L6GraphTransportRequest(**values)
+    assert 0 < remaining <= 0.06
+    assert deadline > 0
+    assert cancellation.is_set()
+    run_blob = authority._run_blob(values["l6_run_id"])
+    persisted = json.loads(run_blob.download_blob().readall())
+    assert persisted["status"] == "failed"
+    assert persisted.get("owner_hash") is None
+    assert backend.blobs[run_blob.name].lease_id is None
+    with pytest.raises(ValueError, match="exact completed run"):
+        authority.issue(
+            graph_query=values["graph_query"],
+            graph_result=graph,
+            ontology_scope=values["ontology_scope"],
+            retrieval_scope=values["retrieval_scope"],
+            budget=values["budget"],
+            access=values["access"],
+            authorities=values["authorities"],
+        )
+
+    late_release.set()
+    assert transport.returned.wait(1)
+    assert json.loads(run_blob.download_blob().readall())["status"] == "failed"
+
+
+@pytest.mark.unit
+def test_lease_renewal_stops_at_graph_deadline(setup):
+    _, backend, provider, _, graph, values = setup
+    transport = _CancellableTransport(graph)
+    authority = _production_authority(backend, provider, transport)
+    authority._lease_seconds = 0.03
+    values = {
+        **values,
+        "budget": _budget_with_runtime(values["budget"], 75),
+    }
+
+    with pytest.raises(TimeoutError):
+        authority.execute_graph_once(**values)
+
+    assert backend.renewals > 0
+    renewals_at_deadline = backend.renewals
+    time.sleep(0.05)
+    assert backend.renewals == renewals_at_deadline
+
+
+@pytest.mark.unit
+def test_deadline_failure_notifies_waiter_via_durable_terminal_state(setup):
+    _, backend, provider, _, graph, values = setup
+    transport = _CancellableTransport(graph)
+    first = _production_authority(backend, provider, transport)
+    second = _production_authority(backend, provider, transport)
+    values = {
+        **values,
+        "budget": _budget_with_runtime(values["budget"], 100),
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(first.execute_graph_once, **values)
+        assert transport.entered.wait(1)
+        time.sleep(0.03)
+        waiter = pool.submit(second.execute_graph_once, **values)
+        with pytest.raises(TimeoutError):
+            owner.result(timeout=1)
+        with pytest.raises(ValueError, match="previously failed"):
+            waiter.result(timeout=1)
+
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.unit
+def test_transport_error_is_safely_normalized_and_persisted(setup):
+    _, backend, provider, _, _, values = setup
+
+    class FailingTransport:
+        connect_timeout_seconds = 0.01
+        read_timeout_seconds = 0.01
+
+        def execute_graph(self, request, **kwargs):
+            del request, kwargs
+            raise RuntimeError("secret endpoint and response body")
+
+    authority = _production_authority(backend, provider, FailingTransport())
+    with pytest.raises(L6BlobAuthorityError) as caught:
+        authority.execute_graph_once(**values)
+
+    assert str(caught.value) == "Graph transport execution failed"
+    assert caught.value.__cause__ is None
+    run = json.loads(
+        authority._run_blob(values["l6_run_id"]).download_blob().readall()
+    )
+    assert run["status"] == "failed"
+
+
 @pytest.mark.unit
 def test_concurrent_authorities_claim_and_execute_once(setup):
     _, backend, provider, first, graph, values = setup
@@ -354,6 +561,7 @@ def test_concurrent_authorities_claim_and_execute_once(setup):
         container_name="authority",
         signer_provider=provider,
         lease_seconds=15,
+        allow_test_legacy_callback=True,
     )
     entered = threading.Event()
     release = threading.Event()
@@ -438,6 +646,7 @@ def test_receipt_consume_is_atomic_and_one_time(setup):
         container_name="authority",
         signer_provider=provider,
         lease_seconds=15,
+        allow_test_legacy_callback=True,
     )
     claim = "b" * 64
     consumed = authority.verify_and_consume(
@@ -464,6 +673,7 @@ def test_issue_and_verify_fail_closed_without_signer(setup):
         container_name="authority",
         signer_provider=None,
         lease_seconds=15,
+        allow_test_legacy_callback=True,
     )
     unsigned.execute_graph_once(**values, execute=lambda: graph)
     with pytest.raises(L6BlobSigningError, match="not configured"):
@@ -578,6 +788,7 @@ def test_evidence_issue_and_consume_are_atomic_across_authorities(setup):
                 signer_provider=provider,
                 lease_seconds=15,
                 clock_milliseconds=lambda: now[0],
+                allow_test_legacy_callback=True,
             )
             for _ in range(3)
         ],

@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import importlib
 import json
+import os
+import secrets
 import time
 from typing import Any, Mapping, Protocol
 from urllib.parse import urljoin, urlsplit
 
-from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import (
+    HttpResponseError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 from requests import RequestException
 
 from fabric_kg_builder.agent.l6_integration import L6CanonicalAgentDefinition
 from fabric_kg_builder.agent.l7_deployment import (
     L7DeploymentAction,
+    L7ConnectionOwnershipReceipt,
     L7DeploymentConfig,
     L7DeploymentError,
     L7FabricItemTarget,
     L7ObservedIdentity,
+    L7OwnershipAuthorityObservation,
+    L7RemoteReadinessObservation,
     L7ResourceReadback,
     L7ResourceResult,
 )
@@ -73,11 +84,58 @@ class L7FoundryAgentBackend(Protocol):
         expected_etag: str,
     ) -> L7ResourceReadback: ...
 
+    def rollback_pending(
+        self,
+        *,
+        config: L7DeploymentConfig,
+        definition: L6CanonicalAgentDefinition,
+    ) -> None: ...
+
+
+class L7ConnectionOwnershipAuthority(Protocol):
+    def observe(self) -> L7OwnershipAuthorityObservation: ...
+
+    def read_verified(
+        self,
+        *,
+        connection_id: str,
+    ) -> L7ConnectionOwnershipReceipt | None: ...
+
+    def issue_attempt_created(
+        self,
+        *,
+        connection_id: str,
+        connection_etag: str,
+        workspace_id: str,
+        data_agent_id: str,
+    ) -> L7ConnectionOwnershipReceipt: ...
+
+    def delete_attempt_created(
+        self,
+        *,
+        connection_id: str,
+        connection_etag: str,
+    ) -> None: ...
+
+
+def _is_control_flow(exc: BaseException) -> bool:
+    return isinstance(
+        exc,
+        (KeyboardInterrupt, SystemExit, asyncio.CancelledError),
+    )
+
 
 class SDKL7FoundryAgentBackend:
     """Versioned Foundry prompt-agent adapter bound to canonical L6 OpenAPI."""
 
-    def __init__(self, *, project_endpoint: str, credential: Any) -> None:
+    def __init__(
+        self,
+        *,
+        project_endpoint: str,
+        credential: Any,
+        reconciliation_timeout_seconds: float = 10.0,
+        reconciliation_poll_seconds: float = 0.25,
+    ) -> None:
         try:
             from azure.ai.projects import AIProjectClient
         except ImportError as exc:
@@ -89,6 +147,15 @@ class SDKL7FoundryAgentBackend:
             credential=credential,
             allow_preview=True,
         )
+        if (
+            reconciliation_timeout_seconds <= 0
+            or reconciliation_poll_seconds <= 0
+            or reconciliation_poll_seconds > reconciliation_timeout_seconds
+        ):
+            raise ValueError("Foundry reconciliation timing is invalid")
+        self._reconciliation_timeout = reconciliation_timeout_seconds
+        self._reconciliation_poll = reconciliation_poll_seconds
+        self._pending_attempts: dict[str, tuple[str | None, str]] = {}
 
     @staticmethod
     def _value(value: Any, key: str, default: Any = "") -> Any:
@@ -174,7 +241,9 @@ class SDKL7FoundryAgentBackend:
             openapi=OpenApiFunctionDefinition(
                 name="fabric_kg_canonical_l6",
                 spec=build_l6_openapi_spec(
-                    endpoint=config.remote_tool_endpoint
+                    endpoint=config.remote_tool_endpoint,
+                    max_body_bytes=config.remote_tool_max_body_bytes,
+                    timeout_seconds=config.remote_tool_timeout_seconds,
                 ),
                 description=(
                     "Canonical L6 evidence tools with strict schemas and zero synthesis."
@@ -291,6 +360,15 @@ class SDKL7FoundryAgentBackend:
             definition=definition,
         )
         desired_hash = canonical_sha256(self._plain(prompt_definition))
+        attempt_id = "op-sha256:" + secrets.token_hex(32)
+        pending_attempts = getattr(self, "_pending_attempts", None)
+        if pending_attempts is None:
+            pending_attempts = {}
+            self._pending_attempts = pending_attempts
+        pending_attempts[definition.agent_name] = (
+            current.etag,
+            attempt_id,
+        )
         try:
             created = self._project.agents.create_version(
                 definition.agent_name,
@@ -299,14 +377,35 @@ class SDKL7FoundryAgentBackend:
                     "l6_definition_hash": definition.definition_hash,
                     "l6_instructions_hash": str(definition["instructions_hash"]),
                     "l6_toolset_version": str(definition["toolset_version"]),
+                    "l7_attempt_id": attempt_id,
                 },
                 description="Fabric KG canonical L6 evidence-first agent",
             )
-        except HttpResponseError as exc:
-            raise L7DeploymentError("Foundry create_version failed") from exc
-        version = str(self._value(created, "version") or "")
-        if not version:
-            raise L7DeploymentError("Foundry create_version omitted version identity")
+            version = str(self._value(created, "version") or "")
+            if not version:
+                raise L7DeploymentError(
+                    "Foundry create_version omitted version identity"
+                )
+        except BaseException as exc:
+            try:
+                self._reconcile_uncertain_version(
+                    config=config,
+                    definition=definition,
+                    previous_etag=current.etag,
+                    attempt_id=attempt_id,
+                )
+            except BaseException as rollback_exc:
+                exc.add_note(
+                    "uncertain Foundry version reconciliation failed: "
+                    f"{type(rollback_exc).__name__}"
+                )
+            else:
+                pending_attempts.pop(definition.agent_name, None)
+            if _is_control_flow(exc):
+                raise
+            raise L7DeploymentError(
+                "Foundry create_version outcome was reconciled"
+            ) from exc
         try:
             readback = self.get(
                 project_resource_id=config.foundry_project_resource_id,
@@ -316,22 +415,157 @@ class SDKL7FoundryAgentBackend:
                 readback.etag != version
                 or readback.properties_hash != desired_hash
                 or readback.definition_hash != definition.definition_hash
+                or not self._version_has_attempt(
+                    agent_name=definition.agent_name,
+                    agent_version=version,
+                    attempt_id=attempt_id,
+                )
             ):
                 raise L7DeploymentError("Foundry agent exact readback failed")
-        except (L7DeploymentError, HttpResponseError, TypeError, ValueError) as exc:
+        except BaseException as exc:
             try:
                 self._project.agents.delete_version(
                     agent_name=definition.agent_name,
                     agent_version=version,
                 )
-            except HttpResponseError as rollback_exc:
-                raise L7DeploymentError(
-                    "Foundry agent readback and conditional rollback failed"
-                ) from rollback_exc
+            except BaseException as rollback_exc:
+                exc.add_note(
+                    "conditional Foundry version rollback also failed: "
+                    f"{type(rollback_exc).__name__}"
+                )
+            else:
+                pending_attempts.pop(definition.agent_name, None)
+            if _is_control_flow(exc):
+                raise
+            if isinstance(exc, L7DeploymentError):
+                raise
             raise L7DeploymentError(
                 "Foundry agent readback failed; created version was rolled back"
             ) from exc
+        pending_attempts.pop(definition.agent_name, None)
         return readback
+
+    def _reconcile_uncertain_version(
+        self,
+        *,
+        config: L7DeploymentConfig,
+        definition: L6CanonicalAgentDefinition,
+        previous_etag: str | None,
+        attempt_id: str,
+    ) -> None:
+        del config
+        list_versions = getattr(self._project.agents, "list_versions", None)
+        if not callable(list_versions):
+            raise L7DeploymentError(
+                "Foundry SDK cannot reconcile uncertain version ownership"
+            )
+        deadline = time.monotonic() + getattr(
+            self,
+            "_reconciliation_timeout",
+            10.0,
+        )
+        matches: tuple[str, ...] = ()
+        latest_version = ""
+        last_error: BaseException | None = None
+        while time.monotonic() < deadline:
+            try:
+                versions = tuple(list_versions(agent_name=definition.agent_name))
+                matches = tuple(
+                    str(self._value(item, "version") or "")
+                    for item in versions
+                    if isinstance(self._value(item, "metadata", {}), Mapping)
+                    and self._value(item, "metadata", {}).get("l7_attempt_id")
+                    == attempt_id
+                )
+                matches = tuple(version for version in matches if version)
+                if not matches:
+                    _, latest_version = self._latest(definition.agent_name)
+                last_error = None
+            except (
+                HttpResponseError,
+                ServiceRequestError,
+                ServiceResponseError,
+                ConnectionError,
+                TimeoutError,
+            ) as exc:
+                last_error = exc
+            if matches:
+                break
+            time.sleep(
+                min(
+                    getattr(self, "_reconciliation_poll", 0.25),
+                    max(0.0, deadline - time.monotonic()),
+                )
+            )
+        if last_error is not None:
+            raise L7DeploymentError(
+                "uncertain Foundry version list failed throughout "
+                "the reconciliation window"
+            ) from last_error
+        if len(matches) > 1:
+            raise L7DeploymentError(
+                "uncertain Foundry attempt identity is ambiguous"
+            )
+        if not matches:
+            if latest_version == (previous_etag or "") or not latest_version:
+                return
+            raise L7DeploymentError(
+                "uncertain Foundry attempt version was not found"
+            )
+        try:
+            self._project.agents.delete_version(
+                agent_name=definition.agent_name,
+                agent_version=matches[0],
+            )
+        except HttpResponseError as exc:
+            raise L7DeploymentError(
+                "uncertain Foundry version rollback failed"
+            ) from exc
+
+    def _version_has_attempt(
+        self,
+        *,
+        agent_name: str,
+        agent_version: str,
+        attempt_id: str,
+    ) -> bool:
+        get_version = getattr(self._project.agents, "get_version", None)
+        if not callable(get_version):
+            return False
+        try:
+            detail = get_version(
+                agent_name=agent_name,
+                agent_version=agent_version,
+            )
+        except HttpResponseError as exc:
+            raise L7DeploymentError(
+                "Foundry attempt metadata readback failed"
+            ) from exc
+        metadata = self._value(detail, "metadata", {})
+        return bool(
+            isinstance(metadata, Mapping)
+            and metadata.get("l7_attempt_id") == attempt_id
+        )
+
+    def rollback_pending(
+        self,
+        *,
+        config: L7DeploymentConfig,
+        definition: L6CanonicalAgentDefinition,
+    ) -> None:
+        pending = getattr(self, "_pending_attempts", {}).get(
+            definition.agent_name
+        )
+        if pending is None:
+            return
+        previous_etag, attempt_id = pending
+        self._reconcile_uncertain_version(
+            config=config,
+            definition=definition,
+            previous_etag=previous_etag,
+            attempt_id=attempt_id,
+        )
+        self._pending_attempts.pop(definition.agent_name, None)
 
     def delete_created(
         self,
@@ -395,8 +629,10 @@ class AzureL7ReadOnlyProbe:
         *,
         config: L7DeploymentConfig,
         credential: Any,
+        remote_probe_credential: Any,
         connection_client: FoundryProjectConnectionClient,
         foundry_backend: L7FoundryAgentBackend,
+        ownership_authority: L7ConnectionOwnershipAuthority,
         session: Any | None = None,
     ) -> None:
         if session is None:
@@ -405,12 +641,36 @@ class AzureL7ReadOnlyProbe:
             session = requests.Session()
         self._config = config
         self._credential = credential
+        self._remote_probe_credential = remote_probe_credential
         self._connections = connection_client
         self._foundry = foundry_backend
+        self._ownership = ownership_authority
         self._session = session
 
+    def _token(self, scope: str) -> str:
+        try:
+            token = self._credential.get_token(scope).token
+        except (HttpResponseError, ServiceRequestError, TimeoutError) as exc:
+            raise L7DeploymentError("Azure credential token acquisition failed") from exc
+        if not token:
+            raise L7DeploymentError("Azure credential returned an empty token")
+        return token
+
+    def _remote_probe_token(self, scope: str) -> str:
+        try:
+            token = self._remote_probe_credential.get_token(scope).token
+        except (HttpResponseError, ServiceRequestError, TimeoutError) as exc:
+            raise L7DeploymentError(
+                "Foundry caller readiness token acquisition failed"
+            ) from exc
+        if not token:
+            raise L7DeploymentError(
+                "Foundry caller readiness credential returned an empty token"
+            )
+        return token
+
     def current_identity(self) -> L7ObservedIdentity:
-        token = self._credential.get_token(_ARM_SCOPE).token
+        token = self._token(_ARM_SCOPE)
         claims = _decode_access_token_claims(token)
         tenant_id = str(claims.get("tid") or "")
         principal_id = str(claims.get("oid") or claims.get("sub") or "")
@@ -423,6 +683,127 @@ class AzureL7ReadOnlyProbe:
             principal_id=principal_id,
         )
 
+    def probe_remote_readiness(
+        self,
+        *,
+        config: L7DeploymentConfig,
+        definition: L6CanonicalAgentDefinition,
+    ) -> L7RemoteReadinessObservation:
+        scope = config.remote_tool_audience.rstrip("/") + "/.default"
+        token = self._remote_probe_token(scope)
+        claims = _decode_access_token_claims(token)
+        tenant_id = str(claims.get("tid") or "")
+        caller_object_id = str(claims.get("oid") or "")
+        roles = claims.get("roles") or ()
+        if (
+            tenant_id.casefold() != config.tenant_id.casefold()
+            or caller_object_id
+            not in config.remote_tool_allowed_caller_object_ids
+            or not isinstance(roles, (list, tuple))
+            or config.remote_tool_required_app_role not in roles
+        ):
+            raise L7DeploymentError(
+                "RemoteTool probe credential lacks exact tenant/caller/app role"
+            )
+        try:
+            response = self._session.request(
+                "GET",
+                config.remote_tool_endpoint.rstrip("/") + "/ready",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=(5, 15),
+            )
+        except RequestException as exc:
+            raise L7DeploymentError(
+                "authenticated RemoteTool readiness request failed"
+            ) from exc
+        if response.status_code != 200:
+            raise L7DeploymentError(
+                f"authenticated RemoteTool readiness failed with HTTP "
+                f"{response.status_code}"
+            )
+        try:
+            observation = L7RemoteReadinessObservation.model_validate_json(
+                response.text
+            )
+        except (ValueError, TypeError) as exc:
+            raise L7DeploymentError(
+                "RemoteTool readiness response is invalid"
+            ) from exc
+        from fabric_kg_builder.agent.l7_remote_tool import build_l6_openapi_spec
+
+        expected_schema_hash = canonical_sha256(
+            build_l6_openapi_spec(
+                endpoint=config.remote_tool_endpoint,
+                max_body_bytes=config.remote_tool_max_body_bytes,
+                timeout_seconds=config.remote_tool_timeout_seconds,
+            )
+        )
+        if (
+            observation.endpoint != config.remote_tool_endpoint
+            or observation.tenant_id.casefold() != config.tenant_id.casefold()
+            or observation.audience != config.remote_tool_audience
+            or observation.caller_object_id != caller_object_id
+            or observation.app_role != config.remote_tool_required_app_role
+            or observation.openapi_schema_hash != expected_schema_hash
+            or observation.l6_definition_hash != definition.definition_hash
+            or observation.authority_backend != "azure_blob"
+            or observation.authority_version
+            != config.l6_authority_backend_version
+        ):
+            raise L7DeploymentError(
+                "RemoteTool readiness authority differs from deployment config"
+            )
+        return observation
+
+    def probe_ownership_authority(
+        self,
+        *,
+        config: L7DeploymentConfig,
+    ) -> L7OwnershipAuthorityObservation:
+        try:
+            observation = self._ownership.observe()
+        except (HttpResponseError, ServiceRequestError, TypeError, ValueError) as exc:
+            raise L7DeploymentError(
+                "Fabric connection ownership authority probe failed"
+            ) from exc
+        if (
+            observation.authority_id
+            != config.fabric_connection_ownership_authority_id
+        ):
+            raise L7DeploymentError(
+                "Fabric connection ownership authority mismatch"
+            )
+        return observation
+
+    def get_fabric_connection_ownership(
+        self,
+        *,
+        config: L7DeploymentConfig,
+        readback: L7ResourceReadback,
+        data_agent_id: str,
+    ) -> L7ConnectionOwnershipReceipt | None:
+        if not readback.exists:
+            return None
+        try:
+            receipt = self._ownership.read_verified(
+                connection_id=readback.stable_id
+            )
+        except (HttpResponseError, ServiceRequestError, TypeError, ValueError) as exc:
+            raise L7DeploymentError(
+                "Fabric connection ownership receipt read failed"
+            ) from exc
+        if receipt is None:
+            return None
+        if (
+            receipt.connection_etag != readback.etag
+            or receipt.workspace_id != config.fabric_workspace_id
+            or receipt.data_agent_id != data_agent_id
+        ):
+            raise L7DeploymentError(
+                "Fabric connection ownership receipt is stale or mismatched"
+            )
+        return receipt
+
     def _fabric_request(
         self,
         method: str,
@@ -430,7 +811,7 @@ class AzureL7ReadOnlyProbe:
         *,
         json_body: dict[str, Any] | None = None,
     ) -> Any:
-        token = self._credential.get_token(_FABRIC_SCOPE).token
+        token = self._token(_FABRIC_SCOPE)
         url = (
             path_or_url
             if path_or_url.startswith("https://")
@@ -572,17 +953,16 @@ class AzureL7ReadOnlyProbe:
         ):
             raise L7DeploymentError("Fabric item stable ID readback mismatch")
         definition_hash = None
-        if item.definition_hash:
-            try:
-                definition_body = self._fabric_definition(
-                    workspace_id=workspace_id,
-                    item_id=item.item_id,
-                )
-            except (TypeError, ValueError) as exc:
-                raise L7DeploymentError(
-                    "Fabric item definition readback returned invalid JSON"
-                ) from exc
-            definition_hash = canonical_sha256(definition_body)
+        try:
+            definition_body = self._fabric_definition(
+                workspace_id=workspace_id,
+                item_id=item.item_id,
+            )
+        except (TypeError, ValueError) as exc:
+            raise L7DeploymentError(
+                "Fabric item definition readback returned invalid JSON"
+            ) from exc
+        definition_hash = canonical_sha256(definition_body)
         etag = str(
             response.headers.get("ETag")
             or response.headers.get("etag")
@@ -635,10 +1015,20 @@ class AzureL7ReadOnlyProbe:
         project_resource_id: str,
         agent_name: str,
     ) -> L7ResourceReadback:
-        return self._foundry.get(
-            project_resource_id=project_resource_id,
-            agent_name=agent_name,
-        )
+        try:
+            return self._foundry.get(
+                project_resource_id=project_resource_id,
+                agent_name=agent_name,
+            )
+        except (
+            HttpResponseError,
+            ServiceRequestError,
+            ConnectionError,
+            TimeoutError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise L7DeploymentError("Foundry agent GET failed") from exc
 
     def desired_agent_hash(
         self,
@@ -646,10 +1036,22 @@ class AzureL7ReadOnlyProbe:
         config: L7DeploymentConfig,
         definition: L6CanonicalAgentDefinition,
     ) -> str:
-        return self._foundry.desired_hash(
-            config=config,
-            definition=definition,
-        )
+        try:
+            return self._foundry.desired_hash(
+                config=config,
+                definition=definition,
+            )
+        except (
+            HttpResponseError,
+            ServiceRequestError,
+            ConnectionError,
+            TimeoutError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise L7DeploymentError(
+                "Foundry desired agent definition failed"
+            ) from exc
 
 
 class AzureL7MutationAdapter:
@@ -661,16 +1063,21 @@ class AzureL7MutationAdapter:
         probe: AzureL7ReadOnlyProbe,
         connection_client: FoundryProjectConnectionClient,
         foundry_backend: L7FoundryAgentBackend,
+        ownership_authority: L7ConnectionOwnershipAuthority,
     ) -> None:
         self._probe = probe
         self._connections = connection_client
         self._foundry = foundry_backend
+        self._ownership = ownership_authority
         self._definitions: dict[str, L6CanonicalAgentDefinition] = {}
+        self._started_connections: dict[str, Any] = {}
 
     @staticmethod
     def _result(
         action: L7DeploymentAction,
         readback: L7ResourceReadback,
+        *,
+        ownership_receipt_hash: str | None = None,
     ) -> L7ResourceResult:
         if action.action in {"adopt", "verify"}:
             performed = "adopted" if action.action == "adopt" else "verified"
@@ -682,6 +1089,7 @@ class AzureL7MutationAdapter:
             before_etag=action.expected_etag,
             after_etag=readback.etag,
             readback_hash=canonical_sha256(readback.model_dump(mode="json")),
+            ownership_receipt_hash=ownership_receipt_hash,
             rollback_status=(
                 "pending" if action.rollback.action != "none" else "not_required"
             ),
@@ -726,7 +1134,25 @@ class AzureL7MutationAdapter:
             if action.action == "adopt":
                 readback = self._probe.get_connection(resource_id=action.stable_id)
                 self._require_approved_readback(action, readback)
-                return self._result(action, readback)
+                ownership_receipt_hash = None
+                if action.resource_kind == "fabric_connection":
+                    receipt = self._ownership.read_verified(
+                        connection_id=action.stable_id
+                    )
+                    if (
+                        receipt is None
+                        or receipt.connection_etag != readback.etag
+                    ):
+                        raise L7DeploymentError(
+                            "Fabric connection ownership changed after preflight"
+                        )
+                    ownership_receipt_hash = receipt.receipt_hash
+                return self._result(
+                    action,
+                    readback,
+                    ownership_receipt_hash=ownership_receipt_hash,
+                )
+            ownership_receipt = None
             try:
                 if action.resource_kind == "fabric_connection":
                     data_agent = next(
@@ -749,10 +1175,59 @@ class AzureL7MutationAdapter:
                         expected_etag=action.expected_etag,
                         create_only=action.action == "create",
                     )
-            except ProjectConnectionError as exc:
+            except (
+                ProjectConnectionError,
+                HttpResponseError,
+                ServiceRequestError,
+                ConnectionError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 raise L7DeploymentError(
                     "Foundry connection mutation failed"
                 ) from exc
+            self._started_connections[action.stable_id] = connection
+            if (
+                action.resource_kind == "fabric_connection"
+                and action.action == "create"
+            ):
+                data_agent = next(
+                    item
+                    for item in config.fabric_items
+                    if item.item_type == "DataAgent"
+                )
+                try:
+                    ownership_receipt = self._ownership.issue_attempt_created(
+                        connection_id=connection.resource_id,
+                        connection_etag=connection.etag,
+                        workspace_id=config.fabric_workspace_id,
+                        data_agent_id=data_agent.item_id,
+                    )
+                except BaseException as ownership_exc:
+                    rollback_succeeded = False
+                    try:
+                        self._connections.delete_if_attempt_owned(
+                            name=config.fabric_connection_name,
+                            attempt_owned=True,
+                            expected_etag=connection.etag,
+                        )
+                        rollback_succeeded = True
+                    except BaseException as rollback_exc:
+                        ownership_exc.add_note(
+                            "conditional connection rollback also failed: "
+                            f"{type(rollback_exc).__name__}"
+                        )
+                    if rollback_succeeded:
+                        self._started_connections.pop(
+                            action.stable_id,
+                            None,
+                        )
+                    if _is_control_flow(ownership_exc):
+                        raise
+                    raise L7DeploymentError(
+                        "ownership receipt issuance failed"
+                    ) from ownership_exc
             readback = L7ResourceReadback(
                 resource_kind="foundry_connection",
                 stable_id=connection.resource_id,
@@ -761,22 +1236,44 @@ class AzureL7MutationAdapter:
                 resource_type=connection.category,
                 properties_hash=connection.properties_hash,
             )
-            return self._result(action, readback)
+            result = self._result(
+                action,
+                readback,
+                ownership_receipt_hash=(
+                    ownership_receipt.receipt_hash
+                    if ownership_receipt is not None
+                    else None
+                ),
+            )
+            self._started_connections.pop(action.stable_id, None)
+            return result
         if action.resource_kind == "foundry_agent":
             self._definitions[action.stable_id] = definition
-            if action.action == "adopt":
-                readback = self._probe.get_agent(
-                    project_resource_id=config.foundry_project_resource_id,
-                    agent_name=definition.agent_name,
-                )
-                self._require_approved_readback(action, readback)
-            else:
-                readback = self._foundry.upsert(
-                    config=config,
-                    definition=definition,
-                    expected_etag=action.expected_etag,
-                    create_only=action.action == "create",
-                )
+            try:
+                if action.action == "adopt":
+                    readback = self._probe.get_agent(
+                        project_resource_id=config.foundry_project_resource_id,
+                        agent_name=definition.agent_name,
+                    )
+                    self._require_approved_readback(action, readback)
+                else:
+                    readback = self._foundry.upsert(
+                        config=config,
+                        definition=definition,
+                        expected_etag=action.expected_etag,
+                        create_only=action.action == "create",
+                    )
+            except (
+                HttpResponseError,
+                ServiceRequestError,
+                ConnectionError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise L7DeploymentError(
+                    "Foundry agent mutation boundary failed"
+                ) from exc
             if readback.properties_hash != action.desired_hash:
                 raise L7DeploymentError("Foundry agent exact readback mismatch")
             return self._result(action, readback)
@@ -803,13 +1300,18 @@ class AzureL7MutationAdapter:
                         attempt_owned=True,
                         expected_etag=result.after_etag or "",
                     )
+                    if action.resource_kind == "fabric_connection":
+                        self._ownership.delete_attempt_created(
+                            connection_id=action.stable_id,
+                            connection_etag=result.after_etag or "",
+                        )
                 else:
                     self._connections.restore_if_attempt_owned(
                         name=name,
                         attempt_owned=True,
                         expected_etag=result.after_etag or "",
                     )
-            except ProjectConnectionError as exc:
+            except (ProjectConnectionError, L7DeploymentError) as exc:
                 raise L7DeploymentError(
                     "Foundry connection conditional rollback failed"
                 ) from exc
@@ -819,25 +1321,146 @@ class AzureL7MutationAdapter:
                 raise L7DeploymentError(
                     "Foundry rollback lacks canonical attempt authority"
                 )
-            if action.action == "create":
-                self._foundry.delete_created(
-                    config=config,
-                    definition=definition,
-                    expected_etag=result.after_etag or "",
-                )
-            else:
-                self._foundry.restore_updated(
-                    config=config,
-                    definition=definition,
-                    expected_etag=result.after_etag or "",
-                )
+            try:
+                if action.action == "create":
+                    self._foundry.delete_created(
+                        config=config,
+                        definition=definition,
+                        expected_etag=result.after_etag or "",
+                    )
+                else:
+                    self._foundry.restore_updated(
+                        config=config,
+                        definition=definition,
+                        expected_etag=result.after_etag or "",
+                    )
+            except (
+                HttpResponseError,
+                ServiceRequestError,
+                ConnectionError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise L7DeploymentError(
+                    "Foundry agent conditional rollback failed"
+                ) from exc
         return result.model_copy(update={"rollback_status": "succeeded"})
+
+    def verify_postconditions(
+        self,
+        *,
+        config: L7DeploymentConfig,
+        definition: L6CanonicalAgentDefinition,
+        results: tuple[L7ResourceResult, ...],
+    ) -> None:
+        del definition
+        connection_id = config.connection_resource_id(
+            config.fabric_connection_name
+        )
+        matching = tuple(
+            result for result in results if result.stable_id == connection_id
+        )
+        if len(matching) != 1:
+            raise L7DeploymentError(
+                "Fabric connection result is missing or ambiguous"
+            )
+        try:
+            receipt = self._ownership.read_verified(
+                connection_id=connection_id
+            )
+        except (
+            HttpResponseError,
+            ServiceRequestError,
+            ConnectionError,
+            TimeoutError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise L7DeploymentError(
+                "ownership postcondition read failed"
+            ) from exc
+        data_agent = next(
+            item for item in config.fabric_items if item.item_type == "DataAgent"
+        )
+        if (
+            receipt is None
+            or receipt.connection_etag != matching[0].after_etag
+            or receipt.receipt_hash
+            != matching[0].ownership_receipt_hash
+            or receipt.workspace_id != config.fabric_workspace_id
+            or receipt.data_agent_id != data_agent.item_id
+        ):
+            raise L7DeploymentError(
+                "Fabric connection ownership postcondition failed"
+            )
+
+    def rollback_started(
+        self,
+        action: L7DeploymentAction,
+        *,
+        config: L7DeploymentConfig,
+        definition: L6CanonicalAgentDefinition,
+    ) -> None:
+        if action.resource_kind in {
+            "fabric_connection",
+            "remote_tool_connection",
+        }:
+            name = action.stable_id.rsplit("/", 1)[-1]
+            started = self._started_connections.get(action.stable_id)
+            try:
+                if started is not None:
+                    if action.action == "create":
+                        self._connections.delete_if_attempt_owned(
+                            name=name,
+                            attempt_owned=True,
+                            expected_etag=started.etag,
+                        )
+                        if action.resource_kind == "fabric_connection":
+                            self._ownership.delete_attempt_created(
+                                connection_id=action.stable_id,
+                                connection_etag=started.etag,
+                            )
+                    else:
+                        self._connections.restore_if_attempt_owned(
+                            name=name,
+                            attempt_owned=True,
+                            expected_etag=started.etag,
+                        )
+                    self._started_connections.pop(action.stable_id, None)
+                else:
+                    self._connections.rollback_pending(name)
+            except ProjectConnectionError as exc:
+                raise L7DeploymentError(
+                    "started connection mutation reconciliation failed"
+                ) from exc
+            return
+        if action.resource_kind == "foundry_agent":
+            try:
+                self._foundry.rollback_pending(
+                    config=config,
+                    definition=definition,
+                )
+            except (
+                HttpResponseError,
+                ServiceRequestError,
+                ServiceResponseError,
+                ConnectionError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise L7DeploymentError(
+                    "started Foundry mutation reconciliation failed"
+                ) from exc
 
 
 def build_azure_l7_adapters(
     *,
     config: L7DeploymentConfig,
     foundry_backend: L7FoundryAgentBackend,
+    ownership_authority: L7ConnectionOwnershipAuthority,
+    remote_probe_credential: Any,
     credential: Any | None = None,
     request: Any | None = None,
     session: Any | None = None,
@@ -860,14 +1483,17 @@ def build_azure_l7_adapters(
     probe = AzureL7ReadOnlyProbe(
         config=config,
         credential=credential,
+        remote_probe_credential=remote_probe_credential,
         connection_client=connections,
         foundry_backend=foundry_backend,
+        ownership_authority=ownership_authority,
         session=session,
     )
     return probe, AzureL7MutationAdapter(
         probe=probe,
         connection_client=connections,
         foundry_backend=foundry_backend,
+        ownership_authority=ownership_authority,
     )
 
 
@@ -883,8 +1509,53 @@ def build_default_azure_l7_adapters(
         project_endpoint=config.foundry_project_endpoint,
         credential=credential,
     )
+    remote_factory_path = os.environ.get(
+        "FABRIC_KG_L7_REMOTE_PROBE_CREDENTIAL_FACTORY",
+        "",
+    )
+    remote_module, remote_separator, remote_attribute = (
+        remote_factory_path.partition(":")
+    )
+    if (
+        not remote_separator
+        or not remote_module
+        or not remote_attribute
+    ):
+        raise L7DeploymentError(
+            "FABRIC_KG_L7_REMOTE_PROBE_CREDENTIAL_FACTORY=module:callable "
+            "is required to prove the actual Foundry caller identity"
+        )
+    try:
+        remote_factory = getattr(
+            importlib.import_module(remote_module),
+            remote_attribute,
+        )
+        remote_probe_credential = remote_factory(
+            config=config,
+            credential=credential,
+        )
+    except (ImportError, AttributeError, TypeError) as exc:
+        raise L7DeploymentError(
+            "Foundry caller readiness credential factory failed"
+        ) from exc
+    factory_path = os.environ.get("FABRIC_KG_L7_OWNERSHIP_FACTORY", "")
+    module_name, separator, attribute = factory_path.partition(":")
+    if not separator or not module_name or not attribute:
+        raise L7DeploymentError(
+            "FABRIC_KG_L7_OWNERSHIP_FACTORY=module:callable is required; "
+            "deployment is NO-GO without signed durable ownership authority"
+        )
+    try:
+        factory = getattr(importlib.import_module(module_name), attribute)
+        ownership_authority = factory(config=config, credential=credential)
+    except (ImportError, AttributeError, TypeError) as exc:
+        raise L7DeploymentError(
+            "signed durable ownership authority factory failed"
+        ) from exc
     return build_azure_l7_adapters(
         config=config,
         foundry_backend=backend,
+        ownership_authority=ownership_authority,
+        remote_probe_credential=remote_probe_credential,
         credential=credential,
     )

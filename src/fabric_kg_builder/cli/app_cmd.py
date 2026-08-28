@@ -43,7 +43,6 @@ from fabric_kg_builder.agent.l7_deployment import (
     load_l7_config,
     load_l7_plan,
     persist_l7_plan,
-    persist_l7_receipt,
     require_canonical_l6_definition,
 )
 from fabric_kg_builder.lineage.registry import AssetRegistry, record_deployment
@@ -258,12 +257,6 @@ def app_cmd() -> None:
     help="Exact unexpired plan hash required with --live.",
 )
 @click.option(
-    "--rollback/--no-rollback",
-    default=True,
-    show_default=True,
-    help="Rollback attempt-owned mutations after a failure.",
-)
-@click.option(
     "--out",
     "receipt_path",
     default="build/release/l7-deployment-receipt.json",
@@ -277,7 +270,6 @@ def deploy_l6_cmd(
     plan_path: Path,
     resume: bool,
     approve_live: str | None,
-    rollback: bool,
     receipt_path: Path,
 ) -> None:
     """Plan or deploy the canonical L6 definition through the L7 authority."""
@@ -338,9 +330,8 @@ def deploy_l6_cmd(
             approve_live=approve_live,
             config=config,
             definition=definition,
-            rollback_on_failure=rollback,
+            receipt_path=receipt_path,
         )
-        persist_l7_receipt(receipt_path, receipt)
         click.echo(f"status={receipt.status}")
         click.echo(f"receipt_hash={receipt.receipt_hash}")
         click.echo(f"receipt_path={receipt_path}")
@@ -356,25 +347,56 @@ def deploy_l6_cmd(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
+    "--definition",
+    "definition_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
     "--handler-factory",
     required=True,
     help="Import path module:callable returning an L6RemoteToolHandler.",
 )
+@click.option(
+    "--readiness-authority-factory",
+    required=True,
+    help="Import path module:callable returning durable L6 readiness authority.",
+)
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--port", default=8000, show_default=True, type=click.IntRange(1, 65535))
-@click.option("--max-body-bytes", default=1_048_576, show_default=True, type=int)
-@click.option("--timeout-seconds", default=30.0, show_default=True, type=float)
+@click.option("--max-body-bytes", default=None, type=int)
+@click.option("--timeout-seconds", default=None, type=float)
 def serve_l6_cmd(
     config_path: Path,
+    definition_path: Path,
     handler_factory: str,
+    readiness_authority_factory: str,
     host: str,
     port: int,
-    max_body_bytes: int,
-    timeout_seconds: float,
+    max_body_bytes: int | None,
+    timeout_seconds: float | None,
 ) -> None:
     """Serve canonical L6 tools; hosting infrastructure is a prerequisite."""
     try:
         config = load_l7_config(config_path)
+        definition = require_canonical_l6_definition(definition_path)
+        resolved_max_body_bytes = (
+            config.remote_tool_max_body_bytes
+            if max_body_bytes is None
+            else max_body_bytes
+        )
+        resolved_timeout_seconds = (
+            config.remote_tool_timeout_seconds
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        if (
+            resolved_max_body_bytes != config.remote_tool_max_body_bytes
+            or resolved_timeout_seconds != config.remote_tool_timeout_seconds
+        ):
+            raise L7DeploymentError(
+                "serve-l6 limits must equal the approved L7 configuration"
+            )
         module_name, separator, attribute = handler_factory.partition(":")
         if not separator or not module_name or not attribute:
             raise L7DeploymentError(
@@ -382,6 +404,21 @@ def serve_l6_cmd(
             )
         factory = getattr(importlib.import_module(module_name), attribute)
         handler = factory()
+        readiness_module, separator, readiness_attribute = (
+            readiness_authority_factory.partition(":")
+        )
+        if not separator or not readiness_module or not readiness_attribute:
+            raise L7DeploymentError(
+                "--readiness-authority-factory must use module:callable syntax"
+            )
+        readiness_factory = getattr(
+            importlib.import_module(readiness_module),
+            readiness_attribute,
+        )
+        readiness_provider = readiness_factory(
+            config=config,
+            definition=definition,
+        )
         from fabric_kg_builder.agent.l7_remote_tool import (
             create_l6_remote_tool_app,
         )
@@ -397,9 +434,19 @@ def serve_l6_cmd(
                 ),
                 required_app_role=config.remote_tool_required_app_role,
             ),
-            max_body_bytes=max_body_bytes,
-            timeout_seconds=timeout_seconds,
+            max_body_bytes=resolved_max_body_bytes,
+            timeout_seconds=resolved_timeout_seconds,
             external_endpoint=config.remote_tool_endpoint,
+            readiness_authority_provider=readiness_provider,
+            expected_tenant_id=config.tenant_id,
+            expected_audience=config.remote_tool_audience,
+            allowed_caller_object_ids=(
+                config.remote_tool_allowed_caller_object_ids
+            ),
+            required_app_role=config.remote_tool_required_app_role,
+            expected_l6_definition_hash=definition.definition_hash,
+            expected_authority_backend="azure_blob",
+            expected_authority_version=config.l6_authority_backend_version,
         )
         try:
             import uvicorn

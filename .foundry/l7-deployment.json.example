@@ -12,17 +12,23 @@
     {
       "item_id": "<fabric-data-agent-guid>",
       "item_type": "DataAgent",
-      "definition_hash": null
+      "definition_path": "build/release/fabric-data-agent-definition.json",
+      "definition_hash": "<64-hex-canonical-definition-hash>",
+      "definition_bytes_hash": "<64-hex-exact-file-bytes-hash>"
     },
     {
       "item_id": "<lakehouse-guid>",
       "item_type": "Lakehouse",
-      "definition_hash": "<64-hex-definition-hash>"
+      "definition_path": "build/release/lakehouse-definition.json",
+      "definition_hash": "<64-hex-canonical-definition-hash>",
+      "definition_bytes_hash": "<64-hex-exact-file-bytes-hash>"
     },
     {
       "item_id": "<ontology-guid>",
       "item_type": "Ontology",
-      "definition_hash": "<64-hex-definition-hash>"
+      "definition_path": "build/release/ontology-definition.json",
+      "definition_hash": "<64-hex-canonical-definition-hash>",
+      "definition_bytes_hash": "<64-hex-exact-file-bytes-hash>"
     }
   ],
   "fabric_connection_name": "<fabric-data-agent-connection>",
@@ -33,6 +39,10 @@
     "<foundry-managed-identity-object-guid>"
   ],
   "remote_tool_required_app_role": "<remote-tool-invoke-app-role>",
+  "remote_tool_max_body_bytes": 1048576,
+  "remote_tool_timeout_seconds": 30.0,
+  "fabric_connection_ownership_authority_id": "gxra-sha256:<64-hex-authority-id>",
+  "l6_authority_backend_version": "<durable-authority-version>",
   "l5a_definition_hash": "<64-hex-l5a-definition-hash>",
   "l5b_definition_hash": "<64-hex-l5b-definition-hash>",
   "plan_ttl_seconds": 900
