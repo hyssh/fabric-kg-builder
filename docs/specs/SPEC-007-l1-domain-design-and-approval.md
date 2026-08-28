@@ -17,10 +17,11 @@ normalizes model-proposed candidates, and seals one immutable
 `DomainContractV2` after one explicit user decision.
 
 L1 does not extract canonical entities or relationships, publish an ontology,
-mutate a running schema, import external ontology content, or activate schema-2
-enrichment. L2 and later layers remain fail-closed until their required receipt
-integration is implemented. Schema-1 behavior is unchanged and is selected with
-`--legacy-schema-1`.
+mutate a running schema, or import external ontology content. After approval,
+`fabric-kg enrich --domain-file domain.yaml` activates schema-constrained L2
+and emits its receipt; later layers remain fail-closed until their required
+receipt integration is implemented. Schema-1 behavior is unchanged and is
+selected with `--legacy-schema-1`.
 
 ## 2. Inputs and immutable outputs
 

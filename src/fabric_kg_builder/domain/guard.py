@@ -165,10 +165,9 @@ def evaluate_domain_guard_status(
                     f"Schema-2 L1 approval artifacts are missing or invalid: {exc}"
                 )
                 return status
+            status.ready_for_enrichment = True
             status.messages.append(
-                "Schema-2 L1 is approved and intact, but enrichment remains "
-                "fail-closed until the L2 schema-constrained extraction receipt "
-                "integration is installed."
+                "Schema-2 L1 is approved and intact for L2 enrichment."
             )
         else:
             status.messages.append(
@@ -229,14 +228,21 @@ def require_ready_domain_contract(
     *,
     output_dir: Path | None = None,
     l1_state_root: Path | None = None,
-) -> tuple[DomainContract, DomainReview, DomainGuardStatus]:
+) -> tuple[AnyDomainContract, DomainReview | None, DomainGuardStatus]:
     """Return the approved contract or raise a clear compatibility/migration error."""
     status = evaluate_domain_guard_status(
         explicit_path,
         output_dir=output_dir,
         l1_state_root=l1_state_root,
     )
-    if not status.ready_for_enrichment or status.contract is None or status.review is None:
+    if (
+        not status.ready_for_enrichment
+        or status.contract is None
+        or (
+            not isinstance(status.contract, DomainContractV2)
+            and status.review is None
+        )
+    ):
         raise EnrichmentContractError(" ".join(status.messages))
     return status.contract, status.review, status
 
