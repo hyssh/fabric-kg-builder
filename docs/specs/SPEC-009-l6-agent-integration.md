@@ -171,17 +171,6 @@ The definition requires:
 - managed identity/RBAC configured outside the definition;
 - no embedded token, key, signed URL, principal metadata, or provider secret.
 
-No resource is deployed by L6. `AzureBlobL6GraphReceiptAuthority` provides the
-production multi-process run/receipt boundary with Entra-authenticated Blob access, finite
-leases, ETag compare-and-swap, crash recovery, one-time consumption, and an
-opaque injected signer provider. Its production Graph path requires a
-deadline-aware cancellable transport with bounded connect/read operations;
-synchronous callbacks are test-only and rejected by production configuration.
-Deadline expiry atomically fails the run and ignores late results. Signing keys
-never enter Blob state, receipts, logs, or repository configuration.
-
-The public RemoteTool ASGI host binds those five canonical schemas to
-authenticated, bounded endpoints and publishes hash-sealed readiness. Compute
-provisioning and all L7 planning, Fabric/Foundry connection deployment,
-transaction, rollback, and acceptance logic are outside this component. RDF
-remains optional and inactive.
+No resource is deployed by L6. L7 owns endpoint publication, project connection
+creation, live Data Agent/Foundry definition deployment, smoke tests, and
+post-deploy acceptance.
