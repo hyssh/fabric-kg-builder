@@ -49,6 +49,7 @@ _L1_AUDIT_PATH_SEGMENTS = {
     "contract_version",
     "decisions",
     "domain_boundary_candidates",
+    "draft_contract",
     "domain_intake_id",
     "end_type_id",
     "generalization_candidates",

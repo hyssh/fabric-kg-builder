@@ -198,6 +198,41 @@ def _sanitized_validation_failures(
     ][:20]
 
 
+def _stable_semantic_validation_code(
+    message: str,
+    error_type: str,
+) -> str:
+    known = (
+        ("exactly one path plan", "question_plan_cardinality_invalid"),
+        ("at least one question must be covered", "question_coverage_zero"),
+        ("question path references unknown relationship", "question_path_relationship_unknown"),
+        ("question path references unknown type", "question_path_type_unknown"),
+        ("path endpoint or direction mismatch", "question_path_endpoint_mismatch"),
+        ("question path exceeds approved K", "question_path_exceeds_k"),
+        ("question plan is not shortest", "question_path_not_shortest"),
+        ("N must equal approved relationship type count", "relationship_count_policy_mismatch"),
+        ("K must equal maximum shortest covered path", "max_hops_policy_mismatch"),
+        ("Unknown relationship endpoints", "relationship_endpoint_unknown"),
+        ("Unknown relationship questions", "relationship_question_unknown"),
+        ("Duplicate semantic type ID", "semantic_type_id_duplicate"),
+        ("Duplicate semantic key", "semantic_key_duplicate"),
+        ("Duplicate relationship type ID", "relationship_type_id_duplicate"),
+        ("Duplicate predicate ID", "predicate_id_duplicate"),
+        ("hierarchy closure/hash", "hierarchy_closure_mismatch"),
+        ("identity_root_type_id", "identity_root_invalid"),
+        ("identity key policy", "identity_key_policy_invalid"),
+        ("identity_policy_hash", "identity_policy_hash_mismatch"),
+        ("completeness_requirement_hash", "completeness_hash_mismatch"),
+        ("external_reference_decision_hash", "external_reference_hash_mismatch"),
+    )
+    for fragment, code in known:
+        if fragment in message:
+            return code
+    if error_type != "value_error":
+        return error_type
+    return "domain_contract_invariant_unclassified"
+
+
 def _normalize_question_route_shapes(
     candidate: dict[str, Any],
     *,
@@ -1640,10 +1675,9 @@ def prepare_l1_stage(
                 (
                     "proposal.draft_contract."
                     + (item["location"] or "root"),
-                    (
-                        item["type"]
-                        if item["type"] != "value_error"
-                        else "domain_contract_invariant_invalid"
+                    _stable_semantic_validation_code(
+                        item["message"],
+                        item["type"],
                     ),
                 )
                 for item in _sanitized_validation_failures(exc)
