@@ -1,0 +1,67 @@
+{
+  "release": "0.2.4",
+  "tenant_id": "<tenant-guid>",
+  "subscription_id": "<subscription-guid>",
+  "resource_group": "<resource-group>",
+  "expected_principal_id": "<identity-object-guid>",
+  "fabric_workspace_id": "<fabric-workspace-guid>",
+  "authority_hash": "<64-hex-authority-hash>",
+  "l5a_definition_hash": "<64-hex-l5a-definition-hash>",
+  "l5b_definition_hash": "<64-hex-l5b-definition-hash>",
+  "l6_definition": {
+    "path": "../build/release/l6-agent-definition.json",
+    "sha256": "<64-hex-file-bytes-hash>",
+    "canonical_hash": "<64-hex-canonical-json-hash>"
+  },
+  "fabric_definitions": [
+    {
+      "name": "fabric-kg-024-<release-name>",
+      "item_id": "<fabric-data-agent-guid>",
+      "item_type": "DataAgent",
+      "artifact": {
+        "path": "../build/release/data-agent-definition.json",
+        "sha256": "<64-hex-file-bytes-hash>",
+        "canonical_hash": "<64-hex-canonical-json-hash>"
+      }
+    },
+    {
+      "name": "fabric-kg-024-<release-name>-ontology",
+      "item_id": "<fabric-ontology-guid>",
+      "item_type": "Ontology",
+      "artifact": {
+        "path": "../build/release/ontology-definition.json",
+        "sha256": "<64-hex-file-bytes-hash>",
+        "canonical_hash": "<64-hex-canonical-json-hash>"
+      }
+    }
+  ],
+  "search": {
+    "endpoint": "https://<search-service>.search.windows.net",
+    "index_name": "fabric-kg-024-<release-name>-index",
+    "index_schema": {
+      "path": "../build/search/index.schema.json",
+      "sha256": "<64-hex-file-bytes-hash>",
+      "canonical_hash": "<64-hex-canonical-json-hash>"
+    },
+    "documents": {
+      "path": "../build/search/docs.json",
+      "sha256": "<64-hex-file-bytes-hash>",
+      "canonical_hash": "<64-hex-canonical-json-hash>"
+    },
+    "knowledge_source_name": "fabric-kg-024-<release-name>-source",
+    "knowledge_base_name": "fabric-kg-024-<release-name>-kb",
+    "api_version": "2025-11-01-preview",
+    "foundry_role_assignment_id": "<search-managed-identity-foundry-role-assignment-guid>",
+    "foundry_role_principal_id": "<search-managed-identity-object-guid>",
+    "foundry_role_definition_id": "<foundry-role-definition-resource-id>"
+  },
+  "foundry": {
+    "account_name": "<foundry-account>",
+    "project_name": "<foundry-project>",
+    "search_connection_name": "fabric-kg-024-<release-name>-search",
+    "fabric_connection_name": "fabric-kg-024-<release-name>-fabric",
+    "data_agent_id": "<fabric-data-agent-guid>",
+    "deploy_builtin_agent": false
+  },
+  "plan_ttl_seconds": 900
+}

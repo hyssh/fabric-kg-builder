@@ -4,7 +4,10 @@
 
 📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
-📋 **Current assessment and roadmap:** [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md)
+📋 **Current release:** `0.2.4` — strict L7 planning and installed-CLI gates.
+See [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md). The validated
+0.2.3 assessment remains at
+[`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md).
 
 ---
 

@@ -39,6 +39,10 @@ env/
 ontology/environments/*.json
 !ontology/environments/*.json.example
 
+# L7 target configuration contains real stable resource IDs.
+.foundry/l7-*.json
+!.foundry/l7-*.json.example
+
 # Generated Parquet files (build-time artifacts)
 build/**/*.parquet
 

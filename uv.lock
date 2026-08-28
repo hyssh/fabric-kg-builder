@@ -998,7 +998,7 @@ wheels = [
 
 [[package]]
 name = "fabric-kg-builder"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "." }
 dependencies = [
     { name = "azure-ai-documentintelligence" },
