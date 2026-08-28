@@ -105,8 +105,10 @@ class L1ProposalSchemaRepairError(L1StageError):
         attempt_count: int,
         validation_error_codes: tuple[str, ...] = (),
         validation_failures: tuple[tuple[str, str], ...] = (),
+        candidate_attempts: tuple[dict[str, Any], ...] = (),
     ) -> None:
         self.attempt_count = attempt_count
+        self.candidate_attempts = candidate_attempts
         self.validation_failures = validation_failures or tuple(
             ("proposal", code) for code in validation_error_codes
         )
@@ -334,10 +336,43 @@ def _validate_proposal_candidate(
         raise L1ProposalSchemaRepairError(
             attempt_count=attempt_count,
             validation_failures=tuple(
-                (item["location"], item["type"])
+                (
+                    item["location"] or "proposal.root",
+                    item["type"],
+                )
                 for item in failures
             ),
         ) from error
+
+
+def _raw_candidate_diagnostics(
+    raw: object,
+    *,
+    attempt: int,
+    failures: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    mapping = raw if isinstance(raw, dict) else {}
+    return {
+        "attempt": attempt,
+        "candidate_hash": canonical_sha256(
+            raw if isinstance(raw, (dict, list, str, int, float, bool)) or raw is None
+            else {"payload_type": type(raw).__name__}
+        ),
+        "proposed_type_count": (
+            len(mapping.get("semantic_type_candidates", ()))
+            if isinstance(mapping.get("semantic_type_candidates"), list)
+            else 0
+        ),
+        "proposed_relationship_count": (
+            len(mapping.get("relationship_candidates", ()))
+            if isinstance(mapping.get("relationship_candidates"), list)
+            else 0
+        ),
+        "failures": [
+            {"path": path or "proposal.root", "code": code}
+            for path, code in failures
+        ],
+    }
 
 
 def _zero_route_audit(
@@ -1253,6 +1288,7 @@ def prepare_l1_stage(
     )
     model_call_count = 0
     candidate_regeneration_attempted = False
+    rejected_candidate_diagnostics: dict[str, Any] | None = None
     route_repair_attempted = False
     trusted_question_ids = tuple(
         item.id for item in preflight.intake.competency_questions
@@ -1276,11 +1312,106 @@ def prepare_l1_stage(
         model_call_count = 1
         candidates = raw
     if isinstance(candidates, dict):
-        candidates = _validate_proposal_candidate(
-            candidates,
-            trusted_question_ids=trusted_question_ids,
-            attempt_count=model_call_count or 1,
-        )
+        first_raw = candidates
+        try:
+            candidates = _validate_proposal_candidate(
+                first_raw,
+                trusted_question_ids=trusted_question_ids,
+                attempt_count=model_call_count or 1,
+            )
+        except L1ProposalSchemaRepairError as first_error:
+            if client is None or model_call_count != 1:
+                raise
+            if any(
+                code == "route_question_id_unknown"
+                or "authority_drift" in code
+                for _path, code in first_error.validation_failures
+            ):
+                raise
+            first_diagnostics = _raw_candidate_diagnostics(
+                first_raw,
+                attempt=1,
+                failures=first_error.validation_failures,
+            )
+            rejected_candidate_diagnostics = first_diagnostics
+            retry_feedback = {
+                "reason_code": "provider_candidate_validation_failed",
+                "validation_codes": sorted(
+                    {
+                        code
+                        for _path, code in first_error.validation_failures
+                    }
+                ),
+                "proposed_type_count": first_diagnostics[
+                    "proposed_type_count"
+                ],
+                "proposed_relationship_count": first_diagnostics[
+                    "proposed_relationship_count"
+                ],
+            }
+            candidate_regeneration_attempted = True
+            model_call_count = 2
+            try:
+                second_raw = client.complete_json(
+                    system=(
+                        DOMAIN_PROPOSAL_SYSTEM_PROMPT
+                        + "\nTrusted local candidate-regeneration feedback:\n"
+                        + canonical_json(retry_feedback)
+                    ),
+                    user=proposal_user_message,
+                    json_schema=domain_proposal_candidates_schema(),
+                )
+            except Exception as exc:
+                second_failure = (
+                    ("proposal.provider", "provider_retry_failed"),
+                )
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=second_failure,
+                    candidate_attempts=(
+                        first_diagnostics,
+                        _raw_candidate_diagnostics(
+                            None,
+                            attempt=2,
+                            failures=second_failure,
+                        ),
+                    ),
+                ) from exc
+            if not isinstance(second_raw, dict):
+                second_failure = (
+                    ("proposal.root", "proposal_root_not_object"),
+                )
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=second_failure,
+                    candidate_attempts=(
+                        first_diagnostics,
+                        _raw_candidate_diagnostics(
+                            second_raw,
+                            attempt=2,
+                            failures=second_failure,
+                        ),
+                    ),
+                )
+            try:
+                candidates = _validate_proposal_candidate(
+                    second_raw,
+                    trusted_question_ids=trusted_question_ids,
+                    attempt_count=2,
+                )
+            except L1ProposalSchemaRepairError as second_error:
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=second_error.validation_failures,
+                    candidate_attempts=(
+                        first_diagnostics,
+                        _raw_candidate_diagnostics(
+                            second_raw,
+                            attempt=2,
+                            failures=second_error.validation_failures,
+                        ),
+                    ),
+                ) from second_error
     initial_route_audit = _zero_route_audit(
         preflight=preflight,
         candidates=candidates,
@@ -1290,13 +1421,32 @@ def prepare_l1_stage(
     )
     first_route_audit = initial_route_audit
     candidate_attempt_hashes = (
-        initial_route_audit.candidate_hash,
+        (
+            str(rejected_candidate_diagnostics["candidate_hash"]),
+            initial_route_audit.candidate_hash,
+        )
+        if rejected_candidate_diagnostics is not None
+        else (initial_route_audit.candidate_hash,)
     )
     candidate_attempt_type_counts = (
-        initial_route_audit.proposed_type_count,
+        (
+            int(rejected_candidate_diagnostics["proposed_type_count"]),
+            initial_route_audit.proposed_type_count,
+        )
+        if rejected_candidate_diagnostics is not None
+        else (initial_route_audit.proposed_type_count,)
     )
     candidate_attempt_relationship_counts = (
-        initial_route_audit.proposed_relationship_count,
+        (
+            int(
+                rejected_candidate_diagnostics[
+                    "proposed_relationship_count"
+                ]
+            ),
+            initial_route_audit.proposed_relationship_count,
+        )
+        if rejected_candidate_diagnostics is not None
+        else (initial_route_audit.proposed_relationship_count,)
     )
     if (
         client is not None
@@ -1470,11 +1620,134 @@ def prepare_l1_stage(
             known_evidence_span_ids=known_evidence_ids,
         )
         )
-    except ProposalSelectionError as exc:
-        if str(exc) != (
-            "[DOM-104] at least one competency question must be covered"
+    except (ProposalSelectionError, ValidationError, ArithmeticError) as exc:
+        if isinstance(exc, ProposalSelectionError):
+            semantic_failures = (
+                (
+                    "proposal.selection",
+                    next(
+                        (
+                            token.strip("[]")
+                            for token in str(exc).split()
+                            if token.startswith("[DOM-")
+                        ),
+                        "proposal_selection_invalid",
+                    ),
+                ),
+            )
+        else:
+            semantic_failures = tuple(
+                (
+                    "proposal.draft_contract."
+                    + (item["location"] or "root"),
+                    (
+                        item["type"]
+                        if item["type"] != "value_error"
+                        else "domain_contract_invariant_invalid"
+                    ),
+                )
+                for item in _sanitized_validation_failures(exc)
+            )
+        if client is not None and model_call_count == 1:
+            first_diagnostics = _raw_candidate_diagnostics(
+                candidates.model_dump(mode="json"),
+                attempt=1,
+                failures=semantic_failures,
+            )
+            feedback = {
+                "reason_code": "provider_candidate_semantic_validation_failed",
+                "validation_codes": sorted(
+                    {code for _path, code in semantic_failures}
+                ),
+                "proposed_type_count": first_diagnostics[
+                    "proposed_type_count"
+                ],
+                "proposed_relationship_count": first_diagnostics[
+                    "proposed_relationship_count"
+                ],
+            }
+            try:
+                second_raw = client.complete_json(
+                    system=(
+                        DOMAIN_PROPOSAL_SYSTEM_PROMPT
+                        + "\nTrusted local candidate-regeneration feedback:\n"
+                        + canonical_json(feedback)
+                    ),
+                    user=proposal_user_message,
+                    json_schema=domain_proposal_candidates_schema(),
+                )
+                if not isinstance(second_raw, dict):
+                    raise L1ProposalSchemaRepairError(
+                        attempt_count=2,
+                        validation_failures=(
+                            ("proposal.root", "proposal_root_not_object"),
+                        ),
+                    )
+                second = _validate_proposal_candidate(
+                    second_raw,
+                    trusted_question_ids=trusted_question_ids,
+                    attempt_count=2,
+                )
+                retried = prepare_l1_stage(
+                    preflight,
+                    candidates=second,
+                    client=None,
+                    correction_instruction=correction_instruction,
+                    parent_correction_context_id=parent_correction_context_id,
+                    started_at_utc=started,
+                )
+                return retried.model_copy(update={"model_call_count": 2})
+            except L1ZeroSupportedRoutesError as second_error:
+                raise L1ZeroSupportedRoutesError(
+                    second_error.audit_payload.model_copy(
+                        update={
+                            "model_call_count": 2,
+                            "candidate_regeneration_attempted": True,
+                            "candidate_regeneration_result_code": (
+                                "candidate_regeneration_insufficient"
+                            ),
+                            "candidate_attempt_hashes": (
+                                first_diagnostics["candidate_hash"],
+                                canonical_sha256(second_raw),
+                            ),
+                        }
+                    )
+                ) from second_error
+            except L1ProposalSchemaRepairError as second_error:
+                second_failures = second_error.validation_failures
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=second_failures,
+                    candidate_attempts=(
+                        first_diagnostics,
+                        _raw_candidate_diagnostics(
+                            locals().get("second_raw"),
+                            attempt=2,
+                            failures=second_failures,
+                        ),
+                    ),
+                ) from second_error
+        if not (
+            isinstance(exc, ProposalSelectionError)
+            and str(exc)
+            == "[DOM-104] at least one competency question must be covered"
         ):
-            raise
+            raise L1ProposalSchemaRepairError(
+                attempt_count=2 if model_call_count >= 2 else 1,
+                validation_failures=semantic_failures,
+                candidate_attempts=tuple(
+                    item
+                    for item in (
+                        rejected_candidate_diagnostics,
+                        _raw_candidate_diagnostics(
+                            candidates.model_dump(mode="json"),
+                            attempt=2 if model_call_count >= 2 else 1,
+                            failures=semantic_failures,
+                        ),
+                    )
+                    if item is not None
+                ),
+            ) from exc
         raise L1ZeroSupportedRoutesError(
             _zero_route_audit(
                 preflight=preflight,

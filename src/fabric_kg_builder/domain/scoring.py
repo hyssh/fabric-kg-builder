@@ -6,6 +6,7 @@ from math import fsum, isfinite
 from typing import Literal
 
 from pydantic import Field, model_validator
+from pydantic_core import PydanticCustomError
 
 from fabric_kg_builder.contracts.base import ContractModel, RequiredText, Sha256, canonical_sha256
 
@@ -60,9 +61,15 @@ class CandidateScoreV2(ContractModel):
             self.total_score,
         )
         if not all(isfinite(value) for value in numeric):
-            raise ValueError("candidate score components must be finite")
+            raise PydanticCustomError(
+                "candidate_score_nonfinite",
+                "candidate score components must be finite",
+            )
         if self.ip_governance_eligible == (self.gate_reason is not None):
-            raise ValueError("ineligible candidates require exactly one gate reason")
+            raise PydanticCustomError(
+                "candidate_score_gate_reason_invalid",
+                "ineligible candidates require exactly one gate reason",
+            )
         return self
 
 

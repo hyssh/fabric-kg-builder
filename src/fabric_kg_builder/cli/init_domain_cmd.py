@@ -57,9 +57,12 @@ _L1_AUDIT_PATH_SEGMENTS = {
     "intake_hash",
     "organization_context",
     "out_of_scope",
+    "proposal",
+    "provider",
     "question_id",
     "question_routes",
     "relationship_candidates",
+    "root",
     "score",
     "score_inputs",
     "semantic_type_candidates",
@@ -992,6 +995,30 @@ def _run_schema_2_l1(
             ),
             "failures": failures,
         }
+        candidate_attempts = getattr(exc, "candidate_attempts", ())
+        if candidate_attempts:
+            audit["candidate_attempts"] = [
+                {
+                    "attempt": int(item["attempt"]),
+                    "candidate_hash": str(item["candidate_hash"]),
+                    "proposed_type_count": int(
+                        item["proposed_type_count"]
+                    ),
+                    "proposed_relationship_count": int(
+                        item["proposed_relationship_count"]
+                    ),
+                    "failures": [
+                        {
+                            "path": safe_path(
+                                tuple(str(failure["path"]).split("."))
+                            ),
+                            "code": str(failure["code"]),
+                        }
+                        for failure in item["failures"]
+                    ],
+                }
+                for item in candidate_attempts
+            ]
         if details:
             audit.update(details)
         state_root.mkdir(parents=True, exist_ok=True)

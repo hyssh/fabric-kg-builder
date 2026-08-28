@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from fabric_kg_builder.contracts.adapters import assert_domain_hash_authority
 from fabric_kg_builder.contracts.base import (
@@ -112,7 +113,10 @@ class CandidateDomainBoundaryV2(ContractModel):
     @model_validator(mode="after")
     def _score(self) -> "CandidateDomainBoundaryV2":
         if self.score != score_candidate(self.score_inputs):
-            raise ValueError("domain boundary score is not deterministic")
+            raise PydanticCustomError(
+                "domain_boundary_score_mismatch",
+                "domain boundary score is not deterministic",
+            )
         return self
 
 
@@ -125,7 +129,10 @@ class CandidateSemanticTypeV2(ContractModel):
     @model_validator(mode="after")
     def _score(self) -> "CandidateSemanticTypeV2":
         if self.score != score_candidate(self.score_inputs):
-            raise ValueError("semantic type score is not deterministic")
+            raise PydanticCustomError(
+                "semantic_type_score_mismatch",
+                "semantic type score is not deterministic",
+            )
         return self
 
 
@@ -141,9 +148,15 @@ class CandidateGeneralizationV2(ContractModel):
     @model_validator(mode="after")
     def _score(self) -> "CandidateGeneralizationV2":
         if self.child_type_id == self.parent_type_id:
-            raise ValueError("generalization cannot be self-referential")
+            raise PydanticCustomError(
+                "generalization_self_reference",
+                "generalization cannot be self-referential",
+            )
         if self.score != score_candidate(self.score_inputs):
-            raise ValueError("generalization score is not deterministic")
+            raise PydanticCustomError(
+                "generalization_score_mismatch",
+                "generalization score is not deterministic",
+            )
         return self
 
 
@@ -181,11 +194,20 @@ class RelationshipCandidateV2(ContractModel):
     @model_validator(mode="after")
     def _support_and_score(self) -> "RelationshipCandidateV2":
         if not self.competency_question_ids and self.governance_rationale is None:
-            raise ValueError("relationship candidate requires CQ or governance support")
+            raise PydanticCustomError(
+                "relationship_support_missing",
+                "relationship candidate requires CQ or governance support",
+            )
         if not self.evidence_span_ids and self.governance_rationale is None:
-            raise ValueError("relationship candidate requires evidence or governance")
+            raise PydanticCustomError(
+                "relationship_evidence_missing",
+                "relationship candidate requires evidence or governance",
+            )
         if self.score != score_candidate(self.score_inputs):
-            raise ValueError("relationship candidate score is not deterministic")
+            raise PydanticCustomError(
+                "relationship_score_mismatch",
+                "relationship candidate score is not deterministic",
+            )
         return self
 
 
@@ -198,7 +220,10 @@ class CandidateCompletenessRequirementV2(ContractModel):
     @model_validator(mode="after")
     def _score(self) -> "CandidateCompletenessRequirementV2":
         if self.score != score_candidate(self.score_inputs):
-            raise ValueError("completeness candidate score is not deterministic")
+            raise PydanticCustomError(
+                "completeness_score_mismatch",
+                "completeness candidate score is not deterministic",
+            )
         return self
 
 
@@ -234,8 +259,9 @@ class ExternalSemanticReferenceCandidateV2(ContractModel):
         if approved != (
             self.reviewer is not None and self.approval_reference is not None
         ):
-            raise ValueError(
-                "approved external references require reviewer and approval reference"
+            raise PydanticCustomError(
+                "external_approval_fields_invalid",
+                "approved external references require reviewer and approval reference",
             )
         return self
 
@@ -249,11 +275,20 @@ class ProposalQuestionRouteV2(ContractModel):
     @model_validator(mode="after")
     def _route(self) -> "ProposalQuestionRouteV2":
         if (self.start_type_id is None) != (self.end_type_id is None):
-            raise ValueError("question route requires both endpoints")
+            raise PydanticCustomError(
+                "route_endpoint_pair_invalid",
+                "question route requires both endpoints",
+            )
         if self.start_type_id is None and self.unsupported_reason is None:
-            raise ValueError("unsupported route requires a reason")
+            raise PydanticCustomError(
+                "unsupported_reason_missing",
+                "unsupported route requires a reason",
+            )
         if self.start_type_id is not None and self.unsupported_reason is not None:
-            raise ValueError("supported route cannot include unsupported_reason")
+            raise PydanticCustomError(
+                "supported_reason_forbidden",
+                "supported route cannot include unsupported_reason",
+            )
         return self
 
 
@@ -304,11 +339,20 @@ class QuestionRoutePatchV2(ContractModel):
     @model_validator(mode="after")
     def _state(self) -> "QuestionRoutePatchV2":
         if (self.source_type_id is None) != (self.target_type_id is None):
-            raise ValueError("route patch requires both endpoints")
+            raise PydanticCustomError(
+                "route_patch_endpoint_pair_invalid",
+                "route patch requires both endpoints",
+            )
         if self.source_type_id is None and self.unsupported_reason is None:
-            raise ValueError("unsupported route patch requires a reason")
+            raise PydanticCustomError(
+                "route_patch_reason_missing",
+                "unsupported route patch requires a reason",
+            )
         if self.source_type_id is not None and self.unsupported_reason is not None:
-            raise ValueError("supported route patch forbids unsupported_reason")
+            raise PydanticCustomError(
+                "route_patch_reason_forbidden",
+                "supported route patch forbids unsupported_reason",
+            )
         return self
 
 

@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.domain.service import load_domain_contract
 from tests.unit.test_l1_stage import (
+    _SchemaRegenerationClient,
     _ZeroRouteRepairClient,
     _candidates,
     _intake,
@@ -305,6 +306,49 @@ def test_initial_proposal_validation_persists_path_specific_audit(
         }
     ]
     assert all("message" not in failure for failure in audit["failures"])
+
+
+def test_repeated_provider_validation_failure_persists_two_attempts(
+    tmp_path: Path,
+) -> None:
+    source, intake_path, _ = _write_inputs(tmp_path)
+    state_root = tmp_path / ".fkg" / "l1"
+    client = _SchemaRegenerationClient(second_valid=False)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init-domain",
+            "--input",
+            str(source),
+            "--intake",
+            str(intake_path),
+            "--non-interactive",
+            "--force",
+            "--project-id",
+            "surface-024",
+            "--state-dir",
+            str(state_root),
+            "--out",
+            str(tmp_path / "domain.yaml"),
+        ],
+        obj={
+            "_foundry_client": client,
+            "_foundry_model_version": "gpt-4-1",
+        },
+    )
+    assert result.exit_code != 0
+    audit = json.loads(
+        (state_root / "proposal-failure-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["attempt_count"] == 2
+    assert len(audit["candidate_attempts"]) == 2
+    assert all(
+        failure["path"] and failure["code"] != "value_error"
+        for attempt in audit["candidate_attempts"]
+        for failure in attempt["failures"]
+    )
 
 
 def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(

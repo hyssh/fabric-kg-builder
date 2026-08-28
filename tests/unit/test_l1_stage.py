@@ -395,6 +395,21 @@ class _UnboundCandidateRegenerationClient:
         return raw
 
 
+class _SchemaRegenerationClient:
+    def __init__(self, *, second_valid: bool) -> None:
+        self.calls = 0
+        self.second_valid = second_valid
+
+    def complete_json(self, **kwargs):
+        self.calls += 1
+        raw = _candidates("records")
+        if self.calls == 1 or not self.second_valid:
+            raw["semantic_type_candidates"][0]["score_inputs"][
+                "classification_fit"
+            ] = "provider-invalid"
+        return raw
+
+
 def test_zero_supported_routes_use_one_strict_route_only_repair(
     tmp_path: Path,
 ) -> None:
@@ -453,6 +468,32 @@ def test_nonempty_unbound_vocabulary_gets_one_full_regeneration(
     assert client.calls == 2
     assert prepared.model_call_count == 2
     assert prepared.candidates.relationship_candidates[0].competency_question_ids
+
+
+def test_structurally_invalid_provider_candidate_gets_one_full_regeneration(
+    tmp_path: Path,
+) -> None:
+    client = _SchemaRegenerationClient(second_valid=True)
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+
+
+def test_repeated_structural_provider_failure_has_two_attempt_diagnostics(
+    tmp_path: Path,
+) -> None:
+    client = _SchemaRegenerationClient(second_valid=False)
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    error = captured.value
+    assert error.attempt_count == 2
+    assert len(error.candidate_attempts) == 2
+    assert all(item["candidate_hash"] for item in error.candidate_attempts)
+    assert all(
+        failure["path"] and failure["code"] != "value_error"
+        for item in error.candidate_attempts
+        for failure in item["failures"]
+    )
 
 
 def test_repeated_insufficient_candidate_vocabulary_is_typed(
