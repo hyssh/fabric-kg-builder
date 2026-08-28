@@ -2149,23 +2149,145 @@ def prepare_l1_stage(
                 ),
             )
         ) from exc
-    design_context = _build_design_context(
-        preflight=preflight,
-        sample_manifest=sample_manifest,
-        source_profile=profile,
-        source_units=source_units,
-        evidence_spans=evidence_spans,
-        draft_contract=draft_contract,
-        parent_correction_context_id=parent_correction_context_id,
-    )
-    proposal = build_domain_proposal(
-        design_context=design_context,
-        candidates=candidates,
-        draft_contract=draft_contract,
-        merge_groups=merge_groups,
-        selected_candidate_ids=selected_candidate_ids,
-        identity=design_context.identity,
-    )
+    try:
+        design_context = _build_design_context(
+            preflight=preflight,
+            sample_manifest=sample_manifest,
+            source_profile=profile,
+            source_units=source_units,
+            evidence_spans=evidence_spans,
+            draft_contract=draft_contract,
+            parent_correction_context_id=parent_correction_context_id,
+        )
+        proposal = build_domain_proposal(
+            design_context=design_context,
+            candidates=candidates,
+            draft_contract=draft_contract,
+            merge_groups=merge_groups,
+            selected_candidate_ids=selected_candidate_ids,
+            identity=design_context.identity,
+        )
+    except ValidationError as exc:
+        proposal_failures = tuple(
+            (
+                "proposal."
+                + (
+                    ".".join(
+                        "[index]" if isinstance(part, int) else str(part)
+                        for part in item["loc"]
+                    )
+                    or "root"
+                ),
+                _stable_semantic_validation_code(
+                    str(item["msg"]),
+                    str(item["type"]),
+                ),
+            )
+            for item in exc.errors(
+                include_url=False,
+                include_input=False,
+            )
+        )
+        current_diagnostics = _raw_candidate_diagnostics(
+            candidates.model_dump(mode="json"),
+            attempt=2 if model_call_count >= 2 else 1,
+            failures=proposal_failures,
+        )
+        if (
+            client is not None
+            and model_call_count == 1
+            and not any(
+                _is_authority_validation_failure(code)
+                for _path, code in proposal_failures
+            )
+        ):
+            feedback = {
+                "reason_code": "provider_candidate_semantic_validation_failed",
+                "validation_codes": sorted(
+                    {code for _path, code in proposal_failures}
+                ),
+                "proposed_type_count": current_diagnostics[
+                    "proposed_type_count"
+                ],
+                "proposed_relationship_count": current_diagnostics[
+                    "proposed_relationship_count"
+                ],
+            }
+            try:
+                second_raw = client.complete_json(
+                    system=(
+                        DOMAIN_PROPOSAL_SYSTEM_PROMPT
+                        + "\nTrusted local candidate-regeneration feedback:\n"
+                        + canonical_json(feedback)
+                    ),
+                    user=proposal_user_message,
+                    json_schema=domain_proposal_candidates_schema(),
+                )
+                if not isinstance(second_raw, dict):
+                    raise L1ProposalSchemaRepairError(
+                        attempt_count=2,
+                        validation_failures=(
+                            ("proposal.root", "proposal_root_not_object"),
+                        ),
+                    )
+                _assert_raw_candidate_authority(
+                    second_raw,
+                    trusted_question_ids=trusted_question_ids,
+                    trusted_evidence_ids=known_evidence_ids,
+                    attempt_count=2,
+                )
+                second = _validate_proposal_candidate(
+                    second_raw,
+                    trusted_question_ids=trusted_question_ids,
+                    attempt_count=2,
+                )
+                return replace(
+                    prepare_l1_stage(
+                        preflight,
+                        candidates=second,
+                        client=None,
+                        correction_instruction=correction_instruction,
+                        parent_correction_context_id=(
+                            parent_correction_context_id
+                        ),
+                        started_at_utc=started,
+                    ),
+                    model_call_count=2,
+                )
+            except L1ProposalSchemaRepairError as second_error:
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=second_error.validation_failures,
+                    candidate_attempts=(
+                        current_diagnostics,
+                        _raw_candidate_diagnostics(
+                            locals().get("second_raw"),
+                            attempt=2,
+                            failures=second_error.validation_failures,
+                        ),
+                    ),
+                ) from second_error
+            except Exception as provider_error:
+                provider_failure = (
+                    ("proposal.provider", "provider_retry_failed"),
+                )
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=provider_failure,
+                    candidate_attempts=(
+                        current_diagnostics,
+                        _raw_candidate_diagnostics(
+                            locals().get("second_raw"),
+                            attempt=2,
+                            failures=provider_failure,
+                        ),
+                    ),
+                ) from provider_error
+        raise L1ProposalSchemaRepairError(
+            attempt_count=2 if model_call_count >= 2 else 1,
+            validation_failures=proposal_failures,
+            candidate_attempts=(current_diagnostics,),
+        ) from exc
     summary = render_l1_summary(
         intake=preflight.intake,
         profile=profile,
