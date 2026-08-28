@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -314,6 +315,7 @@ def _zero_route_audit(
     reason_code: str,
     route_repair_attempted: bool | None = None,
     route_repair_result_code: str | None = None,
+    terminal_error_code: str | None = None,
     initial_route_codes: tuple[str, ...] | None = None,
     initial_supported_route_count: int | None = None,
     initial_unsupported_route_count: int | None = None,
@@ -421,7 +423,9 @@ def _zero_route_audit(
         route_repair_result_code=(
             route_repair_result_code or reason_code
         ),
-        terminal_error_code=reason_code,
+        terminal_error_code=(
+            terminal_error_code or "L1_ZERO_SUPPORTED_ROUTES"
+        ),
         proposed_type_count=len(candidates.semantic_type_candidates),
         proposed_type_id_hash=canonical_sha256(
             sorted(
@@ -1286,6 +1290,7 @@ def prepare_l1_stage(
                     if model_call_count >= 2
                     else "not_attempted"
                 ),
+                terminal_error_code="DOM-104",
                 initial_route_codes=(
                     initial_route_audit.unsupported_reason_codes
                 ),
@@ -1432,7 +1437,15 @@ def render_l1_summary(
             f"Domain contract hash: {proposal.domain_contract_hash}",
         ]
     )
-    return "\n".join(lines)
+    def terminal_safe(value: str) -> str:
+        return "".join(
+            char
+            if unicodedata.category(char) not in {"Cc", "Cf", "Cs"}
+            else f"\\u{ord(char):04x}"
+            for char in value
+        )
+
+    return "\n".join(terminal_safe(line) for line in lines)
 
 
 def _approval_context(

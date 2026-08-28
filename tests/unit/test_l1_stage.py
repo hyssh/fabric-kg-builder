@@ -395,6 +395,21 @@ def test_structurally_supported_but_unavailable_paths_trigger_repair(
     assert client.calls == 2
 
 
+def test_review_summary_escapes_terminal_control_characters(
+    tmp_path: Path,
+) -> None:
+    candidates = _candidates("records")
+    candidates["semantic_type_candidates"][0]["proposed_type"][
+        "display_name"
+    ] = "\x1b[2JForged"
+    prepared = prepare_l1_stage(
+        _preflight(tmp_path),
+        candidates=candidates,
+    )
+    assert "\x1b" not in prepared.summary
+    assert "\\u001b[2JForged" in prepared.summary
+
+
 def test_dry_run_inventories_complete_corpus_without_writes(tmp_path: Path) -> None:
     preflight = _preflight(tmp_path)
     state_root = tmp_path / ".fkg" / "l1"
