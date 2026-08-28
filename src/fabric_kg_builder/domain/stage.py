@@ -3025,7 +3025,20 @@ def _persist_payloads(
     state_root: Path,
     domain_path: Path,
     remove_relative: tuple[Path, ...] = (),
+    transition_lock_held: bool = False,
 ) -> None:
+    lock_path = state_root.parent / f".{state_root.name}.transition.lock"
+    lock_descriptor = -1
+    if not transition_lock_held:
+        state_root.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            lock_descriptor = os.open(lock_path, flags, 0o600)
+        except FileExistsError as exc:
+            raise L1StageError(
+                "an L1 state transition is already in progress"
+            ) from exc
     state_root.parent.mkdir(parents=True, exist_ok=True)
     temp_root = Path(
         tempfile.mkdtemp(prefix=".l1-stage-", dir=str(state_root.parent))
@@ -3071,6 +3084,9 @@ def _persist_payloads(
             shutil.rmtree(temp_root)
         if domain_temp.exists():
             domain_temp.unlink()
+        if lock_descriptor >= 0:
+            os.close(lock_descriptor)
+            lock_path.unlink(missing_ok=True)
 
 
 def finalize_l1_stage(
@@ -3082,6 +3098,7 @@ def finalize_l1_stage(
     state_root: Path = L1_STATE_DIR,
     domain_path: Path = Path("domain.yaml"),
     persist: bool = True,
+    transition_lock_held: bool = False,
 ) -> L1StageResult:
     """Seal one terminal decision and emit a succeeded or blocked C0 receipt."""
     completed = _utc_now()
@@ -3170,6 +3187,7 @@ def finalize_l1_stage(
                 if decision is None
                 else ()
             ),
+            transition_lock_held=transition_lock_held,
         )
     return L1StageResult(
         status=status,
@@ -3473,7 +3491,8 @@ def approve_persisted_l1_draft(
 ) -> L1StageResult:
     """Explicitly approve a current blocked draft after complete binding checks."""
     state_root.mkdir(parents=True, exist_ok=True)
-    lock_path = state_root / ".approval.lock"
+    lock_path = state_root.parent / f".{state_root.name}.transition.lock"
+    state_root.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -3522,7 +3541,7 @@ def approve_persisted_l1_draft(
     finally:
         os.close(descriptor)
         lock_path.unlink(missing_ok=True)
-        directory = os.open(state_root, os.O_RDONLY)
+        directory = os.open(state_root.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
         finally:
@@ -3580,6 +3599,7 @@ def _approve_persisted_l1_draft_locked(
         actor=actor,
         state_root=state_root,
         domain_path=domain_path,
+        transition_lock_held=True,
     )
 
 
