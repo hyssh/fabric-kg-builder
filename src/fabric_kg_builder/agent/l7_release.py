@@ -1321,8 +1321,6 @@ class AzureL7Backend:
         self._mutation_confirmed: set[str] = set()
         self._created_fabric_ids: dict[str, str] = {}
         self._ownership_outputs: dict[Path, bytes] = {}
-        self._fabric_mutation_keys: set[str] = set()
-        self._rolled_back_fabric_keys: set[str] = set()
 
     def _artifact_json(self, binding: ArtifactBinding) -> Any:
         return _artifact_value(binding, self.artifact_base)
@@ -2176,7 +2174,6 @@ class AzureL7Backend:
         logical_key = action.resource_id.casefold()
         self._created_fabric_ids[logical_key] = item_id
         self._mutation_confirmed.add(logical_key)
-        self._fabric_mutation_keys.add(logical_key)
         managed_target = self._created_target(target, item_id)
         observed = self._fabric_definition(config, managed_target)
         if observed.etag:
@@ -2247,7 +2244,6 @@ class AzureL7Backend:
         logical_key = action.resource_id.casefold()
         self._created_fabric_ids[logical_key] = item_id
         self._mutation_confirmed.add(logical_key)
-        self._fabric_mutation_keys.add(logical_key)
         observed = self._fabric_definition(
             config, self._created_target(target, item_id)
         )
@@ -2396,9 +2392,6 @@ class AzureL7Backend:
                     f"{response.status_code}"
                 )
             self._mutation_confirmed.add(action.resource_id.casefold())
-            self._fabric_mutation_keys.add(
-                action.resource_id.casefold()
-            )
             response_etag = str(response.headers.get("ETag") or "")
             if response_etag:
                 self._created_etags[action.resource_id.casefold()] = response_etag
@@ -2516,14 +2509,6 @@ class AzureL7Backend:
                 raise L7ReleaseError(
                     "Fabric rollback definition hash readback mismatch"
                 )
-            self._rolled_back_fabric_keys.add(
-                action.resource_id.casefold()
-            )
-            if (
-                self._rolled_back_fabric_keys
-                == self._fabric_mutation_keys
-            ):
-                self._cleanup_ownership_outputs()
             return restored
         if action.rollback.action != "delete-created":
             raise L7ReleaseError("unsupported rollback action")
@@ -2576,14 +2561,6 @@ class AzureL7Backend:
                 raise L7ReleaseError(
                     "Fabric create rollback deletion readback mismatch"
                 )
-            self._rolled_back_fabric_keys.add(
-                action.resource_id.casefold()
-            )
-            if (
-                self._rolled_back_fabric_keys
-                == self._fabric_mutation_keys
-            ):
-                self._cleanup_ownership_outputs()
             return ResourceReadback(
                 resource_id=action.resource_id,
                 stable_id=item_id,
@@ -2670,6 +2647,10 @@ class AzureL7Backend:
                     "ownership output rollback failed"
                 ) from exc
             self._ownership_outputs.pop(path, None)
+
+    def finalize_rollback(self) -> None:
+        """Remove generated ownership state after all resource rollbacks succeed."""
+        self._cleanup_ownership_outputs()
 
     def _wait_lro(
         self,
@@ -2872,6 +2853,18 @@ class L7Executor:
                     )
                 )
                 sequence += 1
+            if not rollback_errors:
+                rollback_finalizer = getattr(
+                    self.backend, "finalize_rollback", None
+                )
+                if callable(rollback_finalizer):
+                    try:
+                        rollback_finalizer()
+                    except BaseException as rollback_exc:
+                        rollback_errors.append(
+                            "rollback-finalizer:"
+                            f"{type(rollback_exc).__name__}"
+                        )
             receipt = L7DeploymentReceipt.seal(
                 attempt_id=reservation.attempt_id,
                 plan_hash=plan.plan_hash,

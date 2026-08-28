@@ -349,9 +349,19 @@ class _UnavailablePathRepairClient(_ZeroRouteRepairClient):
         if self.calls == 0:
             self.calls += 1
             raw = _candidates("records")
-            raw["relationship_candidates"][0][
-                "competency_question_ids"
-            ] = []
+            isolated = json.loads(
+                json.dumps(raw["semantic_type_candidates"][1])
+            )
+            isolated["candidate_id"] = "candidate:type-isolated"
+            isolated_type = isolated["proposed_type"]
+            isolated_type["type_id"] = "semantic-type:records.isolated"
+            isolated_type["semantic_key"] = "isolated"
+            isolated_type["display_name"] = "Isolated"
+            isolated_type["identity_root_type_id"] = isolated_type["type_id"]
+            raw["semantic_type_candidates"].append(isolated)
+            for route in raw["question_routes"]:
+                route["start_type_id"] = "semantic-type:records.subject"
+                route["end_type_id"] = "semantic-type:records.isolated"
             return raw
         return super().complete_json(**kwargs)
 
@@ -370,6 +380,18 @@ class _CandidateRegenerationClient:
                 route["start_type_id"] = None
                 route["end_type_id"] = None
                 route["unsupported_reason"] = "No candidate relationship."
+        return raw
+
+
+class _UnboundCandidateRegenerationClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, **kwargs):
+        self.calls += 1
+        raw = _candidates("records")
+        if self.calls == 1:
+            raw["relationship_candidates"][0]["competency_question_ids"] = []
         return raw
 
 
@@ -408,6 +430,7 @@ def test_structurally_supported_but_unavailable_paths_trigger_repair(
     assert audit.initial_route_codes == (
         "supported_path_unavailable",
     ) * 5
+    assert audit.route_states == ("unsupported",) * 5
     assert audit.route_repair_attempted is True
     assert client.calls == 2
 
@@ -420,6 +443,16 @@ def test_insufficient_candidate_vocabulary_gets_one_full_regeneration(
     assert client.calls == 2
     assert prepared.model_call_count == 2
     assert prepared.candidates.relationship_candidates
+
+
+def test_nonempty_unbound_vocabulary_gets_one_full_regeneration(
+    tmp_path: Path,
+) -> None:
+    client = _UnboundCandidateRegenerationClient()
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+    assert prepared.candidates.relationship_candidates[0].competency_question_ids
 
 
 def test_repeated_insufficient_candidate_vocabulary_is_typed(

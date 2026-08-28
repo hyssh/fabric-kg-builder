@@ -401,6 +401,7 @@ class _FailingBackend(L7Backend):
         self.observation = observation
         self.applied: list[str] = []
         self.rolled_back: list[str] = []
+        self.rollback_finalized = False
 
     def observe(self, config: L7ReleaseConfig) -> L7Observation:
         return self.observation
@@ -431,6 +432,9 @@ class _FailingBackend(L7Backend):
             name=action.name,
         )
 
+    def finalize_rollback(self) -> None:
+        self.rollback_finalized = True
+
 
 @pytest.mark.unit
 def test_failure_after_mutation_persists_sanitized_rollback_receipt(
@@ -455,6 +459,7 @@ def test_failure_after_mutation_persists_sanitized_rollback_receipt(
     assert backend.applied
     assert backend.rolled_back[-1] == backend.applied[0]
     assert set(backend.applied).issubset(set(backend.rolled_back))
+    assert backend.rollback_finalized is True
     receipt_text = receipt_path.with_name(
         "receipt.json.failure.json"
     ).read_text(encoding="utf-8")
@@ -688,6 +693,23 @@ def test_empty_workspace_create_plan_and_ownership_outputs(
     assert Path(str(config.ownership_registry_output)).exists()
     for target in config.fabric_definitions:
         assert Path(str(target.ownership_receipt_output)).exists()
+
+
+@pytest.mark.unit
+def test_successful_global_rollback_removes_ownership_outputs(
+    tmp_path: Path,
+) -> None:
+    ownership_path = tmp_path / "ownership.json"
+    payload = b'{"attempt":"release-owned"}\n'
+    ownership_path.write_bytes(payload)
+    ownership_path.chmod(0o400)
+    backend = object.__new__(AzureL7Backend)
+    backend._ownership_outputs = {ownership_path: payload}
+
+    backend.finalize_rollback()
+
+    assert not ownership_path.exists()
+    assert backend._ownership_outputs == {}
 
 
 @pytest.mark.unit

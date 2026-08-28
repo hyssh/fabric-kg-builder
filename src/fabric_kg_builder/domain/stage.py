@@ -162,6 +162,7 @@ class L1ZeroRouteAudit(ContractModel):
     eligible_type_id_hash: str
     eligible_relationship_count: int
     eligible_relationship_id_hash: str
+    coverable_question_count: int
     route_repair_attempted: bool
     route_repair_result_code: str
     terminal_error_code: str
@@ -371,7 +372,11 @@ def _zero_route_audit(
             eligible_type_ids=eligible_type_ids,
         )
     )
+    trusted_question_ids = {
+        question.id for question in preflight.intake.competency_questions
+    }
     route_codes: list[str] = []
+    route_states: list[Literal["supported", "unsupported"]] = []
     supported_count = 0
     for route in candidates.question_routes:
         if route.start_type_id is not None:
@@ -379,10 +384,13 @@ def _zero_route_audit(
                 route, eligible_relationships, max_hops=4
             ):
                 route_codes.append("supported_path_valid")
+                route_states.append("supported")
                 supported_count += 1
             else:
                 route_codes.append("supported_path_unavailable")
+                route_states.append("unsupported")
         else:
+            route_states.append("unsupported")
             route_codes.append(
                 route.unsupported_reason
                 if route.unsupported_reason
@@ -434,12 +442,7 @@ def _zero_route_audit(
             canonical_sha256({"question_id": question.id})
             for question in preflight.intake.competency_questions
         ),
-        route_states=tuple(
-            "supported"
-            if route.start_type_id is not None
-            else "unsupported"
-            for route in candidates.question_routes
-        ),
+        route_states=tuple(route_states),
         unsupported_reason_codes=tuple(route_codes),
         initial_route_codes=(
             tuple(route_codes)
@@ -470,6 +473,14 @@ def _zero_route_audit(
                 item.relationship_type_id
                 for item in eligible_relationships
             )
+        ),
+        coverable_question_count=len(
+            {
+                question_id
+                for relationship in eligible_relationships
+                for question_id in relationship.competency_question_ids
+                if question_id in trusted_question_ids
+            }
         ),
         route_repair_attempted=(
             model_call_count == 2
@@ -1290,7 +1301,7 @@ def prepare_l1_stage(
     if (
         client is not None
         and model_call_count == 1
-        and initial_route_audit.eligible_relationship_count == 0
+        and initial_route_audit.coverable_question_count == 0
     ):
         retry_feedback = {
             "reason_code": "minimum_viable_vocabulary_insufficient",
@@ -1304,6 +1315,9 @@ def prepare_l1_stage(
             ),
             "supported_route_count": (
                 initial_route_audit.supported_route_count
+            ),
+            "coverable_question_count": (
+                initial_route_audit.coverable_question_count
             ),
         }
         candidate_regeneration_attempted = True
@@ -1403,7 +1417,7 @@ def prepare_l1_stage(
             second_audit.candidate_attempt_relationship_counts
         )
         candidates = second
-        if second_audit.eligible_relationship_count == 0:
+        if second_audit.coverable_question_count == 0:
             raise L1ZeroSupportedRoutesError(
                 second_audit.model_copy(
                     update={
