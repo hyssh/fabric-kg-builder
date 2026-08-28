@@ -1294,7 +1294,8 @@ def save_domain_proposal(proposal: DomainProposal, path: Path | str) -> None:
 def load_domain_proposal(path: Path | str) -> DomainProposal:
     proposal_path = Path(path)
     try:
-        raw = json.loads(proposal_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        return DomainProposal.model_validate_json(
+            proposal_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
         raise ProposalArtifactError(f"could not load proposal: {exc}") from exc
-    return DomainProposal.model_validate(raw)

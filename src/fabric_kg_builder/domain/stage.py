@@ -3192,10 +3192,10 @@ def dry_run_l1(
 
 def _load_json_model(path: Path, model_type: type[ContractModel]) -> ContractModel:
     try:
-        return model_type.model_validate(
-            json.loads(path.read_text(encoding="utf-8"))
+        return model_type.model_validate_json(
+            path.read_text(encoding="utf-8")
         )
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+    except (OSError, ValueError, ValidationError) as exc:
         raise L1StageError(f"invalid persisted artifact {path}: {exc}") from exc
 
 
