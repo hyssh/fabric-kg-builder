@@ -1588,6 +1588,8 @@ def prepare_l1_stage(
             system=DOMAIN_PROPOSAL_SYSTEM_PROMPT,
             user=proposal_user_message,
             json_schema=domain_proposal_candidates_schema(),
+            max_completion_tokens=16_000,
+            max_attempts=1,
         )
         model_call_count = 1
         candidates = raw
@@ -1613,6 +1615,8 @@ def prepare_l1_stage(
                 ),
                 user=proposal_user_message,
                 json_schema=domain_proposal_candidates_schema(),
+                max_completion_tokens=16_000,
+                max_attempts=1,
             )
         except Exception as exc:
             raise L1ProposalSchemaRepairError(
@@ -1731,6 +1735,8 @@ def prepare_l1_stage(
                     ),
                     user=proposal_user_message,
                     json_schema=domain_proposal_candidates_schema(),
+                    max_completion_tokens=16_000,
+                    max_attempts=1,
                 )
             except Exception as exc:
                 second_failure = (
@@ -1875,6 +1881,8 @@ def prepare_l1_stage(
                 ),
                 user=proposal_user_message,
                 json_schema=domain_proposal_candidates_schema(),
+                max_completion_tokens=16_000,
+                max_attempts=1,
             )
         except Exception as exc:
             raise L1ZeroSupportedRoutesError(
@@ -2087,6 +2095,8 @@ def prepare_l1_stage(
                     ),
                     user=proposal_user_message,
                     json_schema=domain_proposal_candidates_schema(),
+                    max_completion_tokens=16_000,
+                    max_attempts=1,
                 )
                 if not isinstance(second_raw, dict):
                     raise L1ProposalSchemaRepairError(
@@ -2298,6 +2308,8 @@ def prepare_l1_stage(
                     ),
                     user=proposal_user_message,
                     json_schema=domain_proposal_candidates_schema(),
+                    max_completion_tokens=16_000,
+                    max_attempts=1,
                 )
                 if not isinstance(second_raw, dict):
                     raise L1ProposalSchemaRepairError(
