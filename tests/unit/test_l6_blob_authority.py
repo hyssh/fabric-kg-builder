@@ -69,7 +69,9 @@ class _Lease:
         self._name = name
         self.id = lease_id
 
-    def renew(self):
+    def renew(self, *, timeout=None, **kwargs):
+        del kwargs
+        self._backend.calls.append(("renew", timeout))
         with self._backend.lock:
             if self._backend.on_renew is not None:
                 self._backend.on_renew(self)
@@ -89,7 +91,9 @@ class _Lease:
                 return {"lease_id": self.id}
             return self._backend.renewal_response
 
-    def release(self):
+    def release(self, *, timeout=None, **kwargs):
+        del kwargs
+        self._backend.calls.append(("release", timeout))
         with self._backend.lock:
             stored = self._backend.blobs[self._name]
             if (
@@ -114,7 +118,13 @@ class _Blob:
         etag=None,
         match_condition=None,
         lease=None,
+        timeout=None,
+        **kwargs,
     ):
+        del kwargs
+        self.backend.calls.append(("upload", timeout))
+        if self.backend.upload_exception is not None:
+            raise self.backend.upload_exception
         del match_condition
         with self.backend.lock:
             stored = self.backend.blobs.get(self.name)
@@ -137,7 +147,9 @@ class _Blob:
             stored.data = bytes(data)
             stored.etag += 1
 
-    def download_blob(self, *, lease=None):
+    def download_blob(self, *, lease=None, timeout=None, **kwargs):
+        del kwargs
+        self.backend.calls.append(("download", timeout))
         with self.backend.lock:
             stored = self.backend.blobs.get(self.name)
             if stored is None:
@@ -152,7 +164,9 @@ class _Blob:
                 raise _http_error(412)
             return _Download(stored)
 
-    def acquire_lease(self, *, lease_duration):
+    def acquire_lease(self, *, lease_duration, timeout=None, **kwargs):
+        del kwargs
+        self.backend.calls.append(("acquire", timeout))
         with self.backend.lock:
             self.backend.lease_seconds = lease_duration
             stored = self.backend.blobs.get(self.name)
@@ -171,6 +185,17 @@ class _Blob:
             )
             return _Lease(self.backend, self.name, lease_id)
 
+    def delete_blob(self, *, lease=None, timeout=None, **kwargs):
+        del kwargs
+        self.backend.calls.append(("delete", timeout))
+        with self.backend.lock:
+            stored = self.backend.blobs.get(self.name)
+            if stored is None:
+                raise ResourceNotFoundError()
+            if lease is not None and stored.lease_id != lease.id:
+                raise _http_error(412)
+            del self.backend.blobs[self.name]
+
 
 class _Container:
     def __init__(self, backend):
@@ -178,6 +203,13 @@ class _Container:
 
     def get_blob_client(self, name):
         return _Blob(self.backend, name)
+
+    def get_container_properties(self, *, timeout=None, **kwargs):
+        del kwargs
+        self.backend.calls.append(("probe", timeout))
+        if self.backend.probe_exception is not None:
+            raise self.backend.probe_exception
+        return self.backend.probe_response
 
 
 class _BlobService:
@@ -192,6 +224,21 @@ class _BlobService:
         self.renew_exception = None
         self.renewal_response = "valid"
         self.on_renew = None
+        self.calls = []
+        self.probe_exception = None
+        self.probe_response = {"name": "authority"}
+        self.upload_exception = None
+        self._config = SimpleNamespace(
+            transport=SimpleNamespace(
+                connection_config=SimpleNamespace(timeout=2.0, read_timeout=2.0)
+            ),
+            retry_policy=SimpleNamespace(
+                total_retries=0,
+                connect_retries=0,
+                read_retries=0,
+                status_retries=0,
+            ),
+        )
         self.container = _Container(self)
 
     def get_container_client(self, name):
@@ -1173,7 +1220,6 @@ def test_evidence_collision_rejects_partial_and_revoked_receipt(setup):
             evidence_output=output,
             citation_collection=collection,
         )
-
     with backend.lock:
         backend.blobs[blob.name].data = authentic
         backend.blobs[blob.name].etag += 1
@@ -1184,3 +1230,266 @@ def test_evidence_collision_rejects_partial_and_revoked_receipt(setup):
             evidence_output=output,
             citation_collection=collection,
         )
+
+
+@pytest.mark.unit
+def test_production_rejects_injected_blob_client_without_bounded_transport(setup):
+    _, backend, provider, _, graph, _ = setup
+    backend._config.transport.connection_config.read_timeout = None
+
+    with pytest.raises(ValueError, match="bounded Blob connection/read timeouts"):
+        _production_authority(backend, provider, _CancellableTransport(graph))
+
+    authority = AzureBlobL6GraphReceiptAuthority(
+        blob_service_client=backend,
+        container_name="authority",
+        signer_provider=provider,
+        graph_transport=_CancellableTransport(graph),
+        allow_test_unbounded_blob_client=True,
+    )
+    assert authority is not None
+
+
+@pytest.mark.unit
+def test_from_account_url_configures_bounded_blob_transport(monkeypatch, setup):
+    _, _, provider, _, graph, _ = setup
+    captured = {}
+
+    class Client(_BlobService):
+        def __init__(self, *, account_url, credential, **kwargs):
+            super().__init__([10_000])
+            captured.update(
+                account_url=account_url, credential=credential, **kwargs
+            )
+            self._config.transport.connection_config.timeout = kwargs[
+                "connection_timeout"
+            ]
+            self._config.transport.connection_config.read_timeout = kwargs[
+                "read_timeout"
+            ]
+
+    monkeypatch.setattr("azure.storage.blob.BlobServiceClient", Client)
+    authority = AzureBlobL6GraphReceiptAuthority.from_account_url(
+        account_url="https://example.blob.core.windows.net",
+        container_name="authority",
+        signer_provider=provider,
+        credential=object(),
+        graph_transport=_CancellableTransport(graph),
+        blob_connection_timeout_seconds=1.25,
+        blob_read_timeout_seconds=1.5,
+    )
+
+    assert captured["connection_timeout"] == 1.25
+    assert captured["read_timeout"] == 1.5
+    assert captured["retry_total"] == 0
+    assert captured["retry_connect"] == 0
+    assert captured["retry_read"] == 0
+    assert captured["retry_status"] == 0
+    assert authority is not None
+
+
+@pytest.mark.unit
+def test_production_rejects_retry_or_timeout_budget_that_can_exceed_deadline(setup):
+    _, backend, provider, _, graph, _ = setup
+    backend._config.retry_policy.total_retries = 1
+    with pytest.raises(ValueError, match="retries disabled"):
+        _production_authority(
+            backend,
+            provider,
+            _CancellableTransport(graph),
+        )
+    backend._config.retry_policy.total_retries = 0
+    backend._config.transport.connection_config.timeout = 3
+    backend._config.transport.connection_config.read_timeout = 3
+    with pytest.raises(ValueError, match="timeout sum"):
+        _production_authority(
+            backend,
+            provider,
+            _CancellableTransport(graph),
+        )
+
+
+@pytest.mark.unit
+def test_blob_transport_options_are_clamped_to_remaining_deadline(setup):
+    _, _, _, authority, _, _ = setup
+    deadline = authority._monotonic() + 0.08
+    options = authority._call_options(deadline)
+    assert 0 < options["timeout"] <= 0.08
+    assert options["connection_timeout"] + options["read_timeout"] <= (
+        options["timeout"]
+    )
+
+
+@pytest.mark.unit
+def test_graph_blob_calls_are_bounded_and_clamped_to_deadline(setup):
+    _, backend, provider, _, graph, values = setup
+    authority = _production_authority(
+        backend, provider, _CancellableTransport(graph)
+    )
+    values = {
+        **values,
+        "budget": _budget_with_runtime(values["budget"], 80),
+    }
+
+    with pytest.raises(TimeoutError):
+        authority.execute_graph_once(**values)
+
+    graph_calls = [
+        (operation, timeout)
+        for operation, timeout in backend.calls
+        if operation in {"upload", "download", "acquire", "renew"}
+    ]
+    assert graph_calls
+    assert all(
+        0 < timeout <= authority._terminalization_timeout
+        for _, timeout in graph_calls
+    )
+    assert any(timeout < 0.08 for _, timeout in graph_calls)
+    assert all(
+        0 < timeout <= authority._operation_timeout
+        for _, timeout in backend.calls
+        if timeout is not None
+    )
+
+
+@pytest.mark.unit
+def test_expired_graph_deadline_prevents_blob_sdk_call(setup):
+    _, backend, _, authority, _, _ = setup
+    blob = authority._run_blob("l6r-sha256:" + "9" * 64)
+    before = list(backend.calls)
+
+    with pytest.raises(TimeoutError, match="sealed runtime budget"):
+        authority._create(
+            blob,
+            {"state": "must-not-write"},
+            deadline=authority._monotonic() - 1,
+        )
+
+    assert backend.calls == before
+    assert blob.name not in backend.blobs
+
+
+@pytest.mark.unit
+def test_stalled_blob_transport_is_bounded_and_fails_closed(setup):
+    _, backend, provider, _, graph, values = setup
+    backend.upload_exception = ServiceRequestError("connect timed out")
+    authority = _production_authority(
+        backend, provider, _CancellableTransport(graph)
+    )
+    values = {
+        **values,
+        "budget": _budget_with_runtime(values["budget"], 70),
+    }
+
+    with pytest.raises(L6BlobAuthorityError, match="could not be created"):
+        authority.execute_graph_once(**values)
+
+    assert len(backend.calls) == 1
+    operation, timeout = backend.calls[0]
+    assert operation == "upload"
+    assert 0 < timeout <= 0.07
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        ResourceNotFoundError("missing"),
+        _http_error(403),
+        ServiceRequestError("stalled"),
+    ],
+    ids=["missing-container", "unauthorized", "unavailable"],
+)
+def test_readiness_blob_probe_fails_closed_without_mutation(setup, probe_error):
+    now, backend, provider, _, graph, _ = setup
+    backend.probe_exception = probe_error
+    authority = _production_authority(
+        backend, provider, _CancellableTransport(graph)
+    )
+    authority._clock = lambda: now[0]
+    before = dict(backend.blobs)
+
+    observation = authority.readiness_observation()
+
+    assert observation.ready is False
+    assert observation.blob_capability_verified is False
+    assert backend.blobs == before
+    assert backend.calls == [("probe", authority._operation_timeout)]
+
+
+@pytest.mark.unit
+def test_readiness_probe_exercises_bounded_write_lease_cas_and_cleanup(setup):
+    now, backend, provider, _, graph, _ = setup
+    authority = _production_authority(
+        backend, provider, _CancellableTransport(graph)
+    )
+    authority._clock = lambda: now[0]
+
+    observation = authority.readiness_observation()
+
+    assert observation.ready is True
+    assert observation.blob_capability_verified is True
+    assert [operation for operation, _ in backend.calls] == [
+        "probe",
+        "upload",
+        "acquire",
+        "download",
+        "upload",
+        "delete",
+    ]
+    assert all(
+        0 < timeout <= authority._operation_timeout
+        for _, timeout in backend.calls
+    )
+    assert backend.blobs == {}
+
+    backend.calls.clear()
+    backend.probe_response = None
+    assert authority.readiness_observation().ready is False
+    assert backend.blobs == {}
+
+
+@pytest.mark.unit
+def test_readiness_fails_closed_without_blob_write_capability(setup):
+    now, backend, provider, _, graph, _ = setup
+    backend.upload_exception = _http_error(403)
+    authority = _production_authority(
+        backend,
+        provider,
+        _CancellableTransport(graph),
+    )
+    authority._clock = lambda: now[0]
+
+    observation = authority.readiness_observation()
+
+    assert observation.ready is False
+    assert observation.blob_capability_verified is False
+    assert backend.blobs == {}
+
+
+@pytest.mark.unit
+def test_server_lease_allows_recovery_despite_future_host_claim_clock(setup):
+    _, _, _, authority, graph, values = setup
+    fingerprint = l6._graph_execution_fingerprint(
+        graph_query=values["graph_query"],
+        ontology_scope=values["ontology_scope"],
+        retrieval_scope=values["retrieval_scope"],
+        budget=values["budget"],
+        access=values["access"],
+        authorities=values["authorities"],
+    )
+    blob = authority._run_blob(values["l6_run_id"])
+    authority._create(
+        blob,
+        {
+            "schema_version": 1,
+            "kind": "l6_graph_run",
+            "l6_run_id": values["l6_run_id"],
+            "execution_fingerprint": fingerprint,
+            "status": "executing",
+            "owner_hash": "f" * 64,
+            "claim_expires_milliseconds": 10**15,
+        },
+    )
+
+    assert authority.execute_graph_once(**values, execute=lambda: graph) == graph

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from fabric_kg_builder.agent.l6_integration import (
     L6CitationPresentationCollection,
     L6CitationToolInput,
@@ -25,7 +27,6 @@ from fabric_kg_builder.agent.l6_integration import (
     L6_TOOL_RESOLVE_SCOPE,
     L6_TOOL_RETRIEVE_EVIDENCE,
 )
-from fabric_kg_builder.agent.l7_deployment import L7RemoteReadinessObservation
 from fabric_kg_builder.app.auth import AuthError, InboundAuthVerifier
 from fabric_kg_builder.contracts.base import canonical_sha256
 
@@ -44,6 +45,41 @@ class L6RemoteToolHandler(Protocol):
     ) -> Any: ...
 
 
+class L6RemoteReadinessObservation(BaseModel):
+    """Hash-sealed authenticated readiness authority for the RemoteTool host."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        hide_input_in_errors=True,
+    )
+
+    endpoint: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
+    audience: str = Field(min_length=1)
+    caller_object_id: str = Field(min_length=1)
+    app_role: str = Field(min_length=1)
+    openapi_schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    l6_definition_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authority_backend: str = Field(min_length=1)
+    authority_version: str = Field(min_length=1)
+    checked_at: datetime
+    expires_at: datetime
+    readiness_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _sealed(self) -> "L6RemoteReadinessObservation":
+        if self.expires_at <= self.checked_at:
+            raise ValueError("RemoteTool readiness expiry must follow observation")
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"readiness_hash"})
+        )
+        if self.readiness_hash != expected:
+            raise ValueError("RemoteTool readiness hash mismatch")
+        return self
+
+
 @dataclass(frozen=True)
 class L6ReadinessAuthority:
     """Current identity of the durable L6 authority used by this host."""
@@ -57,6 +93,26 @@ class L6ReadinessAuthorityProvider(Protocol):
     """Reads the durable L6 authority identity without mutating it."""
 
     def observe(self) -> L6ReadinessAuthority | None: ...
+
+
+@dataclass(frozen=True)
+class L6BlobReadinessAuthorityProvider:
+    """Bind Blob authority capability readiness to one canonical L6 definition."""
+
+    authority: Any
+    l6_definition_hash: str
+    backend_kind: str = "azure_blob"
+    backend_version: str = "1"
+
+    def observe(self) -> L6ReadinessAuthority | None:
+        observation = self.authority.readiness_observation()
+        if not bool(getattr(observation, "ready", False)):
+            return None
+        return L6ReadinessAuthority(
+            l6_definition_hash=self.l6_definition_hash,
+            backend_kind=self.backend_kind,
+            backend_version=self.backend_version,
+        )
 
 
 _TOOL_MODELS = (
@@ -241,6 +297,22 @@ def create_l6_remote_tool_app(
             return _error(401, "request authorization failed")
         if not isinstance(claims, dict):
             return _error(401, "request authorization failed")
+        roles = claims.get("roles")
+        if (
+            not expected_tenant_id
+            or not expected_audience
+            or not allowed_caller_object_ids
+            or not required_app_role
+        ):
+            return _error(503, "tool authorization is not configured")
+        if (
+            claims.get("tid") != expected_tenant_id
+            or claims.get("aud") != expected_audience
+            or claims.get("oid") not in allowed_caller_object_ids
+            or not isinstance(roles, (list, tuple))
+            or required_app_role not in roles
+        ):
+            return _error(403, "request authorization failed")
         request.state.auth_claims = claims
 
         raw_headers = request.scope.get("headers", ())
@@ -421,11 +493,11 @@ def create_l6_remote_tool_app(
     @app.get(
         "/ready",
         include_in_schema=False,
-        response_model=L7RemoteReadinessObservation,
+        response_model=L6RemoteReadinessObservation,
     )
     def ready(
         claims: dict[str, Any] = Depends(_authenticate_readiness),
-    ) -> L7RemoteReadinessObservation:
+    ) -> L6RemoteReadinessObservation:
         unavailable = HTTPException(
             status_code=503,
             detail="L6 authorities are not ready",
@@ -499,7 +571,7 @@ def create_l6_remote_tool_app(
         }
         values["readiness_hash"] = canonical_sha256(values)
         try:
-            return L7RemoteReadinessObservation.model_validate(values)
+            return L6RemoteReadinessObservation.model_validate(values)
         except (TypeError, ValueError) as exc:
             raise unavailable from exc
 

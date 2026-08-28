@@ -112,6 +112,7 @@ class L6BlobReadinessObservation:
 
     ready: bool
     graph_transport_configured: bool
+    blob_capability_verified: bool
     signer_valid: bool
     observed_at_milliseconds: int
     signer_snapshot_version: int | None = None
@@ -176,12 +177,14 @@ class AzureBlobL6GraphReceiptAuthority:
         prefix: str = "l6-authority/v1",
         lease_seconds: int = 30,
         operation_timeout_seconds: float = 5.0,
+        terminalization_timeout_seconds: float = 2.0,
         poll_interval_seconds: float = 0.05,
         clock_milliseconds: Callable[[], int] | None = None,
         monotonic: Callable[[], float] | None = None,
         sleep: Callable[[float], None] | None = None,
         graph_transport: L6DeadlineAwareGraphTransport | None = None,
         allow_test_legacy_callback: bool = False,
+        allow_test_unbounded_blob_client: bool = False,
     ) -> None:
         if not 15 <= lease_seconds <= 60:
             raise ValueError("lease_seconds must be between 15 and 60")
@@ -189,11 +192,68 @@ class AzureBlobL6GraphReceiptAuthority:
             raise ValueError("poll_interval_seconds must be positive")
         if operation_timeout_seconds <= 0:
             raise ValueError("operation_timeout_seconds must be positive")
+        if (
+            terminalization_timeout_seconds <= 0
+            or terminalization_timeout_seconds > operation_timeout_seconds
+        ):
+            raise ValueError(
+                "terminalization timeout must be positive and no greater "
+                "than the operation timeout"
+            )
+        if not allow_test_unbounded_blob_client:
+            transport = getattr(
+                getattr(blob_service_client, "_config", None), "transport", None
+            )
+            connection_config = getattr(transport, "connection_config", None)
+            timeout_values = (
+                getattr(connection_config, "timeout", None),
+                getattr(connection_config, "read_timeout", None),
+            )
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+                for value in timeout_values
+            ):
+                raise ValueError(
+                    "production L6 Blob authority requires verifiably bounded "
+                    "Blob connection/read timeouts"
+                )
+            if sum(float(value) for value in timeout_values) > (
+                operation_timeout_seconds
+            ):
+                raise ValueError(
+                    "Blob connection/read timeout sum must not exceed "
+                    "the authority operation timeout"
+                )
+            retry_policy = getattr(
+                getattr(blob_service_client, "_config", None),
+                "retry_policy",
+                None,
+            )
+            retry_values = (
+                getattr(retry_policy, "total_retries", None),
+                getattr(retry_policy, "connect_retries", None),
+                getattr(retry_policy, "read_retries", None),
+                getattr(retry_policy, "status_retries", None),
+            )
+            if any(value != 0 for value in retry_values):
+                raise ValueError(
+                    "production L6 Blob authority requires retries disabled "
+                    "for aggregate deadline enforcement"
+                )
+            self._blob_connection_timeout = float(timeout_values[0])
+            self._blob_read_timeout = float(timeout_values[1])
+        else:
+            self._blob_connection_timeout = operation_timeout_seconds / 2
+            self._blob_read_timeout = operation_timeout_seconds / 2
         self._container = blob_service_client.get_container_client(container_name)
         self._signer_provider = signer_provider
         self._prefix = prefix.strip("/")
         self._lease_seconds = lease_seconds
         self._operation_timeout = operation_timeout_seconds
+        self._terminalization_timeout = terminalization_timeout_seconds
         self._poll_interval = poll_interval_seconds
         self._clock = clock_milliseconds or (lambda: int(time.time() * 1000))
         self._monotonic = monotonic or time.monotonic
@@ -228,6 +288,8 @@ class AzureBlobL6GraphReceiptAuthority:
         container_name: str,
         signer_provider: L6OpaqueSignerProvider | None,
         credential: Any | None = None,
+        blob_connection_timeout_seconds: float = 2.0,
+        blob_read_timeout_seconds: float = 2.0,
         **kwargs: Any,
     ) -> "AzureBlobL6GraphReceiptAuthority":
         """Create an authority with an injected credential or Azure default auth."""
@@ -239,6 +301,12 @@ class AzureBlobL6GraphReceiptAuthority:
         client = BlobServiceClient(
             account_url=account_url,
             credential=resolved_credential,
+            connection_timeout=blob_connection_timeout_seconds,
+            read_timeout=blob_read_timeout_seconds,
+            retry_total=0,
+            retry_connect=0,
+            retry_read=0,
+            retry_status=0,
         )
         return cls(
             blob_service_client=client,
@@ -286,9 +354,43 @@ class AzureBlobL6GraphReceiptAuthority:
 
         return model.model_validate_json(canonical_json(value))
 
-    def _read(self, blob: Any, *, lease: Any | None = None) -> _BlobDocument:
+    def _call_timeout(self, deadline: float | None = None) -> float:
+        timeout = self._operation_timeout
+        if deadline is not None:
+            timeout = min(timeout, deadline - self._monotonic())
+            if timeout <= 0:
+                raise TimeoutError(
+                    "L6 Blob operation exceeded sealed runtime budget"
+                )
+        return timeout
+
+    def _call_options(self, deadline: float | None = None) -> dict[str, float]:
+        timeout = self._call_timeout(deadline)
+        half_budget = timeout / 2
+        return {
+            "timeout": timeout,
+            "connection_timeout": min(
+                self._blob_connection_timeout,
+                half_budget,
+            ),
+            "read_timeout": min(
+                self._blob_read_timeout,
+                half_budget,
+            ),
+        }
+
+    def _read(
+        self,
+        blob: Any,
+        *,
+        lease: Any | None = None,
+        deadline: float | None = None,
+    ) -> _BlobDocument:
         try:
-            download = blob.download_blob(lease=lease)
+            download = blob.download_blob(
+                lease=lease,
+                **self._call_options(deadline),
+            )
             raw = download.readall()
             etag = str(download.properties.etag)
         except ResourceNotFoundError as exc:
@@ -301,9 +403,19 @@ class AzureBlobL6GraphReceiptAuthority:
             ) from exc
         return _BlobDocument(self._decode(raw), etag)
 
-    def _create(self, blob: Any, value: Mapping[str, Any]) -> bool:
+    def _create(
+        self,
+        blob: Any,
+        value: Mapping[str, Any],
+        *,
+        deadline: float | None = None,
+    ) -> bool:
         try:
-            blob.upload_blob(self._encode(value), overwrite=False)
+            blob.upload_blob(
+                self._encode(value),
+                overwrite=False,
+                **self._call_options(deadline),
+            )
             return True
         except ResourceExistsError:
             return False
@@ -312,9 +424,14 @@ class AzureBlobL6GraphReceiptAuthority:
                 "durable L6 authority state could not be created"
             ) from exc
 
-    def _acquire_lease(self, blob: Any) -> Any | None:
+    def _acquire_lease(
+        self, blob: Any, *, deadline: float | None = None
+    ) -> Any | None:
         try:
-            return blob.acquire_lease(lease_duration=self._lease_seconds)
+            return blob.acquire_lease(
+                lease_duration=self._lease_seconds,
+                **self._call_options(deadline),
+            )
         except AzureError as exc:
             if getattr(exc, "status_code", None) in {409, 412}:
                 return None
@@ -329,6 +446,7 @@ class AzureBlobL6GraphReceiptAuthority:
         expected_etag: str,
         value: Mapping[str, Any],
         lease: Any,
+        deadline: float | None = None,
     ) -> None:
         try:
             blob.upload_blob(
@@ -337,6 +455,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 etag=expected_etag,
                 match_condition=MatchConditions.IfNotModified,
                 lease=lease,
+                **self._call_options(deadline),
             )
         except (ResourceModifiedError, ResourceExistsError) as exc:
             raise L6BlobConflictError(
@@ -351,12 +470,17 @@ class AzureBlobL6GraphReceiptAuthority:
                 "durable L6 authority state could not be updated"
             ) from exc
 
-    @staticmethod
-    def _release(lease: Any | None) -> None:
+    def _release(
+        self, lease: Any | None, *, deadline: float | None = None
+    ) -> None:
         if lease is None:
             return
         try:
-            lease.release()
+            try:
+                options = self._call_options(deadline)
+            except TimeoutError:
+                options = self._call_options()
+            lease.release(**options)
         except AzureError:
             # An expired finite lease is already released server-side.
             return
@@ -367,12 +491,12 @@ class AzureBlobL6GraphReceiptAuthority:
             raise TimeoutError(
                 "L6 Graph execution wait exceeded sealed runtime budget"
             )
-        self._sleep(min(self._poll_interval, remaining))
+        self._sleep(min(self._poll_interval, 0.01, remaining))
 
     def _acquire_required_lease(self, blob: Any, *, description: str) -> Any:
         deadline = self._monotonic() + self._operation_timeout
         while True:
-            lease = self._acquire_lease(blob)
+            lease = self._acquire_lease(blob, deadline=deadline)
             if lease is not None:
                 return lease
             if self._monotonic() >= deadline:
@@ -401,15 +525,15 @@ class AzureBlobL6GraphReceiptAuthority:
                 self._clock() + self._lease_seconds * 1000
             ),
         }
-        self._create(blob, initial)
+        self._create(blob, initial, deadline=deadline)
         while True:
-            lease = self._acquire_lease(blob)
+            lease = self._acquire_lease(blob, deadline=deadline)
             if lease is None:
                 self._wait(deadline)
                 continue
             keep_lease = False
             try:
-                document = self._read(blob, lease=lease)
+                document = self._read(blob, lease=lease, deadline=deadline)
                 state = document.value
                 if state.get("execution_fingerprint") != execution_fingerprint:
                     raise ValueError(
@@ -424,30 +548,31 @@ class AzureBlobL6GraphReceiptAuthority:
                     raise L6BlobAuthorityError(
                         "durable L6 run has an invalid state"
                     )
-                if (
-                    state.get("owner_hash") == owner_hash
-                    or int(state.get("claim_expires_milliseconds", 0))
-                    <= self._clock()
-                ):
-                    claimed = {
-                        **state,
-                        "owner_hash": owner_hash,
-                        "claim_expires_milliseconds": (
-                            self._clock() + self._lease_seconds * 1000
-                        ),
-                    }
-                    self._cas(
-                        blob,
-                        expected_etag=document.etag,
-                        value=claimed,
-                        lease=lease,
-                    )
-                    claimed_document = self._read(blob, lease=lease)
-                    keep_lease = True
-                    return lease, claimed_document
+                # Acquiring the Azure lease is the server-authoritative proof
+                # that no prior owner still holds write authority. Do not gate
+                # recovery on unsynchronized host wall clocks.
+                claimed = {
+                    **state,
+                    "owner_hash": owner_hash,
+                    "claim_expires_milliseconds": (
+                        self._clock() + self._lease_seconds * 1000
+                    ),
+                }
+                self._cas(
+                    blob,
+                    expected_etag=document.etag,
+                    value=claimed,
+                    lease=lease,
+                    deadline=deadline,
+                )
+                claimed_document = self._read(
+                    blob, lease=lease, deadline=deadline
+                )
+                keep_lease = True
+                return lease, claimed_document
             finally:
                 if not keep_lease:
-                    self._release(lease)
+                    self._release(lease, deadline=deadline)
             self._wait(deadline)
 
     def _fail_owned_run(
@@ -458,8 +583,14 @@ class AzureBlobL6GraphReceiptAuthority:
         owner_hash: str,
         l6_run_id: str,
         fingerprint: str,
+        deadline: float | None = None,
+        document: _BlobDocument | None = None,
     ) -> None:
-        latest = self._read(blob, lease=lease)
+        latest = document or self._read(
+            blob,
+            lease=lease,
+            deadline=deadline,
+        )
         if (
             latest.value.get("owner_hash") != owner_hash
             or latest.value.get("status") != "executing"
@@ -479,6 +610,7 @@ class AzureBlobL6GraphReceiptAuthority:
             expected_etag=latest.etag,
             value=failed,
             lease=lease,
+            deadline=deadline,
         )
 
     def execute_graph_once(
@@ -525,6 +657,7 @@ class AzureBlobL6GraphReceiptAuthority:
         deadline = (
             self._monotonic() + budget.max_runtime_milliseconds / 1000
         )
+        execution_deadline = deadline
         owner_hash = canonical_sha256({"owner_nonce": secrets.token_hex(32)})
         blob = self._run_blob(l6_run_id)
         lease, document = self._claim_run(
@@ -535,7 +668,7 @@ class AzureBlobL6GraphReceiptAuthority:
             deadline=deadline,
         )
         if document.value["status"] == "completed":
-            self._release(lease)
+            self._release(lease, deadline=deadline)
             return self._model_from_json(
                 l6.L6GraphResult,
                 document.value["graph_result"]
@@ -546,6 +679,9 @@ class AzureBlobL6GraphReceiptAuthority:
         cancellation = threading.Event()
         lease_loss_handled = threading.Event()
         lease_loss_lock = threading.Lock()
+
+        def terminal_deadline() -> float:
+            return self._monotonic() + self._terminalization_timeout
 
         def lose_lease() -> None:
             # The first observer owns terminalization. Set all stop signals before
@@ -563,28 +699,30 @@ class AzureBlobL6GraphReceiptAuthority:
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
+                        deadline=terminal_deadline(),
+                        document=document,
                     )
-                except (AzureError, L6BlobAuthorityError):
+                except (AzureError, L6BlobAuthorityError, TimeoutError):
                     # A lost/reclaimed lease can make terminal CAS impossible.
                     pass
                 finally:
-                    self._release(lease)
+                    self._release(lease, deadline=deadline)
                     lease_loss_handled.set()
 
         def renew() -> None:
             interval = self._lease_seconds / 3
             while True:
-                remaining = deadline - self._monotonic()
+                remaining = execution_deadline - self._monotonic()
                 if remaining <= 0:
                     cancellation.set()
                     return
                 if stop_renewal.wait(min(interval, remaining)):
                     return
-                if self._monotonic() >= deadline:
+                if self._monotonic() >= execution_deadline:
                     cancellation.set()
                     return
                 try:
-                    renewed = lease.renew()
+                    renewed = lease.renew(**self._call_options(deadline))
                     renewed_id = (
                         renewed.get("lease_id")
                         if isinstance(renewed, Mapping)
@@ -593,7 +731,7 @@ class AzureBlobL6GraphReceiptAuthority:
                     if renewed_id != getattr(lease, "id", None):
                         lose_lease()
                         return
-                except AzureError:
+                except (AzureError, TimeoutError):
                     lose_lease()
                     return
 
@@ -640,7 +778,7 @@ class AzureBlobL6GraphReceiptAuthority:
             while not finished.is_set():
                 if lease_lost.is_set():
                     break
-                remaining = deadline - self._monotonic()
+                remaining = execution_deadline - self._monotonic()
                 if remaining <= 0:
                     deadline_expired = True
                     break
@@ -653,7 +791,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 raise L6BlobConflictError(
                     "durable L6 authority lease was lost during execution"
                 )
-            if self._monotonic() >= deadline:
+            if self._monotonic() >= execution_deadline:
                 deadline_expired = True
             if deadline_expired:
                 cancellation.set()
@@ -665,6 +803,8 @@ class AzureBlobL6GraphReceiptAuthority:
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
+                        deadline=terminal_deadline(),
+                        document=document,
                     )
                 raise TimeoutError(
                     "L6 Graph execution exceeded sealed runtime budget"
@@ -678,6 +818,8 @@ class AzureBlobL6GraphReceiptAuthority:
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
+                        deadline=terminal_deadline(),
+                        document=document,
                     )
                 raise L6BlobAuthorityError("Graph transport execution failed")
             result = outcome.get("result")
@@ -692,9 +834,11 @@ class AzureBlobL6GraphReceiptAuthority:
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
+                        deadline=terminal_deadline(),
+                        document=document,
                     )
                 raise ValueError("Graph transport returned an invalid result") from None
-            if self._monotonic() >= deadline:
+            if self._monotonic() >= execution_deadline:
                 cancellation.set()
                 stop_renewal.set()
                 if not lease_lost.is_set():
@@ -704,6 +848,8 @@ class AzureBlobL6GraphReceiptAuthority:
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
+                        deadline=terminal_deadline(),
+                        document=document,
                     )
                 raise TimeoutError(
                     "L6 Graph execution exceeded sealed runtime budget"
@@ -726,7 +872,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 raise L6BlobConflictError(
                     "durable L6 authority lease was lost during execution"
                 )
-            latest = self._read(blob, lease=lease)
+            latest = self._read(blob, lease=lease, deadline=deadline)
             if lease_lost.is_set():
                 raise L6BlobConflictError(
                     "durable L6 authority lease was lost during execution"
@@ -751,13 +897,14 @@ class AzureBlobL6GraphReceiptAuthority:
                 expected_etag=latest.etag,
                 value=completed,
                 lease=lease,
+                deadline=deadline,
             )
             return result
         finally:
             cancellation.set()
             stop_renewal.set()
             renewal.join(timeout=1)
-            self._release(lease)
+            self._release(lease, deadline=deadline)
 
     def _signer_snapshot(self) -> L6OpaqueSignerSnapshot:
         if self._signer_provider is None:
@@ -852,11 +999,81 @@ class AzureBlobL6GraphReceiptAuthority:
             for name, value in expected.items()
         )
 
+    def _probe_blob_capabilities(self) -> bool:
+        deadline = self._monotonic() + self._operation_timeout
+        nonce_hash = canonical_sha256({"nonce": secrets.token_hex(32)})
+        blob = self._container.get_blob_client(
+            f"{self._prefix}/readiness/{nonce_hash}.json"
+        )
+        lease = None
+        deleted = False
+        try:
+            if not self._create(
+                blob,
+                {
+                    "kind": "l6_authority_readiness",
+                    "nonce_hash": nonce_hash,
+                    "state": "created",
+                },
+                deadline=deadline,
+            ):
+                return False
+            lease = self._acquire_lease(blob, deadline=deadline)
+            if lease is None:
+                return False
+            document = self._read(blob, lease=lease, deadline=deadline)
+            if (
+                document.value.get("kind") != "l6_authority_readiness"
+                or document.value.get("nonce_hash") != nonce_hash
+            ):
+                return False
+            self._cas(
+                blob,
+                expected_etag=document.etag,
+                value={
+                    **document.value,
+                    "state": "verified",
+                },
+                lease=lease,
+                deadline=deadline,
+            )
+            blob.delete_blob(
+                lease=lease,
+                **self._call_options(deadline),
+            )
+            deleted = True
+            return True
+        except (
+            AzureError,
+            L6BlobAuthorityError,
+            TimeoutError,
+        ):
+            return False
+        finally:
+            if not deleted:
+                self._release(lease)
+                try:
+                    blob.delete_blob(**self._call_options())
+                except AzureError:
+                    pass
+
     def readiness_observation(self) -> L6BlobReadinessObservation:
         """Return a fail-closed, immutable production capability observation."""
 
         now = self._clock()
         transport_ready = self._graph_transport is not None
+        blob_ready = False
+        if transport_ready:
+            try:
+                properties = self._container.get_container_properties(
+                    **self._call_options()
+                )
+                blob_ready = (
+                    properties is not None
+                    and self._probe_blob_capabilities()
+                )
+            except (AzureError, TimeoutError):
+                pass
         try:
             snapshot = self._signer_snapshot()
             signer = self._signing_key(snapshot, now)
@@ -864,13 +1081,15 @@ class AzureBlobL6GraphReceiptAuthority:
             return L6BlobReadinessObservation(
                 ready=False,
                 graph_transport_configured=transport_ready,
+                blob_capability_verified=blob_ready,
                 signer_valid=False,
                 observed_at_milliseconds=now,
             )
         metadata = signer.metadata
         return L6BlobReadinessObservation(
-            ready=transport_ready,
+            ready=transport_ready and blob_ready,
             graph_transport_configured=transport_ready,
+            blob_capability_verified=blob_ready,
             signer_valid=True,
             observed_at_milliseconds=now,
             signer_snapshot_version=snapshot.snapshot_version,

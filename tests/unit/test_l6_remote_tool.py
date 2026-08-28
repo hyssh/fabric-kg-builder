@@ -8,7 +8,8 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from fabric_kg_builder.agent.l7_remote_tool import (
+from fabric_kg_builder.agent.l6_remote_tool import (
+    L6BlobReadinessAuthorityProvider,
     L6ReadinessAuthority,
     build_l6_openapi_spec,
     create_l6_remote_tool_app,
@@ -57,6 +58,30 @@ class _AuthorityProvider:
         return self.authority
 
 
+def test_blob_readiness_adapter_requires_ready_durable_authority():
+    class Authority:
+        def __init__(self, ready):
+            self.ready = ready
+
+        def readiness_observation(self):
+            return type("Observation", (), {"ready": self.ready})()
+
+    unavailable = L6BlobReadinessAuthorityProvider(
+        authority=Authority(False),
+        l6_definition_hash="a" * 64,
+    )
+    assert unavailable.observe() is None
+    available = L6BlobReadinessAuthorityProvider(
+        authority=Authority(True),
+        l6_definition_hash="a" * 64,
+    )
+    assert available.observe() == L6ReadinessAuthority(
+        l6_definition_hash="a" * 64,
+        backend_kind="azure_blob",
+        backend_version="1",
+    )
+
+
 def _readiness_kwargs(**overrides):
     values = {
         "external_endpoint": "https://l6.example.test",
@@ -75,13 +100,25 @@ def _readiness_kwargs(**overrides):
 
 
 def _client(handler=None, **kwargs):
-    auth_verifier = kwargs.pop("auth_verifier", _Verifier())
+    configured = _readiness_kwargs()
+    configured.update(kwargs)
+    auth_verifier = configured.pop("auth_verifier", _Verifier())
     return TestClient(
         create_l6_remote_tool_app(
             handler=handler or _Handler(),
             auth_verifier=auth_verifier,
-            **kwargs,
+            **configured,
         )
+    )
+
+
+def _raw_app(handler=None, **overrides):
+    configured = _readiness_kwargs()
+    configured.update(overrides)
+    return create_l6_remote_tool_app(
+        handler=handler or _Handler(),
+        auth_verifier=_Verifier(),
+        **configured,
     )
 
 
@@ -107,6 +144,28 @@ def test_auth_failure_is_sanitized_before_schema_validation():
     assert "provider" not in response.text
 
 
+def test_tool_ingress_enforces_caller_oid_and_app_role_before_body():
+    class WrongRoleVerifier(InboundAuthVerifier):
+        def verify(self, authorization_header):
+            return {
+                "tid": "tenant",
+                "aud": "api://l6",
+                "oid": "caller-object-id",
+                "roles": ["Wrong.Role"],
+            }
+
+    response = _client(auth_verifier=WrongRoleVerifier()).post(
+        _TOOL_PATH,
+        headers={
+            "Authorization": _VALID_AUTH,
+            "Content-Length": str(10_000_000),
+        },
+        content=b"{}",
+    )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "request authorization failed"}
+
+
 def test_request_size_is_bounded():
     response = _client(max_body_bytes=1024).post(
         _TOOL_PATH,
@@ -125,7 +184,7 @@ def test_health_is_non_authoritative_and_readiness_requires_authentication():
 
 
 def test_readiness_fails_closed_when_authority_is_absent_or_not_ready():
-    response = _client().get(
+    response = _client(readiness_authority_provider=None).get(
         "/ready",
         headers={"Authorization": _VALID_AUTH},
     )
@@ -270,7 +329,7 @@ def _headers(*extra):
 
 
 def test_auth_is_rejected_without_reading_body():
-    app = create_l6_remote_tool_app(handler=_Handler(), auth_verifier=_Verifier())
+    app = _raw_app()
     status, body = asyncio.run(
         _asgi_request(
             app,
@@ -282,9 +341,7 @@ def test_auth_is_rejected_without_reading_body():
 
 
 def test_oversized_declared_length_is_rejected_before_body():
-    app = create_l6_remote_tool_app(
-        handler=_Handler(), auth_verifier=_Verifier(), max_body_bytes=1024
-    )
+    app = _raw_app(max_body_bytes=1024)
     status, body = asyncio.run(
         _asgi_request(
             app,
@@ -299,9 +356,7 @@ def test_oversized_declared_length_is_rejected_before_body():
 
 
 def test_chunked_body_aborts_as_soon_as_limit_is_crossed():
-    app = create_l6_remote_tool_app(
-        handler=_Handler(), auth_verifier=_Verifier(), max_body_bytes=1024
-    )
+    app = _raw_app(max_body_bytes=1024)
     messages = [
         {"type": "http.request", "body": b"a" * 700, "more_body": True},
         {"type": "http.request", "body": b"b" * 400, "more_body": True},
@@ -321,7 +376,7 @@ def test_chunked_body_aborts_as_soon_as_limit_is_crossed():
 
 
 def test_declared_length_mismatch_aborts_immediately():
-    app = create_l6_remote_tool_app(handler=_Handler(), auth_verifier=_Verifier())
+    app = _raw_app()
     status, body = asyncio.run(
         _asgi_request(
             app,
@@ -364,7 +419,7 @@ def test_declared_length_mismatch_aborts_immediately():
 def test_invalid_or_ambiguous_framing_is_static(
     headers, expected_status, expected_detail
 ):
-    app = create_l6_remote_tool_app(handler=_Handler(), auth_verifier=_Verifier())
+    app = _raw_app()
     status, body = asyncio.run(
         _asgi_request(
             app,
@@ -377,7 +432,7 @@ def test_invalid_or_ambiguous_framing_is_static(
 
 def test_disconnect_is_sanitized_and_never_invokes_handler():
     handler = _Handler()
-    app = create_l6_remote_tool_app(handler=handler, auth_verifier=_Verifier())
+    app = _raw_app(handler)
     status, body = asyncio.run(
         _asgi_request(
             app,
@@ -408,11 +463,7 @@ def test_slow_trickle_is_cancelled_at_monotonic_ingress_deadline():
             raise
         return {"type": "http.request", "body": b"{}", "more_body": False}
 
-    app = create_l6_remote_tool_app(
-        handler=handler,
-        auth_verifier=_Verifier(),
-        timeout_seconds=0.01,
-    )
+    app = _raw_app(handler, timeout_seconds=0.01)
     status, body = asyncio.run(
         _asgi_request(
             app,
@@ -430,7 +481,7 @@ def test_slow_trickle_is_cancelled_at_monotonic_ingress_deadline():
 
 def test_ingress_cancellation_propagates_and_never_invokes_handler():
     handler = _Handler()
-    app = create_l6_remote_tool_app(handler=handler, auth_verifier=_Verifier())
+    app = _raw_app(handler)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
             _asgi_request(

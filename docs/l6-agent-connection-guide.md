@@ -1,7 +1,7 @@
 # L6 Agent Connection Guide
 
-L6 definitions remain canonical artifacts in version 0.2.3. Deployment is an
-explicit L7 operation and never occurs during L6 compilation.
+L6 definitions are local artifacts in version 0.2.3. Do not deploy them from
+this stage.
 
 ## Required existing connections
 
@@ -59,81 +59,40 @@ or rejects the run, wakes concurrent waiters, and performs no second Graph
 call. The included
 `L6InMemoryGraphReceiptAuthority` is the process-local test implementation.
 Callers receive only the opaque receipt ID/hash; they cannot submit receipt
-contents. A production multi-process host uses `AzureBlobL6GraphReceiptAuthority` to
-preserve the same atomic claim/completion/failure transitions with finite Blob
-leases and ETag compare-and-swap. A durable host injects an immutable
-`L6AuthorityKeyringSnapshot` through `L6AuthorityKeyringProvider`. Snapshots
-carry authority ID/version/algorithm, validity window, state, and verifier;
-atomic versioned replacement supports rotation, disable, and revocation.
-Unknown, inactive, early, or expired authority keys fail closed. Key material
-and verifiers are internal host configuration and are never exposed as tools.
+contents. `AzureBlobL6GraphReceiptAuthority` is the production multi-process
+adapter. It uses finite Blob leases, ETag compare-and-swap, bounded waits,
+crash/expired-claim recovery, and atomic Graph/evidence issue and one-time
+consume. It requires a deadline-aware cancellable Graph transport with bounded
+connect/read operations; synchronous callbacks are test-only. Lease renewal
+failure, deadline expiry, or unknown lease state cancels the transport, marks
+the owned run terminal when possible, releases the lease, and ignores late
+results.
 
-## L7 safe deployment workflow
+The durable adapter receives an opaque immutable signer snapshot provider.
+Every operation uses one snapshot and one clock instant to validate algorithm,
+key ID/version, active state, validity window, and revocation. Key bytes remain
+outside Blob, repository, logs, tools, and receipts. Existing receipt IDs are
+idempotent only when their current signature and complete run/scope/request/
+evidence bindings match exactly.
 
-Copy `.foundry/l7-deployment.json.example` to the ignored
-`.foundry/l7-deployment.json` and replace every placeholder. The endpoint must
-already be hosted on approved HTTPS compute; this release does not provision a
-new compute resource.
+## Public RemoteTool host
 
-```text
-fabric-kg app deploy-l6 \
-  --config .foundry/l7-deployment.json \
-  --definition build/agent/l6-agent-definition.json \
-  --plan build/release/l7-deployment-plan.json
+`fabric_kg_builder.agent.l6_remote_tool.create_l6_remote_tool_app` exposes the
+five canonical L6 schemas as an ASGI/OpenAPI application. Tool ingress
+authenticates first, rejects ambiguous framing and unsupported content
+encodings, incrementally bounds streamed bodies, applies ingress and execution
+deadlines, propagates cancellation, validates typed responses, and returns only
+static sanitized errors.
 
-fabric-kg app deploy-l6 \
-  --config .foundry/l7-deployment.json \
-  --definition build/agent/l6-agent-definition.json \
-  --live \
-  --plan build/release/l7-deployment-plan.json \
-  --approve-live <exact-plan-hash>
-```
+`/health` is operational only. Authenticated `/ready` binds the tenant,
+audience, allowed caller object ID, required app role, exact OpenAPI hash, L6
+definition hash, and durable authority backend/version. Missing or invalid
+signer/transport/backend readiness returns 503.
 
-Dry-run is the default and performs GET/read-only operations only. Live mode
-reads the exact unexpired plan from disk and rechecks identity, configuration,
-audience, resource ETags, canonical Fabric definition bytes/hashes, signed
-connection ownership, and L5a/L5b/L6 hashes before its first mutation.
-Authenticated RemoteTool readiness is checked again immediately before mutation
-and before success. `--resume` does not re-plan or accept changed state.
-Rollback is mandatory and journals every attempted mutation; there is no live
-opt-out after the first mutation.
+This component provisions no compute. Deploy the ASGI app behind TLS and a
+reverse proxy with request limits as defense-in-depth; application-level
+streaming limits remain authoritative.
 
-Foundry does not return `CustomKeys` credential values from connection GET.
-Mutable `metadata.bindingHash` is not adoption authority. A preexisting
-connection requires an independently signed durable Blob receipt for the exact
-connection ID, ETag, category, target, audience, workspace, and Data Agent.
-Without it, use a new release-owned connection name. Configure the opaque
-authority factory as `FABRIC_KG_L7_OWNERSHIP_FACTORY=module:callable`; key
-material remains outside config, Blob state, logs, plans, and receipts.
-Configure
-`FABRIC_KG_L7_REMOTE_PROBE_CREDENTIAL_FACTORY=module:callable` separately; it
-must return a credential for the actual allowed Foundry managed identity.
-The deployer credential is never substituted for this caller proof.
-
-Every Fabric target in `.foundry/l7-deployment.json` must set
-`definition_path`, `definition_hash`, and `definition_bytes_hash`. The file must
-be canonical JSON. A `null` hash, type-only readback, or unavailable Data
-Agent/Graph `getDefinition` API is a capability NO-GO.
-
-The RemoteTool process is exposed separately:
-
-```text
-fabric-kg app serve-l6 \
-  --config .foundry/l7-deployment.json \
-  --definition build/agent/l6-agent-definition.json \
-  --handler-factory my_package.l6_runtime:create_handler \
-  --readiness-authority-factory my_package.l6_runtime:create_readiness
-```
-
-The handler factory must return configured canonical L6 authorities. The host
-enforces Entra tenant/audience validation, strict request/response schemas,
-request size and deadline limits, sanitized errors, health/readiness, and zero
-synthesis. `/health` is operational only; live authority comes exclusively from
-authenticated `/ready` with exact caller/app-role, OpenAPI, L6 definition, and
-durable backend hashes. Reverse-proxy body limits are defense-in-depth; the
-application still authenticates first and incrementally bounds streamed input.
-Assign Storage Blob Data Contributor (or a tighter custom role with
-read/write/lease permissions) to the host identity. Foundry and Fabric RBAC,
-RemoteTool application registration/audience, and compute hosting remain release
-prerequisites. Live Graph/Search acceptance is intentionally deferred to the
-0.2.4 successor.
+L7 must deploy the endpoint and definition, verify project connection
+audiences/RBAC, run live Graph and Search acceptance, and confirm definition
+read-back from Microsoft Foundry and Fabric Data Agent.

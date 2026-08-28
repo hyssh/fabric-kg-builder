@@ -2351,6 +2351,13 @@ class L6VerifiedGraphTool:
                 retrieval_scope=retrieval_scope,
             ),
         )
+        configured_transport = bool(
+            getattr(
+                self._graph_receipt_authority,
+                "uses_configured_transport",
+                False,
+            )
+        )
         result = self._graph_receipt_authority.execute_graph_once(
             l6_run_id=request.l6_run_id,
             graph_query=request.graph_query,
@@ -2359,7 +2366,14 @@ class L6VerifiedGraphTool:
             budget=budget,
             access=access,
             authorities=self._authorities,
-            execute=lambda: self._delegate.execute(request, scope=ontology_scope),
+            execute=(
+                None
+                if configured_transport
+                else lambda: self._delegate.execute(
+                    request,
+                    scope=ontology_scope,
+                )
+            ),
         )
         graph_complete, _ = _validate_graph_result(
             request.graph_query,

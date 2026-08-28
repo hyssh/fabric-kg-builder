@@ -1612,35 +1612,25 @@ PYTHONPATH=src python3 -m pytest -q -m integration \
   tests/integration/test_l6_agent_integration.py
 ```
 
-### 15.9 L7 production deployment adapter foundation gate
+### 15.9 L6 RemoteTool and durable authority gate
 
-The L7 gate is offline and fake-backed. It must prove that dry-run performs only
-identity/GET probes; plan JSON is canonical, immutable, hashed, sanitized, and
-expires; live mode requires `--approve-live` equal to the exact persisted plan
-hash; and tenant, principal, config, audience, L5a/L5b/L6 hash, definition, or
-ETag drift fails before the first mutation. Resume accepts only the same plan
-and state.
+This gate is offline and fake-backed. It covers Blob lease/ETag concurrency,
+concurrent run claims, crash/expired-claim recovery, atomic Graph and evidence
+receipt issue/consume/replay, immutable signer snapshots, key
+rotation/revocation/validity windows, strict collision verification,
+deadline-aware cancellable Graph transport, lease-loss cancellation, ignored
+late results, and exactly one valid receipt under reclaim races.
 
-It also covers Blob lease/CAS concurrency, concurrent run claims, expired claim
-recovery, one-time receipt consumption, absent/rotated opaque signers,
-deadline-aware/cancellable Graph transport and ignored late results, RemoteTool
-auth-first bounded streaming/framing/encoding/disconnect/schema/deadline and
-authenticated readiness/OpenAPI behavior, bearer header use without token
-disclosure, signed durable CustomKeys ownership, transaction-journal rollback
-under network/parser/interrupt failures, per-mutation plan expiry, ownership
-upload `BaseException` reconciliation in dependency order, mandatory canonical Fabric definition
-bytes plus POST/LRO readback, Foundry version readback, accounting, redaction,
-and unchanged RDF inactivity.
+The RemoteTool gate covers auth-first bounded streaming, framing and encoding
+rejection, ingress and tool deadlines, disconnect/cancellation, strict
+request/response/OpenAPI schemas, sanitized errors, authenticated readiness
+bound to tenant/audience/caller OID/app role/L6 definition/durable backend, and
+zero synthesis. RDF remains inactive.
 
 ```text
 PYTHONPATH=src python3 -m pytest -q \
   tests/unit/test_l6_blob_authority.py \
-  tests/unit/test_l7_deployment.py \
-  tests/unit/test_l7_adapters.py \
-  tests/unit/test_l7_ownership.py \
-  tests/unit/test_l7_remote_tool.py \
-  tests/unit/test_project_connections_l7.py \
-  tests/unit/test_l7_cli.py \
+  tests/unit/test_l6_remote_tool.py \
   tests/unit/test_l6_agent_integration.py
 ```
 
