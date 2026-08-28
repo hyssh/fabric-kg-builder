@@ -446,6 +446,34 @@ def _raw_candidate_diagnostics(
     }
 
 
+def _uncoverable_critical_question_ids(
+    preflight: L1Preflight,
+    candidates: DomainProposalCandidatesV2,
+) -> tuple[str, ...]:
+    from .selection import eligible_relationship_vocabulary
+
+    eligible_type_ids = {
+        item.proposed_type.type_id
+        for item in candidates.semantic_type_candidates
+        if item.score.ip_governance_eligible
+        and item.score.ambiguity_conflict_penalty == 0
+    }
+    relationships, _aliases, _groups = eligible_relationship_vocabulary(
+        candidates.relationship_candidates,
+        eligible_type_ids=eligible_type_ids,
+    )
+    coverable = {
+        question_id
+        for relationship in relationships
+        for question_id in relationship.competency_question_ids
+    }
+    return tuple(
+        item.id
+        for item in preflight.intake.competency_questions
+        if item.business_critical and item.id not in coverable
+    )
+
+
 def _zero_route_audit(
     *,
     preflight: L1Preflight,
@@ -1893,6 +1921,12 @@ def prepare_l1_stage(
             ),
             "critical_coverable_question_count": (
                 initial_route_audit.critical_coverable_question_count
+            ),
+            "uncovered_critical_question_ids": (
+                _uncoverable_critical_question_ids(
+                    preflight,
+                    candidates,
+                )
             ),
         }
         candidate_regeneration_attempted = True

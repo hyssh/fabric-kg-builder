@@ -397,9 +397,11 @@ class _PartialCriticalCoverageClient:
     def __init__(self, *, second_valid: bool) -> None:
         self.calls = 0
         self.second_valid = second_valid
+        self.systems: list[str] = []
 
     def complete_json(self, **kwargs):
         self.calls += 1
+        self.systems.append(kwargs["system"])
         raw = _candidates("records")
         if self.calls == 1 or not self.second_valid:
             raw["relationship_candidates"][0][
@@ -533,6 +535,8 @@ def test_partial_critical_coverage_gets_one_full_regeneration(
         route.start_type_id is not None
         for route in prepared.candidates.question_routes
     )
+    assert "uncovered_critical_question_ids" in client.systems[1]
+    assert "cq:q2" in client.systems[1]
 
 
 def test_repeated_partial_critical_coverage_is_typed_per_question(
