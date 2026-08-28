@@ -844,6 +844,7 @@ def test_noninteractive_stage_is_blocked_until_explicit_approval(
         domain_path=tmp_path / "domain.yaml",
         expected_project_id=prepared.preflight.base_identity.project_id,
         expected_run_id=prepared.preflight.run_id,
+        expected_proposal_hash=prepared.proposal.proposal_hash,
     )
     assert approved.status == "succeeded"
     assert approved.contract is not None

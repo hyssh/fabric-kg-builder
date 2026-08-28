@@ -3416,12 +3416,18 @@ def approve_persisted_l1_draft(
     reviewed_contract: DomainContractV2 | None = None,
     expected_project_id: str | None = None,
     expected_run_id: str | None = None,
+    expected_proposal_hash: str | None = None,
 ) -> L1StageResult:
     """Explicitly approve a current blocked draft after complete binding checks."""
     prepared = load_prepared_l1_stage(state_root=state_root)
-    if not expected_project_id or not expected_run_id:
+    if (
+        not expected_project_id
+        or not expected_run_id
+        or not expected_proposal_hash
+    ):
         raise L1StageError(
-            "schema-2 approval requires expected project and run IDs"
+            "schema-2 approval requires expected project ID, run ID, "
+            "and proposal hash"
         )
     if (
         prepared.design_context.identity.project_id
@@ -3430,6 +3436,10 @@ def approve_persisted_l1_draft(
     ):
         raise L1StageError(
             "persisted L1 identity does not match expected project/run"
+        )
+    if prepared.proposal.proposal_hash != expected_proposal_hash:
+        raise L1StageError(
+            "persisted L1 proposal does not match expected proposal hash"
         )
     if reviewed_contract is not None and (
         canonical_json(reviewed_contract)

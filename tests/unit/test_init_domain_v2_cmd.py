@@ -381,6 +381,9 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
             encoding="utf-8"
         )
     )["identity"]
+    proposal_hash = json.loads(
+        (state_root / "domain-proposal.json").read_text(encoding="utf-8")
+    )["proposal_hash"]
 
     mismatched_path = tmp_path / "different-domain.yaml"
     mismatched = yaml.safe_load(domain_path.read_text(encoding="utf-8"))
@@ -404,6 +407,8 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
             identity["project_id"],
             "--run-id",
             identity["run_id"],
+            "--proposal-hash",
+            proposal_hash,
         ],
     )
     assert mismatch.exit_code != 0
@@ -437,6 +442,8 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
             identity["project_id"],
             "--run-id",
             identity["run_id"],
+            "--proposal-hash",
+            proposal_hash,
         ],
     )
 
@@ -474,14 +481,17 @@ def test_schema_2_approval_rejects_cross_run_proposal_replay(
             ],
         )
         assert result.exit_code == 0, result.output
-    (states[0] / "domain-proposal.json").write_bytes(
-        (states[1] / "domain-proposal.json").read_bytes()
-    )
     expected_identity = json.loads(
         (states[0] / "domain-design-context.json").read_text(
             encoding="utf-8"
         )
     )["identity"]
+    expected_proposal_hash = json.loads(
+        (states[0] / "domain-proposal.json").read_text(encoding="utf-8")
+    )["proposal_hash"]
+    (states[0] / "domain-proposal.json").write_bytes(
+        (states[1] / "domain-proposal.json").read_bytes()
+    )
 
     approval = runner.invoke(
         cli,
@@ -498,6 +508,8 @@ def test_schema_2_approval_rejects_cross_run_proposal_replay(
             expected_identity["project_id"],
             "--run-id",
             expected_identity["run_id"],
+            "--proposal-hash",
+            expected_proposal_hash,
         ],
     )
 

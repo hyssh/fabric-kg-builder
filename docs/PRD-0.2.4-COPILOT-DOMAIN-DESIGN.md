@@ -330,11 +330,16 @@ Approval remains a separate explicit operation:
 fabric-kg domain approve \
   --file domain.yaml \
   --proposal .fkg/domain-proposal.json \
+  --project-id "$PROJECT_ID" \
+  --run-id "$L1_RUN_ID" \
+  --proposal-hash "$L1_PROPOSAL_HASH" \
   --approved-by "$OPERATOR"
 ```
 
 CI cannot invent an approver. An approved intake/proposal may be reused only
-when all bound hashes still match.
+when all bound hashes still match. The project ID, run ID, and proposal hash
+must be retained independently from proposal generation and supplied at
+approval.
 
 ## 10. Copilot Proposal Algorithm
 

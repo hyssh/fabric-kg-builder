@@ -130,12 +130,19 @@ fabric-kg init-domain \
 
 fabric-kg domain approve \
   --file domain.yaml \
+  --project-id "$PROJECT_ID" \
+  --run-id "$L1_RUN_ID" \
+  --proposal-hash "$L1_PROPOSAL_HASH" \
   --proposal .fkg/l1/domain-proposal.json \
   --design-context .fkg/l1/domain-design-context.json \
   --source-profile .fkg/l1/domain-source-profile.json \
   --source-corpus-manifest .fkg/l1/source-corpus-manifest.json \
   --design-sample-manifest .fkg/l1/design-sample-manifest.json
 ```
+
+`PROJECT_ID`, `L1_RUN_ID`, and `L1_PROPOSAL_HASH` are independent approval
+inputs retained from the `init-domain` invocation/output. Approval fails if
+they do not match the complete persisted L1 artifact set.
 
 The one-summary decision is `approve`, `correct`, or `abort`. Corrections create
 a new proposal linked to the prior proposal; approval never mutates a proposal.
