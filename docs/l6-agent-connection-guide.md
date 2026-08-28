@@ -59,13 +59,39 @@ or rejects the run, wakes concurrent waiters, and performs no second Graph
 call. The included
 `L6InMemoryGraphReceiptAuthority` is the process-local test implementation.
 Callers receive only the opaque receipt ID/hash; they cannot submit receipt
-contents. A production multi-process host must use a durable adapter preserving
-the same atomic claim/completion/failure transitions. A durable host injects an immutable
-`L6AuthorityKeyringSnapshot` through `L6AuthorityKeyringProvider`. Snapshots
-carry authority ID/version/algorithm, validity window, state, and verifier;
-atomic versioned replacement supports rotation, disable, and revocation.
-Unknown, inactive, early, or expired authority keys fail closed. Key material
-and verifiers are internal host configuration and are never exposed as tools.
+contents. `AzureBlobL6GraphReceiptAuthority` is the production multi-process
+adapter. It uses finite Blob leases, ETag compare-and-swap, bounded waits,
+crash/expired-claim recovery, and atomic Graph/evidence issue and one-time
+consume. It requires a deadline-aware cancellable Graph transport with bounded
+connect/read operations; synchronous callbacks are test-only. Lease renewal
+failure, deadline expiry, or unknown lease state cancels the transport, marks
+the owned run terminal when possible, releases the lease, and ignores late
+results.
+
+The durable adapter receives an opaque immutable signer snapshot provider.
+Every operation uses one snapshot and one clock instant to validate algorithm,
+key ID/version, active state, validity window, and revocation. Key bytes remain
+outside Blob, repository, logs, tools, and receipts. Existing receipt IDs are
+idempotent only when their current signature and complete run/scope/request/
+evidence bindings match exactly.
+
+## Public RemoteTool host
+
+`fabric_kg_builder.agent.l6_remote_tool.create_l6_remote_tool_app` exposes the
+five canonical L6 schemas as an ASGI/OpenAPI application. Tool ingress
+authenticates first, rejects ambiguous framing and unsupported content
+encodings, incrementally bounds streamed bodies, applies ingress and execution
+deadlines, propagates cancellation, validates typed responses, and returns only
+static sanitized errors.
+
+`/health` is operational only. Authenticated `/ready` binds the tenant,
+audience, allowed caller object ID, required app role, exact OpenAPI hash, L6
+definition hash, and durable authority backend/version. Missing or invalid
+signer/transport/backend readiness returns 503.
+
+This component provisions no compute. Deploy the ASGI app behind TLS and a
+reverse proxy with request limits as defense-in-depth; application-level
+streaming limits remain authoritative.
 
 L7 must deploy the endpoint and definition, verify project connection
 audiences/RBAC, run live Graph and Search acceptance, and confirm definition
