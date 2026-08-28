@@ -147,8 +147,10 @@ class L1ZeroRouteAudit(ContractModel):
     question_id_hashes: tuple[str, ...]
     route_states: tuple[Literal["supported", "unsupported"], ...]
     unsupported_reason_codes: tuple[str, ...]
-    proposed_type_ids: tuple[str, ...]
-    proposed_relationship_ids: tuple[str, ...]
+    proposed_type_count: int
+    proposed_type_id_hash: str
+    proposed_relationship_count: int
+    proposed_relationship_id_hash: str
 
 
 def _sanitized_validation_failures(
@@ -248,9 +250,11 @@ def _normalize_question_route_shapes(
         if not has_start or not has_end:
             code = "route_endpoint_key_missing"
         elif not (
-            start is None or isinstance(start, str)
+            start is None
+            or (isinstance(start, str) and bool(start.strip()))
         ) or not (
-            end is None or isinstance(end, str)
+            end is None
+            or (isinstance(end, str) and bool(end.strip()))
         ):
             code = "route_endpoint_type_invalid"
         elif (start is None) != (end is None):
@@ -268,15 +272,16 @@ def _normalize_question_route_shapes(
             code = ""
             if reason is not None and not isinstance(reason, str):
                 code = "supported_reason_type_invalid"
-            rebuilt.append(
-                {
-                    "question_id": question_id,
-                    "start_type_id": start,
-                    "end_type_id": end,
-                    "unsupported_reason": None,
-                }
-            )
-            continue
+            if not code:
+                rebuilt.append(
+                    {
+                        "question_id": question_id,
+                        "start_type_id": start,
+                        "end_type_id": end,
+                        "unsupported_reason": None,
+                    }
+                )
+                continue
         rebuilt.append(
             {
                 "question_id": question_id,
@@ -339,13 +344,15 @@ def _zero_route_audit(
             )
             for route in candidates.question_routes
         ),
-        proposed_type_ids=tuple(
+        proposed_type_count=len(candidates.semantic_type_candidates),
+        proposed_type_id_hash=canonical_sha256(
             sorted(
                 item.proposed_type.type_id
                 for item in candidates.semantic_type_candidates
             )
         ),
-        proposed_relationship_ids=tuple(
+        proposed_relationship_count=len(candidates.relationship_candidates),
+        proposed_relationship_id_hash=canonical_sha256(
             sorted(
                 item.relationship_type_id
                 for item in candidates.relationship_candidates

@@ -203,19 +203,19 @@ def test_proposal_route_reason_is_normalized_locally_without_retry(
     assert prepared.model_call_count == 1
     assert (
         prepared.candidates.question_routes[0].unsupported_reason
-        == "no_supported_route_proposed"
+        == "unsupported_reason_missing"
     )
 
 
-def test_half_defined_route_fails_typed_without_regeneration(
+def test_half_defined_route_downgrades_without_regeneration(
     tmp_path: Path,
 ) -> None:
     client = _RepairingProposalClient(half_route=True)
-    with pytest.raises(L1ProposalSchemaRepairError) as captured:
-        prepare_l1_stage(_preflight(tmp_path), client=client)
-    assert captured.value.attempt_count == 1
-    assert captured.value.error_code == "L1_PROPOSAL_SCHEMA_REPAIR_EXHAUSTED"
-    assert "Support evidence-backed" not in str(captured.value)
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    route = prepared.candidates.question_routes[0]
+    assert route.start_type_id is None
+    assert route.end_type_id is None
+    assert route.unsupported_reason == "route_endpoint_pair_half_defined"
     assert client.calls == 1
 
 

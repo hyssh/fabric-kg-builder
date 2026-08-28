@@ -9,7 +9,6 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.domain.service import load_domain_contract
 from tests.unit.test_l1_stage import (
-    _RepairingProposalClient,
     _ZeroRouteRepairClient,
     _candidates,
     _intake,
@@ -256,6 +255,13 @@ def test_initial_proposal_validation_persists_path_specific_audit(
 ) -> None:
     source, intake_path, _ = _write_inputs(tmp_path)
     state_root = tmp_path / ".fkg" / "l1"
+
+    class UnknownQuestionRouteClient:
+        def complete_json(self, **kwargs):
+            raw = _candidates("records")
+            raw["question_routes"][0]["question_id"] = "model-invented"
+            return raw
+
     result = CliRunner().invoke(
         cli,
         [
@@ -274,9 +280,7 @@ def test_initial_proposal_validation_persists_path_specific_audit(
             str(tmp_path / "domain.yaml"),
         ],
         obj={
-            "_foundry_client": _RepairingProposalClient(
-                half_route=True
-            ),
+            "_foundry_client": UnknownQuestionRouteClient(),
             "_foundry_model_version": "gpt-4-1",
         },
     )
@@ -284,10 +288,12 @@ def test_initial_proposal_validation_persists_path_specific_audit(
     audit_path = state_root / "proposal-failure-audit.json"
     assert audit_path.exists()
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    assert any(
-        failure["path"].startswith("question_routes.[index]")
-        for failure in audit["failures"]
-    )
+    assert audit["failures"] == [
+        {
+            "path": "question_routes",
+            "code": "route_question_id_unknown",
+        }
+    ]
     assert all("message" not in failure for failure in audit["failures"])
 
 
