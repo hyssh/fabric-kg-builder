@@ -554,7 +554,58 @@ def test_semantic_authority_drift_does_not_retry(tmp_path: Path) -> None:
         prepare_l1_stage(_preflight(tmp_path), client=client)
     assert client.calls == 1
     assert captured.value.validation_error_codes == (
-        "relationship_question_unknown",
+        "candidate_question_unknown",
+    )
+
+
+def test_mixed_structural_and_authority_failure_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    class MixedFailureClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            raw = _candidates("records")
+            raw["semantic_type_candidates"][0]["score_inputs"][
+                "classification_fit"
+            ] = "provider-invalid"
+            raw["relationship_candidates"][0][
+                "competency_question_ids"
+            ] = ["cq:invented"]
+            return raw
+
+    client = MixedFailureClient()
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 1
+    assert captured.value.validation_error_codes == (
+        "candidate_question_unknown",
+    )
+
+
+def test_unknown_semantic_type_evidence_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    class EvidenceDriftClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            raw = _candidates("records")
+            raw["semantic_type_candidates"][0]["proposed_type"][
+                "evidence_span_ids"
+            ] = ["evidence:invented"]
+            return raw
+
+    client = EvidenceDriftClient()
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 1
+    assert captured.value.validation_error_codes == (
+        "candidate_evidence_unknown",
     )
 
 

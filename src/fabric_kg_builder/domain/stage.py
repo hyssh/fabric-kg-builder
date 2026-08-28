@@ -633,6 +633,97 @@ def _assert_candidate_authority(
         )
 
 
+def _assert_raw_candidate_authority(
+    raw: dict[str, Any],
+    *,
+    trusted_question_ids: tuple[str, ...],
+    trusted_evidence_ids: set[str],
+    attempt_count: int,
+) -> None:
+    questions = set(trusted_question_ids)
+    semantic_candidates = raw.get("semantic_type_candidates")
+    type_ids: set[str] = set()
+    if isinstance(semantic_candidates, list):
+        for item in semantic_candidates:
+            if not isinstance(item, dict):
+                continue
+            proposed = item.get("proposed_type")
+            if isinstance(proposed, dict) and isinstance(
+                proposed.get("type_id"), str
+            ):
+                type_ids.add(proposed["type_id"])
+    failures: list[tuple[str, str]] = []
+
+    candidate_groups = (
+        "domain_boundary_candidates",
+        "semantic_type_candidates",
+        "generalization_candidates",
+        "relationship_candidates",
+        "completeness_candidates",
+        "external_reference_candidates",
+    )
+    for group_name in candidate_groups:
+        values = raw.get(group_name)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            proposed = (
+                item.get("proposed_type")
+                if isinstance(item.get("proposed_type"), dict)
+                else item
+            )
+            for mapping in (item, proposed):
+                for field in (
+                    "competency_question_ids",
+                    "question_ids",
+                ):
+                    references = mapping.get(field)
+                    if isinstance(references, list) and (
+                        {value for value in references if isinstance(value, str)}
+                        - questions
+                    ):
+                        failures.append(
+                            (
+                                f"{group_name}.{field}",
+                                "candidate_question_unknown",
+                            )
+                        )
+                evidence = mapping.get("evidence_span_ids")
+                if isinstance(evidence, list) and (
+                    {value for value in evidence if isinstance(value, str)}
+                    - trusted_evidence_ids
+                ):
+                    failures.append(
+                        (
+                            f"{group_name}.evidence_span_ids",
+                            "candidate_evidence_unknown",
+                        )
+                    )
+            for field in (
+                "source_type_ids",
+                "target_type_ids",
+                "semantic_target_ids",
+            ):
+                references = item.get(field)
+                if isinstance(references, list) and (
+                    {value for value in references if isinstance(value, str)}
+                    - type_ids
+                ):
+                    failures.append(
+                        (
+                            f"{group_name}.{field}",
+                            "candidate_type_reference_unknown",
+                        )
+                    )
+    if failures:
+        raise L1ProposalSchemaRepairError(
+            attempt_count=attempt_count,
+            validation_failures=tuple(dict.fromkeys(failures)),
+        )
+
+
 def _repair_zero_supported_routes(
         *,
         preflight: L1Preflight,
@@ -1401,6 +1492,14 @@ def prepare_l1_stage(
         candidates = raw
     if isinstance(candidates, dict):
         first_raw = candidates
+        _assert_raw_candidate_authority(
+            first_raw,
+            trusted_question_ids=trusted_question_ids,
+            trusted_evidence_ids={
+                item.evidence_span_id for item in evidence_spans
+            },
+            attempt_count=model_call_count or 1,
+        )
         try:
             candidates = _validate_proposal_candidate(
                 first_raw,
@@ -1481,6 +1580,14 @@ def prepare_l1_stage(
                     ),
                 )
             try:
+                _assert_raw_candidate_authority(
+                    second_raw,
+                    trusted_question_ids=trusted_question_ids,
+                    trusted_evidence_ids={
+                        item.evidence_span_id for item in evidence_spans
+                    },
+                    attempt_count=2,
+                )
                 candidates = _validate_proposal_candidate(
                     second_raw,
                     trusted_question_ids=trusted_question_ids,
@@ -1605,6 +1712,14 @@ def prepare_l1_stage(
                 )
             )
         try:
+            _assert_raw_candidate_authority(
+                second_raw,
+                trusted_question_ids=trusted_question_ids,
+                trusted_evidence_ids={
+                    item.evidence_span_id for item in evidence_spans
+                },
+                attempt_count=2,
+            )
             second = _validate_proposal_candidate(
                 second_raw,
                 trusted_question_ids=trusted_question_ids,
@@ -1784,6 +1899,14 @@ def prepare_l1_stage(
                             ("proposal.root", "proposal_root_not_object"),
                         ),
                     )
+                _assert_raw_candidate_authority(
+                    second_raw,
+                    trusted_question_ids=trusted_question_ids,
+                    trusted_evidence_ids={
+                        item.evidence_span_id for item in evidence_spans
+                    },
+                    attempt_count=2,
+                )
                 second = _validate_proposal_candidate(
                     second_raw,
                     trusted_question_ids=trusted_question_ids,
