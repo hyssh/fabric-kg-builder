@@ -115,7 +115,7 @@ def test_schema2_intake_rejects_caller_authority_fields(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code != 0
-    assert "must not supply authority fields" in result.output
+    assert "L1_STAGE_FAILED" in result.output
 
 
 def test_schema_2_dry_run_makes_no_writes_or_remote_calls(tmp_path: Path) -> None:
@@ -254,7 +254,7 @@ def test_initial_proposal_validation_persists_path_specific_audit(
     assert audit_path.exists()
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     assert any(
-        failure["path"].startswith("question_routes.0")
+        failure["path"].startswith("question_routes.[index]")
         for failure in audit["failures"]
     )
     assert all("message" not in failure for failure in audit["failures"])

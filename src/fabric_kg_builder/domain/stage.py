@@ -163,7 +163,10 @@ def _sanitized_validation_failures(
         ]
     return [
         {
-            "location": ".".join(str(part) for part in item["loc"]),
+            "location": ".".join(
+                "[index]" if isinstance(part, int) else str(part)
+                for part in item["loc"]
+            ),
             "type": str(item["type"]),
             "message": str(item["msg"])[:200],
         }

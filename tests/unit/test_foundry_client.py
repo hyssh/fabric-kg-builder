@@ -163,6 +163,35 @@ def test_untyped_schema_branch_falls_back_to_json_object() -> None:
     assert response_format == {"type": "json_object"}
 
 
+def test_strict_capability_rejection_retries_json_object_once() -> None:
+    class UnsupportedStrictSchema(Exception):
+        status_code = 400
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    success = sdk_mock.chat.completions.create.return_value
+    sdk_mock.chat.completions.create.side_effect = [
+        UnsupportedStrictSchema(),
+        success,
+    ]
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    result = client.complete_json(
+        "sys",
+        "usr",
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        },
+    )
+    assert result == _FIXTURE_PAYLOAD
+    assert sdk_mock.chat.completions.create.call_count == 2
+    assert (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+        == {"type": "json_object"}
+    )
+
+
 def test_complete_json_puts_system_in_system_role() -> None:
     """System prompt must be sent with role='system', user content with role='user'."""
     sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)

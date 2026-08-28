@@ -43,6 +43,29 @@ from fabric_kg_builder.sources.inspector import (
 
 _DEFAULT_PROFILE_PATH = Path(".fkg") / "source-profile.json"
 _DEFAULT_CONTRACT_PATH = Path("domain.yaml")
+_L1_AUDIT_PATH_SEGMENTS = {
+    "business_goal",
+    "competency_questions",
+    "contract_version",
+    "decisions",
+    "domain_boundary_candidates",
+    "domain_intake_id",
+    "end_type_id",
+    "generalization_candidates",
+    "identity",
+    "in_scope",
+    "intake_hash",
+    "organization_context",
+    "out_of_scope",
+    "question_id",
+    "question_routes",
+    "relationship_candidates",
+    "score",
+    "score_inputs",
+    "semantic_type_candidates",
+    "start_type_id",
+    "unsupported_reason",
+}
 
 _UNRESOLVED_QUESTIONS: list[tuple[str, str, str]] = [
     # (field_path, prompt_text, default)
@@ -661,6 +684,39 @@ def _schema_2_actor() -> str:
     )
 
 
+def _persist_early_l1_failure_audit(
+    *,
+    state_root: Path,
+    project_id: str,
+    run_id: str,
+    path: str,
+    code: str,
+) -> Path:
+    state_root.mkdir(parents=True, exist_ok=True)
+    audit_path = state_root / "proposal-failure-audit.json"
+    temporary = audit_path.with_name(
+        f".{audit_path.name}.{os.getpid()}.tmp"
+    )
+    payload = {
+        "schema_version": "1.0.0",
+        "error_code": "L1_STAGE_FAILED",
+        "run_id": run_id,
+        "project_id": project_id,
+        "model_version": "not-resolved",
+        "model_hash": None,
+        "intake_hash": None,
+        "attempt_count": 0,
+        "failures": [{"path": path, "code": code}],
+    }
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(audit_path)
+    return audit_path
+
+
 def _build_schema_2_client(ctx: click.Context):
     from .domain_cmd import _build_foundry_client, _resolve_model_version
 
@@ -718,10 +774,25 @@ def _run_schema_2_l1(
             "--approve is schema-1-only. Schema-2 requires the one-summary "
             "interactive decision or explicit 'fabric-kg domain approve'."
         )
-    source_path = Path(input_path)
-    if not source_path.exists():
-        raise click.ClickException(f"Source path not found: {source_path}")
     state_root = Path(state_dir)
+    source_path = Path(input_path)
+    effective_project_id = (
+        project_id
+        or os.environ.get("FABRIC_KG_PROJECT_ID")
+        or f"project:{source_path.resolve().name}"
+    )
+    run_id = f"run:{uuid.uuid4().hex}"
+    if not source_path.exists():
+        audit_path = _persist_early_l1_failure_audit(
+            state_root=state_root,
+            project_id=effective_project_id,
+            run_id=run_id,
+            path="preflight.source",
+            code="source_not_found",
+        )
+        raise click.ClickException(
+            f"L1_STAGE_FAILED; audit={audit_path}"
+        )
     out_path = Path(output_path)
     if out_path.exists() and not force and not resume:
         raise click.ClickException(
@@ -729,7 +800,19 @@ def _run_schema_2_l1(
             "Use --resume or --force."
         )
     if intake_path is not None:
-        intake_raw = _load_mapping(Path(intake_path))
+        try:
+            intake_raw = _load_mapping(Path(intake_path))
+        except Exception as exc:
+            audit_path = _persist_early_l1_failure_audit(
+                state_root=state_root,
+                project_id=effective_project_id,
+                run_id=run_id,
+                path="preflight.intake",
+                code="intake_load_failed",
+            )
+            raise click.ClickException(
+                f"L1_STAGE_FAILED; audit={audit_path}"
+            ) from exc
     elif non_interactive or dry_run:
         raise click.ClickException(
             "--intake is required for schema-2 non-interactive and dry-run modes"
@@ -739,12 +822,24 @@ def _run_schema_2_l1(
 
     client = None
     if candidates_path is not None:
-        candidates_raw = _load_mapping(Path(candidates_path))
-        candidates = candidates_raw
-        model_version = "offline-candidate-fixture/1.0.0"
-        model_hash = canonical_sha256(
-            {"model_version": model_version, "candidates": candidates_raw}
-        )
+        try:
+            candidates_raw = _load_mapping(Path(candidates_path))
+            candidates = candidates_raw
+            model_version = "offline-candidate-fixture/1.0.0"
+            model_hash = canonical_sha256(
+                {"model_version": model_version, "candidates": candidates_raw}
+            )
+        except Exception as exc:
+            audit_path = _persist_early_l1_failure_audit(
+                state_root=state_root,
+                project_id=effective_project_id,
+                run_id=run_id,
+                path="proposal.candidates",
+                code="candidate_load_failed",
+            )
+            raise click.ClickException(
+                f"L1_STAGE_FAILED; audit={audit_path}"
+            ) from exc
     else:
         candidates = None
         if dry_run:
@@ -756,16 +851,17 @@ def _run_schema_2_l1(
             try:
                 client, model_version = _build_schema_2_client(ctx)
                 model_hash = compute_model_hash(client, model_version)
-            except (EnvironmentError, ImportError, OSError, ValidationError) as exc:
+            except Exception as exc:
+                audit_path = _persist_early_l1_failure_audit(
+                    state_root=state_root,
+                    project_id=effective_project_id,
+                    run_id=run_id,
+                    path="proposal.provider",
+                    code="client_construction_failed",
+                )
                 raise click.ClickException(
-                    f"Could not build Foundry client for L1 design: {exc}"
+                    f"L1_STAGE_FAILED; audit={audit_path}"
                 ) from exc
-    effective_project_id = (
-        project_id
-        or os.environ.get("FABRIC_KG_PROJECT_ID")
-        or f"project:{source_path.resolve().name}"
-    )
-    run_id = f"run:{uuid.uuid4().hex}"
     previous = None
     if resume and (state_root / "stage-receipt.json").exists():
         try:
@@ -776,23 +872,45 @@ def _run_schema_2_l1(
     preflight = None
     proposal_started = False
 
+    def failure_error_code(exc: Exception) -> str:
+        if isinstance(exc, L1ZeroSupportedRoutesError):
+            return "L1_ZERO_SUPPORTED_ROUTES"
+        if isinstance(exc, L1ProposalSchemaRepairError):
+            return "L1_PROPOSAL_SCHEMA_REPAIR_EXHAUSTED"
+        return (
+            "L1_PROPOSAL_FAILED"
+            if proposal_started
+            else "L1_STAGE_FAILED"
+        )
+
     def persist_failure_audit(
         exc: Exception,
         *,
         details: dict | None = None,
     ) -> Path:
+        def safe_path(parts: tuple[object, ...]) -> str:
+            return ".".join(
+                str(part)
+                if isinstance(part, int)
+                or str(part) == "[index]"
+                or str(part) in _L1_AUDIT_PATH_SEGMENTS
+                else "unknown_field"
+                for part in parts
+            )
+
         failures: list[dict[str, str]] = []
         if isinstance(exc, L1ProposalSchemaRepairError):
             failures = [
-                {"path": path, "code": code}
+                {
+                    "path": safe_path(tuple(path.split("."))),
+                    "code": code,
+                }
                 for path, code in exc.validation_failures
             ]
         elif isinstance(exc, ValidationError):
             failures = [
                 {
-                    "path": ".".join(
-                        str(part) for part in item["loc"]
-                    ),
+                    "path": safe_path(tuple(item["loc"])),
                     "code": str(item["type"]),
                 }
                 for item in exc.errors(
@@ -802,18 +920,27 @@ def _run_schema_2_l1(
             ][:20]
         else:
             text = str(exc)
-            code = next(
+            candidate_code = next(
                 (
                     token.strip("[]")
                     for token in text.split()
                     if token.startswith("[DOM-")
                 ),
-                type(exc).__name__,
+                "",
+            )
+            code = (
+                candidate_code
+                if candidate_code in {"DOM-101", "DOM-103", "DOM-104", "DOM-105"}
+                else (
+                    "provider_or_validation_failure"
+                    if proposal_started
+                    else "preflight_failure"
+                )
             )
             failures = [
                 {
                     "path": (
-                        "proposal"
+                        "proposal.selection"
                         if proposal_started
                         else "preflight"
                     ),
@@ -822,9 +949,7 @@ def _run_schema_2_l1(
             ]
         audit = {
             "schema_version": "1.0.0",
-            "error_code": getattr(
-                exc, "error_code", "L1_STAGE_FAILED"
-            ),
+            "error_code": failure_error_code(exc),
             "run_id": run_id,
             "project_id": effective_project_id,
             "model_version": model_version,
@@ -981,7 +1106,9 @@ def _run_schema_2_l1(
         audit_path = persist_failure_audit(exc)
         if proposal_started:
             raise click.ClickException(
-                f"{getattr(exc, 'error_code', 'L1_PROPOSAL_FAILED')}; "
+                f"{failure_error_code(exc)}; "
                 f"audit={audit_path}"
             ) from exc
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            f"L1_STAGE_FAILED; audit={audit_path}"
+        ) from exc

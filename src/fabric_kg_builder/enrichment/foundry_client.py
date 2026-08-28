@@ -212,12 +212,13 @@ class FoundryClient:
         )
         last_error: json.JSONDecodeError | None = None
         raw = ""
+        strict_rejected = False
         for attempt in range(max_attempts):
             attempt_system = system + schema_instruction
             if attempt:
                 attempt_system += retry_instruction
             strict_schema = None
-            if json_schema:
+            if json_schema and not strict_rejected:
                 try:
                     strict_schema = _azure_strict_schema(json_schema)
                 except ValueError:
@@ -234,17 +235,34 @@ class FoundryClient:
                 if strict_schema is not None
                 else {"type": "json_object"}
             )
-            response = self._client.chat.completions.create(
-                model=self._config.chat_deployment,
-                messages=[
+            request_values = {
+                "model": self._config.chat_deployment,
+                "messages": [
                     {"role": "system", "content": attempt_system},
                     {"role": "user", "content": user},
                 ],
-                response_format=response_format,
-                temperature=0.0,
-                seed=42,
-                max_completion_tokens=max_completion_tokens,
-            )
+                "response_format": response_format,
+                "temperature": 0.0,
+                "seed": 42,
+                "max_completion_tokens": max_completion_tokens,
+            }
+            try:
+                response = self._client.chat.completions.create(
+                    **request_values
+                )
+            except Exception as exc:
+                if (
+                    strict_schema is None
+                    or getattr(exc, "status_code", None) != 400
+                ):
+                    raise
+                request_values["response_format"] = {
+                    "type": "json_object"
+                }
+                strict_rejected = True
+                response = self._client.chat.completions.create(
+                    **request_values
+                )
             raw = response.choices[0].message.content
             try:
                 return json.loads(raw)
@@ -254,8 +272,8 @@ class FoundryClient:
         assert last_error is not None
         raise ValueError(
             f"Foundry response could not be parsed as JSON after {max_attempts} "
-            f"attempt(s): {last_error}\nRaw content (first 500 chars): {raw[:500]}"
-        ) from last_error
+            f"attempt(s); line={last_error.lineno}; column={last_error.colno}"
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* and return one float vector per input string.
@@ -289,15 +307,23 @@ def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     normalized = json.loads(json.dumps(schema))
     property_count = 0
     unsupported_constraints = {
+        "contains",
+        "exclusiveMaximum",
+        "exclusiveMinimum",
+        "format",
         "maxItems",
+        "maxLength",
         "maximum",
         "minItems",
         "minLength",
         "minimum",
+        "multipleOf",
         "pattern",
+        "patternProperties",
+        "uniqueItems",
     }
 
-    def visit(value: Any) -> None:
+    def visit(value: Any, object_depth: int = 0) -> None:
         nonlocal property_count
         if isinstance(value, dict):
             if not value:
@@ -309,6 +335,11 @@ def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 value.pop(keyword, None)
             properties = value.get("properties")
             if value.get("type") == "object" and isinstance(properties, dict):
+                object_depth += 1
+                if object_depth > 5:
+                    raise ValueError(
+                        "Azure strict schema exceeds nesting limit"
+                    )
                 property_count += len(properties)
                 value["additionalProperties"] = False
                 value["required"] = list(properties)
@@ -318,12 +349,14 @@ def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(
                     "Azure strict schema cannot contain allOf"
                 )
-            for child in value.values():
-                visit(child)
+            for key, child in value.items():
+                visit(child, 0 if key == "$defs" else object_depth)
         elif isinstance(value, list):
             for child in value:
-                visit(child)
+                visit(child, object_depth)
 
+    if normalized.get("type") != "object" or "anyOf" in normalized:
+        raise ValueError("Azure strict schema root must be one object")
     visit(normalized)
     if property_count > 100:
         raise ValueError(
