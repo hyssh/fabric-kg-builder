@@ -236,7 +236,14 @@ def seal_domain_intake(
             raw.get("structural_completeness_expectations", ())
         ),
     }
-    intake_hash = canonical_sha256(values)
+    try:
+        normalized_values = DomainIntake.normalize_content(
+            values,
+            identity=identity,
+        )
+    except ValidationError as exc:
+        raise L1StageError(f"invalid L1 domain intake: {exc}") from exc
+    intake_hash = canonical_sha256(normalized_values)
     intake_id = deterministic_contract_id(
         "domain-intake", {"intake_hash": intake_hash}
     )
@@ -250,7 +257,7 @@ def seal_domain_intake(
         return DomainIntake(
             identity=intake_identity,
             domain_intake_id=intake_id,
-            **values,
+            **normalized_values,
             intake_hash=intake_hash,
         )
     except ValidationError as exc:

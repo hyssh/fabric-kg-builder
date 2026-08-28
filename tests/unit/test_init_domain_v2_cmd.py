@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import yaml
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli import cli
@@ -25,6 +26,91 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         encoding="utf-8",
     )
     return source, intake_path, candidates_path
+
+
+def test_simplified_yaml_and_json_intake_share_canonical_hash(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "records.txt").write_text("governed records", encoding="utf-8")
+    raw = _intake("surface")
+    yaml_path = tmp_path / "simplified.yaml"
+    json_path = tmp_path / "simplified.json"
+    yaml_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    json_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    outputs: list[str] = []
+    for intake_path in (yaml_path, json_path):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init-domain",
+                "--input",
+                str(source),
+                "--intake",
+                str(intake_path),
+                "--dry-run",
+                "--force",
+                "--project-id",
+                "surface-024",
+                "--state-dir",
+                str(tmp_path / f"state-{intake_path.suffix[1:]}"),
+                "--out",
+                str(tmp_path / f"domain-{intake_path.suffix[1:]}.yaml"),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        outputs.append(result.output)
+    assert all("writes=0" in output for output in outputs)
+
+    from fabric_kg_builder.domain.stage import preflight_l1_inputs
+
+    common = {
+        "source_path": source,
+        "project_id": "surface-024",
+        "run_id": "run:canonical-intake-test",
+        "model_version": "planned-model",
+        "model_hash": "a" * 64,
+    }
+    yaml_preflight = preflight_l1_inputs(
+        intake_raw=yaml.safe_load(yaml_path.read_text(encoding="utf-8")),
+        **common,
+    )
+    json_preflight = preflight_l1_inputs(
+        intake_raw=json.loads(json_path.read_text(encoding="utf-8")),
+        **common,
+    )
+    assert (
+        yaml_preflight.intake.intake_hash
+        == json_preflight.intake.intake_hash
+    )
+    assert yaml_preflight.intake == json_preflight.intake
+
+
+def test_schema2_intake_rejects_caller_authority_fields(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "records.txt").write_text("governed records", encoding="utf-8")
+    raw = {**_intake("surface"), "intake_hash": "0" * 64}
+    intake_path = tmp_path / "forged.json"
+    intake_path.write_text(json.dumps(raw), encoding="utf-8")
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init-domain",
+            "--input",
+            str(source),
+            "--intake",
+            str(intake_path),
+            "--dry-run",
+            "--force",
+            "--project-id",
+            "surface-024",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "must not supply authority fields" in result.output
 
 
 def test_schema_2_dry_run_makes_no_writes_or_remote_calls(tmp_path: Path) -> None:

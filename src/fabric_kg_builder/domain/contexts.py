@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from fabric_kg_builder.contracts.base import (
     CONTRACT_VERSION,
@@ -22,6 +22,7 @@ from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
 from .models import CompetencyQuestionV2, DomainContractV2
 
 NonNegativeInt = Annotated[int, Field(ge=0)]
+_INTAKE_NORMALIZATION_CONTEXT = object()
 
 
 def _validate_identity(
@@ -146,8 +147,32 @@ class DomainIntake(ContractModel):
             return tuple(value)
         return value
 
+    @classmethod
+    def normalize_content(
+        cls,
+        values: dict[str, Any],
+        *,
+        identity: CanonicalIdentityEnvelope,
+    ) -> dict[str, Any]:
+        """Validate and normalize content before sealing authority fields."""
+        provisional = cls.model_validate(
+            {
+                "identity": identity,
+                "domain_intake_id": "domain-intake:pending",
+                "intake_hash": "0" * 64,
+                **values,
+            },
+            context=_INTAKE_NORMALIZATION_CONTEXT,
+        )
+        return provisional.model_dump(
+            mode="json",
+            exclude={"identity", "domain_intake_id", "intake_hash"},
+        )
+
     @model_validator(mode="after")
-    def _invariants(self) -> "DomainIntake":
+    def _invariants(self, info: ValidationInfo) -> "DomainIntake":
+        if info.context is _INTAKE_NORMALIZATION_CONTEXT:
+            return self
         if not 5 <= len(self.competency_questions) <= 10:
             raise ValueError("[DOM-101] intake requires five to ten questions")
         question_ids = [item.id for item in self.competency_questions]
