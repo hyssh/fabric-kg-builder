@@ -253,7 +253,7 @@ def _repair_zero_supported_routes(
         candidates: DomainProposalCandidatesV2,
         client: Any,
 ) -> DomainProposalCandidatesV2:
-        from .selection import _enumerate_paths, merge_relationship_candidates
+        from .selection import _enumerate_paths, eligible_relationship_vocabulary
 
         ordered_questions = [
             {"question_id": item.id, "question": item.question}
@@ -265,16 +265,9 @@ def _repair_zero_supported_routes(
             if item.score.ip_governance_eligible
             and item.score.ambiguity_conflict_penalty == 0
         }
-        eligible_relationships = [
-            item
-            for item in candidates.relationship_candidates
-            if item.score.ip_governance_eligible
-            and item.score.ambiguity_conflict_penalty == 0
-            and set(item.source_type_ids).issubset(type_ids)
-            and set(item.target_type_ids).issubset(type_ids)
-        ]
-        relationships, _aliases, _groups = merge_relationship_candidates(
-            eligible_relationships
+        relationships, _aliases, _groups = eligible_relationship_vocabulary(
+            candidates.relationship_candidates,
+            eligible_type_ids=type_ids,
         )
         if not type_ids or not relationships:
             raise L1ZeroSupportedRoutesError(

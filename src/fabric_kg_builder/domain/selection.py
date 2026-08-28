@@ -194,6 +194,33 @@ def merge_relationship_candidates(
     )
 
 
+def eligible_relationship_vocabulary(
+    candidates: Iterable[RelationshipCandidateV2],
+    *,
+    eligible_type_ids: set[str] | None = None,
+) -> tuple[
+    list[RelationshipCandidateV2],
+    dict[str, str],
+    dict[str, tuple[str, ...]],
+]:
+    """Return the shared merged, governance-eligible relationship graph."""
+    merged, aliases, merge_groups = merge_relationship_candidates(candidates)
+    eligible = [
+        item
+        for item in merged
+        if item.score.ip_governance_eligible
+        and item.score.ambiguity_conflict_penalty == 0
+        and (
+            eligible_type_ids is None
+            or (
+                set(item.source_type_ids).issubset(eligible_type_ids)
+                and set(item.target_type_ids).issubset(eligible_type_ids)
+            )
+        )
+    ]
+    return eligible, aliases, merge_groups
+
+
 def _adjacency(
     relationships: Iterable[RelationshipCandidateV2],
     question_id: str,
@@ -322,13 +349,9 @@ def select_relationship_vocabulary(
     required_relationship_type_ids: set[str] | None = None,
 ) -> SelectionResult:
     """Select the minimum path union plus mandatory governance/role relationships."""
-    merged, _aliases, merge_groups = merge_relationship_candidates(candidates)
-    merged = [
-        item
-        for item in merged
-        if item.score.ip_governance_eligible
-        and item.score.ambiguity_conflict_penalty == 0
-    ]
+    merged, _aliases, merge_groups = eligible_relationship_vocabulary(
+        candidates
+    )
     by_id = {item.relationship_type_id: item for item in merged}
     mandatory = {
         item.relationship_type_id
