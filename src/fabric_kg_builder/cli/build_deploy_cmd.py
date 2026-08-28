@@ -747,9 +747,7 @@ def _update_grounding_metadata(
     search_connection_id: str,
     search_index_name: str,
     data_agent_connection_id: str,
-    knowledge_connection_id: str,
     knowledge_base_name: str,
-    knowledge_mcp_endpoint: str,
 ) -> None:
     payload = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
     env_cfg = payload.setdefault("environments", {}).setdefault(environment, {})
@@ -757,11 +755,11 @@ def _update_grounding_metadata(
     if search_connection_id:
         connections["search"] = search_connection_id
     connections["fabricDataAgent"] = data_agent_connection_id
-    connections["knowledgeBase"] = knowledge_connection_id
+    connections.pop("knowledgeBase", None)
     knowledge = env_cfg.setdefault("knowledge", {})
     knowledge["searchIndexName"] = search_index_name
     knowledge["knowledgeBaseName"] = knowledge_base_name
-    knowledge["knowledgeBaseMcpEndpoint"] = knowledge_mcp_endpoint
+    knowledge.pop("knowledgeBaseMcpEndpoint", None)
     knowledge.setdefault("queryType", "vector_semantic_hybrid")
     knowledge.setdefault("topK", 5)
     metadata_path.write_text(
@@ -1353,15 +1351,6 @@ def _deploy_knowledge(
         workspace_id=workspace_id,
         data_agent_id=data_agent_result.item_id,
     )
-    kb_mcp_endpoint = (
-        f"{search_endpoint}/knowledgebases/{kb_name}/mcp"
-        "?api-version=2025-11-01-preview"
-    )
-    kb_connection = connection_client.upsert_remote_tool(
-        name=f"fkg-{run_token}-knowledge-mcp",
-        target=kb_mcp_endpoint,
-        audience="https://search.azure.com/",
-    )
     search_connection_id = str(outputs.get("foundrySearchConnectionId") or "")
     if require_foundry_search_connection and not search_connection_id:
         raise BuildDeployError(
@@ -1373,9 +1362,7 @@ def _deploy_knowledge(
         search_connection_id=search_connection_id,
         search_index_name=search_index_name,
         data_agent_connection_id=data_agent_connection.resource_id,
-        knowledge_connection_id=kb_connection.resource_id,
         knowledge_base_name=kb_name,
-        knowledge_mcp_endpoint=kb_mcp_endpoint,
     )
     return {
         "knowledge_source_name": source_result.name,
@@ -1400,8 +1387,6 @@ def _deploy_knowledge(
             for source in agent_publication_receipt.selected_sources
         ],
         "fabric_data_agent_connection_id": data_agent_connection.resource_id,
-        "knowledge_connection_id": kb_connection.resource_id,
-        "knowledge_mcp_endpoint": kb_mcp_endpoint,
         "semantic_contract_hash": (
             loaded_semantic.manifest.semantic_contract_hash
         ),
@@ -1790,15 +1775,6 @@ def _build_resource_ledger(
                     ),
                     display_name=str(
                         knowledge["fabric_data_agent_connection_id"]
-                    ).rstrip("/").rsplit("/", 1)[-1],
-                    adoption_mode="create",
-                    run_id=run_id,
-                ),
-                _ledger_record(
-                    kind="foundry_project_connection",
-                    resource_id=str(knowledge["knowledge_connection_id"]),
-                    display_name=str(
-                        knowledge["knowledge_connection_id"]
                     ).rstrip("/").rsplit("/", 1)[-1],
                     adoption_mode="create",
                     run_id=run_id,

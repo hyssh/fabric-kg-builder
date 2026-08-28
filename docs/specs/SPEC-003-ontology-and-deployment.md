@@ -1894,8 +1894,8 @@ downstream synthesis calls and records a one-call synthesis limit for the
 downstream agent boundary.
 
 Agent definitions are built and canonically hashed by
-`build_l6_agent_definition`, using the existing Fabric Data Agent and Foundry
-RemoteTool project connection IDs. `persist_l6_agent_definition` writes and
+`build_l6_agent_definition`, using the existing Fabric Data Agent project
+connection ID. `persist_l6_agent_definition` writes and
 reads back the canonical JSON byte-for-byte. L6 performs no live deployment;
 that remains an L7 activity.
 

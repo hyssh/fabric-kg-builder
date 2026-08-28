@@ -7,8 +7,7 @@ this stage.
 
 1. A Fabric Data Agent project connection created through the existing
    `FoundryProjectConnectionClient.upsert_fabric_data_agent` abstraction.
-2. A Foundry `RemoteTool` project connection created through
-   `FoundryProjectConnectionClient.upsert_remote_tool`.
+2. The base installed CLI invoked locally by GitHub Copilot.
 
 Pass only the resulting stable project connection IDs to
 `build_l6_agent_definition`. Credentials, workspace secrets, ACL principals,
@@ -29,7 +28,6 @@ from fabric_kg_builder.agent.l6_integration import (
 definition = build_l6_agent_definition(
     agent_name="fabric-kg-evidence-agent",
     fabric_data_agent_connection_id="connection:fabric-data-agent",
-    foundry_remote_tool_connection_id="connection:l6-remote-tool",
 )
 persist_l6_agent_definition(
     Path("build/agent/l6-agent-definition.json"),
@@ -67,6 +65,6 @@ atomic versioned replacement supports rotation, disable, and revocation.
 Unknown, inactive, early, or expired authority keys fail closed. Key material
 and verifiers are internal host configuration and are never exposed as tools.
 
-L7 must deploy the endpoint and definition, verify project connection
-audiences/RBAC, run live Graph and Search acceptance, and confirm definition
-read-back from Microsoft Foundry and Fabric Data Agent.
+L7 must orchestrate the installed CLI locally, verify identity/RBAC, run live
+Graph and Search acceptance, and confirm definition read-back from Fabric Data
+Agent. Foundry agent deployment is optional and is not a 0.2.4 release gate.
