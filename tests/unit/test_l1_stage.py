@@ -16,6 +16,7 @@ from fabric_kg_builder.domain.stage import (
     prepare_l1_stage,
     _normalize_question_route_shapes,
 )
+from fabric_kg_builder.domain.proposal import domain_proposal_candidates_schema
 
 
 def _intake(domain: str = "records") -> dict:
@@ -436,6 +437,22 @@ def test_zero_supported_routes_use_one_strict_route_only_repair(
     assert prepared.model_call_count == 2
     assert prepared.candidates.question_routes[0].start_type_id == (
         "semantic-type:records.record"
+    )
+
+
+def test_provider_schema_requires_exact_root_or_child_identity_state() -> None:
+    schema = domain_proposal_candidates_schema()
+    entity = schema["$defs"]["DomainEntityTypeV2"]
+    assert len(entity["anyOf"]) == 2
+    root = entity["anyOf"][0]["properties"]
+    child = entity["anyOf"][1]["properties"]
+    assert root["parent_type_id"] == {"type": "null"}
+    assert root["identity_key_policy"]["$ref"].endswith(
+        "/IdentityKeyPolicyV2"
+    )
+    assert child["identity_key_policy"] == {"type": "null"}
+    assert child["generalization_basis"]["$ref"].endswith(
+        "/GeneralizationBasisV2"
     )
 
 

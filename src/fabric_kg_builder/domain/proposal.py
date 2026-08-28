@@ -70,7 +70,20 @@ route during schema repair and never add unapproved vocabulary. Propose sufficie
 evidence-backed, governance-eligible relationship candidates to route each
 competency question when the verified evidence supports a path. Route endpoints
 must use exact proposed type IDs and relationships must cite the relevant exact
-competency question IDs."""
+competency question IDs.
+For every proposed semantic type, use one exact hierarchy state:
+- Root: parent_type_id is null, identity_root_type_id equals its own type_id,
+  identity_key_policy is a complete non-null policy, and generalization_basis
+  is null.
+- Child: parent_type_id names an exact proposed type, identity_root_type_id
+  names the exact transitive proposed root, identity_key_policy is null, and
+  generalization_basis is complete and evidence/CQ/governance supported.
+Only roots own identity policies. A business_key policy must name only
+property_id values declared on that root; stable_source_identity must have an
+empty business_key_fields array. Every declared property belongs to exactly
+one proposed type, has a unique property_id, and uses only the allowed value
+types string, integer, number, boolean, date, or datetime. Do not invent a
+property, key field, parent, root, evidence ID, or competency-question ID."""
 DOMAIN_PROPOSAL_PROMPT_HASH = canonical_sha256(
     {
         "prompt_version": DOMAIN_PROPOSAL_PROMPT_VERSION,
@@ -402,6 +415,31 @@ def domain_proposal_candidates_schema() -> dict[str, Any]:
             },
         },
     ]
+    entity = schema.get("$defs", {}).get("DomainEntityTypeV2")
+    if isinstance(entity, dict):
+        entity["anyOf"] = [
+            {
+                "properties": {
+                    "parent_type_id": {"type": "null"},
+                    "identity_key_policy": {
+                        "$ref": "#/$defs/IdentityKeyPolicyV2"
+                    },
+                    "generalization_basis": {"type": "null"},
+                }
+            },
+            {
+                "properties": {
+                    "parent_type_id": {
+                        "type": "string",
+                        "pattern": r"^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+                    },
+                    "identity_key_policy": {"type": "null"},
+                    "generalization_basis": {
+                        "$ref": "#/$defs/GeneralizationBasisV2"
+                    },
+                }
+            },
+        ]
     return schema
 
 

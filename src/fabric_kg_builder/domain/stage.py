@@ -219,7 +219,10 @@ def _stable_semantic_validation_code(
         ("Duplicate relationship type ID", "relationship_type_id_duplicate"),
         ("Duplicate predicate ID", "predicate_id_duplicate"),
         ("hierarchy closure/hash", "hierarchy_closure_mismatch"),
-        ("identity_root_type_id", "identity_root_invalid"),
+        ("root type must identify itself as identity root", "identity_root_self_mismatch"),
+        ("every hierarchy root requires one identity key policy", "identity_root_policy_missing"),
+        ("descendants inherit and cannot override root identity", "identity_descendant_policy_forbidden"),
+        ("identity_root_type_id must resolve to transitive root", "identity_root_reference_invalid"),
         ("identity key policy", "identity_key_policy_invalid"),
         ("identity_policy_hash", "identity_policy_hash_mismatch"),
         ("completeness_requirement_hash", "completeness_hash_mismatch"),
@@ -1608,14 +1611,15 @@ def prepare_l1_stage(
         model_call_count = 2
     if isinstance(candidates, dict):
         first_raw = candidates
-        _assert_raw_candidate_authority(
-            first_raw,
-            trusted_question_ids=trusted_question_ids,
-            trusted_evidence_ids={
-                item.evidence_span_id for item in evidence_spans
-            },
-            attempt_count=model_call_count or 1,
-        )
+        if model_call_count == 1:
+            _assert_raw_candidate_authority(
+                first_raw,
+                trusted_question_ids=trusted_question_ids,
+                trusted_evidence_ids={
+                    item.evidence_span_id for item in evidence_spans
+                },
+                attempt_count=1,
+            )
         try:
             candidates = _validate_proposal_candidate(
                 first_raw,
