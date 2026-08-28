@@ -44,6 +44,12 @@ _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 _FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
 
 
+def _add_exception_note(exc: BaseException, note: str) -> None:
+    add_note = getattr(exc, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+
+
 class L7FoundryAgentBackend(Protocol):
     def desired_hash(
         self,
@@ -395,9 +401,10 @@ class SDKL7FoundryAgentBackend:
                     attempt_id=attempt_id,
                 )
             except BaseException as rollback_exc:
-                exc.add_note(
+                _add_exception_note(
+                    exc,
                     "uncertain Foundry version reconciliation failed: "
-                    f"{type(rollback_exc).__name__}"
+                    f"{type(rollback_exc).__name__}",
                 )
             else:
                 pending_attempts.pop(definition.agent_name, None)
@@ -429,9 +436,10 @@ class SDKL7FoundryAgentBackend:
                     agent_version=version,
                 )
             except BaseException as rollback_exc:
-                exc.add_note(
+                _add_exception_note(
+                    exc,
                     "conditional Foundry version rollback also failed: "
-                    f"{type(rollback_exc).__name__}"
+                    f"{type(rollback_exc).__name__}",
                 )
             else:
                 pending_attempts.pop(definition.agent_name, None)
@@ -1214,9 +1222,10 @@ class AzureL7MutationAdapter:
                         )
                         rollback_succeeded = True
                     except BaseException as rollback_exc:
-                        ownership_exc.add_note(
+                        _add_exception_note(
+                            ownership_exc,
                             "conditional connection rollback also failed: "
-                            f"{type(rollback_exc).__name__}"
+                            f"{type(rollback_exc).__name__}",
                         )
                     if rollback_succeeded:
                         self._started_connections.pop(

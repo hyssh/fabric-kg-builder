@@ -22,6 +22,12 @@ class ProjectConnectionError(RuntimeError):
     """Raised when a Foundry project connection operation fails closed."""
 
 
+def _add_exception_note(exc: BaseException, note: str) -> None:
+    add_note = getattr(exc, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+
+
 @dataclass(frozen=True)
 class ProjectConnection:
     name: str
@@ -389,9 +395,10 @@ class FoundryProjectConnectionClient:
                     attempt_id=attempt_id,
                 )
             except BaseException as rollback_exc:
-                exc.add_note(
+                _add_exception_note(
+                    exc,
                     "uncertain connection reconciliation failed: "
-                    f"{type(rollback_exc).__name__}"
+                    f"{type(rollback_exc).__name__}",
                 )
             else:
                 self._pending_attempts.pop(name, None)
@@ -493,9 +500,10 @@ class FoundryProjectConnectionClient:
                     )
                 self._pending_attempts.pop(name, None)
             except BaseException as rollback_exc:
-                exc.add_note(
+                _add_exception_note(
+                    exc,
                     "conditional connection rollback also failed: "
-                    f"{type(rollback_exc).__name__}"
+                    f"{type(rollback_exc).__name__}",
                 )
             if isinstance(
                 exc,

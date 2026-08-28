@@ -25,6 +25,12 @@ from fabric_kg_builder.agent.l7_deployment import (
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 
 
+def _add_exception_note(exc: BaseException, note: str) -> None:
+    add_note = getattr(exc, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+
+
 class AzureBlobL7ConnectionOwnershipAuthority:
     """Immutable one-receipt-per-connection authority backed by Azure Blob."""
 
@@ -243,9 +249,10 @@ class AzureBlobL7ConnectionOwnershipAuthority:
                         connection_etag=connection_etag,
                     )
             except BaseException as rollback_exc:
-                exc.add_note(
+                _add_exception_note(
+                    exc,
                     "uncertain ownership receipt reconciliation failed: "
-                    f"{type(rollback_exc).__name__}"
+                    f"{type(rollback_exc).__name__}",
                 )
             raise L7DeploymentError(
                 "connection ownership receipt persistence outcome was reconciled"
@@ -263,9 +270,10 @@ class AzureBlobL7ConnectionOwnershipAuthority:
                     connection_etag=connection_etag,
                 )
             except BaseException as rollback_exc:
-                exc.add_note(
+                _add_exception_note(
+                    exc,
                     "conditional ownership receipt rollback failed: "
-                    f"{type(rollback_exc).__name__}"
+                    f"{type(rollback_exc).__name__}",
                 )
             if isinstance(
                 exc,

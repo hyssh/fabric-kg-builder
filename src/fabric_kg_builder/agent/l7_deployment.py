@@ -27,6 +27,12 @@ class L7DeploymentError(RuntimeError):
     """Raised when planning, drift validation, deployment, or rollback fails."""
 
 
+def _add_exception_note(exc: BaseException, note: str) -> None:
+    add_note = getattr(exc, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+
+
 class _L7Model(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -1157,7 +1163,7 @@ class L7DeploymentExecutor:
                 original_error,
                 (KeyboardInterrupt, SystemExit),
             ):
-                original_error.add_note(detail)
+                _add_exception_note(original_error, detail)
                 raise original_error
             try:
                 import asyncio
@@ -1169,7 +1175,7 @@ class L7DeploymentExecutor:
             except ImportError:
                 cancelled = False
             if cancelled:
-                original_error.add_note(detail)
+                _add_exception_note(original_error, detail)
                 raise original_error
             raise L7DeploymentError(detail) from original_error
         if receipt is None:
