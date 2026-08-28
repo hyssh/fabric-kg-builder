@@ -227,6 +227,17 @@ def _stable_semantic_validation_code(
         ("identity_policy_hash", "identity_policy_hash_mismatch"),
         ("completeness_requirement_hash", "completeness_hash_mismatch"),
         ("external_reference_decision_hash", "external_reference_hash_mismatch"),
+        ("identity.contract_kind must be l1.domain_proposal", "proposal_identity_kind_mismatch"),
+        ("proposal identity domain hash mismatch", "proposal_identity_domain_hash_mismatch"),
+        ("proposal must contain a draft contract", "proposal_draft_status_invalid"),
+        ("selected relationship IDs do not match draft contract", "proposal_relationship_selection_mismatch"),
+        ("completeness IDs do not match draft contract", "proposal_completeness_selection_mismatch"),
+        ("competency question coverage hash mismatch", "proposal_question_coverage_hash_mismatch"),
+        ("selected_candidate_count does not match audit", "proposal_selected_count_mismatch"),
+        ("candidate_count does not match audit", "proposal_candidate_count_mismatch"),
+        ("proposal_hash does not match proposal content", "proposal_content_hash_mismatch"),
+        ("domain_proposal_id does not match deterministic seed", "proposal_id_mismatch"),
+        ("proposal identity content_hash mismatch", "proposal_identity_content_hash_mismatch"),
     )
     for fragment, code in known:
         if fragment in message:
