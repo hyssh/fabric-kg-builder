@@ -694,6 +694,7 @@ def _run_schema_2_l1(
     from fabric_kg_builder.domain.proposal import compute_model_hash
     from fabric_kg_builder.domain.stage import (
         L1StageError,
+        L1ProposalSchemaRepairError,
         L1ZeroSupportedRoutesError,
         dry_run_l1,
         finalize_l1_stage,
@@ -772,6 +773,89 @@ def _run_schema_2_l1(
             run_id = previous.preflight.run_id
         except L1StageError:
             previous = None
+    preflight = None
+    proposal_started = False
+
+    def persist_failure_audit(
+        exc: Exception,
+        *,
+        details: dict | None = None,
+    ) -> Path:
+        failures: list[dict[str, str]] = []
+        if isinstance(exc, L1ProposalSchemaRepairError):
+            failures = [
+                {"path": path, "code": code}
+                for path, code in exc.validation_failures
+            ]
+        elif isinstance(exc, ValidationError):
+            failures = [
+                {
+                    "path": ".".join(
+                        str(part) for part in item["loc"]
+                    ),
+                    "code": str(item["type"]),
+                }
+                for item in exc.errors(
+                    include_url=False,
+                    include_input=False,
+                )
+            ][:20]
+        else:
+            text = str(exc)
+            code = next(
+                (
+                    token.strip("[]")
+                    for token in text.split()
+                    if token.startswith("[DOM-")
+                ),
+                type(exc).__name__,
+            )
+            failures = [
+                {
+                    "path": (
+                        "proposal"
+                        if proposal_started
+                        else "preflight"
+                    ),
+                    "code": code,
+                }
+            ]
+        audit = {
+            "schema_version": "1.0.0",
+            "error_code": getattr(
+                exc, "error_code", "L1_STAGE_FAILED"
+            ),
+            "run_id": run_id,
+            "project_id": effective_project_id,
+            "model_version": model_version,
+            "model_hash": model_hash,
+            "intake_hash": (
+                preflight.intake.intake_hash
+                if preflight is not None
+                else None
+            ),
+            "attempt_count": getattr(
+                exc,
+                "attempt_count",
+                1 if proposal_started else 0,
+            ),
+            "failures": failures,
+        }
+        if details:
+            audit.update(details)
+        state_root.mkdir(parents=True, exist_ok=True)
+        audit_path = state_root / "proposal-failure-audit.json"
+        temporary_audit = audit_path.with_name(
+            f".{audit_path.name}.{os.getpid()}.tmp"
+        )
+        with temporary_audit.open("w", encoding="utf-8") as stream:
+            json.dump(audit, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary_audit.replace(audit_path)
+        return audit_path
+
     try:
         preflight = preflight_l1_inputs(
             source_path=source_path,
@@ -806,6 +890,7 @@ def _run_schema_2_l1(
             if resumed is not None:
                 click.echo("[init-domain] L1 skipped; prior output is intact.")
                 return
+        proposal_started = True
         prepared = prepare_l1_stage(
             preflight,
             candidates=candidates,
@@ -879,21 +964,24 @@ def _run_schema_2_l1(
             )
             return
     except L1ZeroSupportedRoutesError as exc:
-        state_root.mkdir(parents=True, exist_ok=True)
-        audit_path = state_root / "proposal-failure-audit.json"
-        temporary_audit = audit_path.with_name(
-            f".{audit_path.name}.{os.getpid()}.tmp"
+        audit_path = persist_failure_audit(
+            exc,
+            details={
+                "zero_route_audit": exc.audit_payload.model_dump(
+                    mode="json"
+                )
+            },
         )
-        temporary_audit.write_text(
-            json.dumps(
-                exc.audit_payload.model_dump(mode="json"),
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary_audit.replace(audit_path)
-        raise click.ClickException(str(exc)) from exc
-    except (L1StageError, ValidationError, ValueError) as exc:
+        raise click.ClickException(
+            f"{exc.error_code}; audit={audit_path}"
+        ) from exc
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        audit_path = persist_failure_audit(exc)
+        if proposal_started:
+            raise click.ClickException(
+                f"{getattr(exc, 'error_code', 'L1_PROPOSAL_FAILED')}; "
+                f"audit={audit_path}"
+            ) from exc
         raise click.ClickException(str(exc)) from exc

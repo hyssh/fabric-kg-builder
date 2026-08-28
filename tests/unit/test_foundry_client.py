@@ -103,6 +103,66 @@ def test_complete_json_passes_correct_deployment() -> None:
     assert call_kwargs.kwargs["model"] == "gpt-5-4-mini"
 
 
+def test_complete_json_uses_strict_structured_output_schema() -> None:
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    schema = {
+        "type": "object",
+        "properties": {"source_file_id": {"type": "string"}},
+        "required": ["source_file_id"],
+        "additionalProperties": False,
+    }
+    client.complete_json("sys", "usr", schema)
+    response_format = (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+    )
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    strict_schema = response_format["json_schema"]["schema"]
+    assert strict_schema["required"] == ["source_file_id"]
+    assert strict_schema["additionalProperties"] is False
+
+
+def test_oversized_schema_falls_back_to_json_object() -> None:
+    from fabric_kg_builder.domain.proposal import (
+        domain_proposal_candidates_schema,
+    )
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    client.complete_json(
+        "sys",
+        "usr",
+        domain_proposal_candidates_schema(),
+    )
+    response_format = (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+    )
+    assert response_format == {"type": "json_object"}
+
+
+def test_untyped_schema_branch_falls_back_to_json_object() -> None:
+    from fabric_kg_builder.domain.models import DomainReviewPayload
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    client.complete_json(
+        "sys",
+        "usr",
+        DomainReviewPayload.model_json_schema(),
+    )
+    response_format = (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+    )
+    assert response_format == {"type": "json_object"}
+
+
 def test_complete_json_puts_system_in_system_role() -> None:
     """System prompt must be sent with role='system', user content with role='user'."""
     sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)

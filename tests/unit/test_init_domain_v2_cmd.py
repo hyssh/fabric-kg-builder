@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.domain.service import load_domain_contract
 from tests.unit.test_l1_stage import (
+    _RepairingProposalClient,
     _ZeroRouteRepairClient,
     _candidates,
     _intake,
@@ -211,9 +212,52 @@ def test_zero_route_failure_persists_sanitized_audit(
             encoding="utf-8"
         )
     )
-    assert audit["reason_code"] == "route_patch_zero_supported"
-    assert audit["model_call_count"] == 2
+    assert (
+        audit["zero_route_audit"]["reason_code"]
+        == "route_patch_zero_supported"
+    )
+    assert audit["zero_route_audit"]["model_call_count"] == 2
     assert "A governed record describes" not in json.dumps(audit)
+
+
+def test_initial_proposal_validation_persists_path_specific_audit(
+    tmp_path: Path,
+) -> None:
+    source, intake_path, _ = _write_inputs(tmp_path)
+    state_root = tmp_path / ".fkg" / "l1"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init-domain",
+            "--input",
+            str(source),
+            "--intake",
+            str(intake_path),
+            "--non-interactive",
+            "--force",
+            "--project-id",
+            "surface-024",
+            "--state-dir",
+            str(state_root),
+            "--out",
+            str(tmp_path / "domain.yaml"),
+        ],
+        obj={
+            "_foundry_client": _RepairingProposalClient(
+                half_route=True
+            ),
+            "_foundry_model_version": "gpt-4-1",
+        },
+    )
+    assert result.exit_code != 0
+    audit_path = state_root / "proposal-failure-audit.json"
+    assert audit_path.exists()
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert any(
+        failure["path"].startswith("question_routes.0")
+        for failure in audit["failures"]
+    )
+    assert all("message" not in failure for failure in audit["failures"])
 
 
 def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(

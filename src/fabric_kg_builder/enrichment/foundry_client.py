@@ -145,7 +145,9 @@ class FoundryClient:
             "chat_deployment": self._config.chat_deployment,
             "api_version": self._config.api_version,
             "request_timeout_seconds": self._config.request_timeout_seconds,
-            "completion_format": "json_object",
+            "completion_format": (
+                "json_schema_strict_when_compatible_else_json_object"
+            ),
             "temperature": 0.0,
             "seed": 42,
             "max_completion_tokens": 4_096,
@@ -214,13 +216,31 @@ class FoundryClient:
             attempt_system = system + schema_instruction
             if attempt:
                 attempt_system += retry_instruction
+            strict_schema = None
+            if json_schema:
+                try:
+                    strict_schema = _azure_strict_schema(json_schema)
+                except ValueError:
+                    strict_schema = None
+            response_format = (
+                {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fabric_kg_structured_response",
+                        "strict": True,
+                        "schema": strict_schema,
+                    },
+                }
+                if strict_schema is not None
+                else {"type": "json_object"}
+            )
             response = self._client.chat.completions.create(
                 model=self._config.chat_deployment,
                 messages=[
                     {"role": "system", "content": attempt_system},
                     {"role": "user", "content": user},
                 ],
-                response_format={"type": "json_object"},
+                response_format=response_format,
                 temperature=0.0,
                 seed=42,
                 max_completion_tokens=max_completion_tokens,
@@ -264,3 +284,49 @@ class FoundryClient:
             dimensions=self._config.embedding_dimensions,
         )
         return [item.embedding for item in response.data]
+def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Convert generated schemas to Azure structured-output subset."""
+    normalized = json.loads(json.dumps(schema))
+    property_count = 0
+    unsupported_constraints = {
+        "maxItems",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "pattern",
+    }
+
+    def visit(value: Any) -> None:
+        nonlocal property_count
+        if isinstance(value, dict):
+            if not value:
+                raise ValueError(
+                    "Azure strict schema cannot contain untyped branches"
+                )
+            value.pop("default", None)
+            for keyword in unsupported_constraints:
+                value.pop(keyword, None)
+            properties = value.get("properties")
+            if value.get("type") == "object" and isinstance(properties, dict):
+                property_count += len(properties)
+                value["additionalProperties"] = False
+                value["required"] = list(properties)
+            if "oneOf" in value:
+                value["anyOf"] = value.pop("oneOf")
+            if "allOf" in value:
+                raise ValueError(
+                    "Azure strict schema cannot contain allOf"
+                )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(normalized)
+    if property_count > 100:
+        raise ValueError(
+            "Azure strict schema exceeds the 100-property limit"
+        )
+    return normalized

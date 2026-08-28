@@ -102,14 +102,23 @@ class L1ProposalSchemaRepairError(L1StageError):
         self,
         *,
         attempt_count: int,
-        validation_error_codes: tuple[str, ...],
+        validation_error_codes: tuple[str, ...] = (),
+        validation_failures: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.attempt_count = attempt_count
-        self.validation_error_codes = validation_error_codes
+        self.validation_failures = validation_failures or tuple(
+            ("proposal", code) for code in validation_error_codes
+        )
+        self.validation_error_codes = tuple(
+            code for _path, code in self.validation_failures
+        )
         super().__init__(
             f"{self.error_code}: proposal schema remained invalid after "
-            f"{attempt_count} same-authority attempts; validation_codes="
-            f"{','.join(validation_error_codes)}"
+            f"{attempt_count} bounded attempt(s); validation_paths="
+            + ",".join(
+                f"{path}:{code}"
+                for path, code in self.validation_failures
+            )
         )
 
 
@@ -1006,8 +1015,9 @@ def prepare_l1_stage(
             failures = _sanitized_validation_failures(first_error)
             raise L1ProposalSchemaRepairError(
                 attempt_count=model_call_count or 1,
-                validation_error_codes=tuple(
-                    item["type"] for item in failures
+                validation_failures=tuple(
+                    (item["location"], item["type"])
+                    for item in failures
                 ),
             ) from first_error
     if (
