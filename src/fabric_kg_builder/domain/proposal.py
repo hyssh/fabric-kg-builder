@@ -321,6 +321,11 @@ def domain_proposal_candidates_schema() -> dict[str, Any]:
                     }
                 },
             },
+            "else": {
+                "properties": {
+                    "unsupported_reason": {"type": "null"}
+                }
+            },
         }
     ]
     return schema

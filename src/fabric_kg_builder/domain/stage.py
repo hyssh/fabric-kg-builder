@@ -197,6 +197,18 @@ def _require_reason_only_route_repair(
                     attempt_count=2,
                     validation_error_codes=("unsupported_reason.missing",),
                 )
+        elif (
+            prior.get("start_type_id") is not None
+            and prior.get("end_type_id") is not None
+            and prior.get("unsupported_reason") not in (None, "")
+        ):
+            repaired_reason = candidate.pop("unsupported_reason", None)
+            prior_candidate.pop("unsupported_reason", None)
+            if repaired_reason not in (None, ""):
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_error_codes=("unsupported_reason.unexpected",),
+                )
         if candidate != prior_candidate:
             raise L1ProposalSchemaRepairError(
                 attempt_count=2,
@@ -726,7 +738,8 @@ def prepare_l1_stage(
                     {
                         "task": (
                             "Repair schema only. Add a non-empty "
-                            "unsupported_reason to unsupported routes. "
+                            "unsupported_reason to unsupported routes and "
+                            "remove it from supported routes. "
                             "Do not change route support, endpoint IDs, "
                             "candidate vocabulary, scores, or evidence."
                         ),
