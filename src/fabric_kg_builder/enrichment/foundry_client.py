@@ -40,6 +40,7 @@ import json
 import os
 from typing import Any
 
+from pydantic import ValidationError
 from ..config.schema import FoundryConfig
 
 
@@ -253,7 +254,10 @@ class FoundryClient:
             except Exception as exc:
                 if (
                     strict_schema is None
-                    or getattr(exc, "status_code", None) != 400
+                    or (
+                        getattr(exc, "status_code", None) != 400
+                        and not isinstance(exc, ValidationError)
+                    )
                 ):
                     raise
                 request_values["response_format"] = {
