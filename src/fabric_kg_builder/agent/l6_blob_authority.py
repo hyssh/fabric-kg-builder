@@ -481,6 +481,9 @@ class AzureBlobL6GraphReceiptAuthority:
     ) -> None:
         if lease is None:
             return
+        lease_id = getattr(lease, "id", None)
+        if not isinstance(lease_id, str) or not lease_id:
+            return
         try:
             try:
                 options = self._call_options(deadline)
@@ -490,6 +493,18 @@ class AzureBlobL6GraphReceiptAuthority:
         except AzureError:
             # An expired finite lease is already released server-side.
             return
+
+    @staticmethod
+    def _lease_authority_handle(
+        blob: Any,
+        lease_id: str,
+    ) -> Any:
+        test_factory = getattr(blob, "_lease_client_for_id", None)
+        if callable(test_factory):
+            return test_factory(lease_id)
+        from azure.storage.blob import BlobLeaseClient
+
+        return BlobLeaseClient(blob, lease_id=lease_id)
 
     def _wait(self, deadline: float) -> None:
         remaining = deadline - self._monotonic()
@@ -691,6 +706,11 @@ class AzureBlobL6GraphReceiptAuthority:
             raise L6BlobAuthorityError(
                 "durable L6 authority lease identity is unavailable"
             )
+        authority_lease = self._lease_authority_handle(
+            blob,
+            captured_lease_id,
+        )
+        lease_cleanup_uncertain = threading.Event()
 
         def terminal_deadline() -> float:
             return self._monotonic() + self._terminalization_timeout
@@ -707,7 +727,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 try:
                     self._fail_owned_run(
                         blob=blob,
-                        lease=lease,
+                        lease=authority_lease,
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
@@ -716,10 +736,25 @@ class AzureBlobL6GraphReceiptAuthority:
                     )
                 except (AzureError, L6BlobAuthorityError, TimeoutError):
                     # A lost/reclaimed lease can make terminal CAS impossible.
-                    pass
+                    lease_cleanup_uncertain.set()
                 finally:
-                    self._release(lease, deadline=deadline)
+                    self._release(authority_lease, deadline=deadline)
                     lease_loss_handled.set()
+
+        def raise_lease_loss() -> None:
+            cleanup_finished = lease_loss_handled.wait(
+                self._operation_timeout
+            )
+            if (
+                not cleanup_finished
+                or lease_cleanup_uncertain.is_set()
+            ):
+                raise L6BlobConflictError(
+                    "durable L6 authority lease cleanup is uncertain"
+                )
+            raise L6BlobConflictError(
+                "durable L6 authority lease was lost during execution"
+            )
 
         def renew() -> None:
             interval = self._lease_seconds / 3
@@ -797,10 +832,7 @@ class AzureBlobL6GraphReceiptAuthority:
             # The deadline wins every race. A result published at or after it
             # is deliberately ignored and can never transition the run.
             if lease_lost.is_set():
-                lease_loss_handled.wait(self._operation_timeout)
-                raise L6BlobConflictError(
-                    "durable L6 authority lease was lost during execution"
-                )
+                raise_lease_loss()
             if self._monotonic() >= execution_deadline:
                 deadline_expired = True
             if deadline_expired:
@@ -809,7 +841,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
-                        lease=lease,
+                        lease=authority_lease,
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
@@ -824,7 +856,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
-                        lease=lease,
+                        lease=authority_lease,
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
@@ -840,7 +872,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
-                        lease=lease,
+                        lease=authority_lease,
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
@@ -854,7 +886,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
-                        lease=lease,
+                        lease=authority_lease,
                         owner_hash=owner_hash,
                         l6_run_id=l6_run_id,
                         fingerprint=fingerprint,
@@ -865,28 +897,29 @@ class AzureBlobL6GraphReceiptAuthority:
                     "L6 Graph execution exceeded sealed runtime budget"
                 )
             if lease_lost.is_set():
-                raise L6BlobConflictError(
-                    "durable L6 authority lease was lost during execution"
-                )
+                raise_lease_loss()
             # Quiesce renewal before the terminal CAS. This closes the race in
             # which an in-flight failed renewal could otherwise arrive just
             # after the last lease-loss check but before completion is stored.
             stop_renewal.set()
             renewal.join(timeout=self._operation_timeout)
             if renewal.is_alive():
-                lose_lease()
-                raise L6BlobConflictError(
-                    "durable L6 authority lease renewal did not terminate"
-                )
+                lease_lost.set()
+                cancellation.set()
+                threading.Thread(
+                    target=lose_lease,
+                    daemon=True,
+                ).start()
+                raise_lease_loss()
             if lease_lost.is_set():
-                raise L6BlobConflictError(
-                    "durable L6 authority lease was lost during execution"
-                )
-            latest = self._read(blob, lease=lease, deadline=deadline)
+                raise_lease_loss()
+            latest = self._read(
+                blob,
+                lease=authority_lease,
+                deadline=deadline,
+            )
             if lease_lost.is_set():
-                raise L6BlobConflictError(
-                    "durable L6 authority lease was lost during execution"
-                )
+                raise_lease_loss()
             if (
                 latest.value.get("owner_hash") != owner_hash
                 or latest.value.get("status") != "executing"
@@ -906,7 +939,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 blob,
                 expected_etag=latest.etag,
                 value=completed,
-                lease=lease,
+                lease=authority_lease,
                 deadline=deadline,
             )
             return result
@@ -914,7 +947,8 @@ class AzureBlobL6GraphReceiptAuthority:
             cancellation.set()
             stop_renewal.set()
             renewal.join(timeout=1)
-            self._release(lease, deadline=deadline)
+            if not lease_lost.is_set():
+                self._release(authority_lease, deadline=deadline)
 
     def _signer_snapshot(self) -> L6OpaqueSignerSnapshot:
         if self._signer_provider is None:

@@ -73,8 +73,6 @@ class _Lease:
         del kwargs
         self._backend.calls.append(("renew", timeout))
         with self._backend.lock:
-            if self._backend.on_renew is not None:
-                self._backend.on_renew(self)
             if self._backend.renew_exception is not None:
                 raise self._backend.renew_exception
             stored = self._backend.blobs[self._name]
@@ -87,6 +85,8 @@ class _Lease:
             stored.lease_expires = (
                 self._backend.now[0] + self._backend.lease_seconds * 1000
             )
+            if self._backend.on_renew is not None:
+                self._backend.on_renew(self)
             return None
 
     def release(self, *, timeout=None, **kwargs):
@@ -101,12 +101,16 @@ class _Lease:
                 raise _http_error(412)
             stored.lease_id = None
             stored.lease_expires = 0
+            self.id = None
 
 
 class _Blob:
     def __init__(self, backend, name):
         self.backend = backend
         self.name = name
+
+    def _lease_client_for_id(self, lease_id):
+        return _Lease(self.backend, self.name, lease_id)
 
     def upload_blob(
         self,
@@ -945,13 +949,14 @@ def test_every_azure_renewal_failure_cancels_and_terminalizes(
     authority._lease_seconds = 0.03
     backend.renew_exception = renewal_failure
 
-    with pytest.raises(L6BlobConflictError, match="lease was lost"):
+    with pytest.raises(L6BlobConflictError, match="lease"):
         authority.execute_graph_once(**values)
 
     assert transport.cancelled.wait(1)
     run_blob = authority._run_blob(values["l6_run_id"])
     assert json.loads(run_blob.download_blob().readall())["status"] == "failed"
     assert backend.blobs[run_blob.name].lease_id is None
+    assert [operation for operation, _ in backend.calls].count("release") == 1
 
 
 @pytest.mark.unit
@@ -970,6 +975,43 @@ def test_changed_or_missing_post_renew_lease_id_is_lease_loss(
         authority.execute_graph_once(**values)
 
     assert transport.cancelled.wait(1)
+    run_blob = authority._run_blob(values["l6_run_id"])
+    assert json.loads(run_blob.download_blob().readall())["status"] == "failed"
+    assert backend.blobs[run_blob.name].lease_id is None
+    assert [operation for operation, _ in backend.calls].count("release") == 1
+
+
+@pytest.mark.unit
+def test_incomplete_lease_cleanup_is_uncertain_and_has_one_release_owner(
+    setup,
+    monkeypatch,
+):
+    _, backend, provider, _, graph, values = setup
+    transport = _CancellableTransport(graph)
+    authority = _production_authority(backend, provider, transport)
+    authority._lease_seconds = 0.03
+    authority._operation_timeout = 0.02
+    backend.on_renew = lambda lease: setattr(lease, "id", "")
+    cleanup_gate = threading.Event()
+    original_fail = authority._fail_owned_run
+
+    def blocked_fail(**kwargs):
+        assert cleanup_gate.wait(5)
+        return original_fail(**kwargs)
+
+    monkeypatch.setattr(authority, "_fail_owned_run", blocked_fail)
+    with pytest.raises(L6BlobConflictError, match="cleanup is uncertain"):
+        authority.execute_graph_once(**values)
+    assert [operation for operation, _ in backend.calls].count("release") == 0
+
+    cleanup_gate.set()
+    deadline = time.monotonic() + 1
+    while (
+        [operation for operation, _ in backend.calls].count("release") < 1
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert [operation for operation, _ in backend.calls].count("release") == 1
 
 
 @pytest.mark.unit
@@ -1001,7 +1043,7 @@ def test_lease_loss_during_reclaim_ignores_late_result_and_yields_one_receipt(se
         backend.renew_exception = ServiceResponseError("ambiguous renewal")
 
     backend.on_renew = expire_before_failed_renewal
-    with pytest.raises(L6BlobConflictError, match="lease was lost"):
+    with pytest.raises(L6BlobConflictError, match="lease"):
         first.execute_graph_once(**values)
 
     backend.on_renew = None
