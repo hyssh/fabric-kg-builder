@@ -233,8 +233,8 @@ class ExternalSemanticReferenceCandidateV2(ContractModel):
 
 class ProposalQuestionRouteV2(ContractModel):
     question_id: RequiredText
-    start_type_id: RequiredText | None = None
-    end_type_id: RequiredText | None = None
+    start_type_id: RequiredText | None
+    end_type_id: RequiredText | None
     unsupported_reason: RequiredText | None = None
 
     @model_validator(mode="after")
