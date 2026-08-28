@@ -682,6 +682,47 @@ def test_nested_generalization_authority_drift_does_not_retry(
     } <= set(captured.value.validation_error_codes)
 
 
+def test_initial_non_object_provider_response_gets_one_retry(
+    tmp_path: Path,
+) -> None:
+    class NonObjectClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            return [] if self.calls == 1 else _candidates("records")
+
+    client = NonObjectClient()
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+
+
+def test_unknown_route_endpoint_does_not_trigger_repair(
+    tmp_path: Path,
+) -> None:
+    class RouteEndpointDriftClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            raw = _candidates("records")
+            raw["question_routes"][0][
+                "start_type_id"
+            ] = "semantic-type:invented"
+            return raw
+
+    client = RouteEndpointDriftClient()
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 1
+    assert captured.value.validation_error_codes == (
+        "candidate_type_reference_unknown",
+    )
+
+
 def test_repeated_insufficient_candidate_vocabulary_is_typed(
     tmp_path: Path,
 ) -> None:

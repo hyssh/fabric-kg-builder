@@ -673,6 +673,8 @@ def _assert_raw_candidate_authority(
         "to_type_id",
         "source_type_id",
         "target_type_id",
+        "start_type_id",
+        "end_type_id",
         "source_type_ids",
         "target_type_ids",
         "semantic_target_ids",
@@ -693,8 +695,6 @@ def _assert_raw_candidate_authority(
         return set()
 
     def walk(value: object, path: tuple[str, ...]) -> None:
-        if path and path[0] == "question_routes":
-            return
         if isinstance(value, list):
             for index, item in enumerate(value):
                 walk(item, (*path, str(index)))
@@ -705,9 +705,12 @@ def _assert_raw_candidate_authority(
             item_path = ".".join((*path, key))
             item_references = references(item)
             if (
-                key == "question_id"
-                or key.endswith("_question_ids")
-                or key in {"question_ids", "competency_question_ids"}
+                not (path and path[0] == "question_routes")
+                and (
+                    key == "question_id"
+                    or key.endswith("_question_ids")
+                    or key in {"question_ids", "competency_question_ids"}
+                )
             ) and item_references - questions:
                 failures.append(
                     (item_path, "candidate_question_unknown")
@@ -1520,6 +1523,89 @@ def prepare_l1_stage(
         )
         model_call_count = 1
         candidates = raw
+    if model_call_count == 1 and not isinstance(candidates, dict):
+        root_failure = (("proposal.root", "proposal_root_not_object"),)
+        first_diagnostics = _raw_candidate_diagnostics(
+            candidates,
+            attempt=1,
+            failures=root_failure,
+        )
+        retry_feedback = {
+            "reason_code": "provider_candidate_validation_failed",
+            "validation_codes": ["proposal_root_not_object"],
+            "proposed_type_count": 0,
+            "proposed_relationship_count": 0,
+        }
+        try:
+            second_raw = client.complete_json(
+                system=(
+                    DOMAIN_PROPOSAL_SYSTEM_PROMPT
+                    + "\nTrusted local candidate-regeneration feedback:\n"
+                    + canonical_json(retry_feedback)
+                ),
+                user=proposal_user_message,
+                json_schema=domain_proposal_candidates_schema(),
+            )
+        except Exception as exc:
+            raise L1ProposalSchemaRepairError(
+                attempt_count=2,
+                validation_failures=(
+                    ("proposal.provider", "provider_retry_failed"),
+                ),
+                candidate_attempts=(
+                    first_diagnostics,
+                    _raw_candidate_diagnostics(
+                        None,
+                        attempt=2,
+                        failures=(
+                            ("proposal.provider", "provider_retry_failed"),
+                        ),
+                    ),
+                ),
+            ) from exc
+        if not isinstance(second_raw, dict):
+            raise L1ProposalSchemaRepairError(
+                attempt_count=2,
+                validation_failures=root_failure,
+                candidate_attempts=(
+                    first_diagnostics,
+                    _raw_candidate_diagnostics(
+                        second_raw,
+                        attempt=2,
+                        failures=root_failure,
+                    ),
+                ),
+            )
+        _assert_raw_candidate_authority(
+            second_raw,
+            trusted_question_ids=trusted_question_ids,
+            trusted_evidence_ids={
+                item.evidence_span_id for item in evidence_spans
+            },
+            attempt_count=2,
+        )
+        try:
+            candidates = _validate_proposal_candidate(
+                second_raw,
+                trusted_question_ids=trusted_question_ids,
+                attempt_count=2,
+            )
+        except L1ProposalSchemaRepairError as exc:
+            raise L1ProposalSchemaRepairError(
+                attempt_count=2,
+                validation_failures=exc.validation_failures,
+                candidate_attempts=(
+                    first_diagnostics,
+                    _raw_candidate_diagnostics(
+                        second_raw,
+                        attempt=2,
+                        failures=exc.validation_failures,
+                    ),
+                ),
+            ) from exc
+        rejected_candidate_diagnostics = first_diagnostics
+        candidate_regeneration_attempted = True
+        model_call_count = 2
     if isinstance(candidates, dict):
         first_raw = candidates
         _assert_raw_candidate_authority(
