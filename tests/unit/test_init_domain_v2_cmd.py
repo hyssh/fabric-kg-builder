@@ -247,6 +247,16 @@ def test_zero_route_failure_persists_sanitized_audit(
         == "route_patch_zero_supported"
     )
     assert audit["zero_route_audit"]["model_call_count"] == 2
+    zero = audit["zero_route_audit"]
+    assert zero["initial_supported_route_count"] == 0
+    assert zero["supported_route_count"] == 0
+    assert zero["route_repair_attempted"] is True
+    assert zero["route_repair_result_code"] == "route_patch_zero_supported"
+    assert len(zero["initial_route_codes"]) == 5
+    assert zero["eligible_type_count"] == 2
+    assert zero["eligible_relationship_count"] == 1
+    assert len(zero["eligible_type_id_hash"]) == 64
+    assert len(zero["eligible_relationship_id_hash"]) == 64
     assert "A governed record describes" not in json.dumps(audit)
 
 

@@ -344,6 +344,18 @@ class _ZeroRouteRepairClient:
         return {"question_routes": routes}
 
 
+class _UnavailablePathRepairClient(_ZeroRouteRepairClient):
+    def complete_json(self, **kwargs):
+        if self.calls == 0:
+            self.calls += 1
+            raw = _candidates("records")
+            raw["relationship_candidates"][0][
+                "competency_question_ids"
+            ] = []
+            return raw
+        return super().complete_json(**kwargs)
+
+
 def test_zero_supported_routes_use_one_strict_route_only_repair(
     tmp_path: Path,
 ) -> None:
@@ -367,6 +379,20 @@ def test_zero_supported_route_repair_exhaustion_is_typed(
         captured.value.audit_payload.reason_code
         == "route_patch_zero_supported"
     )
+
+
+def test_structurally_supported_but_unavailable_paths_trigger_repair(
+    tmp_path: Path,
+) -> None:
+    client = _UnavailablePathRepairClient(keep_unsupported=True)
+    with pytest.raises(L1ZeroSupportedRoutesError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    audit = captured.value.audit_payload
+    assert audit.initial_route_codes == (
+        "supported_path_unavailable",
+    ) * 5
+    assert audit.route_repair_attempted is True
+    assert client.calls == 2
 
 
 def test_dry_run_inventories_complete_corpus_without_writes(tmp_path: Path) -> None:

@@ -60,7 +60,11 @@ IDs. Do not bundle or infer external ontology content. Local deterministic code
 owns scoring, merging, selection, hierarchy closure, N/K, validation, and approval.
 Every unsupported question route must keep both endpoint IDs null and include a
 non-empty unsupported_reason. Never convert an unsupported route into a supported
-route during schema repair and never add unapproved vocabulary."""
+route during schema repair and never add unapproved vocabulary. Propose sufficient
+evidence-backed, governance-eligible relationship candidates to route each
+competency question when the verified evidence supports a path. Route endpoints
+must use exact proposed type IDs and relationships must cite the relevant exact
+competency question IDs."""
 DOMAIN_PROPOSAL_PROMPT_HASH = canonical_sha256(
     {
         "prompt_version": DOMAIN_PROPOSAL_PROMPT_VERSION,

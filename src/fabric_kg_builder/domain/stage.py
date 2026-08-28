@@ -67,7 +67,7 @@ from .proposal import (
     normalize_candidate_scores,
 )
 from .scoring import SCORER_HASH, SCORER_VERSION
-from .selection import SELECTOR_VERSION
+from .selection import ProposalSelectionError, SELECTOR_VERSION
 from .service import compute_contract_hash, load_domain_contract, render_domain_contract_yaml
 
 L1_STAGE_NAME = "Domain Design/Approval"
@@ -147,6 +147,17 @@ class L1ZeroRouteAudit(ContractModel):
     question_id_hashes: tuple[str, ...]
     route_states: tuple[Literal["supported", "unsupported"], ...]
     unsupported_reason_codes: tuple[str, ...]
+    initial_route_codes: tuple[str, ...]
+    supported_route_count: int
+    unsupported_route_count: int
+    initial_supported_route_count: int
+    initial_unsupported_route_count: int
+    eligible_type_count: int
+    eligible_type_id_hash: str
+    eligible_relationship_count: int
+    eligible_relationship_id_hash: str
+    route_repair_attempted: bool
+    route_repair_result_code: str
     proposed_type_count: int
     proposed_type_id_hash: str
     proposed_relationship_count: int
@@ -300,7 +311,54 @@ def _zero_route_audit(
     candidates: DomainProposalCandidatesV2,
     model_call_count: Literal[1, 2],
     reason_code: str,
+    route_repair_attempted: bool | None = None,
+    initial_route_codes: tuple[str, ...] | None = None,
+    initial_supported_route_count: int | None = None,
+    initial_unsupported_route_count: int | None = None,
 ) -> L1ZeroRouteAudit:
+    from .selection import _enumerate_paths, eligible_relationship_vocabulary
+
+    eligible_type_ids = {
+        item.proposed_type.type_id
+        for item in candidates.semantic_type_candidates
+        if item.score.ip_governance_eligible
+        and item.score.ambiguity_conflict_penalty == 0
+    }
+    eligible_relationships, _aliases, _groups = (
+        eligible_relationship_vocabulary(
+            candidates.relationship_candidates,
+            eligible_type_ids=eligible_type_ids,
+        )
+    )
+    route_codes: list[str] = []
+    supported_count = 0
+    for route in candidates.question_routes:
+        if route.start_type_id is not None:
+            if _enumerate_paths(
+                route, eligible_relationships, max_hops=4
+            ):
+                route_codes.append("supported_path_valid")
+                supported_count += 1
+            else:
+                route_codes.append("supported_path_unavailable")
+        else:
+            route_codes.append(
+                route.unsupported_reason
+                if route.unsupported_reason
+                in {
+                    "no_supported_route_proposed",
+                    "route_collection_invalid",
+                    "route_endpoint_key_missing",
+                    "route_endpoint_pair_half_defined",
+                    "route_endpoint_type_invalid",
+                    "route_question_id_duplicate",
+                    "route_question_id_missing",
+                    "supported_reason_type_invalid",
+                    "unsupported_reason_missing",
+                    "unsupported_reason_type_invalid",
+                }
+                else "model_unsupported_reason_present"
+            )
     return L1ZeroRouteAudit(
         error_code=L1ZeroSupportedRoutesError.error_code,
         reason_code=reason_code,
@@ -322,28 +380,43 @@ def _zero_route_audit(
             else "unsupported"
             for route in candidates.question_routes
         ),
-        unsupported_reason_codes=tuple(
-            ""
-            if route.start_type_id is not None
-            else (
-                route.unsupported_reason
-                if route.unsupported_reason
-                in {
-                    "no_supported_route_proposed",
-                    "route_collection_invalid",
-                    "route_endpoint_key_missing",
-                    "route_endpoint_pair_half_defined",
-                    "route_endpoint_type_invalid",
-                    "route_question_id_duplicate",
-                    "route_question_id_missing",
-                    "supported_reason_type_invalid",
-                    "unsupported_reason_missing",
-                    "unsupported_reason_type_invalid",
-                }
-                else "model_unsupported_reason_present"
-            )
-            for route in candidates.question_routes
+        unsupported_reason_codes=tuple(route_codes),
+        initial_route_codes=(
+            tuple(route_codes)
+            if initial_route_codes is None
+            else initial_route_codes
         ),
+        supported_route_count=supported_count,
+        unsupported_route_count=(
+            len(preflight.intake.competency_questions) - supported_count
+        ),
+        initial_supported_route_count=(
+            supported_count
+            if initial_supported_route_count is None
+            else initial_supported_route_count
+        ),
+        initial_unsupported_route_count=(
+            len(preflight.intake.competency_questions) - supported_count
+            if initial_unsupported_route_count is None
+            else initial_unsupported_route_count
+        ),
+        eligible_type_count=len(eligible_type_ids),
+        eligible_type_id_hash=canonical_sha256(
+            sorted(eligible_type_ids)
+        ),
+        eligible_relationship_count=len(eligible_relationships),
+        eligible_relationship_id_hash=canonical_sha256(
+            sorted(
+                item.relationship_type_id
+                for item in eligible_relationships
+            )
+        ),
+        route_repair_attempted=(
+            model_call_count == 2
+            if route_repair_attempted is None
+            else route_repair_attempted
+        ),
+        route_repair_result_code=reason_code,
         proposed_type_count=len(candidates.semantic_type_candidates),
         proposed_type_id_hash=canonical_sha256(
             sorted(
@@ -366,6 +439,7 @@ def _repair_zero_supported_routes(
         preflight: L1Preflight,
         candidates: DomainProposalCandidatesV2,
         client: Any,
+        initial_audit: L1ZeroRouteAudit,
 ) -> DomainProposalCandidatesV2:
         from .selection import _enumerate_paths, eligible_relationship_vocabulary
 
@@ -404,6 +478,17 @@ def _repair_zero_supported_routes(
                 user=canonical_json(
                     {
                         "ordered_competency_questions": ordered_questions,
+                        "initial_route_diagnostics": [
+                            {
+                                "question_id": question["question_id"],
+                                "reason_code": code,
+                            }
+                            for question, code in zip(
+                                ordered_questions,
+                                initial_audit.unsupported_reason_codes,
+                                strict=True,
+                            )
+                        ],
                         "proposed_type_ids": sorted(type_ids),
                         "proposed_relationships": [
                             {
@@ -1129,29 +1214,76 @@ def prepare_l1_stage(
                     for item in failures
                 ),
             ) from first_error
+    initial_route_audit = _zero_route_audit(
+        preflight=preflight,
+        candidates=candidates,
+        model_call_count=1,
+        reason_code="initial_route_diagnostics",
+        route_repair_attempted=False,
+    )
     if (
         client is not None
         and model_call_count == 1
-        and all(
-            route.start_type_id is None
-            and route.end_type_id is None
-            for route in candidates.question_routes
-        )
+        and initial_route_audit.supported_route_count == 0
     ):
-        candidates = _repair_zero_supported_routes(
-            preflight=preflight,
-            candidates=candidates,
-            client=client,
-        )
+        try:
+            candidates = _repair_zero_supported_routes(
+                preflight=preflight,
+                candidates=candidates,
+                client=client,
+                initial_audit=initial_route_audit,
+            )
+        except L1ZeroSupportedRoutesError as exc:
+            raise L1ZeroSupportedRoutesError(
+                exc.audit_payload.model_copy(
+                    update={
+                        "initial_route_codes": (
+                            initial_route_audit.unsupported_reason_codes
+                        ),
+                        "initial_supported_route_count": (
+                            initial_route_audit.supported_route_count
+                        ),
+                        "initial_unsupported_route_count": (
+                            initial_route_audit.unsupported_route_count
+                        ),
+                    }
+                )
+            ) from exc
         model_call_count = 2
     known_evidence_ids = {item.evidence_span_id for item in evidence_spans}
-    draft_contract, merge_groups, selected_candidate_ids = (
-        build_draft_contract_from_candidates(
+    try:
+        draft_contract, merge_groups, selected_candidate_ids = (
+            build_draft_contract_from_candidates(
             preflight.intake,
             candidates,
             known_evidence_span_ids=known_evidence_ids,
         )
-    )
+        )
+    except ProposalSelectionError as exc:
+        if str(exc) != (
+            "[DOM-104] at least one competency question must be covered"
+        ):
+            raise
+        raise L1ZeroSupportedRoutesError(
+            _zero_route_audit(
+                preflight=preflight,
+                candidates=candidates,
+                model_call_count=(
+                    2 if model_call_count >= 2 else 1
+                ),
+                reason_code="selection_dom_104",
+                route_repair_attempted=model_call_count >= 2,
+                initial_route_codes=(
+                    initial_route_audit.unsupported_reason_codes
+                ),
+                initial_supported_route_count=(
+                    initial_route_audit.supported_route_count
+                ),
+                initial_unsupported_route_count=(
+                    initial_route_audit.unsupported_route_count
+                ),
+            )
+        ) from exc
     design_context = _build_design_context(
         preflight=preflight,
         sample_manifest=sample_manifest,
