@@ -28,6 +28,17 @@ _COGNITIVE_SERVICES_USER_ROLE_ID = "a97b65f3-24c7-4388-baec-2e87135dc908"
 _FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
 _FABRIC_ORIGIN = "https://api.fabric.microsoft.com"
 _ARM_ORIGIN = "https://management.azure.com"
+
+
+def _search_scope(endpoint: str) -> str:
+    host = (urlsplit(endpoint).hostname or "").casefold()
+    if host.endswith(".search.azure.us"):
+        return "https://search.azure.us/.default"
+    if host.endswith(".search.azure.cn"):
+        return "https://search.azure.cn/.default"
+    return _SEARCH_SCOPE
+
+
 _FABRIC_TYPES = {
     "DataAgent": "dataAgents",
     "GraphModel": "graphModels",
@@ -1796,7 +1807,7 @@ class AzureL7Backend:
             except L7ReleaseError:
                 capabilities[f"fabric.{target.item_type}.definition"] = False
 
-        search_token = self._token(_SEARCH_SCOPE)
+        search_token = self._token(_search_scope(config.search.endpoint))
         for kind, name in (
             ("indexes", config.search.index_name),
             ("knowledgesources", config.search.knowledge_source_name),
@@ -2038,7 +2049,7 @@ class AzureL7Backend:
     def _search_create(
         self, config: L7ReleaseConfig, action: DeploymentAction
     ) -> ResourceReadback:
-        token = self._token(_SEARCH_SCOPE)
+        token = self._token(_search_scope(config.search.endpoint))
         if action.component == "search-index":
             schema = self._artifact_json(config.search.index_schema)
             if not isinstance(schema, dict):
@@ -2085,23 +2096,41 @@ class AzureL7Backend:
                     raise L7ReleaseError(
                         "Search document upload item readback mismatch"
                     )
-            count = self._request(
-                "GET",
-                self._search_url(
-                    config, f"indexes/{config.search.index_name}/docs/$count"
-                ),
-                token=token,
-            )
-            if count.status_code != 200:
-                raise L7ReleaseError(
-                    f"Search count readback failed with HTTP {count.status_code}"
+            import time
+
+            observed_count = -1
+            for attempt in range(30):
+                count = self._request(
+                    "GET",
+                    self._search_url(
+                        config,
+                        f"indexes/{config.search.index_name}/docs/$count",
+                    ),
+                    token=token,
                 )
-            try:
-                observed_count = int(count.text)
-            except (TypeError, ValueError) as exc:
-                raise L7ReleaseError("Search count readback was invalid") from exc
+                if count.status_code != 200:
+                    raise L7ReleaseError(
+                        "Search count readback failed with HTTP "
+                        f"{count.status_code}"
+                    )
+                try:
+                    observed_count = int(count.text)
+                except (TypeError, ValueError) as exc:
+                    raise L7ReleaseError(
+                        "Search count readback was invalid"
+                    ) from exc
+                if observed_count == len(documents):
+                    break
+                if observed_count > len(documents):
+                    raise L7ReleaseError(
+                        "Search document count readback exceeded expectation"
+                    )
+                if attempt < 29:
+                    time.sleep(1)
             if observed_count != len(documents):
-                raise L7ReleaseError("Search document count readback mismatch")
+                raise L7ReleaseError(
+                    "Search document count readback timed out"
+                )
         elif action.component == "search-knowledge-source":
             path = f"knowledgesources/{config.search.knowledge_source_name}"
             body = {
@@ -2821,7 +2850,7 @@ class AzureL7Backend:
             response = self._request(
                 "DELETE",
                 delete_url,
-                token=self._token(_SEARCH_SCOPE),
+                token=self._token(_search_scope(config.search.endpoint)),
                 headers={"If-Match": etag} if etag else None,
             )
             if response.status_code not in (200, 202, 204, 404):
@@ -2834,14 +2863,14 @@ class AzureL7Backend:
                     )
                 self._wait_lro(
                     location,
-                    self._token(_SEARCH_SCOPE),
+                    self._token(_search_scope(config.search.endpoint)),
                     expected_origin=config.search.endpoint,
                     base_url=delete_url,
                 )
             check = self._request(
                 "GET",
                 self._search_url(config, segment),
-                token=self._token(_SEARCH_SCOPE),
+                token=self._token(_search_scope(config.search.endpoint)),
             )
             if check.status_code != 404:
                 raise L7ReleaseError(

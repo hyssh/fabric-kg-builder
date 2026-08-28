@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import secrets
 import time
 from typing import Any, Callable, Mapping
@@ -223,6 +224,15 @@ class FoundryProjectConnectionClient:
         self.tenant_id = tenant_id
         self._credential = credential
         self._request = request
+        self._legacy_put_request = False
+        if request is not None:
+            try:
+                parameters = tuple(inspect.signature(request).parameters)
+                self._legacy_put_request = bool(parameters) and (
+                    parameters[0] != "method"
+                )
+            except (TypeError, ValueError):
+                pass
 
     def connection_id(self, name: str) -> str:
         if not name or "/" in name:
@@ -465,6 +475,55 @@ class FoundryProjectConnectionClient:
             f"Foundry project connection '{name}' delete readback timed out."
         )
 
+    def _legacy_put(
+        self, name: str, properties: dict[str, Any]
+    ) -> ProjectConnection:
+        """Preserve the pre-0.2.4 injected URL-first PUT transport contract."""
+        assert self._request is not None
+        resource_id = self.connection_id(name)
+        url = (
+            f"https://management.azure.com{resource_id}"
+            f"?api-version={_API_VERSION}"
+        )
+        try:
+            response = self._request(
+                url,
+                headers=self._headers(),
+                json={"name": name, "properties": properties},
+                timeout=60,
+            )
+        except Exception as exc:
+            raise ProjectConnectionError(
+                "Foundry project connection PUT transport failed."
+            ) from exc
+        if response.status_code not in (200, 201):
+            raise ProjectConnectionError(
+                f"Foundry project connection '{name}' failed with HTTP "
+                f"{response.status_code}."
+            )
+        normalized = normalize_connection_properties(properties)
+        metadata = normalized.get("metadata")
+        return ProjectConnection(
+            name=name,
+            resource_id=resource_id,
+            category=str(normalized["category"]),
+            target=str(normalized.get("target", "")),
+            audience=str(normalized.get("audience", "")),
+            etag=str(getattr(response, "headers", {}).get("ETag") or ""),
+            properties_hash=canonical_sha256(normalized),
+            binding_hash=str(
+                metadata.get("bindingHash", "")
+                if isinstance(metadata, Mapping)
+                else ""
+            ),
+            attempt_id=str(
+                metadata.get("l7AttemptId", "")
+                if isinstance(metadata, Mapping)
+                else ""
+            ),
+            normalized_properties=normalized,
+        )
+
     def _put(
         self,
         name: str,
@@ -473,6 +532,11 @@ class FoundryProjectConnectionClient:
         create_only: bool = False,
         attempt_id: str | None = None,
     ) -> ProjectConnection:
+        if (
+            self._legacy_put_request
+            and not create_only
+        ):
+            return self._legacy_put(name, properties)
         existing = self.get(name)
         if create_only and existing is not None:
             raise ProjectConnectionError(

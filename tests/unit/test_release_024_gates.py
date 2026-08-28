@@ -31,6 +31,7 @@ from fabric_kg_builder.agent.l7_release import (
     ResourceReadback,
     _ReceiptReservation,
     _search_document_batches,
+    _search_scope,
     _validated_service_url,
     _write_immutable,
     load_l7_config,
@@ -1122,6 +1123,52 @@ def test_connection_readback_drift_is_not_deleted_without_exact_binding() -> Non
             attempt_id="op-" + "a" * 64,
         )
     assert "DELETE" not in methods
+
+
+@pytest.mark.unit
+def test_legacy_url_first_connection_transport_remains_supported() -> None:
+    calls: list[str] = []
+
+    def legacy_put(url: str, **kwargs: Any) -> _Response:
+        calls.append(url)
+        return _Response(201, kwargs["json"], etag='"legacy"')
+
+    client = FoundryProjectConnectionClient(
+        subscription_id="subscription",
+        resource_group="group",
+        account_name="account",
+        project_name="project",
+        credential=_Credential(),
+        request=legacy_put,
+    )
+    result = client.upsert_search(
+        name="fabric-kg-024-search",
+        endpoint="https://example.search.windows.net",
+    )
+    assert result.etag == '"legacy"'
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("endpoint", "scope"),
+    [
+        (
+            "https://example.search.windows.net",
+            "https://search.azure.com/.default",
+        ),
+        (
+            "https://example.search.azure.us",
+            "https://search.azure.us/.default",
+        ),
+        (
+            "https://example.search.azure.cn",
+            "https://search.azure.cn/.default",
+        ),
+    ],
+)
+def test_search_scope_matches_endpoint_cloud(endpoint: str, scope: str) -> None:
+    assert _search_scope(endpoint) == scope
 
 
 @pytest.mark.unit
