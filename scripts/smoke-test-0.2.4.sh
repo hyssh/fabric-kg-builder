@@ -89,7 +89,9 @@ jq -n \
   '{
     release:"0.2.4", tenant_id:"tenant", subscription_id:"subscription",
     resource_group:"resource-group", expected_principal_id:"principal",
-    fabric_workspace_id:"workspace", authority_hash:("1"*64),
+    fabric_workspace_id:"workspace",
+    ownership_registry_output:"REPLACE_REGISTRY_OUTPUT",
+    authority_hash:("1"*64),
     l5a_definition_hash:("2"*64), l5b_definition_hash:("3"*64),
     l6_definition:{path:"l6.json",sha256:$l6b,canonical_hash:$l6c},
     fabric_definitions:[{
@@ -97,7 +99,8 @@ jq -n \
       name:"fabric-kg-024-data-agent",item_id:"data-agent",
       item_type:"DataAgent",
       artifact:{path:"data-agent.json",sha256:$dab,canonical_hash:$dac},
-      ownership_receipt:{path:"ownership.json",sha256:$orb,canonical_hash:$orc}
+      ownership_receipt:{path:"ownership.json",sha256:$orb,canonical_hash:$orc},
+      ownership_receipt_output:"REPLACE_RECEIPT_OUTPUT"
     }],
     search:{
       endpoint:"https://example.search.windows.net",
@@ -114,6 +117,12 @@ jq -n \
       data_agent_id:"data-agent",deploy_builtin_agent:false
     }
   }' > smoke/config.json
+jq --arg registry "$outside/smoke/next-ownership-registry.json" \
+  --arg receipt "$outside/smoke/next-data-agent-ownership.json" \
+  '.ownership_registry_output = $registry
+   | .fabric_definitions[0].ownership_receipt_output = $receipt' \
+  smoke/config.json > smoke/config.next.json
+mv smoke/config.next.json smoke/config.json
 
 jq -n --arg dh "$(jq -S -c '.definition' smoke/data-agent.json | tr -d '\n' | shasum -a 256 | awk '{print $1}')" '{
   identity:{tenant_id:"tenant",principal_id:"principal"},

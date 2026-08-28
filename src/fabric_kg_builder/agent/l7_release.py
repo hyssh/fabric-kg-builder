@@ -164,9 +164,13 @@ class FabricDefinitionTarget(_StrictModel):
                 raise ValueError(
                     "Fabric managed intent requires item_id and ownership_receipt"
                 )
-            if self.ownership_receipt_output is not None:
+            if not self.ownership_receipt_output:
                 raise ValueError(
-                    "Fabric managed intent forbids ownership_receipt_output"
+                    "Fabric managed intent requires ownership_receipt_output"
+                )
+            if not Path(self.ownership_receipt_output).is_absolute():
+                raise ValueError(
+                    "Fabric ownership_receipt_output must be absolute"
                 )
         return self
 
@@ -292,11 +296,9 @@ class L7ReleaseConfig(_StrictModel):
             raise ValueError(
                 "Foundry Data Agent binding requires a Fabric DataAgent target"
             )
-        if any(item.mode == "create" for item in self.fabric_definitions):
+        if self.fabric_definitions:
             if not self.ownership_registry_output:
-                raise ValueError(
-                    "Fabric create intent requires ownership_registry_output"
-                )
+                raise ValueError("Fabric targets require ownership_registry_output")
             if not Path(self.ownership_registry_output).is_absolute():
                 raise ValueError(
                     "ownership_registry_output must be absolute"
@@ -560,6 +562,49 @@ def _ownership_receipt(
             f"Fabric ownership registry mismatch for {target.name}"
         )
     return receipt
+
+
+def _pinned_ownership_entries() -> dict[str, str]:
+    registry_path_text = os.environ.get("FABRIC_KG_OWNERSHIP_REGISTRY", "")
+    registry_hash = os.environ.get("FABRIC_KG_OWNERSHIP_REGISTRY_SHA256", "")
+    if (
+        not registry_path_text
+        or not Path(registry_path_text).is_absolute()
+        or len(registry_hash) != 64
+    ):
+        raise L7ReleaseError(
+            "Fabric ownership requires an absolute registry path and pinned hash"
+        )
+    registry_path = Path(registry_path_text)
+    try:
+        registry_bytes = registry_path.read_bytes()
+        registry_stat = registry_path.stat()
+    except OSError as exc:
+        raise L7ReleaseError("Fabric ownership registry is unavailable") from exc
+    if (
+        hashlib.sha256(registry_bytes).hexdigest() != registry_hash
+        or registry_stat.st_uid != _effective_uid()
+        or stat.S_IMODE(registry_stat.st_mode) & 0o222
+    ):
+        raise L7ReleaseError(
+            "Fabric ownership registry is not pinned, owner-controlled, and read-only"
+        )
+    try:
+        registry = json.loads(registry_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise L7ReleaseError("Fabric ownership registry is invalid") from exc
+    receipts = (
+        registry.get("receipts")
+        if isinstance(registry, dict)
+        and isinstance(registry.get("receipts"), dict)
+        else None
+    )
+    if receipts is None or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in receipts.items()
+    ):
+        raise L7ReleaseError("Fabric ownership registry receipts are invalid")
+    return dict(receipts)
 
 
 def load_l7_config(path: Path) -> L7ReleaseConfig:
@@ -1262,8 +1307,9 @@ class AzureL7Backend:
         self._created_etags: dict[str, str] = {}
         self._mutation_confirmed: set[str] = set()
         self._created_fabric_ids: dict[str, str] = {}
-        self._deleted_fabric_ids: set[str] = set()
         self._ownership_outputs: dict[Path, bytes] = {}
+        self._fabric_mutation_keys: set[str] = set()
+        self._rolled_back_fabric_keys: set[str] = set()
 
     def _artifact_json(self, binding: ArtifactBinding) -> Any:
         return _artifact_value(binding, self.artifact_base)
@@ -1430,6 +1476,7 @@ class AzureL7Backend:
             exists=True,
             resource_type=str(item.get("type") or ""),
             name=str(item.get("displayName") or ""),
+            stable_id=str(target.item_id or ""),
             etag=str(response.headers.get("ETag") or item_response.headers.get("ETag") or ""),
             definition_hash=canonical_sha256(definition),
             properties_hash=canonical_sha256(
@@ -2116,6 +2163,7 @@ class AzureL7Backend:
         logical_key = action.resource_id.casefold()
         self._created_fabric_ids[logical_key] = item_id
         self._mutation_confirmed.add(logical_key)
+        self._fabric_mutation_keys.add(logical_key)
         managed_target = self._created_target(target, item_id)
         observed = self._fabric_definition(config, managed_target)
         if observed.etag:
@@ -2186,6 +2234,7 @@ class AzureL7Backend:
         logical_key = action.resource_id.casefold()
         self._created_fabric_ids[logical_key] = item_id
         self._mutation_confirmed.add(logical_key)
+        self._fabric_mutation_keys.add(logical_key)
         observed = self._fabric_definition(
             config, self._created_target(target, item_id)
         )
@@ -2224,15 +2273,38 @@ class AzureL7Backend:
         self,
         config: L7ReleaseConfig,
         plan: L7DeploymentPlan,
-        created: list[tuple[DeploymentAction, ResourceReadback]],
+        mutations: list[tuple[DeploymentAction, ResourceReadback]],
     ) -> None:
-        receipt_hashes: dict[str, str] = {}
-        for action, observed in created:
-            if not action.component.startswith("fabric-"):
+        receipt_hashes: dict[str, str] = (
+            _pinned_ownership_entries()
+            if any(
+                target.mode == "managed"
+                for target in config.fabric_definitions
+            )
+            else {}
+        )
+        fabric_mutations = {
+            action.name: (action, observed)
+            for action, observed in mutations
+            if action.component.startswith("fabric-")
+        }
+        for target in config.fabric_definitions:
+            mutation = fabric_mutations.get(target.name)
+            if mutation is None:
+                if target.mode != "managed":
+                    continue
+                existing = _ownership_receipt(
+                    target, config, self.artifact_base
+                )
+                registry_key = (
+                    f"{config.tenant_id.casefold()}/"
+                    f"{config.fabric_workspace_id.casefold()}/"
+                    f"{target.item_type.casefold()}/"
+                    f"{str(target.item_id).casefold()}"
+                )
+                receipt_hashes[registry_key] = existing.receipt_hash
                 continue
-            target = self._target_for_action(config, action)
-            if target.mode != "create" or not target.ownership_receipt_output:
-                continue
+            action, observed = mutation
             values: dict[str, Any] = {
                 "release": RELEASE_VERSION,
                 "attempt_id": plan.attempt_id,
@@ -2262,7 +2334,7 @@ class AzureL7Backend:
                 )
                 + "\n"
             ).encode()
-            path = Path(target.ownership_receipt_output)
+            path = Path(str(target.ownership_receipt_output))
             _write_immutable(path, payload)
             self._ownership_outputs[path] = payload
             registry_key = (
@@ -2311,6 +2383,9 @@ class AzureL7Backend:
                     f"{response.status_code}"
                 )
             self._mutation_confirmed.add(action.resource_id.casefold())
+            self._fabric_mutation_keys.add(
+                action.resource_id.casefold()
+            )
             response_etag = str(response.headers.get("ETag") or "")
             if response_etag:
                 self._created_etags[action.resource_id.casefold()] = response_etag
@@ -2428,6 +2503,14 @@ class AzureL7Backend:
                 raise L7ReleaseError(
                     "Fabric rollback definition hash readback mismatch"
                 )
+            self._rolled_back_fabric_keys.add(
+                action.resource_id.casefold()
+            )
+            if (
+                self._rolled_back_fabric_keys
+                == self._fabric_mutation_keys
+            ):
+                self._cleanup_ownership_outputs()
             return restored
         if action.rollback.action != "delete-created":
             raise L7ReleaseError("unsupported rollback action")
@@ -2480,9 +2563,12 @@ class AzureL7Backend:
                 raise L7ReleaseError(
                     "Fabric create rollback deletion readback mismatch"
                 )
-            self._deleted_fabric_ids.add(item_id)
-            if self._deleted_fabric_ids == set(
-                self._created_fabric_ids.values()
+            self._rolled_back_fabric_keys.add(
+                action.resource_id.casefold()
+            )
+            if (
+                self._rolled_back_fabric_keys
+                == self._fabric_mutation_keys
             ):
                 self._cleanup_ownership_outputs()
             return ResourceReadback(
@@ -2718,7 +2804,7 @@ class L7Executor:
                     )
                 )
                 sequence += 1
-                if action.action == "create":
+                if action.action in {"create", "update"}:
                     created_readbacks.append((action, observed))
             finalizer = getattr(self.backend, "finalize_ownership", None)
             if callable(finalizer):

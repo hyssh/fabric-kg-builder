@@ -2563,19 +2563,6 @@ def deploy_data_agent_cmd(
             ],
         )
         expected = stage_snapshot_from_spec(spec)
-        if definition_out is not None:
-            from fabric_kg_builder.knowledge.data_agent import build_definition_parts
-
-            definition_out.parent.mkdir(parents=True, exist_ok=True)
-            definition_out.write_text(
-                json.dumps(
-                    {"definition": {"parts": build_definition_parts(spec)}},
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
     except DataAgentRequiredExampleEmpty as exc:
         raise click.ClickException(str(exc)) from exc
     except DataAgentExampleValidationFailed as exc:
@@ -2726,6 +2713,27 @@ def deploy_data_agent_cmd(
                 "  planned live gates: direct Graph execution, then Data Agent "
                 "semantic comparison."
             )
+
+    if definition_out is not None:
+        from fabric_kg_builder.knowledge.data_agent import build_definition_parts
+
+        definition_out.parent.mkdir(parents=True, exist_ok=True)
+        definition_payload = (
+            json.dumps(
+                {"definition": {"parts": build_definition_parts(spec)}},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        temporary_definition = definition_out.with_name(
+            f".{definition_out.name}.{os.getpid()}.tmp"
+        )
+        temporary_definition.write_text(
+            definition_payload,
+            encoding="utf-8",
+        )
+        temporary_definition.replace(definition_out)
 
     if dry_run:
         click.echo("[deploy-data-agent] SUCCESS (dry-run)")

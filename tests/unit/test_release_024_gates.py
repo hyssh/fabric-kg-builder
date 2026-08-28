@@ -118,6 +118,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
                     encoding="utf-8"
                 )
             )["receipt_hash"],
+            "tenant-1/workspace-1/ontology/unrelated-item": "f" * 64,
         },
     }
     registry_path = tmp_path / "ownership-registry.json"
@@ -137,6 +138,9 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
         "resource_group": "resource-group-1",
         "expected_principal_id": "principal-1",
         "fabric_workspace_id": "workspace-1",
+        "ownership_registry_output": str(
+            tmp_path / "next-ownership-registry.json"
+        ),
         "authority_hash": "1" * 64,
         "l5a_definition_hash": "2" * 64,
         "l5b_definition_hash": "3" * 64,
@@ -149,6 +153,9 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
                 "item_type": "DataAgent",
                 "artifact": data_agent,
                 "ownership_receipt": data_agent_ownership,
+                "ownership_receipt_output": str(
+                    tmp_path / "next-data-agent-ownership.json"
+                ),
             },
             {
                 "mode": "managed",
@@ -157,6 +164,9 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
                 "item_type": "Ontology",
                 "artifact": ontology,
                 "ownership_receipt": ontology_ownership,
+                "ownership_receipt_output": str(
+                    tmp_path / "next-ontology-ownership.json"
+                ),
             },
         ],
         "search": {
@@ -680,6 +690,55 @@ def test_empty_workspace_create_plan_and_ownership_outputs(
     assert Path(str(config.ownership_registry_output)).exists()
     for target in config.fabric_definitions:
         assert Path(str(target.ownership_receipt_output)).exists()
+
+
+@pytest.mark.unit
+def test_managed_replacement_registry_preserves_unrelated_entries(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    plan = L7Planner(ObservationBackend(observation)).build(
+        config, config_path=config_path
+    )
+    action = next(
+        item for item in plan.actions if item.component == "fabric-dataagent"
+    ).model_copy(update={"action": "update"})
+    target = config.fabric_definitions[0]
+    backend = object.__new__(AzureL7Backend)
+    backend.artifact_base = config_path.parent
+    backend._ownership_outputs = {}
+    backend.finalize_ownership(
+        config,
+        plan,
+        [
+            (
+                action,
+                ResourceReadback(
+                    resource_id=action.resource_id,
+                    stable_id=str(target.item_id),
+                    exists=True,
+                    resource_type=target.item_type,
+                    name=target.name,
+                    etag='"updated"',
+                    definition_hash=action.desired_hash,
+                ),
+            )
+        ],
+    )
+    registry = json.loads(
+        Path(str(config.ownership_registry_output)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        registry["receipts"][
+            "tenant-1/workspace-1/ontology/unrelated-item"
+        ]
+        == "f" * 64
+    )
 
 
 @pytest.mark.unit
