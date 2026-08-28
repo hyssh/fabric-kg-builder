@@ -356,6 +356,23 @@ class _UnavailablePathRepairClient(_ZeroRouteRepairClient):
         return super().complete_json(**kwargs)
 
 
+class _CandidateRegenerationClient:
+    def __init__(self, *, second_valid: bool) -> None:
+        self.calls = 0
+        self.second_valid = second_valid
+
+    def complete_json(self, **kwargs):
+        self.calls += 1
+        raw = _candidates("records")
+        if self.calls == 1 or not self.second_valid:
+            raw["relationship_candidates"] = []
+            for route in raw["question_routes"]:
+                route["start_type_id"] = None
+                route["end_type_id"] = None
+                route["unsupported_reason"] = "No candidate relationship."
+        return raw
+
+
 def test_zero_supported_routes_use_one_strict_route_only_repair(
     tmp_path: Path,
 ) -> None:
@@ -392,6 +409,29 @@ def test_structurally_supported_but_unavailable_paths_trigger_repair(
         "supported_path_unavailable",
     ) * 5
     assert audit.route_repair_attempted is True
+    assert client.calls == 2
+
+
+def test_insufficient_candidate_vocabulary_gets_one_full_regeneration(
+    tmp_path: Path,
+) -> None:
+    client = _CandidateRegenerationClient(second_valid=True)
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+    assert prepared.candidates.relationship_candidates
+
+
+def test_repeated_insufficient_candidate_vocabulary_is_typed(
+    tmp_path: Path,
+) -> None:
+    client = _CandidateRegenerationClient(second_valid=False)
+    with pytest.raises(L1ZeroSupportedRoutesError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    audit = captured.value.audit_payload
+    assert audit.reason_code == "candidate_regeneration_insufficient"
+    assert len(audit.candidate_attempt_hashes) == 2
+    assert audit.candidate_attempt_relationship_counts == (0, 0)
     assert client.calls == 2
 
 

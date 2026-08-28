@@ -144,6 +144,11 @@ class L1ZeroRouteAudit(ContractModel):
     model_hash: str
     intake_hash: str
     candidate_hash: str
+    candidate_attempt_hashes: tuple[str, ...]
+    candidate_attempt_type_counts: tuple[int, ...]
+    candidate_attempt_relationship_counts: tuple[int, ...]
+    candidate_regeneration_attempted: bool
+    candidate_regeneration_result_code: str
     question_ids: tuple[str, ...]
     question_id_hashes: tuple[str, ...]
     route_states: tuple[Literal["supported", "unsupported"], ...]
@@ -194,6 +199,7 @@ def _normalize_question_route_shapes(
     candidate: dict[str, Any],
     *,
     trusted_question_ids: tuple[str, ...],
+    attempt_count: int = 1,
 ) -> dict[str, Any]:
     """Classify raw routes and rebuild them in trusted question order."""
     normalized = json.loads(json.dumps(candidate))
@@ -226,7 +232,7 @@ def _normalize_question_route_shapes(
             unknown_question_id = True
     if unknown_question_id:
         raise L1ProposalSchemaRepairError(
-            attempt_count=1,
+            attempt_count=attempt_count,
             validation_failures=(
                 ("question_routes", "route_question_id_unknown"),
             ),
@@ -307,6 +313,32 @@ def _normalize_question_route_shapes(
     return normalized
 
 
+def _validate_proposal_candidate(
+    raw: dict[str, Any],
+    *,
+    trusted_question_ids: tuple[str, ...],
+    attempt_count: int,
+) -> DomainProposalCandidatesV2:
+    try:
+        values = normalize_candidate_scores(
+            _normalize_question_route_shapes(
+                json.loads(json.dumps(raw)),
+                trusted_question_ids=trusted_question_ids,
+                attempt_count=attempt_count,
+            )
+        )
+        return DomainProposalCandidatesV2.model_validate(values)
+    except (ValidationError, ArithmeticError) as error:
+        failures = _sanitized_validation_failures(error)
+        raise L1ProposalSchemaRepairError(
+            attempt_count=attempt_count,
+            validation_failures=tuple(
+                (item["location"], item["type"])
+                for item in failures
+            ),
+        ) from error
+
+
 def _zero_route_audit(
     *,
     preflight: L1Preflight,
@@ -316,6 +348,11 @@ def _zero_route_audit(
     route_repair_attempted: bool | None = None,
     route_repair_result_code: str | None = None,
     terminal_error_code: str | None = None,
+    candidate_attempt_hashes: tuple[str, ...] | None = None,
+    candidate_attempt_type_counts: tuple[int, ...] | None = None,
+    candidate_attempt_relationship_counts: tuple[int, ...] | None = None,
+    candidate_regeneration_attempted: bool = False,
+    candidate_regeneration_result_code: str = "not_attempted",
     initial_route_codes: tuple[str, ...] | None = None,
     initial_supported_route_count: int | None = None,
     initial_unsupported_route_count: int | None = None,
@@ -371,6 +408,25 @@ def _zero_route_audit(
         model_hash=preflight.model_hash,
         intake_hash=preflight.intake.intake_hash,
         candidate_hash=canonical_sha256(candidates),
+        candidate_attempt_hashes=(
+            (canonical_sha256(candidates),)
+            if candidate_attempt_hashes is None
+            else candidate_attempt_hashes
+        ),
+        candidate_attempt_type_counts=(
+            (len(candidates.semantic_type_candidates),)
+            if candidate_attempt_type_counts is None
+            else candidate_attempt_type_counts
+        ),
+        candidate_attempt_relationship_counts=(
+            (len(candidates.relationship_candidates),)
+            if candidate_attempt_relationship_counts is None
+            else candidate_attempt_relationship_counts
+        ),
+        candidate_regeneration_attempted=candidate_regeneration_attempted,
+        candidate_regeneration_result_code=(
+            candidate_regeneration_result_code
+        ),
         question_ids=tuple(
             question.id for question in preflight.intake.competency_questions
         ),
@@ -1185,47 +1241,35 @@ def prepare_l1_stage(
         )
     )
     model_call_count = 0
+    candidate_regeneration_attempted = False
+    route_repair_attempted = False
+    trusted_question_ids = tuple(
+        item.id for item in preflight.intake.competency_questions
+    )
+    proposal_user_message = build_proposal_user_message(
+        preflight.intake,
+        source_profile_summary=profile.model_dump(
+            mode="json", exclude={"identity"}
+        ),
+        verified_design_evidence=_evidence_payload(evidence_spans),
+        correction_instruction=correction_instruction,
+    )
     if candidates is None:
         if client is None:
             raise L1StageError("proposal candidates or a Foundry client are required")
         raw = client.complete_json(
             system=DOMAIN_PROPOSAL_SYSTEM_PROMPT,
-            user=build_proposal_user_message(
-                preflight.intake,
-                source_profile_summary=profile.model_dump(
-                    mode="json", exclude={"identity"}
-                ),
-                verified_design_evidence=_evidence_payload(evidence_spans),
-                correction_instruction=correction_instruction,
-            ),
+            user=proposal_user_message,
             json_schema=domain_proposal_candidates_schema(),
         )
         model_call_count = 1
         candidates = raw
     if isinstance(candidates, dict):
-        original_candidate_values = json.loads(json.dumps(candidates))
-        try:
-            candidate_values = normalize_candidate_scores(
-                _normalize_question_route_shapes(
-                    original_candidate_values,
-                    trusted_question_ids=tuple(
-                        item.id
-                        for item in preflight.intake.competency_questions
-                    ),
-                )
-            )
-            candidates = DomainProposalCandidatesV2.model_validate(
-                candidate_values
-            )
-        except (ValidationError, ArithmeticError) as first_error:
-            failures = _sanitized_validation_failures(first_error)
-            raise L1ProposalSchemaRepairError(
-                attempt_count=model_call_count or 1,
-                validation_failures=tuple(
-                    (item["location"], item["type"])
-                    for item in failures
-                ),
-            ) from first_error
+        candidates = _validate_proposal_candidate(
+            candidates,
+            trusted_question_ids=trusted_question_ids,
+            attempt_count=model_call_count or 1,
+        )
     initial_route_audit = _zero_route_audit(
         preflight=preflight,
         candidates=candidates,
@@ -1233,12 +1277,153 @@ def prepare_l1_stage(
         reason_code="initial_route_diagnostics",
         route_repair_attempted=False,
     )
+    first_route_audit = initial_route_audit
+    candidate_attempt_hashes = (
+        initial_route_audit.candidate_hash,
+    )
+    candidate_attempt_type_counts = (
+        initial_route_audit.proposed_type_count,
+    )
+    candidate_attempt_relationship_counts = (
+        initial_route_audit.proposed_relationship_count,
+    )
+    if (
+        client is not None
+        and model_call_count == 1
+        and initial_route_audit.eligible_relationship_count == 0
+    ):
+        retry_feedback = {
+            "reason_code": "minimum_viable_vocabulary_insufficient",
+            "proposed_type_count": initial_route_audit.proposed_type_count,
+            "proposed_relationship_count": (
+                initial_route_audit.proposed_relationship_count
+            ),
+            "eligible_type_count": initial_route_audit.eligible_type_count,
+            "eligible_relationship_count": (
+                initial_route_audit.eligible_relationship_count
+            ),
+            "supported_route_count": (
+                initial_route_audit.supported_route_count
+            ),
+        }
+        candidate_regeneration_attempted = True
+        model_call_count = 2
+        try:
+            second_raw = client.complete_json(
+                system=(
+                    DOMAIN_PROPOSAL_SYSTEM_PROMPT
+                    + "\nTrusted local candidate-regeneration feedback:\n"
+                    + canonical_json(retry_feedback)
+                ),
+                user=proposal_user_message,
+                json_schema=domain_proposal_candidates_schema(),
+            )
+        except Exception as exc:
+            raise L1ZeroSupportedRoutesError(
+                initial_route_audit.model_copy(
+                    update={
+                        "model_call_count": 2,
+                        "candidate_regeneration_attempted": True,
+                        "candidate_regeneration_result_code": (
+                            "candidate_regeneration_provider_failure"
+                        ),
+                        "terminal_error_code": (
+                            "L1_ZERO_SUPPORTED_ROUTES"
+                        ),
+                    }
+                )
+            ) from exc
+        if not isinstance(second_raw, dict):
+            raise L1ZeroSupportedRoutesError(
+                initial_route_audit.model_copy(
+                    update={
+                        "model_call_count": 2,
+                        "candidate_regeneration_attempted": True,
+                        "candidate_regeneration_result_code": (
+                            "candidate_regeneration_response_invalid"
+                        ),
+                    }
+                )
+            )
+        try:
+            second = _validate_proposal_candidate(
+                second_raw,
+                trusted_question_ids=trusted_question_ids,
+                attempt_count=2,
+            )
+        except L1ProposalSchemaRepairError as exc:
+            raise L1ZeroSupportedRoutesError(
+                initial_route_audit.model_copy(
+                    update={
+                        "model_call_count": 2,
+                        "candidate_regeneration_attempted": True,
+                        "candidate_regeneration_result_code": (
+                            "candidate_regeneration_schema_invalid"
+                        ),
+                    }
+                )
+            ) from exc
+        second_audit = _zero_route_audit(
+            preflight=preflight,
+            candidates=second,
+            model_call_count=2,
+            reason_code="candidate_regeneration_diagnostics",
+            route_repair_attempted=False,
+            initial_route_codes=(
+                first_route_audit.unsupported_reason_codes
+            ),
+            initial_supported_route_count=(
+                first_route_audit.supported_route_count
+            ),
+            initial_unsupported_route_count=(
+                first_route_audit.unsupported_route_count
+            ),
+            candidate_attempt_hashes=(
+                initial_route_audit.candidate_hash,
+                canonical_sha256(second),
+            ),
+            candidate_attempt_type_counts=(
+                initial_route_audit.proposed_type_count,
+                len(second.semantic_type_candidates),
+            ),
+            candidate_attempt_relationship_counts=(
+                initial_route_audit.proposed_relationship_count,
+                len(second.relationship_candidates),
+            ),
+            candidate_regeneration_attempted=True,
+            candidate_regeneration_result_code=(
+                "candidate_regeneration_validated"
+            ),
+        )
+        candidate_attempt_hashes = second_audit.candidate_attempt_hashes
+        candidate_attempt_type_counts = (
+            second_audit.candidate_attempt_type_counts
+        )
+        candidate_attempt_relationship_counts = (
+            second_audit.candidate_attempt_relationship_counts
+        )
+        candidates = second
+        if second_audit.eligible_relationship_count == 0:
+            raise L1ZeroSupportedRoutesError(
+                second_audit.model_copy(
+                    update={
+                        "reason_code": "candidate_regeneration_insufficient",
+                        "terminal_error_code": "L1_ZERO_SUPPORTED_ROUTES",
+                        "route_repair_result_code": "not_attempted",
+                        "candidate_regeneration_result_code": (
+                            "candidate_regeneration_insufficient"
+                        ),
+                    }
+                )
+            )
+        initial_route_audit = second_audit
     if (
         client is not None
         and model_call_count == 1
         and initial_route_audit.supported_route_count == 0
     ):
         try:
+            route_repair_attempted = True
             candidates = _repair_zero_supported_routes(
                 preflight=preflight,
                 candidates=candidates,
@@ -1284,21 +1469,36 @@ def prepare_l1_stage(
                     2 if model_call_count >= 2 else 1
                 ),
                 reason_code="selection_dom_104",
-                route_repair_attempted=model_call_count >= 2,
+                route_repair_attempted=route_repair_attempted,
                 route_repair_result_code=(
                     "route_patch_validated"
-                    if model_call_count >= 2
+                    if route_repair_attempted
                     else "not_attempted"
                 ),
                 terminal_error_code="DOM-104",
+                candidate_regeneration_attempted=(
+                    candidate_regeneration_attempted
+                ),
+                candidate_regeneration_result_code=(
+                    "candidate_regeneration_validated"
+                    if candidate_regeneration_attempted
+                    else "not_attempted"
+                ),
                 initial_route_codes=(
-                    initial_route_audit.unsupported_reason_codes
+                    first_route_audit.unsupported_reason_codes
                 ),
                 initial_supported_route_count=(
-                    initial_route_audit.supported_route_count
+                    first_route_audit.supported_route_count
                 ),
                 initial_unsupported_route_count=(
-                    initial_route_audit.unsupported_route_count
+                    first_route_audit.unsupported_route_count
+                ),
+                candidate_attempt_hashes=candidate_attempt_hashes,
+                candidate_attempt_type_counts=(
+                    candidate_attempt_type_counts
+                ),
+                candidate_attempt_relationship_counts=(
+                    candidate_attempt_relationship_counts
                 ),
             )
         ) from exc

@@ -58,6 +58,11 @@ and cannot establish types, predicates, hierarchy, counts, or identity rules.
 Propose only evidence/CQ/governance-supported candidates. Do not invent evidence
 IDs. Do not bundle or infer external ontology content. Local deterministic code
 owns scoring, merging, selection, hierarchy closure, N/K, validation, and approval.
+Propose enough evidence-backed semantic types to serve as route endpoints, and
+8 to 20 evidence-backed advisory relationship candidates when the verified
+source profile supports them (hard maximum 24). The relationships must form
+paths for the exact supplied competency question IDs. Return fewer only when
+evidence is insufficient; unsupported questions must say so.
 Every unsupported question route must keep both endpoint IDs null and include a
 non-empty unsupported_reason. Never convert an unsupported route into a supported
 route during schema repair and never add unapproved vocabulary. Propose sufficient
