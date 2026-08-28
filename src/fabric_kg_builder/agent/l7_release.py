@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import stat
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol
@@ -40,6 +41,13 @@ class L7ReleaseError(RuntimeError):
     """Raised when an L7 release gate fails closed."""
 
 
+@dataclass(frozen=True)
+class L7LroOutcome:
+    body: dict[str, Any]
+    status_url: str
+    result_url: str | None
+
+
 def _validated_service_url(
     candidate: str,
     *,
@@ -60,6 +68,10 @@ def _validated_service_url(
     ):
         raise L7ReleaseError("service operation URL origin validation failed")
     return resolved
+
+
+def _is_result_url(url: str) -> bool:
+    return urlsplit(url).path.rstrip("/").casefold().endswith("/result")
 
 
 class _StrictModel(BaseModel):
@@ -1261,20 +1273,29 @@ class AzureL7Backend:
             location = str(response.headers.get("Location") or "")
             if not location:
                 raise L7ReleaseError("Fabric getDefinition returned 202 without Location")
-            body, operation_url = self._wait_lro(
+            outcome = self._wait_lro(
                 location,
                 token,
                 expected_origin=_FABRIC_ORIGIN,
                 base_url=definition_url,
             )
-            definition = body.get("definition")
+            definition = outcome.body.get("definition")
             if not isinstance(definition, dict):
-                operation_parts = urlsplit(operation_url)
-                result_url = operation_parts._replace(
-                    path=f"{operation_parts.path.rstrip('/')}/result",
-                    query="",
-                    fragment="",
-                ).geturl()
+                if outcome.result_url:
+                    result_url = outcome.result_url
+                else:
+                    operation_parts = urlsplit(outcome.status_url)
+                    status_path = operation_parts.path.rstrip("/")
+                    result_path = (
+                        status_path
+                        if status_path.casefold().endswith("/result")
+                        else f"{status_path}/result"
+                    )
+                    result_url = operation_parts._replace(
+                        path=result_path,
+                        query="",
+                        fragment="",
+                    ).geturl()
                 result = self._request(
                     "GET",
                     result_url,
@@ -2019,13 +2040,16 @@ class AzureL7Backend:
         *,
         expected_origin: str,
         base_url: str,
-    ) -> tuple[dict[str, Any], str]:
+    ) -> L7LroOutcome:
         import time
 
         operation_url = _validated_service_url(
             location,
             expected_origin=expected_origin,
             base_url=base_url,
+        )
+        result_url: str | None = (
+            operation_url if _is_result_url(operation_url) else None
         )
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
@@ -2044,14 +2068,24 @@ class AzureL7Backend:
             body = self._json(response, "Fabric operation")
             next_location = str(response.headers.get("Location") or "")
             if next_location:
-                operation_url = _validated_service_url(
+                validated_next = _validated_service_url(
                     next_location,
                     expected_origin=expected_origin,
                     base_url=operation_url,
                 )
+                if _is_result_url(validated_next):
+                    result_url = validated_next
+                else:
+                    operation_url = validated_next
             status = str(body.get("status") or "").casefold()
-            if status in {"succeeded", "completed"}:
-                return body, operation_url
+            if status in {"succeeded", "completed"} or (
+                not status and result_url == operation_url
+            ):
+                return L7LroOutcome(
+                    body=body,
+                    status_url=operation_url,
+                    result_url=result_url,
+                )
             if status in {"failed", "cancelled", "canceled"}:
                 raise L7ReleaseError("Fabric operation reported failure")
             time.sleep(2)

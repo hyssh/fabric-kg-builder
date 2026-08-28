@@ -1163,3 +1163,85 @@ def test_failed_search_create_lro_reconciles_owned_resource(
             "search-token",
         )
     assert deleted is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("supplied_result_location", [True, False])
+def test_fabric_get_definition_uses_result_url_exactly_once(
+    tmp_path: Path,
+    supplied_result_location: bool,
+) -> None:
+    _, _, config = _inputs(tmp_path)
+    target = config.fabric_definitions[0]
+    backend = object.__new__(AzureL7Backend)
+    backend._rollback_definitions = {}
+    backend._token = lambda scope: "fabric-token"
+    urls: list[str] = []
+
+    def transport(
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> _Response:
+        urls.append(url)
+        if "/items/" in url:
+            return _Response(
+                200,
+                {"id": target.item_id, "type": "DataAgent", "displayName": target.name},
+                etag='"item"',
+            )
+        if url.endswith("/getDefinition"):
+            response = _Response(202)
+            response.headers["Location"] = "/operations/definition-1"
+            return response
+        if url.endswith("/operations/definition-1"):
+            response = _Response(200, {"status": "Succeeded"})
+            if supplied_result_location:
+                response.headers["Location"] = (
+                    "https://api.fabric.microsoft.com/operations/"
+                    "definition-1/result"
+                )
+            return response
+        if url.endswith("/operations/definition-1/result"):
+            return _Response(
+                200,
+                {"definition": {"parts": []}},
+                etag='"definition"',
+            )
+        raise AssertionError(url)
+
+    backend._request = transport
+    observed = backend._fabric_definition(config, target)
+    assert observed.definition_hash == canonical_sha256({"parts": []})
+    assert not any(url.endswith("/result/result") for url in urls)
+    assert urls.count(
+        "https://api.fabric.microsoft.com/operations/definition-1/result"
+    ) == 1
+
+
+@pytest.mark.unit
+def test_fabric_lro_rejects_external_final_result_location() -> None:
+    backend = object.__new__(AzureL7Backend)
+    calls: list[str] = []
+
+    def transport(
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> _Response:
+        calls.append(url)
+        response = _Response(200, {"status": "Succeeded"})
+        response.headers["Location"] = "https://evil.example/result?sig=secret"
+        return response
+
+    backend._request = transport
+    with pytest.raises(L7ReleaseError, match="origin validation"):
+        backend._wait_lro(
+            "/operations/definition-1",
+            "fabric-token",
+            expected_origin="https://api.fabric.microsoft.com",
+            base_url="https://api.fabric.microsoft.com/v1/getDefinition",
+        )
+    assert calls == [
+        "https://api.fabric.microsoft.com/operations/definition-1"
+    ]
