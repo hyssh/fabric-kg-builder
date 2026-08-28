@@ -842,6 +842,8 @@ def test_noninteractive_stage_is_blocked_until_explicit_approval(
         actor="automation-reviewer@example.test",
         state_root=tmp_path / ".fkg" / "l1",
         domain_path=tmp_path / "domain.yaml",
+        expected_project_id=prepared.preflight.base_identity.project_id,
+        expected_run_id=prepared.preflight.run_id,
     )
     assert approved.status == "succeeded"
     assert approved.contract is not None

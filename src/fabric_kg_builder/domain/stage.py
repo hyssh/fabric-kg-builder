@@ -3320,13 +3320,21 @@ def load_prepared_l1_stage(
             "persisted L1 cross-artifact binding mismatch: evidence spans"
         )
     source_unit_ids = {item.source_unit_id for item in source_units}
-    if any(
-        item.source_unit_id not in source_unit_ids
-        for item in evidence_spans
-    ):
-        raise L1StageError(
-            "persisted L1 cross-artifact binding mismatch: evidence source unit"
-        )
+    source_units_by_id = {
+        item.source_unit_id: item for item in source_units
+    }
+    for span in evidence_spans:
+        source_unit = source_units_by_id.get(span.source_unit_id)
+        if source_unit is None:
+            raise L1StageError(
+                "persisted L1 cross-artifact binding mismatch: evidence source unit"
+            )
+        try:
+            span.verify_against(source_unit)
+        except ValueError as exc:
+            raise L1StageError(
+                "persisted L1 evidence verification failed"
+            ) from exc
     identity_pairs = (
         intake.identity,
         corpus.identity,
@@ -3406,9 +3414,23 @@ def approve_persisted_l1_draft(
     state_root: Path = L1_STATE_DIR,
     domain_path: Path = Path("domain.yaml"),
     reviewed_contract: DomainContractV2 | None = None,
+    expected_project_id: str | None = None,
+    expected_run_id: str | None = None,
 ) -> L1StageResult:
     """Explicitly approve a current blocked draft after complete binding checks."""
     prepared = load_prepared_l1_stage(state_root=state_root)
+    if not expected_project_id or not expected_run_id:
+        raise L1StageError(
+            "schema-2 approval requires expected project and run IDs"
+        )
+    if (
+        prepared.design_context.identity.project_id
+        != expected_project_id
+        or prepared.design_context.identity.run_id != expected_run_id
+    ):
+        raise L1StageError(
+            "persisted L1 identity does not match expected project/run"
+        )
     if reviewed_contract is not None and (
         canonical_json(reviewed_contract)
         != canonical_json(prepared.proposal.draft_contract)
