@@ -622,12 +622,21 @@ def load_observation(path: Path) -> L7Observation:
         raise L7ReleaseError(f"invalid L7 observation: {path}") from exc
 
 
-def _write_immutable(path: Path, payload: bytes) -> None:
-    if path.exists():
+def _write_immutable(path: Path, payload: bytes) -> bool:
+    def existing_matches() -> bool:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(mode):
+            raise L7ReleaseError(f"immutable path is not a regular file: {path}")
         existing = path.read_bytes()
         if existing != payload:
             raise L7ReleaseError(f"refusing to replace immutable file: {path}")
-        return
+        return True
+
+    if existing_matches():
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -636,7 +645,14 @@ def _write_immutable(path: Path, payload: bytes) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     os.chmod(temp, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    temp.replace(path)
+    try:
+        os.link(temp, path)
+    except FileExistsError:
+        if existing_matches():
+            return False
+        raise
+    finally:
+        temp.unlink(missing_ok=True)
     try:
         _fsync_parent(path)
     except BaseException:
@@ -651,6 +667,7 @@ def _write_immutable(path: Path, payload: bytes) -> None:
         except OSError:
             pass
         raise
+    return True
 
 
 def _fsync_parent(path: Path) -> None:
@@ -2344,8 +2361,8 @@ class AzureL7Backend:
                 + "\n"
             ).encode()
             path = Path(str(target.ownership_receipt_output))
-            _write_immutable(path, payload)
-            self._ownership_outputs[path] = payload
+            if _write_immutable(path, payload):
+                self._ownership_outputs[path] = payload
             registry_key = (
                 f"{config.tenant_id.casefold()}/"
                 f"{config.fabric_workspace_id.casefold()}/"
@@ -2363,8 +2380,8 @@ class AzureL7Backend:
                 )
                 + "\n"
             ).encode()
-            _write_immutable(registry_path, registry_payload)
-            self._ownership_outputs[registry_path] = registry_payload
+            if _write_immutable(registry_path, registry_payload):
+                self._ownership_outputs[registry_path] = registry_payload
 
     def apply(self, config: L7ReleaseConfig, action: DeploymentAction) -> ResourceReadback:
         if action.component.startswith("fabric-"):

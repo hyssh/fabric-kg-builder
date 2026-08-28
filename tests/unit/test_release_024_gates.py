@@ -31,6 +31,7 @@ from fabric_kg_builder.agent.l7_release import (
     ResourceReadback,
     _ReceiptReservation,
     _validated_service_url,
+    _write_immutable,
     load_l7_config,
     load_plan,
 )
@@ -709,6 +710,25 @@ def test_successful_global_rollback_removes_ownership_outputs(
     backend.finalize_rollback()
 
     assert not ownership_path.exists()
+    assert backend._ownership_outputs == {}
+
+
+@pytest.mark.unit
+def test_identical_preexisting_ownership_output_is_not_transaction_owned(
+    tmp_path: Path,
+) -> None:
+    ownership_path = tmp_path / "ownership.json"
+    payload = b'{"attempt":"preexisting"}\n'
+    ownership_path.write_bytes(payload)
+    ownership_path.chmod(0o400)
+    backend = object.__new__(AzureL7Backend)
+    backend._ownership_outputs = {}
+
+    if _write_immutable(ownership_path, payload):
+        backend._ownership_outputs[ownership_path] = payload
+    backend.finalize_rollback()
+
+    assert ownership_path.read_bytes() == payload
     assert backend._ownership_outputs == {}
 
 
