@@ -377,6 +377,29 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
     )
     assert draft.exit_code == 0, draft.output
 
+    mismatched_path = tmp_path / "different-domain.yaml"
+    mismatched = yaml.safe_load(domain_path.read_text(encoding="utf-8"))
+    mismatched["domain"]["description"] = "A different reviewed contract."
+    mismatched_path.write_text(
+        yaml.safe_dump(mismatched, sort_keys=False),
+        encoding="utf-8",
+    )
+    mismatch = runner.invoke(
+        cli,
+        [
+            "domain",
+            "approve",
+            "--file",
+            str(mismatched_path),
+            "--state-dir",
+            str(state_root),
+            "--approved-by",
+            "automation-reviewer@example.test",
+        ],
+    )
+    assert mismatch.exit_code != 0
+    assert "does not match the persisted L1 draft" in mismatch.output
+
     missing_actor = runner.invoke(
         cli,
         [
@@ -408,6 +431,56 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
     assert load_domain_contract(domain_path).approval.status == "approved"
     receipt = json.loads((state_root / "stage-receipt.json").read_text())
     assert receipt["status"] == "succeeded"
+
+
+def test_schema_2_approval_rejects_cross_run_proposal_replay(
+    tmp_path: Path,
+) -> None:
+    source, intake_path, candidates_path = _write_inputs(tmp_path)
+    runner = CliRunner()
+    states = [tmp_path / "state-a", tmp_path / "state-b"]
+    domains = [tmp_path / "domain-a.yaml", tmp_path / "domain-b.yaml"]
+    for index, state_root in enumerate(states):
+        result = runner.invoke(
+            cli,
+            [
+                "init-domain",
+                "--input",
+                str(source),
+                "--intake",
+                str(intake_path),
+                "--candidates",
+                str(candidates_path),
+                "--non-interactive",
+                "--project-id",
+                f"surface-{index}",
+                "--out",
+                str(domains[index]),
+                "--state-dir",
+                str(state_root),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+    (states[0] / "domain-proposal.json").write_bytes(
+        (states[1] / "domain-proposal.json").read_bytes()
+    )
+
+    approval = runner.invoke(
+        cli,
+        [
+            "domain",
+            "approve",
+            "--file",
+            str(domains[0]),
+            "--state-dir",
+            str(states[0]),
+            "--approved-by",
+            "automation-reviewer@example.test",
+        ],
+    )
+
+    assert approval.exit_code != 0
+    assert "cross-artifact binding mismatch" in approval.output
 
 
 def test_schema_2_interactive_uses_exact_one_summary_decision(

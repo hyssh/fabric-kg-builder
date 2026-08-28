@@ -3235,6 +3235,117 @@ def load_prepared_l1_stage(
             (state_root / "design-samples" / "evidence-spans").glob("*.json")
         )
     )
+    expected_bindings = (
+        (
+            design.domain_intake_id,
+            intake.domain_intake_id,
+            "design/intake ID",
+        ),
+        (
+            design.domain_intake_hash,
+            intake.intake_hash,
+            "design/intake hash",
+        ),
+        (
+            design.source_profile_id,
+            profile.domain_source_profile_id,
+            "design/profile ID",
+        ),
+        (
+            design.source_profile_hash,
+            profile.profile_hash,
+            "design/profile hash",
+        ),
+        (
+            design.source_corpus_manifest_id,
+            corpus.source_corpus_manifest_id,
+            "design/corpus ID",
+        ),
+        (
+            design.source_corpus_manifest_hash,
+            corpus.corpus_hash,
+            "design/corpus hash",
+        ),
+        (
+            design.design_sample_manifest_id,
+            sample.design_sample_manifest_id,
+            "design/sample ID",
+        ),
+        (
+            design.design_sample_manifest_hash,
+            sample.sample_hash,
+            "design/sample hash",
+        ),
+        (
+            design.input_manifest_id,
+            input_manifest.artifact_manifest_id,
+            "design/input-manifest ID",
+        ),
+        (
+            design.input_manifest_hash,
+            input_manifest.manifest_hash,
+            "design/input-manifest hash",
+        ),
+        (
+            proposal.domain_design_context_id,
+            design.domain_design_context_id,
+            "proposal/design ID",
+        ),
+        (
+            proposal.domain_design_context_hash,
+            design.design_context_hash,
+            "proposal/design hash",
+        ),
+        (
+            proposal.domain_contract_hash,
+            compute_contract_hash(proposal.draft_contract),
+            "proposal/domain hash",
+        ),
+    )
+    for actual, expected, label in expected_bindings:
+        if actual != expected:
+            raise L1StageError(
+                f"persisted L1 cross-artifact binding mismatch: {label}"
+            )
+    if tuple(sorted(design.source_unit_ids)) != tuple(
+        sorted(item.source_unit_id for item in source_units)
+    ):
+        raise L1StageError(
+            "persisted L1 cross-artifact binding mismatch: source units"
+        )
+    if tuple(sorted(design.evidence_span_ids)) != tuple(
+        sorted(item.evidence_span_id for item in evidence_spans)
+    ):
+        raise L1StageError(
+            "persisted L1 cross-artifact binding mismatch: evidence spans"
+        )
+    source_unit_ids = {item.source_unit_id for item in source_units}
+    if any(
+        item.source_unit_id not in source_unit_ids
+        for item in evidence_spans
+    ):
+        raise L1StageError(
+            "persisted L1 cross-artifact binding mismatch: evidence source unit"
+        )
+    identity_pairs = (
+        intake.identity,
+        corpus.identity,
+        sample.identity,
+        profile.identity,
+        design.identity,
+        proposal.identity,
+        input_manifest.identity,
+        *(item.identity for item in source_units),
+        *(item.identity for item in evidence_spans),
+    )
+    if any(
+        identity.project_id != design.identity.project_id
+        or identity.run_id != design.identity.run_id
+        for identity in identity_pairs
+    ):
+        raise L1StageError(
+            "persisted L1 cross-artifact binding mismatch: identity lineage"
+        )
     source_path = Path(".")
     budget = DesignSamplingBudget(
         max_source_files=12,
@@ -3294,9 +3405,17 @@ def approve_persisted_l1_draft(
     actor: str,
     state_root: Path = L1_STATE_DIR,
     domain_path: Path = Path("domain.yaml"),
+    reviewed_contract: DomainContractV2 | None = None,
 ) -> L1StageResult:
     """Explicitly approve a current blocked draft after complete binding checks."""
     prepared = load_prepared_l1_stage(state_root=state_root)
+    if reviewed_contract is not None and (
+        canonical_json(reviewed_contract)
+        != canonical_json(prepared.proposal.draft_contract)
+    ):
+        raise L1StageError(
+            "reviewed domain contract does not match the persisted L1 draft"
+        )
     return finalize_l1_stage(
         prepared,
         decision="approve",

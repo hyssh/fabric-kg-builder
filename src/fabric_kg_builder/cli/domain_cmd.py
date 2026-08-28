@@ -387,6 +387,7 @@ def domain_approve_cmd(
                 actor=approved_by.strip(),
                 state_root=state_root,
                 domain_path=Path(contract_path),
+                reviewed_contract=contract,
             )
         except L1StageError as exc:
             raise click.ClickException(str(exc)) from exc
