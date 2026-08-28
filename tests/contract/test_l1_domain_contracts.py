@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from fabric_kg_builder.contracts.base import canonical_sha256
 from fabric_kg_builder.contracts.registry import REGISTERED_CONTRACTS
-from fabric_kg_builder.domain.contexts import DomainIntake
+from fabric_kg_builder.domain.contexts import DomainDesignContext, DomainIntake
 from fabric_kg_builder.domain.stage import (
     finalize_l1_stage,
     make_l1_identity,
@@ -57,6 +57,12 @@ def test_generated_l1_registry_hashes_match_schemas() -> None:
     for entry in registry["contracts"].values():
         schema = json.loads((root / entry["schema"]).read_text(encoding="utf-8"))
         assert entry["schema_hash"] == canonical_sha256(schema)
+    design_schema = json.loads(
+        (
+            root / "l1-domain-design-context-1.0.0.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert design_schema == DomainDesignContext.model_json_schema()
 
 
 def test_l1_kinds_do_not_modify_c0_registry() -> None:

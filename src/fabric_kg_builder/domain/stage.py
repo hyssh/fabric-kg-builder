@@ -3459,6 +3459,73 @@ def approve_persisted_l1_draft(
     expected_proposal_hash: str | None = None,
 ) -> L1StageResult:
     """Explicitly approve a current blocked draft after complete binding checks."""
+    state_root.mkdir(parents=True, exist_ok=True)
+    lock_path = state_root / ".approval.lock"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except FileExistsError as exc:
+        raise L1StageError(
+            "schema-2 approval is already in progress or requires reconciliation"
+        ) from exc
+    try:
+        os.write(
+            descriptor,
+            (
+                json.dumps(
+                    {
+                        "project_id": expected_project_id,
+                        "run_id": expected_run_id,
+                        "proposal_hash": expected_proposal_hash,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+        )
+        os.fsync(descriptor)
+        prior = _load_json_model(
+            state_root / "stage-receipt.json", StageReceipt
+        )
+        if (
+            prior.status != "blocked"
+            or prior.error_codes != ("L1_APPROVAL_REQUIRED",)
+            or prior.identity.content_hash != expected_proposal_hash
+            or (state_root / "domain-approval-context.json").exists()
+        ):
+            raise L1StageError(
+                "schema-2 approval requires the matching unapproved blocked state"
+            )
+        return _approve_persisted_l1_draft_locked(
+            actor=actor,
+            state_root=state_root,
+            domain_path=domain_path,
+            reviewed_contract=reviewed_contract,
+            expected_project_id=expected_project_id,
+            expected_run_id=expected_run_id,
+            expected_proposal_hash=expected_proposal_hash,
+        )
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
+        directory = os.open(state_root, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _approve_persisted_l1_draft_locked(
+    *,
+    actor: str,
+    state_root: Path,
+    domain_path: Path,
+    reviewed_contract: DomainContractV2 | None,
+    expected_project_id: str | None,
+    expected_run_id: str | None,
+    expected_proposal_hash: str | None,
+) -> L1StageResult:
     prepared = load_prepared_l1_stage(state_root=state_root)
     if (
         not expected_project_id
