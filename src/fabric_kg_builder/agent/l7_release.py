@@ -636,13 +636,29 @@ def _secure_output_parent(path: Path) -> None:
         )
 
 
-def _write_immutable(path: Path, payload: bytes) -> tuple[int, int] | None:
+@dataclass(frozen=True)
+class _OwnedPublication:
+    device: int
+    inode: int
+    directory: int
+    descriptor: int
+
+
+def _write_immutable(
+    path: Path,
+    payload: bytes,
+    *,
+    retain_descriptors: bool = False,
+) -> tuple[int, int] | _OwnedPublication | None:
     _secure_output_parent(path)
+    directory = os.open(path.parent, os.O_RDONLY)
 
     def existing_identity() -> tuple[int, int] | None:
         try:
             descriptor = os.open(
-                path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory,
             )
         except FileNotFoundError:
             return None
@@ -665,41 +681,96 @@ def _write_immutable(path: Path, payload: bytes) -> tuple[int, int] | None:
             raise L7ReleaseError(f"refusing to replace immutable file: {path}")
         return opened.st_dev, opened.st_ino
 
-    if existing_identity() is not None:
-        return None
-    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.chmod(temp, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    staged = temp.stat(follow_symlinks=False)
     try:
-        os.link(temp, path)
-    except FileExistsError:
         if existing_identity() is not None:
+            os.close(directory)
+            return None
+    except BaseException:
+        os.close(directory)
+        raise
+    temp_name = f".{path.name}.{os.getpid()}.tmp"
+    try:
+        descriptor = os.open(
+            temp_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=directory,
+        )
+    except BaseException:
+        os.close(directory)
+        raise
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except BaseException:
+        os.close(descriptor)
+        os.unlink(temp_name, dir_fd=directory)
+        os.close(directory)
+        raise
+    staged = os.fstat(descriptor)
+    try:
+        os.link(
+            temp_name,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+    except FileExistsError:
+        try:
+            matched = existing_identity() is not None
+        finally:
+            os.close(descriptor)
+            os.unlink(temp_name, dir_fd=directory)
+            os.close(directory)
+        if matched:
             return None
         raise
-    finally:
-        temp.unlink(missing_ok=True)
+    except BaseException:
+        os.close(descriptor)
+        os.unlink(temp_name, dir_fd=directory)
+        os.close(directory)
+        raise
+    os.unlink(temp_name, dir_fd=directory)
     try:
-        _fsync_parent(path)
+        os.fsync(directory)
     except BaseException:
         try:
-            if path.read_bytes() == payload:
-                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-                path.unlink()
-                try:
-                    _fsync_parent(path)
-                except OSError:
-                    pass
+            linked = os.stat(
+                path.name, dir_fd=directory, follow_symlinks=False
+            )
+            if (linked.st_dev, linked.st_ino) == (
+                staged.st_dev,
+                staged.st_ino,
+            ):
+                os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+                os.unlink(path.name, dir_fd=directory)
         except OSError:
             pass
+        os.close(descriptor)
+        os.close(directory)
         raise
-    published = path.stat(follow_symlinks=False)
+    published = os.stat(
+        path.name, dir_fd=directory, follow_symlinks=False
+    )
     if (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino):
+        os.close(descriptor)
+        os.close(directory)
         raise L7ReleaseError("immutable publication inode changed")
+    if retain_descriptors:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return _OwnedPublication(
+            device=published.st_dev,
+            inode=published.st_ino,
+            directory=directory,
+            descriptor=descriptor,
+        )
+    os.close(descriptor)
+    os.close(directory)
     return published.st_dev, published.st_ino
 
 
@@ -1370,7 +1441,9 @@ class AzureL7Backend:
         self._created_etags: dict[str, str] = {}
         self._mutation_confirmed: set[str] = set()
         self._created_fabric_ids: dict[str, str] = {}
-        self._ownership_outputs: dict[Path, tuple[bytes, int, int]] = {}
+        self._ownership_outputs: dict[
+            Path, tuple[bytes, int, int, int, int]
+        ] = {}
 
     def _artifact_json(self, binding: ArtifactBinding) -> Any:
         return _artifact_value(binding, self.artifact_base)
@@ -2394,9 +2467,17 @@ class AzureL7Backend:
                 + "\n"
             ).encode()
             path = Path(str(target.ownership_receipt_output))
-            identity = _write_immutable(path, payload)
-            if identity is not None:
-                self._ownership_outputs[path] = (payload, *identity)
+            publication = _write_immutable(
+                path, payload, retain_descriptors=True
+            )
+            if isinstance(publication, _OwnedPublication):
+                self._ownership_outputs[path] = (
+                    payload,
+                    publication.device,
+                    publication.inode,
+                    publication.directory,
+                    publication.descriptor,
+                )
             registry_key = (
                 f"{config.tenant_id.casefold()}/"
                 f"{config.fabric_workspace_id.casefold()}/"
@@ -2414,11 +2495,18 @@ class AzureL7Backend:
                 )
                 + "\n"
             ).encode()
-            identity = _write_immutable(registry_path, registry_payload)
-            if identity is not None:
+            publication = _write_immutable(
+                registry_path,
+                registry_payload,
+                retain_descriptors=True,
+            )
+            if isinstance(publication, _OwnedPublication):
                 self._ownership_outputs[registry_path] = (
                     registry_payload,
-                    *identity,
+                    publication.device,
+                    publication.inode,
+                    publication.directory,
+                    publication.descriptor,
                 )
 
     def apply(self, config: L7ReleaseConfig, action: DeploymentAction) -> ResourceReadback:
@@ -2689,52 +2777,52 @@ class AzureL7Backend:
 
     def _cleanup_ownership_outputs(self) -> None:
         for path, owned in list(self._ownership_outputs.items()):
-            payload, device, inode = owned
+            payload, device, inode, directory, descriptor = owned
             try:
-                _secure_output_parent(path)
-                directory = os.open(path.parent, os.O_RDONLY)
-                try:
-                    descriptor = os.open(
-                        path.name,
-                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                        dir_fd=directory,
+                current = os.fstat(descriptor)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if (
+                    (current.st_dev, current.st_ino) != (device, inode)
+                    or os.read(descriptor, len(payload) + 1) != payload
+                ):
+                    raise L7ReleaseError(
+                        "ownership output changed before rollback"
                     )
-                    with os.fdopen(descriptor, "rb") as stream:
-                        current = os.fstat(stream.fileno())
-                        if (
-                            (current.st_dev, current.st_ino)
-                            != (device, inode)
-                            or stream.read() != payload
-                        ):
-                            raise L7ReleaseError(
-                                "ownership output changed before rollback"
-                            )
-                        os.fchmod(
-                            stream.fileno(),
-                            stat.S_IRUSR | stat.S_IWUSR,
-                        )
-                        linked = os.stat(
-                            path.name,
-                            dir_fd=directory,
-                            follow_symlinks=False,
-                        )
-                        if (linked.st_dev, linked.st_ino) != (device, inode):
-                            raise L7ReleaseError(
-                                "ownership output inode changed before rollback"
-                            )
-                        os.unlink(path.name, dir_fd=directory)
-                        os.fsync(directory)
-                finally:
-                    os.close(directory)
+                linked = os.stat(
+                    path.name,
+                    dir_fd=directory,
+                    follow_symlinks=False,
+                )
+                if (linked.st_dev, linked.st_ino) != (device, inode):
+                    raise L7ReleaseError(
+                        "ownership output inode changed before rollback"
+                    )
+                os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+                os.unlink(path.name, dir_fd=directory)
+                os.fsync(directory)
             except OSError as exc:
                 raise L7ReleaseError(
                     "ownership output rollback failed"
                 ) from exc
+            finally:
+                os.close(descriptor)
+                os.close(directory)
             self._ownership_outputs.pop(path, None)
 
     def finalize_rollback(self) -> None:
         """Remove generated ownership state after all resource rollbacks succeed."""
         self._cleanup_ownership_outputs()
+
+    def finalize_success(self) -> None:
+        """Release ownership descriptors after the success receipt is durable."""
+        for path, owned in list(self._ownership_outputs.items()):
+            _payload, _device, _inode, directory, descriptor = owned
+            for retained in (descriptor, directory):
+                try:
+                    os.close(retained)
+                except OSError:
+                    pass
+            self._ownership_outputs.pop(path, None)
 
     def _wait_lro(
         self,
@@ -2900,6 +2988,9 @@ class L7Executor:
                 ),
             )
             reservation.commit_success(receipt)
+            success_finalizer = getattr(self.backend, "finalize_success", None)
+            if callable(success_finalizer):
+                success_finalizer()
             return receipt
         except BaseException as exc:
             rollback_errors: list[str] = []

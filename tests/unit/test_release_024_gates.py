@@ -702,13 +702,20 @@ def test_successful_global_rollback_removes_ownership_outputs(
 ) -> None:
     ownership_path = tmp_path / "ownership.json"
     payload = b'{"attempt":"release-owned"}\n'
-    ownership_path.write_bytes(payload)
-    ownership_path.chmod(0o400)
-    identity = ownership_path.stat(follow_symlinks=False)
     backend = object.__new__(AzureL7Backend)
-    backend._ownership_outputs = {
-        ownership_path: (payload, identity.st_dev, identity.st_ino)
-    }
+    backend._ownership_outputs = {}
+    publication = _write_immutable(
+        ownership_path, payload, retain_descriptors=True
+    )
+    assert publication is not None
+    assert not isinstance(publication, tuple)
+    backend._ownership_outputs[ownership_path] = (
+        payload,
+        publication.device,
+        publication.inode,
+        publication.directory,
+        publication.descriptor,
+    )
 
     backend.finalize_rollback()
 
