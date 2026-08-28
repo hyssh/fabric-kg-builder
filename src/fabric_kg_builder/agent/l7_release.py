@@ -475,6 +475,9 @@ class L7Planner:
             raise L7ReleaseError("Search index schema must be a JSON object")
         index_schema = dict(index_schema)
         index_schema["name"] = config.search.index_name
+        index_schema["description"] = (
+            "fabric-kg-024:" + config.search.index_schema.canonical_hash
+        )
         documents = _document_values(config.search.documents, base)
         index_desired_hash = canonical_sha256(
             {
@@ -953,6 +956,57 @@ class AzureL7Backend:
             f"?api-version={config.search.api_version}"
         )
 
+    def _search_create_put(
+        self,
+        config: L7ReleaseConfig,
+        action: DeploymentAction,
+        path: str,
+        body: dict[str, Any],
+        token: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        marker = (
+            "fabric-kg-024:" + config.search.index_schema.canonical_hash
+            if action.component == "search-index"
+            else "fabric-kg-024:" + action.desired_hash
+        )
+        desired = {**body, "description": marker}
+        try:
+            response = self._request(
+                "PUT",
+                self._search_url(config, path),
+                token=token,
+                body=desired,
+                headers={"If-None-Match": "*"},
+            )
+        except L7ReleaseError:
+            observed = self._request(
+                "GET", self._search_url(config, path), token=token
+            )
+            if observed.status_code == 200:
+                observed_body = self._json(
+                    observed, f"{action.component} uncertain readback"
+                )
+                etag = str(observed.headers.get("ETag") or "")
+                if observed_body.get("description") == marker and etag:
+                    cleanup = self._request(
+                        "DELETE",
+                        self._search_url(config, path),
+                        token=token,
+                        headers={"If-Match": etag},
+                    )
+                    if cleanup.status_code not in (200, 202, 204, 404):
+                        raise L7ReleaseError(
+                            f"{action.component} uncertain cleanup failed"
+                        )
+            raise
+        if response.status_code in (200, 201):
+            key = action.resource_id.casefold()
+            self._mutation_confirmed.add(key)
+            etag = str(response.headers.get("ETag") or "")
+            if etag:
+                self._created_etags[key] = etag
+        return response, desired
+
     def _search_create(
         self, config: L7ReleaseConfig, action: DeploymentAction
     ) -> ResourceReadback:
@@ -964,21 +1018,13 @@ class AzureL7Backend:
             schema = dict(schema)
             schema["name"] = config.search.index_name
             path = f"indexes/{config.search.index_name}"
-            response = self._request(
-                "PUT",
-                self._search_url(config, path),
-                token=token,
-                body=schema,
-                headers={"If-None-Match": "*"},
+            response, schema = self._search_create_put(
+                config, action, path, schema, token
             )
             if response.status_code not in (200, 201):
                 raise L7ReleaseError(
                     f"Search index create failed with HTTP {response.status_code}"
                 )
-            self._mutation_confirmed.add(action.resource_id.casefold())
-            etag = str(response.headers.get("ETag") or "")
-            if etag:
-                self._created_etags[action.resource_id.casefold()] = etag
             documents = _document_values(
                 config.search.documents, self.artifact_base
             )
@@ -1029,12 +1075,8 @@ class AzureL7Backend:
                     "searchFields": [],
                 },
             }
-            response = self._request(
-                "PUT",
-                self._search_url(config, path),
-                token=token,
-                body=body,
-                headers={"If-None-Match": "*"},
+            response, body = self._search_create_put(
+                config, action, path, body, token
             )
         else:
             path = f"knowledgebases/{config.search.knowledge_base_name}"
@@ -1044,18 +1086,13 @@ class AzureL7Backend:
                     {"name": config.search.knowledge_source_name}
                 ],
             }
-            response = self._request(
-                "PUT",
-                self._search_url(config, path),
-                token=token,
-                body=body,
-                headers={"If-None-Match": "*"},
+            response, body = self._search_create_put(
+                config, action, path, body, token
             )
         if response.status_code not in (200, 201):
             raise L7ReleaseError(
                 f"{action.component} create failed with HTTP {response.status_code}"
             )
-        self._mutation_confirmed.add(action.resource_id.casefold())
         etag = str(response.headers.get("ETag") or "")
         if etag:
             self._created_etags[action.resource_id.casefold()] = etag
@@ -1066,6 +1103,9 @@ class AzureL7Backend:
             raise L7ReleaseError(
                 f"{action.component} readback failed with HTTP {readback.status_code}"
             )
+        readback_etag = str(readback.headers.get("ETag") or etag)
+        if readback_etag:
+            self._created_etags[action.resource_id.casefold()] = readback_etag
         body = self._json(readback, f"{action.component} readback")
         if str(body.get("name") or "") != action.name:
             raise L7ReleaseError(f"{action.component} exact-name readback mismatch")
@@ -1122,7 +1162,7 @@ class AzureL7Backend:
             exists=True,
             resource_type=action.resource_type,
             name=action.name,
-            etag=str(readback.headers.get("ETag") or etag),
+            etag=readback_etag,
             properties_hash=action.desired_hash,
         )
 
@@ -1164,6 +1204,9 @@ class AzureL7Backend:
                     f"{response.status_code}"
                 )
             self._mutation_confirmed.add(action.resource_id.casefold())
+            response_etag = str(response.headers.get("ETag") or "")
+            if response_etag:
+                self._created_etags[action.resource_id.casefold()] = response_etag
             if response.status_code == 202:
                 location = str(response.headers.get("Location") or "")
                 if not location:
@@ -1227,6 +1270,17 @@ class AzureL7Backend:
             previous = self._rollback_definitions.get(action.resource_id.casefold())
             if previous is None:
                 raise L7ReleaseError("Fabric rollback definition is unavailable")
+            current = self._fabric_definition(config, target)
+            if current.definition_hash == action.observed_hash:
+                return current
+            if current.definition_hash != action.desired_hash:
+                raise L7ReleaseError(
+                    "Fabric rollback refused concurrent definition drift"
+                )
+            if not current.etag:
+                raise L7ReleaseError(
+                    "Fabric rollback lacks conditional ETag authority"
+                )
             collection = _FABRIC_TYPES[target.item_type]
             response = self._request(
                 "POST",
@@ -1236,11 +1290,7 @@ class AzureL7Backend:
                 ),
                 token=self._token(_FABRIC_SCOPE),
                 body={"definition": previous},
-                headers={
-                    "If-Match": self._created_etags.get(
-                        action.resource_id.casefold(), ""
-                    )
-                },
+                headers={"If-Match": current.etag},
             )
             if response.status_code not in (200, 202):
                 raise L7ReleaseError("Fabric definition rollback failed")
@@ -1260,12 +1310,9 @@ class AzureL7Backend:
         if action.rollback.action != "delete-created":
             raise L7ReleaseError("unsupported rollback action")
         if action.resource_id.casefold() not in self._mutation_confirmed:
-            return ResourceReadback(
-                resource_id=action.resource_id,
-                exists=False,
-                resource_type=action.resource_type,
-                name=action.name,
-                token="attempt-did-not-confirm-mutation",
+            raise L7ReleaseError(
+                "mutation outcome was not confirmed; unsafe unconditional "
+                "rollback was refused"
             )
         etag = self._created_etags.get(action.resource_id.casefold(), "")
         if not etag:

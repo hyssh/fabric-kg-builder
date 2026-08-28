@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import secrets
 from typing import Any, Callable, Mapping
 
 from fabric_kg_builder.contracts.base import canonical_sha256
@@ -26,6 +27,7 @@ class ProjectConnection:
     etag: str = ""
     properties_hash: str = ""
     binding_hash: str = ""
+    attempt_id: str = ""
 
 
 class FoundryProjectConnectionClient:
@@ -168,6 +170,14 @@ class FoundryProjectConnectionClient:
                 ).get("bindingHash")
                 or ""
             ),
+            attempt_id=str(
+                (
+                    properties.get("metadata")
+                    if isinstance(properties.get("metadata"), Mapping)
+                    else {}
+                ).get("l7AttemptId")
+                or ""
+            ),
         )
 
     def get(self, name: str) -> ProjectConnection | None:
@@ -221,12 +231,35 @@ class FoundryProjectConnectionClient:
                 "release-owned connection adoption is forbidden."
             )
         resource_id = self.connection_id(name)
-        response = self._send(
-            "PUT",
-            resource_id,
-            body={"name": name, "properties": properties},
-            headers={"If-None-Match": "*"} if create_only else None,
+        attempt_id = "op-" + secrets.token_hex(32)
+        attempt_properties = dict(properties)
+        metadata = (
+            dict(properties.get("metadata"))
+            if isinstance(properties.get("metadata"), Mapping)
+            else {}
         )
+        metadata["l7AttemptId"] = attempt_id
+        attempt_properties["metadata"] = metadata
+        try:
+            response = self._send(
+                "PUT",
+                resource_id,
+                body={"name": name, "properties": attempt_properties},
+                headers={"If-None-Match": "*"} if create_only else None,
+            )
+        except ProjectConnectionError:
+            if create_only:
+                try:
+                    observed = self.get(name)
+                    if (
+                        observed is not None
+                        and observed.attempt_id == attempt_id
+                        and observed.etag
+                    ):
+                        self.delete_created(name, expected_etag=observed.etag)
+                except ProjectConnectionError:
+                    pass
+            raise
         if response.status_code not in (200, 201):
             raise ProjectConnectionError(
                 f"Foundry project connection '{name}' failed with HTTP "
@@ -242,16 +275,14 @@ class FoundryProjectConnectionClient:
                 raise ProjectConnectionError(
                     f"Foundry project connection '{name}' disappeared after mutation."
                 )
-            metadata = (
-                properties.get("metadata")
-                if isinstance(properties.get("metadata"), Mapping)
-                else {}
-            )
+            expected_metadata = attempt_properties["metadata"]
             if (
                 parsed.category != str(properties["category"])
                 or parsed.target != str(properties.get("target", ""))
                 or parsed.audience != str(properties.get("audience", ""))
-                or parsed.binding_hash != str(metadata.get("bindingHash") or "")
+                or parsed.binding_hash
+                != str(expected_metadata.get("bindingHash") or "")
+                or parsed.attempt_id != attempt_id
             ):
                 raise ProjectConnectionError(
                     f"Foundry project connection '{name}' readback mismatch."
@@ -264,9 +295,10 @@ class FoundryProjectConnectionClient:
         except ProjectConnectionError:
             if create_only:
                 observed = self.get(name)
-                etag = (observed.etag if observed else "") or mutation_etag
-                if observed is not None and etag:
-                    self.delete_created(name, expected_etag=etag)
+                if observed is not None and observed.attempt_id == attempt_id:
+                    etag = mutation_etag or observed.etag
+                    if etag:
+                        self.delete_created(name, expected_etag=etag)
             raise
 
     def upsert_fabric_data_agent(
