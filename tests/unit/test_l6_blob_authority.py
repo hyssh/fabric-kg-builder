@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
@@ -12,15 +12,19 @@ import time
 
 import pytest
 from azure.core.exceptions import (
+    AzureError,
     HttpResponseError,
     ResourceExistsError,
     ResourceModifiedError,
     ResourceNotFoundError,
+    ServiceRequestError,
+    ServiceResponseError,
 )
 
 from fabric_kg_builder.agent import l6_integration as l6
 from fabric_kg_builder.agent.l6_blob_authority import (
     AzureBlobL6GraphReceiptAuthority,
+    L6BlobReadinessObservation,
     L6BlobAuthorityError,
     L6BlobConflictError,
     L6GraphTransportRequest,
@@ -67,6 +71,10 @@ class _Lease:
 
     def renew(self):
         with self._backend.lock:
+            if self._backend.on_renew is not None:
+                self._backend.on_renew(self)
+            if self._backend.renew_exception is not None:
+                raise self._backend.renew_exception
             stored = self._backend.blobs[self._name]
             if (
                 stored.lease_id != self.id
@@ -77,6 +85,9 @@ class _Lease:
             stored.lease_expires = (
                 self._backend.now[0] + self._backend.lease_seconds * 1000
             )
+            if self._backend.renewal_response == "valid":
+                return {"lease_id": self.id}
+            return self._backend.renewal_response
 
     def release(self):
         with self._backend.lock:
@@ -178,6 +189,9 @@ class _BlobService:
         self.lease_seconds = 15
         self.conflict_next_cas = False
         self.renewals = 0
+        self.renew_exception = None
+        self.renewal_response = "valid"
+        self.on_renew = None
         self.container = _Container(self)
 
     def get_container_client(self, name):
@@ -865,3 +879,308 @@ def test_evidence_operations_use_one_immutable_signer_snapshot(setup):
     authority.verify_and_consume_evidence(evidence_receipt)
     assert consume_rotated == [True]
     assert provider.active.metadata.authority_version == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "renewal_failure",
+    [
+        AzureError("renewal failed"),
+        ServiceRequestError("renewal request failed"),
+        ServiceResponseError("renewal response failed"),
+        _http_error(503),
+    ],
+    ids=["azure-error", "request-error", "response-error", "http-error"],
+)
+def test_every_azure_renewal_failure_cancels_and_terminalizes(
+    setup, renewal_failure
+):
+    _, backend, provider, _, graph, values = setup
+    transport = _CancellableTransport(graph)
+    authority = _production_authority(backend, provider, transport)
+    authority._lease_seconds = 0.03
+    backend.renew_exception = renewal_failure
+
+    with pytest.raises(L6BlobConflictError, match="lease was lost"):
+        authority.execute_graph_once(**values)
+
+    assert transport.cancelled.wait(1)
+    run_blob = authority._run_blob(values["l6_run_id"])
+    assert json.loads(run_blob.download_blob().readall())["status"] == "failed"
+    assert backend.blobs[run_blob.name].lease_id is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("response", [None, {}, {"lease_id": "other"}])
+def test_unknown_or_non_successful_renewal_is_lease_loss(setup, response):
+    _, backend, provider, _, graph, values = setup
+    transport = _CancellableTransport(graph)
+    authority = _production_authority(backend, provider, transport)
+    authority._lease_seconds = 0.03
+    backend.renewal_response = response
+
+    with pytest.raises(L6BlobConflictError, match="lease was lost"):
+        authority.execute_graph_once(**values)
+
+    assert transport.cancelled.wait(1)
+
+
+@pytest.mark.unit
+def test_lease_loss_during_reclaim_ignores_late_result_and_yields_one_receipt(setup):
+    now, backend, provider, _, graph, values = setup
+    late_release = threading.Event()
+    transport = _CancellableTransport(graph, late_release=late_release)
+    first = _production_authority(backend, provider, transport)
+    first._lease_seconds = 0.03
+    first._clock = lambda: now[0]
+    second = AzureBlobL6GraphReceiptAuthority(
+        blob_service_client=backend,
+        container_name="authority",
+        signer_provider=provider,
+        lease_seconds=15,
+        clock_milliseconds=lambda: now[0],
+        allow_test_legacy_callback=True,
+    )
+    reclaimed = [False]
+
+    def expire_before_failed_renewal(lease):
+        if reclaimed[0]:
+            return
+        reclaimed[0] = True
+        stored = backend.blobs[lease._name]
+        now[0] += 31
+        stored.lease_id = None
+        stored.lease_expires = 0
+        backend.renew_exception = ServiceResponseError("ambiguous renewal")
+
+    backend.on_renew = expire_before_failed_renewal
+    with pytest.raises(L6BlobConflictError, match="lease was lost"):
+        first.execute_graph_once(**values)
+
+    backend.on_renew = None
+    backend.renew_exception = None
+    completed = second.execute_graph_once(**values, execute=lambda: graph)
+    receipt = second.issue(
+        graph_query=values["graph_query"],
+        graph_result=completed,
+        ontology_scope=values["ontology_scope"],
+        retrieval_scope=values["retrieval_scope"],
+        budget=values["budget"],
+        access=values["access"],
+        authorities=values["authorities"],
+    )
+    late_release.set()
+    assert transport.returned.wait(1)
+    persisted = json.loads(second._run_blob(values["l6_run_id"]).download_blob().readall())
+    assert persisted["status"] == "completed"
+    assert (
+        second.issue(
+            graph_query=values["graph_query"],
+            graph_result=completed,
+            ontology_scope=values["ontology_scope"],
+            retrieval_scope=values["retrieval_scope"],
+            budget=values["budget"],
+            access=values["access"],
+            authorities=values["authorities"],
+        )
+        == receipt
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "metadata_update",
+    [
+        {"not_after_milliseconds": 9_999},
+        {"not_before_milliseconds": 10_001},
+        {"state": "disabled"},
+        {"state": "revoked"},
+        {"algorithm": "none"},
+    ],
+    ids=["expired", "too-early", "disabled", "revoked", "algorithm"],
+)
+def test_invalid_signer_is_not_ready_and_cannot_issue(setup, metadata_update):
+    _, backend, provider, authority, graph, values = setup
+    authority.execute_graph_once(**values, execute=lambda: graph)
+    provider.active.metadata = replace(provider.active.metadata, **metadata_update)
+
+    observation = authority.readiness_observation()
+    assert isinstance(observation, L6BlobReadinessObservation)
+    assert observation.ready is False
+    assert observation.signer_valid is False
+    with pytest.raises(L6BlobSigningError):
+        authority.issue(
+            graph_query=values["graph_query"],
+            graph_result=graph,
+            ontology_scope=values["ontology_scope"],
+            retrieval_scope=values["retrieval_scope"],
+            budget=values["budget"],
+            access=values["access"],
+            authorities=values["authorities"],
+        )
+    assert not any("/receipts/" in name for name in backend.blobs)
+
+
+@pytest.mark.unit
+def test_readiness_requires_transport_and_valid_signer(setup):
+    now, backend, provider, legacy, graph, _ = setup
+    assert legacy.readiness_observation().ready is False
+
+    production = _production_authority(
+        backend, provider, _CancellableTransport(graph)
+    )
+    production._clock = lambda: now[0]
+    observation = production.readiness_observation()
+    assert observation.ready is True
+    assert observation.graph_transport_configured is True
+    assert observation.signer_valid is True
+    assert observation.authority_id == provider.active.metadata.authority_id
+
+
+@pytest.mark.unit
+def test_graph_collision_requires_current_valid_signature_and_exact_binding(setup):
+    _, backend, provider, authority, graph, values = setup
+    receipt = _issue(authority, graph, values)
+    blob = authority._receipt_blob(receipt.graph_execution_receipt_id)
+    stored = json.loads(blob.download_blob().readall())
+    authentic = json.loads(json.dumps(stored))
+    stored["receipt"]["authentication_tag"] = "0" * 64
+    with backend.lock:
+        backend.blobs[blob.name].data = json.dumps(stored).encode()
+        backend.blobs[blob.name].etag += 1
+
+    with pytest.raises(ValueError):
+        authority.issue(
+            graph_query=values["graph_query"],
+            graph_result=graph,
+            ontology_scope=values["ontology_scope"],
+            retrieval_scope=values["retrieval_scope"],
+            budget=values["budget"],
+            access=values["access"],
+            authorities=values["authorities"],
+        )
+
+    with backend.lock:
+        backend.blobs[blob.name].data = json.dumps(authentic).encode()
+        backend.blobs[blob.name].etag += 1
+    provider.active.metadata = replace(provider.active.metadata, state="revoked")
+    with pytest.raises(L6BlobSigningError):
+        authority.issue(
+            graph_query=values["graph_query"],
+            graph_result=graph,
+            ontology_scope=values["ontology_scope"],
+            retrieval_scope=values["retrieval_scope"],
+            budget=values["budget"],
+            access=values["access"],
+            authorities=values["authorities"],
+        )
+
+
+@pytest.mark.unit
+def test_each_signing_path_uses_one_clock_instant(setup):
+    now, _, _, authority, graph, values = setup
+    authority.execute_graph_once(**values, execute=lambda: graph)
+    calls = []
+
+    def observed_clock():
+        calls.append(now[0])
+        return now[0]
+
+    authority._clock = observed_clock
+    receipt = authority.issue(
+        graph_query=values["graph_query"],
+        graph_result=graph,
+        ontology_scope=values["ontology_scope"],
+        retrieval_scope=values["retrieval_scope"],
+        budget=values["budget"],
+        access=values["access"],
+        authorities=values["authorities"],
+    )
+    assert calls == [now[0]]
+
+    calls.clear()
+    assert (
+        authority.issue(
+            graph_query=values["graph_query"],
+            graph_result=graph,
+            ontology_scope=values["ontology_scope"],
+            retrieval_scope=values["retrieval_scope"],
+            budget=values["budget"],
+            access=values["access"],
+            authorities=values["authorities"],
+        )
+        == receipt
+    )
+    assert calls == [now[0]]
+
+    calls.clear()
+    authority.verify_and_consume(
+        receipt.graph_execution_receipt_id,
+        receipt.receipt_hash,
+        _expectation(receipt),
+        "e" * 64,
+    )
+    assert calls == [now[0]]
+
+
+@pytest.mark.unit
+def test_evidence_issue_and_verify_share_one_clock_instant(setup):
+    now, _, _, authority, graph, values = setup
+    graph_receipt, output, collection = _evidence_capability(
+        authority, graph, values
+    )
+    calls = []
+
+    def observed_clock():
+        calls.append(now[0])
+        return now[0]
+
+    authority._clock = observed_clock
+    evidence_receipt = authority.issue_evidence(
+        graph_receipt=graph_receipt,
+        evidence_output=output,
+        citation_collection=collection,
+    )
+    assert calls == [now[0]]
+
+    calls.clear()
+    authority.verify_and_consume_evidence(evidence_receipt)
+    assert calls == [now[0]]
+
+
+@pytest.mark.unit
+def test_evidence_collision_rejects_partial_and_revoked_receipt(setup):
+    _, backend, provider, authority, graph, values = setup
+    graph_receipt, output, collection = _evidence_capability(
+        authority, graph, values
+    )
+    receipt = authority.issue_evidence(
+        graph_receipt=graph_receipt,
+        evidence_output=output,
+        citation_collection=collection,
+    )
+    blob = authority._evidence_blob(receipt.evidence_execution_receipt_id)
+    authentic = bytes(backend.blobs[blob.name].data)
+    partial = json.loads(authentic)
+    partial["receipt"].pop("citation_collection_hash")
+    with backend.lock:
+        backend.blobs[blob.name].data = json.dumps(partial).encode()
+        backend.blobs[blob.name].etag += 1
+
+    with pytest.raises(ValueError):
+        authority.issue_evidence(
+            graph_receipt=graph_receipt,
+            evidence_output=output,
+            citation_collection=collection,
+        )
+
+    with backend.lock:
+        backend.blobs[blob.name].data = authentic
+        backend.blobs[blob.name].etag += 1
+    provider.active.metadata = replace(provider.active.metadata, state="revoked")
+    with pytest.raises(L6BlobSigningError):
+        authority.issue_evidence(
+            graph_receipt=graph_receipt,
+            evidence_output=output,
+            citation_collection=collection,
+        )

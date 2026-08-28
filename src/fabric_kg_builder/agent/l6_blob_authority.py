@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from azure.core import MatchConditions
 from azure.core.exceptions import (
-    HttpResponseError,
+    AzureError,
     ResourceExistsError,
     ResourceModifiedError,
     ResourceNotFoundError,
@@ -57,10 +57,18 @@ class L6OpaqueSigningMetadata:
 
     def validate(self, now_milliseconds: int) -> None:
         if (
-            not re.fullmatch(r"gxra-sha256:[0-9a-f]{64}", self.authority_id)
+            isinstance(now_milliseconds, bool)
+            or not isinstance(now_milliseconds, int)
+            or not re.fullmatch(r"gxra-sha256:[0-9a-f]{64}", self.authority_id)
+            or isinstance(self.authority_version, bool)
+            or not isinstance(self.authority_version, int)
             or self.authority_version < 1
             or self.algorithm != "HMAC-SHA256"
             or self.state != "active"
+            or isinstance(self.not_before_milliseconds, bool)
+            or not isinstance(self.not_before_milliseconds, int)
+            or isinstance(self.not_after_milliseconds, bool)
+            or not isinstance(self.not_after_milliseconds, int)
             or not self.not_before_milliseconds
             <= now_milliseconds
             <= self.not_after_milliseconds
@@ -96,6 +104,19 @@ class L6OpaqueSignerProvider(Protocol):
     """Atomically supplies immutable signer snapshots across key rotations."""
 
     def snapshot(self) -> L6OpaqueSignerSnapshot: ...
+
+
+@dataclass(frozen=True)
+class L6BlobReadinessObservation:
+    """Point-in-time capability observation for production Graph receipts."""
+
+    ready: bool
+    graph_transport_configured: bool
+    signer_valid: bool
+    observed_at_milliseconds: int
+    signer_snapshot_version: int | None = None
+    authority_id: str | None = None
+    authority_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -274,7 +295,7 @@ class AzureBlobL6GraphReceiptAuthority:
             raise L6BlobAuthorityError(
                 "durable L6 authority state was not found"
             ) from exc
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobAuthorityError(
                 "durable L6 authority state could not be read"
             ) from exc
@@ -286,7 +307,7 @@ class AzureBlobL6GraphReceiptAuthority:
             return True
         except ResourceExistsError:
             return False
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobAuthorityError(
                 "durable L6 authority state could not be created"
             ) from exc
@@ -294,8 +315,8 @@ class AzureBlobL6GraphReceiptAuthority:
     def _acquire_lease(self, blob: Any) -> Any | None:
         try:
             return blob.acquire_lease(lease_duration=self._lease_seconds)
-        except HttpResponseError as exc:
-            if exc.status_code in {409, 412}:
+        except AzureError as exc:
+            if getattr(exc, "status_code", None) in {409, 412}:
                 return None
             raise L6BlobAuthorityError(
                 "durable L6 authority lease could not be acquired"
@@ -321,8 +342,8 @@ class AzureBlobL6GraphReceiptAuthority:
             raise L6BlobConflictError(
                 "durable L6 authority compare-and-swap conflict"
             ) from exc
-        except HttpResponseError as exc:
-            if exc.status_code in {409, 412}:
+        except AzureError as exc:
+            if getattr(exc, "status_code", None) in {409, 412}:
                 raise L6BlobConflictError(
                     "durable L6 authority compare-and-swap conflict"
                 ) from exc
@@ -336,7 +357,7 @@ class AzureBlobL6GraphReceiptAuthority:
             return
         try:
             lease.release()
-        except HttpResponseError:
+        except AzureError:
             # An expired finite lease is already released server-side.
             return
 
@@ -521,8 +542,34 @@ class AzureBlobL6GraphReceiptAuthority:
             )
 
         stop_renewal = threading.Event()
-        renewal_failed = threading.Event()
+        lease_lost = threading.Event()
         cancellation = threading.Event()
+        lease_loss_handled = threading.Event()
+        lease_loss_lock = threading.Lock()
+
+        def lose_lease() -> None:
+            # The first observer owns terminalization. Set all stop signals before
+            # touching Blob state so no late transport result can be published.
+            with lease_loss_lock:
+                if lease_loss_handled.is_set():
+                    return
+                lease_lost.set()
+                cancellation.set()
+                stop_renewal.set()
+                try:
+                    self._fail_owned_run(
+                        blob=blob,
+                        lease=lease,
+                        owner_hash=owner_hash,
+                        l6_run_id=l6_run_id,
+                        fingerprint=fingerprint,
+                    )
+                except (AzureError, L6BlobAuthorityError):
+                    # A lost/reclaimed lease can make terminal CAS impossible.
+                    pass
+                finally:
+                    self._release(lease)
+                    lease_loss_handled.set()
 
         def renew() -> None:
             interval = self._lease_seconds / 3
@@ -537,10 +584,17 @@ class AzureBlobL6GraphReceiptAuthority:
                     cancellation.set()
                     return
                 try:
-                    lease.renew()
-                except HttpResponseError:
-                    renewal_failed.set()
-                    cancellation.set()
+                    renewed = lease.renew()
+                    renewed_id = (
+                        renewed.get("lease_id")
+                        if isinstance(renewed, Mapping)
+                        else getattr(renewed, "lease_id", None)
+                    )
+                    if renewed_id != getattr(lease, "id", None):
+                        lose_lease()
+                        return
+                except AzureError:
+                    lose_lease()
                     return
 
         renewal = threading.Thread(target=renew, daemon=True)
@@ -584,20 +638,27 @@ class AzureBlobL6GraphReceiptAuthority:
         try:
             deadline_expired = False
             while not finished.is_set():
+                if lease_lost.is_set():
+                    break
                 remaining = deadline - self._monotonic()
                 if remaining <= 0:
                     deadline_expired = True
                     break
-                finished.wait(remaining)
+                finished.wait(min(remaining, self._poll_interval))
 
             # The deadline wins every race. A result published at or after it
             # is deliberately ignored and can never transition the run.
+            if lease_lost.is_set():
+                lease_loss_handled.wait(self._operation_timeout)
+                raise L6BlobConflictError(
+                    "durable L6 authority lease was lost during execution"
+                )
             if self._monotonic() >= deadline:
                 deadline_expired = True
             if deadline_expired:
                 cancellation.set()
                 stop_renewal.set()
-                if not renewal_failed.is_set():
+                if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
                         lease=lease,
@@ -608,13 +669,9 @@ class AzureBlobL6GraphReceiptAuthority:
                 raise TimeoutError(
                     "L6 Graph execution exceeded sealed runtime budget"
                 )
-            if renewal_failed.is_set():
-                raise L6BlobConflictError(
-                    "durable L6 authority lease was lost during execution"
-                )
             if outcome.get("failed"):
                 cancellation.set()
-                if not renewal_failed.is_set():
+                if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
                         lease=lease,
@@ -628,7 +685,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 l6._validate_graph_result(graph_query, ontology_scope, result)
             except Exception:
                 cancellation.set()
-                if not renewal_failed.is_set():
+                if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
                         lease=lease,
@@ -640,7 +697,7 @@ class AzureBlobL6GraphReceiptAuthority:
             if self._monotonic() >= deadline:
                 cancellation.set()
                 stop_renewal.set()
-                if not renewal_failed.is_set():
+                if not lease_lost.is_set():
                     self._fail_owned_run(
                         blob=blob,
                         lease=lease,
@@ -651,7 +708,29 @@ class AzureBlobL6GraphReceiptAuthority:
                 raise TimeoutError(
                     "L6 Graph execution exceeded sealed runtime budget"
                 )
+            if lease_lost.is_set():
+                raise L6BlobConflictError(
+                    "durable L6 authority lease was lost during execution"
+                )
+            # Quiesce renewal before the terminal CAS. This closes the race in
+            # which an in-flight failed renewal could otherwise arrive just
+            # after the last lease-loss check but before completion is stored.
+            stop_renewal.set()
+            renewal.join(timeout=self._operation_timeout)
+            if renewal.is_alive():
+                lose_lease()
+                raise L6BlobConflictError(
+                    "durable L6 authority lease renewal did not terminate"
+                )
+            if lease_lost.is_set():
+                raise L6BlobConflictError(
+                    "durable L6 authority lease was lost during execution"
+                )
             latest = self._read(blob, lease=lease)
+            if lease_lost.is_set():
+                raise L6BlobConflictError(
+                    "durable L6 authority lease was lost during execution"
+                )
             if (
                 latest.value.get("owner_hash") != owner_hash
                 or latest.value.get("status") != "executing"
@@ -685,11 +764,15 @@ class AzureBlobL6GraphReceiptAuthority:
             raise L6BlobSigningError("L6 receipt signer is not configured")
         try:
             snapshot = self._signer_provider.snapshot()
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobSigningError(
                 "L6 receipt signing key is unavailable"
             ) from exc
-        if snapshot.snapshot_version < 1:
+        if (
+            isinstance(snapshot.snapshot_version, bool)
+            or not isinstance(snapshot.snapshot_version, int)
+            or snapshot.snapshot_version < 1
+        ):
             raise L6BlobSigningError("L6 signer snapshot metadata is invalid")
         return snapshot
 
@@ -699,7 +782,7 @@ class AzureBlobL6GraphReceiptAuthority:
     ) -> L6OpaqueSigner:
         try:
             signer = snapshot.active_signer(now)
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobSigningError(
                 "L6 receipt signing key is unavailable"
             ) from exc
@@ -712,7 +795,7 @@ class AzureBlobL6GraphReceiptAuthority:
     ) -> str:
         try:
             tag = signer.sign(canonical_json(values).encode("utf-8"))
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobSigningError("L6 receipt signing failed") from exc
         if not _HASH_RE.fullmatch(tag):
             raise L6BlobSigningError(
@@ -725,20 +808,21 @@ class AzureBlobL6GraphReceiptAuthority:
         receipt: l6.L6GraphExecutionReceipt | l6.L6EvidenceExecutionReceipt,
         *,
         snapshot: L6OpaqueSignerSnapshot,
+        now_milliseconds: int,
         failure_message: str,
     ) -> None:
         try:
             verifier = snapshot.verifier(
                 receipt.authority_id, receipt.authority_version
             )
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobSigningError(
                 "L6 receipt verification key is unavailable"
             ) from exc
         if verifier is None:
             raise L6BlobSigningError("L6 receipt verification key is unavailable")
         metadata = verifier.metadata
-        metadata.validate(self._clock())
+        metadata.validate(now_milliseconds)
         if (
             metadata.authority_id != receipt.authority_id
             or metadata.authority_version != receipt.authority_version
@@ -750,12 +834,54 @@ class AzureBlobL6GraphReceiptAuthority:
         ).encode("utf-8")
         try:
             verified = verifier.verify(payload, receipt.authentication_tag)
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L6BlobSigningError(
                 "L6 receipt verification failed"
             ) from exc
         if not verified:
             raise L6BlobSigningError(failure_message)
+
+    @staticmethod
+    def _matches_expected_values(
+        receipt: l6.L6GraphExecutionReceipt | l6.L6EvidenceExecutionReceipt,
+        expected: Mapping[str, Any],
+    ) -> bool:
+        actual = receipt.model_dump(mode="json")
+        return all(
+            canonical_json(actual.get(name)) == canonical_json(value)
+            for name, value in expected.items()
+        )
+
+    def readiness_observation(self) -> L6BlobReadinessObservation:
+        """Return a fail-closed, immutable production capability observation."""
+
+        now = self._clock()
+        transport_ready = self._graph_transport is not None
+        try:
+            snapshot = self._signer_snapshot()
+            signer = self._signing_key(snapshot, now)
+        except (L6BlobSigningError, AzureError):
+            return L6BlobReadinessObservation(
+                ready=False,
+                graph_transport_configured=transport_ready,
+                signer_valid=False,
+                observed_at_milliseconds=now,
+            )
+        metadata = signer.metadata
+        return L6BlobReadinessObservation(
+            ready=transport_ready,
+            graph_transport_configured=transport_ready,
+            signer_valid=True,
+            observed_at_milliseconds=now,
+            signer_snapshot_version=snapshot.snapshot_version,
+            authority_id=metadata.authority_id,
+            authority_version=metadata.authority_version,
+        )
+
+    def is_ready(self) -> bool:
+        """Whether this instance can safely execute and issue receipts."""
+
+        return self.readiness_observation().ready
 
     def issue(
         self,
@@ -852,16 +978,34 @@ class AzureBlobL6GraphReceiptAuthority:
             existing = self._read(receipt_blob).value
             prior = self._model_from_json(
                 l6.L6GraphExecutionReceipt,
-                existing.get("receipt")
+                existing.get("receipt"),
             )
+            expected_binding = {
+                name: value
+                for name, value in values.items()
+                if name
+                not in {
+                    "authority_id",
+                    "authority_version",
+                    "authentication_algorithm",
+                    "issued_at_milliseconds",
+                }
+            }
             if (
-                existing.get("state") != "issued"
-                or prior.graph_execution_fingerprint != fingerprint
-                or prior.graph_result_hash != graph_result.response_hash
+                existing.get("schema_version") != 1
+                or existing.get("kind") != "l6_graph_receipt"
+                or existing.get("state") != "issued"
+                or not self._matches_expected_values(prior, expected_binding)
             ):
                 raise ValueError(
                     "Graph run already has a different or consumed receipt"
                 )
+            self._verify_signature(
+                prior,
+                snapshot=snapshot,
+                now_milliseconds=now,
+                failure_message="Graph receipt authentication failed",
+            )
             return prior
         finally:
             self._release(run_lease)
@@ -875,6 +1019,7 @@ class AzureBlobL6GraphReceiptAuthority:
     ) -> l6.L6GraphExecutionReceipt:
         if not _HASH_RE.fullmatch(retrieval_claim_hash):
             raise ValueError("Graph execution receipt is invalid or replayed")
+        now = self._clock()
         snapshot = self._signer_snapshot()
         blob = self._receipt_blob(receipt_id)
         lease = self._acquire_required_lease(
@@ -895,6 +1040,7 @@ class AzureBlobL6GraphReceiptAuthority:
             self._verify_signature(
                 receipt,
                 snapshot=snapshot,
+                now_milliseconds=now,
                 failure_message="Graph receipt authentication failed",
             )
             consumed = {
@@ -938,6 +1084,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 "collection": citation_collection.collection_hash,
             }
         )
+        now = self._clock()
         snapshot = self._signer_snapshot()
         graph_blob = self._receipt_blob(
             graph_receipt.graph_execution_receipt_id
@@ -959,6 +1106,12 @@ class AzureBlobL6GraphReceiptAuthority:
                 raise ValueError(
                     "evidence requires exact consumed Graph retrieval claim"
                 )
+            self._verify_signature(
+                graph_receipt,
+                snapshot=snapshot,
+                now_milliseconds=now,
+                failure_message="Graph receipt authentication failed",
+            )
             graph_state = graph_document.value.get("state")
             if graph_state == "evidence_consumed":
                 raise ValueError("Graph receipt already has an evidence capability")
@@ -974,7 +1127,13 @@ class AzureBlobL6GraphReceiptAuthority:
                     str(graph_document.value.get("evidence_receipt_id"))
                 )
                 existing = self._read(existing_blob).value
-                if existing.get("state") != "issued":
+                if (
+                    existing.get("schema_version") != 1
+                    or existing.get("kind") != "l6_evidence_receipt"
+                    or existing.get("state") != "issued"
+                    or existing.get("evidence_fingerprint")
+                    != evidence_fingerprint
+                ):
                     raise ValueError(
                         "Graph receipt already has an evidence capability"
                     )
@@ -982,9 +1141,48 @@ class AzureBlobL6GraphReceiptAuthority:
                     l6.L6EvidenceExecutionReceipt,
                     existing.get("receipt"),
                 )
+                expected_binding = {
+                    "evidence_execution_receipt_id": graph_document.value.get(
+                        "evidence_receipt_id"
+                    ),
+                    "l6_run_id": graph_receipt.l6_run_id,
+                    "graph_request_hash": graph_receipt.graph_request_hash,
+                    "retrieval_claim_hash": evidence_output.retrieval_claim_hash,
+                    "graph_execution_receipt_id": (
+                        graph_receipt.graph_execution_receipt_id
+                    ),
+                    "graph_execution_receipt_hash": graph_receipt.receipt_hash,
+                    "graph_authority_id": graph_receipt.authority_id,
+                    "evidence_output_hash": evidence_output.output_hash,
+                    "coverage_receipt_id": evidence_output.coverage.coverage_receipt_id,
+                    "coverage_receipt_hash": (
+                        evidence_output.coverage.coverage_receipt_hash
+                    ),
+                    "citation_envelope_hashes": (
+                        citation_collection.citation_envelope_hashes
+                    ),
+                    "source_response_hashes": (
+                        citation_collection.source_response_hashes
+                    ),
+                    "search_index_fingerprint": (
+                        citation_collection.search_index_fingerprint
+                    ),
+                    "asserted_publication_hash": (
+                        citation_collection.asserted_publication_hash
+                    ),
+                    "required_canonical_id_set_hash": (
+                        evidence_output.coverage.required_canonical_id_set_hash
+                    ),
+                    "citation_collection_hash": citation_collection.collection_hash,
+                }
+                if not self._matches_expected_values(prior, expected_binding):
+                    raise ValueError(
+                        "Graph receipt already has an evidence capability"
+                    )
                 self._verify_signature(
                     prior,
                     snapshot=snapshot,
+                    now_milliseconds=now,
                     failure_message="evidence receipt authentication failed",
                 )
                 return prior
@@ -992,12 +1190,6 @@ class AzureBlobL6GraphReceiptAuthority:
                 raise ValueError(
                     "evidence requires consumed Graph retrieval authority"
                 )
-            self._verify_signature(
-                graph_receipt,
-                snapshot=snapshot,
-                failure_message="Graph receipt authentication failed",
-            )
-            now = self._clock()
             signer = self._signing_key(snapshot, now)
             metadata = signer.metadata
             receipt_id = "exr-sha256:" + canonical_sha256(
@@ -1072,9 +1264,26 @@ class AzureBlobL6GraphReceiptAuthority:
                     existing.get("receipt"),
                 )
                 if (
-                    existing.get("state") != "issued"
+                    existing.get("schema_version") != 1
+                    or existing.get("kind") != "l6_evidence_receipt"
+                    or existing.get("state") != "issued"
                     or existing.get("evidence_fingerprint")
                     != evidence_fingerprint
+                    or not self._matches_expected_values(
+                        prior,
+                        {
+                            name: value
+                            for name, value in values.items()
+                            if name
+                            not in {
+                                "authority_id",
+                                "authority_version",
+                                "authentication_algorithm",
+                                "issued_at_milliseconds",
+                                "keyring_snapshot_version",
+                            }
+                        },
+                    )
                 ):
                     raise ValueError(
                         "Graph receipt already has an evidence capability"
@@ -1082,6 +1291,7 @@ class AzureBlobL6GraphReceiptAuthority:
                 self._verify_signature(
                     prior,
                     snapshot=snapshot,
+                    now_milliseconds=now,
                     failure_message="evidence receipt authentication failed",
                 )
                 receipt = prior
@@ -1106,6 +1316,7 @@ class AzureBlobL6GraphReceiptAuthority:
         self,
         receipt: l6.L6EvidenceExecutionReceipt,
     ) -> None:
+        now = self._clock()
         snapshot = self._signer_snapshot()
         graph_blob = self._receipt_blob(
             receipt.graph_execution_receipt_id
@@ -1148,11 +1359,13 @@ class AzureBlobL6GraphReceiptAuthority:
             self._verify_signature(
                 graph_receipt,
                 snapshot=snapshot,
+                now_milliseconds=now,
                 failure_message="Graph receipt authentication failed",
             )
             self._verify_signature(
                 receipt,
                 snapshot=snapshot,
+                now_milliseconds=now,
                 failure_message="evidence receipt authentication failed",
             )
             consumed_graph = {
@@ -1174,6 +1387,7 @@ __all__ = [
     "L6BlobAuthorityError",
     "L6BlobConflictError",
     "L6BlobSigningError",
+    "L6BlobReadinessObservation",
     "L6OpaqueSigner",
     "L6OpaqueSignerProvider",
     "L6OpaqueSignerSnapshot",

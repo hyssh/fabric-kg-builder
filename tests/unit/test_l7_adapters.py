@@ -6,21 +6,24 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from azure.core.exceptions import ServiceRequestError
+from azure.core.exceptions import ServiceRequestError, ServiceResponseError
 
 from fabric_kg_builder.agent.l7_adapters import (
+    AzureL7MutationAdapter,
     AzureL7ReadOnlyProbe,
     SDKL7FoundryAgentBackend,
     build_azure_l7_adapters,
 )
 from fabric_kg_builder.agent.l7_deployment import (
     L7DeploymentError,
+    L7DeploymentPlanner,
     L7RemoteReadinessObservation,
     L7ResourceReadback,
 )
+from fabric_kg_builder.agent.project_connections import ProjectConnection
 from fabric_kg_builder.agent.l7_remote_tool import build_l6_openapi_spec
 from fabric_kg_builder.contracts.base import canonical_sha256
-from tests.unit.test_l7_deployment import _config, _definition
+from tests.unit.test_l7_deployment import _Probe, _config, _definition
 
 
 def test_foundry_get_resolves_versions_latest_and_hashes_effective_definition():
@@ -465,7 +468,16 @@ def test_foundry_reconciliation_waits_for_delayed_attempt_version():
     assert deleted == [(definition.agent_name, "12")]
 
 
-def test_foundry_reconciliation_retries_transient_list_failure():
+@pytest.mark.parametrize(
+    "transient_error",
+    [
+        ServiceRequestError("transient request"),
+        ServiceResponseError("transient response"),
+    ],
+)
+def test_foundry_reconciliation_retries_transient_list_failure(
+    transient_error,
+):
     deleted = []
     calls = 0
     attempt_id = "op-sha256:" + "a" * 64
@@ -475,7 +487,7 @@ def test_foundry_reconciliation_retries_transient_list_failure():
             nonlocal calls
             calls += 1
             if calls == 1:
-                raise ServiceRequestError("transient")
+                raise transient_error
             return [
                 SimpleNamespace(
                     version="13",
@@ -500,6 +512,131 @@ def test_foundry_reconciliation_retries_transient_list_failure():
     )
     assert calls == 2
     assert deleted == [(definition.agent_name, "13")]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ServiceRequestError("request"),
+        ServiceResponseError("response"),
+    ],
+)
+def test_foundry_get_normalizes_all_azure_transport_errors(failure):
+    class Operations:
+        def list(self):
+            raise failure
+
+    backend = object.__new__(SDKL7FoundryAgentBackend)
+    backend._project = SimpleNamespace(agents=Operations())
+    with pytest.raises(L7DeploymentError, match="list failed"):
+        backend.get(
+            project_resource_id="/subscriptions/sub/projects/project",
+            agent_name="Canonical L6 Agent",
+        )
+
+
+def test_uncertain_ownership_cleanup_retains_connection_until_receipt_deleted():
+    config = _config()
+    definition = _definition(config)
+    plan = L7DeploymentPlanner(
+        _Probe(config),
+        clock=lambda: datetime(2026, 8, 27, tzinfo=timezone.utc),
+    ).build(config=config, definition=definition)
+    action = next(
+        item
+        for item in plan.actions
+        if item.resource_kind == "fabric_connection"
+    )
+    order = []
+
+    class Connections:
+        def upsert_fabric_data_agent(self, **kwargs):
+            return ProjectConnection(
+                name=config.fabric_connection_name,
+                resource_id=action.stable_id,
+                category="CustomKeys",
+                target="-",
+                etag="created-etag",
+                properties_hash=action.desired_hash,
+                action="created",
+            )
+
+        def delete_if_attempt_owned(self, **kwargs):
+            order.append("connection")
+            return True
+
+        def rollback_pending(self, name):
+            return None
+
+    class Ownership:
+        def issue_attempt_created(self, **kwargs):
+            failure = SystemExit(2)
+            failure._l7_connection_rollback_safe = False
+            raise failure
+
+        def delete_attempt_created(self, **kwargs):
+            order.append("receipt")
+
+    adapter = AzureL7MutationAdapter(
+        probe=SimpleNamespace(),
+        connection_client=Connections(),
+        foundry_backend=SimpleNamespace(),
+        ownership_authority=Ownership(),
+    )
+    with pytest.raises(SystemExit):
+        adapter.apply(
+            action,
+            config=config,
+            definition=definition,
+        )
+    assert order == []
+    adapter.rollback_started(
+        action,
+        config=config,
+        definition=definition,
+    )
+    assert order == ["receipt", "connection"]
+
+
+def test_started_rollback_never_deletes_connection_if_receipt_is_uncertain():
+    config = _config()
+    definition = _definition(config)
+    plan = L7DeploymentPlanner(
+        _Probe(config),
+        clock=lambda: datetime(2026, 8, 27, tzinfo=timezone.utc),
+    ).build(config=config, definition=definition)
+    action = next(
+        item
+        for item in plan.actions
+        if item.resource_kind == "fabric_connection"
+    )
+    order = []
+
+    class Connections:
+        def delete_if_attempt_owned(self, **kwargs):
+            order.append("connection")
+
+    class Ownership:
+        def delete_attempt_created(self, **kwargs):
+            order.append("receipt")
+            raise L7DeploymentError("uncertain receipt delete")
+
+    adapter = AzureL7MutationAdapter(
+        probe=SimpleNamespace(),
+        connection_client=Connections(),
+        foundry_backend=SimpleNamespace(),
+        ownership_authority=Ownership(),
+    )
+    adapter._started_connections[action.stable_id] = SimpleNamespace(
+        etag="created-etag"
+    )
+    with pytest.raises(L7DeploymentError, match="reconciliation failed"):
+        adapter.rollback_started(
+            action,
+            config=config,
+            definition=definition,
+        )
+    assert order == ["receipt"]
 
 
 def test_production_adapter_builder_wires_distinct_remote_probe_credential():

@@ -1053,6 +1053,10 @@ class L7DeploymentExecutor:
                 "RemoteTool readiness changed immediately before mutation"
             )
         _validate_expected_fabric_definitions(config)
+        if self._clock() >= plan.expires_at:
+            raise L7DeploymentError(
+                "approved deployment plan expired immediately before mutation"
+            )
 
         journal: list[_L7MutationJournalEntry] = []
         calls = 0
@@ -1062,6 +1066,10 @@ class L7DeploymentExecutor:
         receipt: L7DeploymentReceipt | None = None
         try:
             for action in plan.actions:
+                if self._clock() >= plan.expires_at:
+                    raise L7DeploymentError(
+                        "approved deployment plan expired between mutations"
+                    )
                 calls += 1
                 entry = _L7MutationJournalEntry(action=action)
                 journal.append(entry)
@@ -1092,6 +1100,11 @@ class L7DeploymentExecutor:
                 raise L7DeploymentError(
                     "RemoteTool readiness changed before deployment success"
                 )
+            completion_time = self._clock()
+            if completion_time >= plan.expires_at:
+                raise L7DeploymentError(
+                    "approved deployment plan expired before success"
+                )
             results = tuple(
                 entry.result.model_copy(
                     update={"rollback_status": "not_required"}
@@ -1114,7 +1127,7 @@ class L7DeploymentExecutor:
                 config_hash=config.config_hash,
                 l6_definition_hash=definition.definition_hash,
                 started_at=started_at,
-                completed_at=self._clock(),
+                completed_at=completion_time,
                 resources=results,
                 accounting=L7RemoteAccounting(
                     calls=calls,

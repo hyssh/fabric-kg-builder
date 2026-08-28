@@ -13,6 +13,7 @@ from typing import Any, Mapping, Protocol
 from urllib.parse import urljoin, urlsplit
 
 from azure.core.exceptions import (
+    AzureError,
     HttpResponseError,
     ServiceRequestError,
     ServiceResponseError,
@@ -148,11 +149,16 @@ class SDKL7FoundryAgentBackend:
             raise L7DeploymentError(
                 "azure-ai-projects>=2.3.0 is required for L7 Foundry deployment"
             ) from exc
-        self._project = AIProjectClient(
-            endpoint=project_endpoint,
-            credential=credential,
-            allow_preview=True,
-        )
+        try:
+            self._project = AIProjectClient(
+                endpoint=project_endpoint,
+                credential=credential,
+                allow_preview=True,
+            )
+        except (AzureError, TypeError, ValueError) as exc:
+            raise L7DeploymentError(
+                "Foundry project client construction failed"
+            ) from exc
         if (
             reconciliation_timeout_seconds <= 0
             or reconciliation_poll_seconds <= 0
@@ -190,7 +196,7 @@ class SDKL7FoundryAgentBackend:
                 for agent in self._project.agents.list()
                 if str(self._value(agent, "name")) == agent_name
             )
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L7DeploymentError("Foundry agent list failed") from exc
         if not matches:
             return None, ""
@@ -314,7 +320,7 @@ class SDKL7FoundryAgentBackend:
                 agent_name=agent_name,
                 agent_version=latest_version,
             )
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L7DeploymentError("Foundry agent version GET failed") from exc
         metadata = self._value(detail, "metadata", {})
         if not isinstance(metadata, Mapping):
@@ -490,9 +496,7 @@ class SDKL7FoundryAgentBackend:
                     _, latest_version = self._latest(definition.agent_name)
                 last_error = None
             except (
-                HttpResponseError,
-                ServiceRequestError,
-                ServiceResponseError,
+                AzureError,
                 ConnectionError,
                 TimeoutError,
             ) as exc:
@@ -525,7 +529,7 @@ class SDKL7FoundryAgentBackend:
                 agent_name=definition.agent_name,
                 agent_version=matches[0],
             )
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L7DeploymentError(
                 "uncertain Foundry version rollback failed"
             ) from exc
@@ -545,7 +549,7 @@ class SDKL7FoundryAgentBackend:
                 agent_name=agent_name,
                 agent_version=agent_version,
             )
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L7DeploymentError(
                 "Foundry attempt metadata readback failed"
             ) from exc
@@ -592,7 +596,7 @@ class SDKL7FoundryAgentBackend:
                 agent_name=definition.agent_name,
                 agent_version=expected_etag,
             )
-        except HttpResponseError as exc:
+        except AzureError as exc:
             raise L7DeploymentError(
                 "Foundry conditional version rollback failed"
             ) from exc
@@ -1000,7 +1004,7 @@ class AzureL7ReadOnlyProbe:
         name = resource_id[len(prefix):]
         try:
             connection = self._connections.get(name)
-        except ProjectConnectionError as exc:
+        except (ProjectConnectionError, L7DeploymentError) as exc:
             raise L7DeploymentError("Foundry connection GET failed") from exc
         if connection is None:
             return L7ResourceReadback(
@@ -1214,18 +1218,29 @@ class AzureL7MutationAdapter:
                     )
                 except BaseException as ownership_exc:
                     rollback_succeeded = False
-                    try:
-                        self._connections.delete_if_attempt_owned(
-                            name=config.fabric_connection_name,
-                            attempt_owned=True,
-                            expected_etag=connection.etag,
-                        )
-                        rollback_succeeded = True
-                    except BaseException as rollback_exc:
+                    if getattr(
+                        ownership_exc,
+                        "_l7_connection_rollback_safe",
+                        True,
+                    ):
+                        try:
+                            self._connections.delete_if_attempt_owned(
+                                name=config.fabric_connection_name,
+                                attempt_owned=True,
+                                expected_etag=connection.etag,
+                            )
+                            rollback_succeeded = True
+                        except BaseException as rollback_exc:
+                            _add_exception_note(
+                                ownership_exc,
+                                "conditional connection rollback also failed: "
+                                f"{type(rollback_exc).__name__}",
+                            )
+                    else:
                         _add_exception_note(
                             ownership_exc,
-                            "conditional connection rollback also failed: "
-                            f"{type(rollback_exc).__name__}",
+                            "connection retained because ownership receipt "
+                            "cleanup is uncertain",
                         )
                     if rollback_succeeded:
                         self._started_connections.pop(
@@ -1304,16 +1319,16 @@ class AzureL7MutationAdapter:
         }:
             try:
                 if action.action == "create":
-                    self._connections.delete_if_attempt_owned(
-                        name=name,
-                        attempt_owned=True,
-                        expected_etag=result.after_etag or "",
-                    )
                     if action.resource_kind == "fabric_connection":
                         self._ownership.delete_attempt_created(
                             connection_id=action.stable_id,
                             connection_etag=result.after_etag or "",
                         )
+                    self._connections.delete_if_attempt_owned(
+                        name=name,
+                        attempt_owned=True,
+                        expected_etag=result.after_etag or "",
+                    )
                 else:
                     self._connections.restore_if_attempt_owned(
                         name=name,
@@ -1420,16 +1435,16 @@ class AzureL7MutationAdapter:
             try:
                 if started is not None:
                     if action.action == "create":
-                        self._connections.delete_if_attempt_owned(
-                            name=name,
-                            attempt_owned=True,
-                            expected_etag=started.etag,
-                        )
                         if action.resource_kind == "fabric_connection":
                             self._ownership.delete_attempt_created(
                                 connection_id=action.stable_id,
                                 connection_etag=started.etag,
                             )
+                        self._connections.delete_if_attempt_owned(
+                            name=name,
+                            attempt_owned=True,
+                            expected_etag=started.etag,
+                        )
                     else:
                         self._connections.restore_if_attempt_owned(
                             name=name,
@@ -1439,7 +1454,7 @@ class AzureL7MutationAdapter:
                     self._started_connections.pop(action.stable_id, None)
                 else:
                     self._connections.rollback_pending(name)
-            except ProjectConnectionError as exc:
+            except (ProjectConnectionError, L7DeploymentError) as exc:
                 raise L7DeploymentError(
                     "started connection mutation reconciliation failed"
                 ) from exc

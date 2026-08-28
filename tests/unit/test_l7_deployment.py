@@ -898,3 +898,70 @@ def test_receipt_persistence_is_atomic_create_if_absent(tmp_path):
     assert L7DeploymentReceipt.model_validate_json(
         path.read_text("utf-8")
     ) in receipts
+
+
+def test_plan_expiry_after_readiness_blocks_first_mutation(tmp_path):
+    config = _config()
+    probe = _Probe(config)
+    planner = L7DeploymentPlanner(probe, clock=lambda: NOW)
+    plan = planner.build(config=config, definition=_definition(config))
+    times = iter(
+        [
+            NOW + timedelta(seconds=1),
+            plan.expires_at,
+        ]
+    )
+    mutations = _Mutations()
+    with pytest.raises(L7DeploymentError, match="immediately before mutation"):
+        L7DeploymentExecutor(
+            planner=planner,
+            mutations=mutations,
+            clock=lambda: next(times),
+        ).execute(
+            plan=plan,
+            approve_live=plan.plan_hash,
+            config=config,
+            definition=_definition(config),
+            receipt_path=tmp_path / "receipt.json",
+        )
+    assert mutations.calls == []
+
+
+def test_plan_expiry_between_mutations_rolls_back_completed_work(tmp_path):
+    config = _config()
+    probe = _Probe(config)
+    planner = L7DeploymentPlanner(probe, clock=lambda: NOW)
+    plan = planner.build(config=config, definition=_definition(config))
+    times = iter(
+        [
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(seconds=2),
+            NOW + timedelta(seconds=3),
+            NOW + timedelta(seconds=4),
+            plan.expires_at,
+        ]
+    )
+
+    class Mutations(_Mutations):
+        def __init__(self):
+            super().__init__()
+            self.rollback_calls = []
+
+        def rollback(self, action, result, *, config):
+            self.rollback_calls.append(action.resource_kind)
+            return super().rollback(action, result, config=config)
+
+    mutations = Mutations()
+    with pytest.raises(L7DeploymentError, match="rollback_failures=0"):
+        L7DeploymentExecutor(
+            planner=planner,
+            mutations=mutations,
+            clock=lambda: next(times),
+        ).execute(
+            plan=plan,
+            approve_live=plan.plan_hash,
+            config=config,
+            definition=_definition(config),
+            receipt_path=tmp_path / "receipt.json",
+        )
+    assert mutations.rollback_calls == ["fabric_connection"]

@@ -31,6 +31,17 @@ def _add_exception_note(exc: BaseException, note: str) -> None:
         add_note(note)
 
 
+def _mark_connection_rollback_safe(
+    exc: BaseException,
+    *,
+    safe: bool,
+) -> None:
+    try:
+        setattr(exc, "_l7_connection_rollback_safe", safe)
+    except (AttributeError, TypeError):
+        return
+
+
 class AzureBlobL7ConnectionOwnershipAuthority:
     """Immutable one-receipt-per-connection authority backed by Azure Blob."""
 
@@ -235,12 +246,8 @@ class AzureBlobL7ConnectionOwnershipAuthority:
             raise L7DeploymentError(
                 "connection ownership receipt collision; use a new connection name"
             ) from exc
-        except (
-            HttpResponseError,
-            ServiceRequestError,
-            ServiceResponseError,
-            TimeoutError,
-        ) as exc:
+        except BaseException as exc:
+            cleanup_safe = False
             try:
                 uncertain = self.read_verified(connection_id=connection_id)
                 if uncertain == receipt:
@@ -248,15 +255,28 @@ class AzureBlobL7ConnectionOwnershipAuthority:
                         connection_id=connection_id,
                         connection_etag=connection_etag,
                     )
+                elif uncertain is not None:
+                    raise L7DeploymentError(
+                        "uncertain ownership receipt differs from this attempt"
+                    )
+                cleanup_safe = True
             except BaseException as rollback_exc:
                 _add_exception_note(
                     exc,
                     "uncertain ownership receipt reconciliation failed: "
                     f"{type(rollback_exc).__name__}",
                 )
-            raise L7DeploymentError(
+            _mark_connection_rollback_safe(exc, safe=cleanup_safe)
+            if isinstance(
+                exc,
+                (KeyboardInterrupt, SystemExit, asyncio.CancelledError),
+            ):
+                raise
+            wrapped = L7DeploymentError(
                 "connection ownership receipt persistence outcome was reconciled"
-            ) from exc
+            )
+            _mark_connection_rollback_safe(wrapped, safe=cleanup_safe)
+            raise wrapped from exc
         try:
             readback = self.read_verified(connection_id=connection_id)
             if readback != receipt:
@@ -264,25 +284,30 @@ class AzureBlobL7ConnectionOwnershipAuthority:
                     "connection ownership receipt exact readback failed"
                 )
         except BaseException as exc:
+            cleanup_safe = False
             try:
                 self.delete_attempt_created(
                     connection_id=connection_id,
                     connection_etag=connection_etag,
                 )
+                cleanup_safe = True
             except BaseException as rollback_exc:
                 _add_exception_note(
                     exc,
                     "conditional ownership receipt rollback failed: "
                     f"{type(rollback_exc).__name__}",
                 )
+            _mark_connection_rollback_safe(exc, safe=cleanup_safe)
             if isinstance(
                 exc,
                 (KeyboardInterrupt, SystemExit, asyncio.CancelledError),
             ):
                 raise
-            raise L7DeploymentError(
+            wrapped = L7DeploymentError(
                 "connection ownership receipt readback failed and was rolled back"
-            ) from exc
+            )
+            _mark_connection_rollback_safe(wrapped, safe=cleanup_safe)
+            raise wrapped from exc
         return receipt
 
     def delete_attempt_created(

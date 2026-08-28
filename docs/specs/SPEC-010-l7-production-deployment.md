@@ -27,7 +27,9 @@ Live deployment requires `--approve-live <exact-plan-hash>` and the matching
 unexpired plan file. Before its first mutation it repeats all probes and rejects
 identity, configuration, resource, ETag, audience, or definition drift.
 `--resume` accepts only identical persisted state. Authenticated readiness is
-rechecked immediately before the first mutation and again before success.
+rechecked immediately before the first mutation and again before success. Plan
+expiry is checked from the injected UTC clock immediately before the first and
+every subsequent mutation; expiry after a mutation triggers mandatory rollback.
 
 ## Adapters
 
@@ -58,10 +60,13 @@ rechecked immediately before the first mutation and again before success.
   signed Azure Blob ownership receipt binding exact connection ID/ETag,
   category, target, audience, workspace, and Data Agent. Missing, forged, stale,
   or mismatched receipts are a collision/NO-GO. Attempt-created connections
-  persist their receipt from known request and exact readback.
+  persist their receipt from known request and exact readback. Receipt upload is
+  journaled as uncertain before I/O; every `BaseException` reconciles and
+  conditionally removes the exact signed receipt before connection deletion.
 - The Foundry adapter creates a version from canonical instructions, model,
   limits, Fabric connection, and exact OpenAPI RemoteTool definition, then
-  checks version/hash readback.
+  checks version/hash readback. Every Azure SDK boundary normalizes the complete
+  `AzureError` transport/service hierarchy to sanitized L7 errors.
 - Fabric is readback-only here. Every target requires canonical expected
   definition bytes plus canonical and byte hashes, followed by POST
   `getDefinition` exact readback (including bounded LRO polling). `null`,

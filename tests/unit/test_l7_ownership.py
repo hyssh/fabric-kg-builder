@@ -152,3 +152,33 @@ def test_commit_then_blob_transport_error_reconciles_orphan(
             data_agent_id="data-agent",
         )
     assert backend.blobs == {}
+
+
+@pytest.mark.parametrize("control_flow", [KeyboardInterrupt(), SystemExit(2)])
+def test_commit_then_control_flow_cleans_receipt_before_reraise(
+    monkeypatch,
+    control_flow,
+):
+    backend, _, authority = _authority()
+    original_upload = _Blob.upload_blob
+
+    def upload_then_interrupt(self, data, **kwargs):
+        original_upload(self, data, **kwargs)
+        raise control_flow
+
+    def delete_blob(self, *, etag, match_condition):
+        del match_condition
+        stored = self.backend.blobs[self.name]
+        assert etag == f'"{stored.etag}"'
+        del self.backend.blobs[self.name]
+
+    monkeypatch.setattr(_Blob, "upload_blob", upload_then_interrupt)
+    monkeypatch.setattr(_Blob, "delete_blob", delete_blob, raising=False)
+    with pytest.raises(type(control_flow)):
+        authority.issue_attempt_created(
+            connection_id="/subscriptions/sub/connections/release-owned",
+            connection_etag='"etag-1"',
+            workspace_id="workspace",
+            data_agent_id="data-agent",
+        )
+    assert backend.blobs == {}

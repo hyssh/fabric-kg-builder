@@ -1627,7 +1627,8 @@ deadline-aware/cancellable Graph transport and ignored late results, RemoteTool
 auth-first bounded streaming/framing/encoding/disconnect/schema/deadline and
 authenticated readiness/OpenAPI behavior, bearer header use without token
 disclosure, signed durable CustomKeys ownership, transaction-journal rollback
-under network/parser/interrupt failures, mandatory canonical Fabric definition
+under network/parser/interrupt failures, per-mutation plan expiry, ownership
+upload `BaseException` reconciliation in dependency order, mandatory canonical Fabric definition
 bytes plus POST/LRO readback, Foundry version readback, accounting, redaction,
 and unchanged RDF inactivity.
 
