@@ -637,7 +637,20 @@ def _write_immutable(path: Path, payload: bytes) -> None:
         os.fsync(stream.fileno())
     os.chmod(temp, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     temp.replace(path)
-    _fsync_parent(path)
+    try:
+        _fsync_parent(path)
+    except BaseException:
+        try:
+            if path.read_bytes() == payload:
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+                path.unlink()
+                try:
+                    _fsync_parent(path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        raise
 
 
 def _fsync_parent(path: Path) -> None:
