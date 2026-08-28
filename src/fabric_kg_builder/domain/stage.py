@@ -132,6 +132,42 @@ def _sanitized_validation_failures(
     ][:20]
 
 
+def _normalize_question_route_shapes(
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize only nonsemantic route-reason annotations locally."""
+    normalized = json.loads(json.dumps(candidate))
+    routes = normalized.get("question_routes")
+    if not isinstance(routes, list):
+        return normalized
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if "start_type_id" not in route or "end_type_id" not in route:
+            continue
+        start = route.get("start_type_id")
+        end = route.get("end_type_id")
+        reason = route.get("unsupported_reason")
+        repairable_missing_reason = (
+            "unsupported_reason" not in route
+            or reason is None
+            or (isinstance(reason, str) and not reason.strip())
+        )
+        if (
+            start is None
+            and end is None
+            and repairable_missing_reason
+        ):
+            route["unsupported_reason"] = "no_supported_route_proposed"
+        elif (
+            start is not None
+            and end is not None
+            and isinstance(reason, str)
+        ):
+            route["unsupported_reason"] = None
+    return normalized
+
+
 def _require_reason_only_route_repair(
     original: dict[str, Any],
     repaired: dict[str, Any],
@@ -731,57 +767,21 @@ def prepare_l1_stage(
         original_candidate_values = json.loads(json.dumps(candidates))
         try:
             candidate_values = normalize_candidate_scores(
-                json.loads(json.dumps(original_candidate_values))
+                _normalize_question_route_shapes(
+                    original_candidate_values
+                )
             )
             candidates = DomainProposalCandidatesV2.model_validate(
                 candidate_values
             )
         except (ValidationError, ArithmeticError) as first_error:
-            if client is None or model_call_count != 1:
-                raise
             failures = _sanitized_validation_failures(first_error)
-            repaired = client.complete_json(
-                system=DOMAIN_PROPOSAL_SYSTEM_PROMPT,
-                user=json.dumps(
-                    {
-                        "task": (
-                            "Repair schema only. Add a non-empty "
-                            "unsupported_reason to unsupported routes and "
-                            "remove it from supported routes. "
-                            "Do not change route support, endpoint IDs, "
-                            "candidate vocabulary, scores, or evidence."
-                        ),
-                        "validation_failures": failures,
-                        "candidate": original_candidate_values,
-                    },
-                    sort_keys=True,
+            raise L1ProposalSchemaRepairError(
+                attempt_count=model_call_count or 1,
+                validation_error_codes=tuple(
+                    item["type"] for item in failures
                 ),
-                json_schema=domain_proposal_candidates_schema(),
-            )
-            model_call_count = 2
-            if not isinstance(repaired, dict):
-                raise L1ProposalSchemaRepairError(
-                    attempt_count=2,
-                    validation_error_codes=("repair.invalid_type",),
-                ) from first_error
-            _require_reason_only_route_repair(
-                original_candidate_values, repaired
-            )
-            try:
-                candidates = DomainProposalCandidatesV2.model_validate(
-                    normalize_candidate_scores(repaired)
-                )
-            except (ValidationError, ArithmeticError) as repair_error:
-                codes = tuple(
-                    item["type"]
-                    for item in _sanitized_validation_failures(
-                        repair_error
-                    )
-                )
-                raise L1ProposalSchemaRepairError(
-                    attempt_count=2,
-                    validation_error_codes=codes,
-                ) from repair_error
+            ) from first_error
     known_evidence_ids = {item.evidence_span_id for item in evidence_spans}
     draft_contract, merge_groups, selected_candidate_ids = (
         build_draft_contract_from_candidates(

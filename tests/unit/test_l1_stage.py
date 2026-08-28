@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -174,72 +173,47 @@ def _preflight(tmp_path: Path, domain: str = "records"):
 
 
 class _RepairingProposalClient:
-    def __init__(
-        self,
-        *,
-        drift: bool = False,
-        no_repair: bool = False,
-    ) -> None:
+    def __init__(self, *, half_route: bool = False) -> None:
         self.calls = 0
-        self.drift = drift
-        self.no_repair = no_repair
+        self.half_route = half_route
 
     def complete_json(self, **kwargs):
         self.calls += 1
-        if self.calls == 1:
-            raw = _candidates("records")
-            route = raw["question_routes"][0]
-            route["start_type_id"] = None
-            route["end_type_id"] = None
-            route.pop("unsupported_reason", None)
-            return raw
-        request = json.loads(kwargs["user"])
-        repaired = request["candidate"]
-        if not self.no_repair:
-            repaired["question_routes"][0][
-                "unsupported_reason"
-            ] = "No approved relationship route."
-        if self.drift:
-            repaired["question_routes"][0]["start_type_id"] = "type:invented"
-            repaired["question_routes"][0]["end_type_id"] = "type:invented"
-        return repaired
+        if self.calls != 1:
+            raise AssertionError("proposal client must not be retried")
+        raw = _candidates("records")
+        route = raw["question_routes"][0]
+        route["start_type_id"] = (
+            route["start_type_id"] if self.half_route else None
+        )
+        route["end_type_id"] = None
+        route.pop("unsupported_reason", None)
+        return raw
 
 
-def test_proposal_schema_repair_adds_only_unsupported_reasons(
+def test_proposal_route_reason_is_normalized_locally_without_retry(
     tmp_path: Path,
 ) -> None:
     client = _RepairingProposalClient()
     prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
-    assert client.calls == 2
-    assert prepared.model_call_count == 2
+    assert client.calls == 1
+    assert prepared.model_call_count == 1
     assert (
         prepared.candidates.question_routes[0].unsupported_reason
-        == "No approved relationship route."
+        == "no_supported_route_proposed"
     )
 
 
-def test_proposal_schema_repair_exhaustion_is_typed_and_sanitized(
+def test_half_defined_route_fails_typed_without_regeneration(
     tmp_path: Path,
 ) -> None:
-    client = _RepairingProposalClient(no_repair=True)
+    client = _RepairingProposalClient(half_route=True)
     with pytest.raises(L1ProposalSchemaRepairError) as captured:
         prepare_l1_stage(_preflight(tmp_path), client=client)
-    assert captured.value.attempt_count == 2
+    assert captured.value.attempt_count == 1
     assert captured.value.error_code == "L1_PROPOSAL_SCHEMA_REPAIR_EXHAUSTED"
     assert "Support evidence-backed" not in str(captured.value)
-    assert client.calls == 2
-
-
-def test_proposal_schema_repair_rejects_supported_route_invention(
-    tmp_path: Path,
-) -> None:
-    client = _RepairingProposalClient(drift=True)
-    with pytest.raises(
-        L1ProposalSchemaRepairError,
-        match="authority_drift",
-    ):
-        prepare_l1_stage(_preflight(tmp_path), client=client)
-    assert client.calls == 2
+    assert client.calls == 1
 
 
 def test_dry_run_inventories_complete_corpus_without_writes(tmp_path: Path) -> None:
