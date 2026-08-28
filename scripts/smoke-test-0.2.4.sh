@@ -10,12 +10,14 @@ outside="$(mktemp -d "${TMPDIR:-/tmp}/fabric-kg-024.XXXXXX")"
 trap 'chmod -R u+w "$outside" 2>/dev/null || true; rm -rf "$outside"' EXIT
 
 git -C "$repo" archive --format=tar HEAD | tar -xf - -C "$outside"
-uv build "$outside" --out-dir "$outside/dist" >/dev/null
+uv build --quiet "$outside" --out-dir "$outside/dist"
 wheel="$(find "$outside/dist" -maxdepth 1 -name 'fabric_kg_builder-0.2.4-*.whl' -print -quit)"
 test -n "$wheel"
 
 uv venv --python 3.12 "$outside/venv" >/dev/null
-uv pip install --python "$outside/venv/bin/python" --quiet "$wheel"
+if ! uv pip install --python "$outside/venv/bin/python" --offline --quiet "$wheel"; then
+  uv pip install --python "$outside/venv/bin/python" --quiet "$wheel"
+fi
 unset PYTHONPATH
 cd "$outside"
 
