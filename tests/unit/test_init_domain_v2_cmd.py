@@ -383,6 +383,30 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
     )
     assert draft.exit_code == 0, draft.output
     assert not (state_root / "domain-approval-context.json").exists()
+    source_unit_dir = state_root / "design-samples" / "source-units"
+    source_unit_dir.mkdir(parents=True, exist_ok=True)
+    stale_unit = source_unit_dir / "stale.json"
+    stale_unit.write_text('{"stale":true}', encoding="utf-8")
+    regenerated = runner.invoke(
+        cli,
+        [
+            "init-domain",
+            "--input",
+            str(source),
+            "--intake",
+            str(intake_path),
+            "--candidates",
+            str(candidates_path),
+            "--non-interactive",
+            "--force",
+            "--out",
+            str(domain_path),
+            "--state-dir",
+            str(state_root),
+        ],
+    )
+    assert regenerated.exit_code == 0, regenerated.output
+    assert not stale_unit.exists()
     assert "[init-domain] approval-anchors project_id=" in draft.output
     assert " run_id=" in draft.output
     assert " proposal_hash=" in draft.output

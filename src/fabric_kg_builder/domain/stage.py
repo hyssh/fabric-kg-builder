@@ -3048,6 +3048,11 @@ def _persist_payloads(
                     relative = existing.relative_to(state_root)
                     if relative in remove_relative:
                         continue
+                    if relative.parts[:2] in {
+                        ("design-samples", "source-units"),
+                        ("design-samples", "evidence-spans"),
+                    }:
+                        continue
                     replacement = temp_root / relative
                     if not replacement.exists():
                         replacement.parent.mkdir(parents=True, exist_ok=True)
