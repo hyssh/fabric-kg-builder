@@ -36,19 +36,9 @@ crash remnants block retries without mutation. Durable success receipt commit
 is inside the rollback boundary; persistence failure triggers conditional
 rollback and a separate failure receipt.
 
-## Deferred
-
-Public RemoteTool hosting, Blob-lease multi-process L6 authority, signer
-rotation/revocation, and RDF serialization are deferred. The canonical L6
-five-tool definition remains generated/local. Foundry may use only supported
-built-in Search and Fabric Data Agent connections; the proof must not claim the
-deferred RemoteTool path is deployed.
-
 Current acceptance is GitHub Copilot invoking the base installed `fabric-kg`
-CLI as a local subprocess. The `agent` extra is optional for future Foundry
-agent-management commands; the `app` extra and an HTTPS RemoteTool host are not
-required. Set `foundry.deploy_builtin_agent` to `false`. Public endpoint,
-audience, and app-role configuration are outside 0.2.4 success criteria.
+CLI as a local subprocess. Set `foundry.deploy_builtin_agent` to `false`; the
+base wheel is the complete 0.2.4 acceptance runtime.
 
 ## Acceptance Results
 

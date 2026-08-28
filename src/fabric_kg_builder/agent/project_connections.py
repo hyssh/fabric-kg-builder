@@ -682,25 +682,3 @@ class FoundryProjectConnectionClient:
             create_only=create_only,
             attempt_id=resolved_attempt,
         )
-
-    def upsert_remote_tool(
-        self,
-        *,
-        name: str,
-        target: str,
-        audience: str,
-    ) -> ProjectConnection:
-        """Create a managed-identity RemoteTool connection for an MCP endpoint."""
-        if not target.startswith("https://"):
-            raise ValueError("RemoteTool target must be an HTTPS URL.")
-        return self._put(
-            name,
-            {
-                "authType": "ProjectManagedIdentity",
-                "category": "RemoteTool",
-                "target": target,
-                "isSharedToAll": True,
-                "audience": audience,
-                "metadata": {"ApiType": "Azure"},
-            },
-        )

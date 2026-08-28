@@ -40,7 +40,6 @@ from fabric_kg_builder.agent.project_connections import (
     normalize_connection_properties,
     search_connection_properties,
 )
-from fabric_kg_builder.agent.l6_remote_tool import build_l6_openapi_spec
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.contracts.base import canonical_sha256
 
@@ -295,7 +294,6 @@ def test_release_version_and_36_top_level_commands() -> None:
     assert len(cli.commands) == 36
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
-    assert build_l6_openapi_spec()["info"]["version"] == __version__
 
 
 @pytest.mark.unit
@@ -1159,9 +1157,9 @@ def test_redirect_is_not_followed_with_search_token(
     ("field", "value"),
     [
         ("authType", "ApiKey"),
-        ("category", "RemoteTool"),
+        ("category", "UnexpectedCategory"),
         ("target", "https://other.search.windows.net"),
-        ("audience", "api://other"),
+        ("audience", "unexpected-audience"),
         ("isSharedToAll", False),
         ("group", "Other"),
     ],

@@ -8,5 +8,4 @@
 - Added exact Foundry project-connection bearer authentication and readback.
 - Added Python 3.12 external installed-CLI acceptance tooling and release proof
   templates.
-- Deferred RemoteTool hosting, distributed L6 authority, signer lifecycle, and
-  RDF serialization.
+- Kept the 0.2.4 acceptance path local and CLI-only.

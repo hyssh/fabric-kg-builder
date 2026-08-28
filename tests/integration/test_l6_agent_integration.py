@@ -80,7 +80,6 @@ def test_l6_canonical_definition_persists_and_reads_back_exactly(tmp_path):
     definition = l6.build_l6_agent_definition(
         agent_name="KG evidence agent",
         fabric_data_agent_connection_id="connection:fabric",
-        foundry_remote_tool_connection_id="connection:remote-tool",
     )
     path = tmp_path / "l6-agent-definition.json"
 

@@ -4121,11 +4121,6 @@ def _l6_definition_template_authority() -> dict[str, Any]:
                 "project_connection_id": "{trusted_fabric_connection_id}",
                 "required": True,
             },
-            "l6_remote_tool": {
-                "type": "foundry_remote_tool",
-                "project_connection_id": "{trusted_remote_tool_connection_id}",
-                "required": True,
-            },
         },
         "limits": {
             "graph_requests": 1,
@@ -4160,20 +4155,15 @@ def _build_l6_definition_values(
     *,
     agent_name: str,
     fabric_data_agent_connection_id: str,
-    foundry_remote_tool_connection_id: str,
 ) -> dict[str, Any]:
     _l6_safe_agent_name(agent_name)
     _l6_safe_connection_id(fabric_data_agent_connection_id)
-    _l6_safe_connection_id(foundry_remote_tool_connection_id)
     values = _l6_definition_template_authority()
     values["agent_name"] = agent_name
     values["template_code_hash"] = L6_DEFINITION_TEMPLATE_CODE_HASH
     values["connections"]["fabric_data_agent"][
         "project_connection_id"
     ] = fabric_data_agent_connection_id
-    values["connections"]["l6_remote_tool"][
-        "project_connection_id"
-    ] = foundry_remote_tool_connection_id
     values["definition_hash"] = canonical_sha256(values)
     _validate_l6_definition_strings(values)
     return values
@@ -4198,7 +4188,6 @@ class L6CanonicalAgentDefinition(Mapping[str, Any]):
 
     agent_name: str
     fabric_data_agent_connection_id: str
-    foundry_remote_tool_connection_id: str
     _values: FrozenDict[str, Any] = field(init=False, repr=False)
     _canonical_bytes: bytes = field(init=False, repr=False)
 
@@ -4206,7 +4195,6 @@ class L6CanonicalAgentDefinition(Mapping[str, Any]):
         values = _build_l6_definition_values(
             agent_name=self.agent_name,
             fabric_data_agent_connection_id=self.fabric_data_agent_connection_id,
-            foundry_remote_tool_connection_id=self.foundry_remote_tool_connection_id,
         )
         frozen = _freeze_l6_definition(values)
         object.__setattr__(self, "_values", frozen)
@@ -4238,14 +4226,12 @@ def build_l6_agent_definition(
     *,
     agent_name: str,
     fabric_data_agent_connection_id: str,
-    foundry_remote_tool_connection_id: str,
 ) -> L6CanonicalAgentDefinition:
     """Build the sole canonical L6 deployment definition authority."""
 
     return L6CanonicalAgentDefinition(
         agent_name=agent_name,
         fabric_data_agent_connection_id=fabric_data_agent_connection_id,
-        foundry_remote_tool_connection_id=foundry_remote_tool_connection_id,
     )
 
 
@@ -4267,9 +4253,6 @@ def persist_l6_agent_definition(
         agent_name=expected_definition.agent_name,
         fabric_data_agent_connection_id=(
             expected_definition.fabric_data_agent_connection_id
-        ),
-        foundry_remote_tool_connection_id=(
-            expected_definition.foundry_remote_tool_connection_id
         ),
     )
     expected_bytes = trusted_expected.canonical_bytes

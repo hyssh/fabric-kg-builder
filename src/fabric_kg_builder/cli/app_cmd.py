@@ -218,11 +218,6 @@ def app_cmd() -> None:
 @click.option("--agent-name", required=True)
 @click.option("--fabric-connection-id", required=True)
 @click.option(
-    "--remote-tool-connection-id",
-    default="connection:deferred-remote-tool",
-    show_default=True,
-)
-@click.option(
     "--out",
     "output_path",
     default="build/release/l6-agent-definition.json",
@@ -232,7 +227,6 @@ def app_cmd() -> None:
 def compile_l6_cmd(
     agent_name: str,
     fabric_connection_id: str,
-    remote_tool_connection_id: str,
     output_path: Path,
 ) -> None:
     """Compile and persist the canonical local L6 five-tool definition."""
@@ -245,7 +239,6 @@ def compile_l6_cmd(
         definition = build_l6_agent_definition(
             agent_name=agent_name,
             fabric_data_agent_connection_id=fabric_connection_id,
-            foundry_remote_tool_connection_id=remote_tool_connection_id,
         )
         definition_hash = persist_l6_agent_definition(
             output_path,

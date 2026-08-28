@@ -13,8 +13,7 @@ commands, and exercises L7 dry-run and live rejection using local generic
 observations. It does not import project modules from the repository.
 
 Install the base wheel only for 0.2.4 acceptance. GitHub Copilot runs the CLI as
-a local subprocess. `[agent]` is optional for Foundry agent management and
-`[app]` is optional for future hosted integration; neither is a release gate.
+a local subprocess.
 
 ## Results
 

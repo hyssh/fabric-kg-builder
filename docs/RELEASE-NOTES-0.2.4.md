@@ -25,11 +25,5 @@ create/delete APIs do not document ETag/CAS rollback, the live Azure adapter
 fails first-create preflight rather than risk deleting a concurrently changed
 item.
 
-RemoteTool hosting, distributed Blob-lease L6 authority, signer
-rotation/revocation, and RDF serialization are deferred. The canonical L6
-five-tool definition remains generated and local in this release.
-
 The supported acceptance architecture is a base-wheel `fabric-kg` subprocess
-invoked locally by GitHub Copilot with `deploy_builtin_agent=false`. Hosted
-RemoteTool/app extras, public endpoint, audience, and app-role are optional
-future integration rather than 0.2.4 requirements.
+invoked locally by GitHub Copilot with `deploy_builtin_agent=false`.

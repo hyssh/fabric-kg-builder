@@ -1219,7 +1219,7 @@ class L7Planner:
                     readback_expectation={
                         "stable_id": resource_id,
                         "name": name,
-                        "exact_category_target_audience_binding": True,
+                        "exact_security_properties": True,
                     },
                     rollback=RollbackStep(
                         action="delete-created" if action == "create" else "none",
@@ -1240,8 +1240,8 @@ class L7Planner:
         else:
             agent_action = "deferred"
             reason = (
-                "canonical L6 five-tool RemoteTool hosting is deferred; built-in "
-                "Search and Fabric Data Agent connections are prepared only"
+                "Foundry agent deployment is disabled; local L6 and built-in "
+                "Search/Fabric Data Agent inputs are prepared only"
             )
         actions.append(
             DeploymentAction(
