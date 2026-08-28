@@ -378,6 +378,9 @@ def _run_schema2_enrichment(
         load_l2_inputs,
     )
     from fabric_kg_builder.enrichment.schema2_stage import run_l2
+    from fabric_kg_builder.enrichment.schema2_extraction import (
+        raw_candidate_response_schema,
+    )
     from fabric_kg_builder.model.schemas import AssetRow, AssetVersionRow
 
     domain_path = Path(domain_file)
@@ -437,12 +440,14 @@ def _run_schema2_enrichment(
         def complete(self, *, prompt: str, work_unit: object) -> dict:
             return client.complete_json(
                 system=(
-                    "Return only a JSON object containing schema-constrained "
-                    "candidate observations for the supplied closed vocabulary. "
-                    "Do not invent type or relationship identifiers."
+                    "Return only one JSON object with the exact `candidates` "
+                    "array required by the supplied schema. Extract only "
+                    "source-grounded observations using the closed vocabulary "
+                    "in the user payload. Do not invent type, relationship, "
+                    "property, local entity, or evidence identifiers."
                 ),
                 user=prompt,
-                json_schema={},
+                json_schema=raw_candidate_response_schema(),
                 max_completion_tokens=8_000,
                 max_attempts=1,
             )
@@ -1835,12 +1840,15 @@ def enrich_cmd(
     out_dir = Path(output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if domain_file is not None:
+    schema2_domain_file = domain_file
+    if schema2_domain_file is None and Path("domain.yaml").exists():
+        schema2_domain_file = "domain.yaml"
+    if schema2_domain_file is not None:
         from fabric_kg_builder.domain.models import DomainContractV2
         from fabric_kg_builder.domain.service import load_domain_contract
 
         try:
-            resolved_contract = load_domain_contract(domain_file)
+            resolved_contract = load_domain_contract(schema2_domain_file)
         except Exception as exc:
             raise click.ClickException(
                 f"Invalid domain contract: {exc}"
@@ -1850,7 +1858,7 @@ def enrich_cmd(
                 result = _run_schema2_enrichment(
                     ctx_obj=ctx.obj or {},
                     input_path=input_path,
-                    domain_file=domain_file,
+                    domain_file=schema2_domain_file,
                     max_concurrent=effective_max_concurrent,
                     model_override=model,
                 )

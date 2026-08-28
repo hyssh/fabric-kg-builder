@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli import cli
+from fabric_kg_builder.cli import enrich_cmd as enrich_cmd_module
 from fabric_kg_builder.contracts.base import canonical_sha256
 from fabric_kg_builder.domain.stage import (
     finalize_l1_stage,
@@ -23,6 +25,8 @@ from fabric_kg_builder.enrichment import schema2_sources
 from fabric_kg_builder.enrichment.schema2_extraction import (
     L2_EXTRACTOR_VERSION,
     L2_PROMPT_VERSION,
+    RawCandidateResponse,
+    raw_candidate_response_schema,
 )
 from fabric_kg_builder.enrichment.schema2_stage import (
     L2_RESPONSE_SCHEMA_HASH,
@@ -179,6 +183,68 @@ def test_l2_is_not_activated_in_product_cli() -> None:
     assert result.exit_code == 0
     assert "schema2" not in result.output.casefold()
     assert "l2" not in result.output.casefold()
+
+
+def test_l2_foundry_response_schema_requires_candidate_envelope() -> None:
+    schema = raw_candidate_response_schema()
+    assert schema["required"] == ["candidates"]
+    parsed = RawCandidateResponse.model_validate(
+        {
+            "candidates": [
+                {
+                    "candidate_kind": "entity",
+                    "local_id": "device-1",
+                    "observed_type": "Device",
+                    "label": "Device 1",
+                    "identity_key": {},
+                    "stable_source_identity": "device-1",
+                }
+            ]
+        }
+    )
+    assert parsed.candidates[0].candidate_kind == "entity"
+
+
+def test_enrich_dispatches_approved_schema2_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _state_root, domain_path = _approved_l1(tmp_path)
+    source = tmp_path / "source"
+    monkeypatch.setattr(
+        enrich_cmd_module,
+        "_resolve_max_concurrent",
+        lambda _ctx, _override: 1,
+    )
+    calls: list[dict[str, object]] = []
+
+    def run_schema2(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            receipt=SimpleNamespace(stage_receipt_id="receipt:l2")
+        )
+
+    monkeypatch.setattr(
+        enrich_cmd_module,
+        "_run_schema2_enrichment",
+        run_schema2,
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "enrich",
+            "--input",
+            str(source),
+            "--domain-file",
+            str(domain_path),
+            "--out",
+            str(tmp_path / "enriched"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "schema-2 extraction succeeded" in result.output
+    assert calls and calls[0]["domain_file"] == str(domain_path)
 
 
 def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(

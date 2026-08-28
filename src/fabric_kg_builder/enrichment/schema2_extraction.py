@@ -121,6 +121,20 @@ RawCandidate = Annotated[
 _RAW_CANDIDATES = TypeAdapter(list[RawCandidate])
 
 
+class RawCandidateResponse(_StrictProposal):
+    candidates: tuple[RawCandidate, ...]
+
+    @field_validator("candidates", mode="before")
+    @classmethod
+    def _json_candidates(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
+def raw_candidate_response_schema() -> dict[str, Any]:
+    """Return the exact L2 Foundry response envelope schema."""
+    return RawCandidateResponse.model_json_schema()
+
+
 @dataclass(frozen=True)
 class ClosedVocabulary:
     contract_hash: str
