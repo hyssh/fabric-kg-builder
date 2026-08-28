@@ -995,6 +995,8 @@ def _repair_zero_supported_routes(
         }
         supported_critical_ids: set[str] = set()
         for route in repaired_candidates.question_routes:
+            if route.question_id not in critical_ids:
+                continue
             if route.start_type_id is None:
                 continue
             if not _enumerate_paths(route, relationships, max_hops=4):
@@ -1006,8 +1008,7 @@ def _repair_zero_supported_routes(
                         reason_code="route_patch_path_unavailable",
                     )
                 )
-            if route.question_id in critical_ids:
-                supported_critical_ids.add(route.question_id)
+            supported_critical_ids.add(route.question_id)
         if supported_critical_ids != critical_ids:
             raise L1ZeroSupportedRoutesError(
                 _zero_route_audit(

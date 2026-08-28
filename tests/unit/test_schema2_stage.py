@@ -209,6 +209,10 @@ def test_l2_foundry_response_schema_requires_candidate_envelope() -> None:
         }
     )
     assert parsed.candidates[0].candidate_kind == "entity"
+    with pytest.raises(Exception, match="extra_forbidden"):
+        RawCandidateResponse.model_validate(
+            {"candidates": [], "unexpected": True}
+        )
 
 
 def test_enrich_dispatches_approved_schema2_contract(

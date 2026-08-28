@@ -379,6 +379,7 @@ def _run_schema2_enrichment(
     )
     from fabric_kg_builder.enrichment.schema2_stage import run_l2
     from fabric_kg_builder.enrichment.schema2_extraction import (
+        RawCandidateResponse,
         raw_candidate_response_schema,
     )
     from fabric_kg_builder.model.schemas import AssetRow, AssetVersionRow
@@ -438,7 +439,7 @@ def _run_schema2_enrichment(
 
     class FoundryCandidateService:
         def complete(self, *, prompt: str, work_unit: object) -> dict:
-            return client.complete_json(
+            raw = client.complete_json(
                 system=(
                     "Return only one JSON object with the exact `candidates` "
                     "array required by the supplied schema. Extract only "
@@ -451,11 +452,19 @@ def _run_schema2_enrichment(
                 max_completion_tokens=8_000,
                 max_attempts=1,
             )
+            return RawCandidateResponse.model_validate(raw).model_dump(
+                mode="json"
+            )
 
-    model_version = model_override or str(
+    configured_model = str(
         getattr(getattr(client, "_config", None), "chat_deployment", "")
         or "configured-foundry-chat"
     )
+    if model_override and model_override != configured_model:
+        raise ValueError(
+            "schema-2 --model must match the configured Foundry deployment"
+        )
+    model_version = configured_model
     prompt_hash = canonical_sha256(
         {
             "stage": "L2",
