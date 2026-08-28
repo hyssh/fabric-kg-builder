@@ -704,8 +704,11 @@ def test_successful_global_rollback_removes_ownership_outputs(
     payload = b'{"attempt":"release-owned"}\n'
     ownership_path.write_bytes(payload)
     ownership_path.chmod(0o400)
+    identity = ownership_path.stat(follow_symlinks=False)
     backend = object.__new__(AzureL7Backend)
-    backend._ownership_outputs = {ownership_path: payload}
+    backend._ownership_outputs = {
+        ownership_path: (payload, identity.st_dev, identity.st_ino)
+    }
 
     backend.finalize_rollback()
 
@@ -724,12 +727,25 @@ def test_identical_preexisting_ownership_output_is_not_transaction_owned(
     backend = object.__new__(AzureL7Backend)
     backend._ownership_outputs = {}
 
-    if _write_immutable(ownership_path, payload):
-        backend._ownership_outputs[ownership_path] = payload
+    identity = _write_immutable(ownership_path, payload)
+    if identity is not None:
+        backend._ownership_outputs[ownership_path] = (payload, *identity)
     backend.finalize_rollback()
 
     assert ownership_path.read_bytes() == payload
     assert backend._ownership_outputs == {}
+
+
+@pytest.mark.unit
+def test_writable_preexisting_ownership_output_is_rejected(
+    tmp_path: Path,
+) -> None:
+    ownership_path = tmp_path / "ownership.json"
+    payload = b'{"attempt":"preexisting"}\n'
+    ownership_path.write_bytes(payload)
+
+    with pytest.raises(L7ReleaseError, match="unsafe ownership or mode"):
+        _write_immutable(ownership_path, payload)
 
 
 @pytest.mark.unit
@@ -1035,6 +1051,69 @@ def test_project_connection_uses_real_token_and_independent_readback() -> None:
         headers["Authorization"] == "Bearer real-access-token"
         for _, headers in calls
     )
+
+
+@pytest.mark.unit
+def test_connection_readback_drift_is_not_deleted_without_exact_binding() -> None:
+    created: dict[str, Any] | None = None
+    methods: list[str] = []
+
+    def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+        timeout: int,
+        allow_redirects: bool,
+    ) -> _Response:
+        nonlocal created
+        methods.append(method)
+        if method == "GET" and created is None:
+            return _Response(404)
+        if method == "PUT":
+            created = dict(json or {})
+            return _Response(
+                201,
+                {
+                    "id": url.split("?")[0].removeprefix(
+                        "https://management.azure.com"
+                    ),
+                    "properties": created["properties"],
+                },
+            )
+        if method == "DELETE":
+            raise AssertionError("concurrently changed connection was deleted")
+        assert created is not None
+        drifted = json_module_roundtrip(created["properties"])
+        drifted["target"] = "https://concurrent.example"
+        return _Response(
+            200,
+            {
+                "id": url.split("?")[0].removeprefix(
+                    "https://management.azure.com"
+                ),
+                "properties": drifted,
+            },
+            etag='"concurrent"',
+        )
+
+    client = FoundryProjectConnectionClient(
+        subscription_id="subscription",
+        resource_group="group",
+        account_name="account",
+        project_name="project",
+        credential=_Credential(),
+        request=request,
+    )
+    with pytest.raises(Exception, match="readback mismatch"):
+        client.upsert_search(
+            name="fabric-kg-024-search",
+            endpoint="https://example.search.windows.net",
+            create_only=True,
+            attempt_id="op-" + "a" * 64,
+        )
+    assert "DELETE" not in methods
 
 
 @pytest.mark.unit

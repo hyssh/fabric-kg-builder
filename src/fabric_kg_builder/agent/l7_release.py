@@ -622,21 +622,35 @@ def load_observation(path: Path) -> L7Observation:
         raise L7ReleaseError(f"invalid L7 observation: {path}") from exc
 
 
-def _write_immutable(path: Path, payload: bytes) -> bool:
-    def existing_matches() -> bool:
+def _write_immutable(path: Path, payload: bytes) -> tuple[int, int] | None:
+    def existing_identity() -> tuple[int, int] | None:
         try:
-            mode = path.lstat().st_mode
+            descriptor = os.open(
+                path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            )
         except FileNotFoundError:
-            return False
-        if not stat.S_ISREG(mode):
-            raise L7ReleaseError(f"immutable path is not a regular file: {path}")
-        existing = path.read_bytes()
+            return None
+        except OSError as exc:
+            raise L7ReleaseError(
+                f"immutable path cannot be opened safely: {path}"
+            ) from exc
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != _effective_uid()
+                or stat.S_IMODE(opened.st_mode) & 0o222
+            ):
+                raise L7ReleaseError(
+                    f"immutable path has unsafe ownership or mode: {path}"
+                )
+            existing = stream.read()
         if existing != payload:
             raise L7ReleaseError(f"refusing to replace immutable file: {path}")
-        return True
+        return opened.st_dev, opened.st_ino
 
-    if existing_matches():
-        return False
+    if existing_identity() is not None:
+        return None
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -645,11 +659,12 @@ def _write_immutable(path: Path, payload: bytes) -> bool:
         stream.flush()
         os.fsync(stream.fileno())
     os.chmod(temp, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    staged = temp.stat(follow_symlinks=False)
     try:
         os.link(temp, path)
     except FileExistsError:
-        if existing_matches():
-            return False
+        if existing_identity() is not None:
+            return None
         raise
     finally:
         temp.unlink(missing_ok=True)
@@ -667,7 +682,10 @@ def _write_immutable(path: Path, payload: bytes) -> bool:
         except OSError:
             pass
         raise
-    return True
+    published = path.stat(follow_symlinks=False)
+    if (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino):
+        raise L7ReleaseError("immutable publication inode changed")
+    return published.st_dev, published.st_ino
 
 
 def _fsync_parent(path: Path) -> None:
@@ -1337,7 +1355,7 @@ class AzureL7Backend:
         self._created_etags: dict[str, str] = {}
         self._mutation_confirmed: set[str] = set()
         self._created_fabric_ids: dict[str, str] = {}
-        self._ownership_outputs: dict[Path, bytes] = {}
+        self._ownership_outputs: dict[Path, tuple[bytes, int, int]] = {}
 
     def _artifact_json(self, binding: ArtifactBinding) -> Any:
         return _artifact_value(binding, self.artifact_base)
@@ -2361,8 +2379,9 @@ class AzureL7Backend:
                 + "\n"
             ).encode()
             path = Path(str(target.ownership_receipt_output))
-            if _write_immutable(path, payload):
-                self._ownership_outputs[path] = payload
+            identity = _write_immutable(path, payload)
+            if identity is not None:
+                self._ownership_outputs[path] = (payload, *identity)
             registry_key = (
                 f"{config.tenant_id.casefold()}/"
                 f"{config.fabric_workspace_id.casefold()}/"
@@ -2380,8 +2399,12 @@ class AzureL7Backend:
                 )
                 + "\n"
             ).encode()
-            if _write_immutable(registry_path, registry_payload):
-                self._ownership_outputs[registry_path] = registry_payload
+            identity = _write_immutable(registry_path, registry_payload)
+            if identity is not None:
+                self._ownership_outputs[registry_path] = (
+                    registry_payload,
+                    *identity,
+                )
 
     def apply(self, config: L7ReleaseConfig, action: DeploymentAction) -> ResourceReadback:
         if action.component.startswith("fabric-"):
@@ -2650,13 +2673,29 @@ class AzureL7Backend:
         )
 
     def _cleanup_ownership_outputs(self) -> None:
-        for path, payload in list(self._ownership_outputs.items()):
+        for path, owned in list(self._ownership_outputs.items()):
+            payload, device, inode = owned
             try:
-                if path.read_bytes() != payload:
-                    raise L7ReleaseError(
-                        "ownership output changed before rollback"
+                descriptor = os.open(
+                    path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                )
+                with os.fdopen(descriptor, "rb") as stream:
+                    current = os.fstat(stream.fileno())
+                    if (
+                        (current.st_dev, current.st_ino) != (device, inode)
+                        or stream.read() != payload
+                    ):
+                        raise L7ReleaseError(
+                            "ownership output changed before rollback"
+                        )
+                    os.fchmod(
+                        stream.fileno(), stat.S_IRUSR | stat.S_IWUSR
                     )
-                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+                    linked = path.stat(follow_symlinks=False)
+                    if (linked.st_dev, linked.st_ino) != (device, inode):
+                        raise L7ReleaseError(
+                            "ownership output inode changed before rollback"
+                        )
                 path.unlink()
                 _fsync_parent(path)
             except OSError as exc:

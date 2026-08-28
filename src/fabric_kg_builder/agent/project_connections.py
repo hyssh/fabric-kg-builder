@@ -609,6 +609,7 @@ class FoundryProjectConnectionClient:
                 if (
                     observed is not None
                     and observed.attempt_id == operation_attempt_id
+                    and observed.properties_hash == expected_hash
                 ):
                     etag = mutation_etag or observed.etag
                     if etag:
