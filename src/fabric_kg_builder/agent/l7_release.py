@@ -622,7 +622,23 @@ def load_observation(path: Path) -> L7Observation:
         raise L7ReleaseError(f"invalid L7 observation: {path}") from exc
 
 
+def _secure_output_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent = path.parent.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != _effective_uid()
+        or stat.S_IMODE(parent.st_mode) & 0o022
+    ):
+        raise L7ReleaseError(
+            "immutable output directory must be owner-controlled and not "
+            "group/world writable"
+        )
+
+
 def _write_immutable(path: Path, payload: bytes) -> tuple[int, int] | None:
+    _secure_output_parent(path)
+
     def existing_identity() -> tuple[int, int] | None:
         try:
             descriptor = os.open(
@@ -651,7 +667,6 @@ def _write_immutable(path: Path, payload: bytes) -> tuple[int, int] | None:
 
     if existing_identity() is not None:
         return None
-    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as stream:
@@ -2676,28 +2691,41 @@ class AzureL7Backend:
         for path, owned in list(self._ownership_outputs.items()):
             payload, device, inode = owned
             try:
-                descriptor = os.open(
-                    path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                )
-                with os.fdopen(descriptor, "rb") as stream:
-                    current = os.fstat(stream.fileno())
-                    if (
-                        (current.st_dev, current.st_ino) != (device, inode)
-                        or stream.read() != payload
-                    ):
-                        raise L7ReleaseError(
-                            "ownership output changed before rollback"
-                        )
-                    os.fchmod(
-                        stream.fileno(), stat.S_IRUSR | stat.S_IWUSR
+                _secure_output_parent(path)
+                directory = os.open(path.parent, os.O_RDONLY)
+                try:
+                    descriptor = os.open(
+                        path.name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=directory,
                     )
-                    linked = path.stat(follow_symlinks=False)
-                    if (linked.st_dev, linked.st_ino) != (device, inode):
-                        raise L7ReleaseError(
-                            "ownership output inode changed before rollback"
+                    with os.fdopen(descriptor, "rb") as stream:
+                        current = os.fstat(stream.fileno())
+                        if (
+                            (current.st_dev, current.st_ino)
+                            != (device, inode)
+                            or stream.read() != payload
+                        ):
+                            raise L7ReleaseError(
+                                "ownership output changed before rollback"
+                            )
+                        os.fchmod(
+                            stream.fileno(),
+                            stat.S_IRUSR | stat.S_IWUSR,
                         )
-                path.unlink()
-                _fsync_parent(path)
+                        linked = os.stat(
+                            path.name,
+                            dir_fd=directory,
+                            follow_symlinks=False,
+                        )
+                        if (linked.st_dev, linked.st_ino) != (device, inode):
+                            raise L7ReleaseError(
+                                "ownership output inode changed before rollback"
+                            )
+                        os.unlink(path.name, dir_fd=directory)
+                        os.fsync(directory)
+                finally:
+                    os.close(directory)
             except OSError as exc:
                 raise L7ReleaseError(
                     "ownership output rollback failed"
