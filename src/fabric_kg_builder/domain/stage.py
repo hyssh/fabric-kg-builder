@@ -3024,6 +3024,7 @@ def _persist_payloads(
     *,
     state_root: Path,
     domain_path: Path,
+    remove_relative: tuple[Path, ...] = (),
 ) -> None:
     state_root.parent.mkdir(parents=True, exist_ok=True)
     temp_root = Path(
@@ -3045,6 +3046,8 @@ def _persist_payloads(
             for existing in state_root.rglob("*"):
                 if existing.is_file():
                     relative = existing.relative_to(state_root)
+                    if relative in remove_relative:
+                        continue
                     replacement = temp_root / relative
                     if not replacement.exists():
                         replacement.parent.mkdir(parents=True, exist_ok=True)
@@ -3157,6 +3160,11 @@ def finalize_l1_stage(
             payloads,
             state_root=state_root,
             domain_path=domain_path,
+            remove_relative=(
+                (Path("domain-approval-context.json"),)
+                if decision is None
+                else ()
+            ),
         )
     return L1StageResult(
         status=status,

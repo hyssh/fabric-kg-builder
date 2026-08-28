@@ -359,6 +359,11 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
     runner = CliRunner()
     domain_path = tmp_path / "domain.yaml"
     state_root = tmp_path / ".fkg" / "l1"
+    state_root.mkdir(parents=True)
+    (state_root / "domain-approval-context.json").write_text(
+        '{"stale":true}',
+        encoding="utf-8",
+    )
     draft = runner.invoke(
         cli,
         [
@@ -377,6 +382,7 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
         ],
     )
     assert draft.exit_code == 0, draft.output
+    assert not (state_root / "domain-approval-context.json").exists()
     assert "[init-domain] approval-anchors project_id=" in draft.output
     assert " run_id=" in draft.output
     assert " proposal_hash=" in draft.output
