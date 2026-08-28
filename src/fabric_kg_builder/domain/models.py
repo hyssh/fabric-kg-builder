@@ -1239,6 +1239,7 @@ class DomainContractV2(V2StrictModel):
                 and (
                     not plans_by_id[question_id].covered
                     or coverage.coverage_status != "covered"
+                    or not coverage.requirement_ids
                 )
             ):
                 raise ValueError(

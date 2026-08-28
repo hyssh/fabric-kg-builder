@@ -68,7 +68,13 @@ def _approved_l1(
                     "requirement_id": (
                         "completeness-requirement:l2-stage.record-subjects"
                     ),
-                    "competency_question_ids": ["cq:q1"],
+                    "competency_question_ids": [
+                        "cq:q1",
+                        "cq:q2",
+                        "cq:q3",
+                        "cq:q4",
+                        "cq:q5",
+                    ],
                     "requirement_kind": "structured_fact_set",
                     "scope_type_id": "semantic-type:l2-stage.record",
                     "scoped_subtype_id": None,
