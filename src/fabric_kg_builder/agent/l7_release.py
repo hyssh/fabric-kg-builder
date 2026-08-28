@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import secrets
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -475,9 +476,6 @@ class L7Planner:
             raise L7ReleaseError("Search index schema must be a JSON object")
         index_schema = dict(index_schema)
         index_schema["name"] = config.search.index_name
-        index_schema["description"] = (
-            "fabric-kg-024:" + config.search.index_schema.canonical_hash
-        )
         documents = _document_values(config.search.documents, base)
         index_desired_hash = canonical_sha256(
             {
@@ -964,11 +962,7 @@ class AzureL7Backend:
         body: dict[str, Any],
         token: str,
     ) -> tuple[Any, dict[str, Any]]:
-        marker = (
-            "fabric-kg-024:" + config.search.index_schema.canonical_hash
-            if action.component == "search-index"
-            else "fabric-kg-024:" + action.desired_hash
-        )
+        marker = "fabric-kg-024-attempt:" + secrets.token_hex(32)
         desired = {**body, "description": marker}
         try:
             response = self._request(
