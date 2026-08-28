@@ -146,6 +146,37 @@ def test_schema_2_dry_run_makes_no_writes_or_remote_calls(tmp_path: Path) -> Non
     assert not state_root.exists()
 
 
+def test_schema2_precondition_failure_replaces_current_audit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "records.txt").write_text("records", encoding="utf-8")
+    state_root = tmp_path / ".fkg" / "l1"
+    state_root.mkdir(parents=True)
+    audit_path = state_root / "proposal-failure-audit.json"
+    audit_path.write_text('{"error_code":"STALE"}', encoding="utf-8")
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init-domain",
+            "--input",
+            str(source),
+            "--dry-run",
+            "--project-id",
+            "surface-024",
+            "--state-dir",
+            str(state_root),
+        ],
+    )
+    assert result.exit_code != 0
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["error_code"] == "L1_STAGE_FAILED"
+    assert audit["failures"] == [
+        {"path": "preflight.intake", "code": "intake_required"}
+    ]
+
+
 def test_schema_2_noninteractive_writes_blocked_draft(tmp_path: Path) -> None:
     source, intake_path, candidates_path = _write_inputs(tmp_path)
     runner = CliRunner()

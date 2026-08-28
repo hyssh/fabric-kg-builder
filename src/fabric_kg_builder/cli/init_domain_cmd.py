@@ -760,28 +760,45 @@ def _run_schema_2_l1(
         try_resume_l1,
     )
 
+    state_root = Path(state_dir)
+    provisional_source = Path(input_path) if input_path else Path("unknown")
+    effective_project_id = (
+        project_id
+        or os.environ.get("FABRIC_KG_PROJECT_ID")
+        or f"project:{provisional_source.resolve().name}"
+    )
+    run_id = f"run:{uuid.uuid4().hex}"
+
+    def fail_precondition(path: str, code: str) -> None:
+        audit_path = _persist_early_l1_failure_audit(
+            state_root=state_root,
+            project_id=effective_project_id,
+            run_id=run_id,
+            path=path,
+            code=code,
+        )
+        raise click.ClickException(
+            f"L1_STAGE_FAILED; audit={audit_path}"
+        )
+
     if input_path is None:
+        fail_precondition("preflight.source", "input_required")
         raise click.ClickException(
             "Schema-2 L1 requires --input for complete corpus inventory. "
             "Use --legacy-schema-1 for the prior workflow."
         )
     if force_interactive and non_interactive:
+        fail_precondition("preflight.mode", "mode_conflict")
         raise click.ClickException(
             "--interactive and --non-interactive are mutually exclusive"
         )
     if approve:
+        fail_precondition("preflight.approval", "approve_not_supported")
         raise click.ClickException(
             "--approve is schema-1-only. Schema-2 requires the one-summary "
             "interactive decision or explicit 'fabric-kg domain approve'."
         )
-    state_root = Path(state_dir)
     source_path = Path(input_path)
-    effective_project_id = (
-        project_id
-        or os.environ.get("FABRIC_KG_PROJECT_ID")
-        or f"project:{source_path.resolve().name}"
-    )
-    run_id = f"run:{uuid.uuid4().hex}"
     if not source_path.exists():
         audit_path = _persist_early_l1_failure_audit(
             state_root=state_root,
@@ -795,6 +812,7 @@ def _run_schema_2_l1(
         )
     out_path = Path(output_path)
     if out_path.exists() and not force and not resume:
+        fail_precondition("preflight.output", "output_exists")
         raise click.ClickException(
             f"Domain contract already exists at '{out_path}'. "
             "Use --resume or --force."
@@ -814,6 +832,7 @@ def _run_schema_2_l1(
                 f"L1_STAGE_FAILED; audit={audit_path}"
             ) from exc
     elif non_interactive or dry_run:
+        fail_precondition("preflight.intake", "intake_required")
         raise click.ClickException(
             "--intake is required for schema-2 non-interactive and dry-run modes"
         )
