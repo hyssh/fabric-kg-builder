@@ -1235,8 +1235,7 @@ class DomainContractV2(V2StrictModel):
             if not set(coverage.requirement_ids) <= set(requirement_by_id):
                 raise ValueError("completeness coverage references unknown requirement")
             if (
-                self.approval.status == "approved"
-                and questions_by_id[question_id].business_critical
+                questions_by_id[question_id].business_critical
                 and (
                     not plans_by_id[question_id].covered
                     or coverage.coverage_status != "covered"

@@ -63,7 +63,11 @@ Propose enough evidence-backed semantic types to serve as route endpoints, and
 8 to 20 evidence-backed advisory relationship candidates when the verified
 source profile supports them (hard maximum 24). The relationships must form
 paths for the exact supplied competency question IDs. Return fewer only when
-evidence is insufficient; unsupported questions must say so.
+evidence is insufficient; unsupported questions must say so. A candidate set
+is acceptable only when every business-critical competency question has both
+an evidence-backed relationship path and completeness coverage. Propose enough
+eligible types and relationships to cover every critical question; partial
+critical coverage is a failed proposal, not a successful minimum.
 Every unsupported question route must keep both endpoint IDs null and include a
 non-empty unsupported_reason. Never convert an unsupported route into a supported
 route during schema repair and never add unapproved vocabulary. Propose sufficient
@@ -606,6 +610,9 @@ def build_draft_contract_from_candidates(
     ]
     closure = build_type_hierarchy_closure(entity_types, relationships)
 
+    plans_by_question = {
+        plan.question_id: plan for plan in selection.question_plans
+    }
     coverage: list[CompletenessQuestionCoverageV2] = []
     for question in intake.competency_questions:
         requirements = [
@@ -624,22 +631,41 @@ def build_draft_contract_from_candidates(
             for requirement in requirements
             if requirement.coverage_status == "unsupported"
         ]
+        plan = plans_by_question[question.id]
+        path_unsupported = not plan.covered
+        unsupported_reason = (
+            plan.unsupported_reason or "no_validated_relationship_path"
+            if path_unsupported
+            else None
+        )
         coverage.append(
             CompletenessQuestionCoverageV2(
                 question_id=question.id,
                 requirement_ids=[
                     requirement.requirement_id for requirement in requirements
                 ],
-                covered_role_ids=sorted(set(roles)) if not unsupported else [],
-                missing_role_ids=sorted(set(roles)) if unsupported else [],
-                coverage_status="unsupported" if unsupported else "covered",
+                covered_role_ids=(
+                    sorted(set(roles))
+                    if not unsupported and not path_unsupported
+                    else []
+                ),
+                missing_role_ids=(
+                    sorted(set(roles))
+                    if unsupported or path_unsupported
+                    else []
+                ),
+                coverage_status=(
+                    "unsupported"
+                    if unsupported or path_unsupported
+                    else "covered"
+                ),
                 unsupported_reason=(
                     "; ".join(
                         requirement.unsupported_reason or "unsupported"
                         for requirement in unsupported
                     )
                     if unsupported
-                    else None
+                    else unsupported_reason
                 ),
             )
         )

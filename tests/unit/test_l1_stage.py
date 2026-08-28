@@ -183,41 +183,52 @@ class _RepairingProposalClient:
 
     def complete_json(self, **kwargs):
         self.calls += 1
-        if self.calls != 1:
-            raise AssertionError("proposal client must not be retried")
-        raw = _candidates("records")
-        route = raw["question_routes"][0]
-        route["start_type_id"] = (
-            route["start_type_id"] if self.half_route else None
-        )
-        route["end_type_id"] = None
-        route.pop("unsupported_reason", None)
-        return raw
+        if self.calls == 1:
+            raw = _candidates("records")
+            route = raw["question_routes"][0]
+            route["start_type_id"] = (
+                route["start_type_id"] if self.half_route else None
+            )
+            route["end_type_id"] = None
+            route.pop("unsupported_reason", None)
+            return raw
+        request = json.loads(kwargs["user"])
+        return {
+            "question_routes": [
+                {
+                    "question_id": item["question_id"],
+                    "source_type_id": "semantic-type:records.record",
+                    "target_type_id": "semantic-type:records.subject",
+                    "unsupported_reason": None,
+                }
+                for item in request["ordered_competency_questions"]
+            ]
+        }
 
 
-def test_proposal_route_reason_is_normalized_locally_without_retry(
+def test_proposal_route_reason_triggers_bounded_critical_route_repair(
     tmp_path: Path,
 ) -> None:
     client = _RepairingProposalClient()
     prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
-    assert client.calls == 1
-    assert prepared.model_call_count == 1
-    assert (
-        prepared.candidates.question_routes[0].unsupported_reason
-        == "unsupported_reason_missing"
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+    assert all(
+        route.start_type_id is not None
+        for route in prepared.candidates.question_routes
     )
 
 
-def test_half_defined_route_downgrades_without_regeneration(
+def test_half_defined_route_triggers_bounded_critical_route_repair(
     tmp_path: Path,
 ) -> None:
     client = _RepairingProposalClient(half_route=True)
     prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
     route = prepared.candidates.question_routes[0]
-    assert route.start_type_id is None
-    assert route.end_type_id is None
-    assert route.unsupported_reason == "route_endpoint_pair_half_defined"
-    assert client.calls == 1
+    assert route.start_type_id is not None
+    assert route.end_type_id is not None
+    assert route.unsupported_reason is None
+    assert client.calls == 2
 
 
 @pytest.mark.parametrize(
@@ -321,10 +332,8 @@ class _ZeroRouteRepairClient:
             return raw
         request = json.loads(kwargs["user"])
         routes = []
-        for index, question in enumerate(
-            request["ordered_competency_questions"]
-        ):
-            if index == 0 and not self.keep_unsupported:
+        for question in request["ordered_competency_questions"]:
+            if not self.keep_unsupported:
                 routes.append(
                     {
                         "question_id": question["question_id"],
@@ -381,6 +390,25 @@ class _CandidateRegenerationClient:
                 route["start_type_id"] = None
                 route["end_type_id"] = None
                 route["unsupported_reason"] = "No candidate relationship."
+        return raw
+
+
+class _PartialCriticalCoverageClient:
+    def __init__(self, *, second_valid: bool) -> None:
+        self.calls = 0
+        self.second_valid = second_valid
+
+    def complete_json(self, **kwargs):
+        self.calls += 1
+        raw = _candidates("records")
+        if self.calls == 1 or not self.second_valid:
+            raw["relationship_candidates"][0][
+                "competency_question_ids"
+            ] = ["cq:q1"]
+            for route in raw["question_routes"][1:]:
+                route["start_type_id"] = None
+                route["end_type_id"] = None
+                route["unsupported_reason"] = "No validated path."
         return raw
 
 
@@ -492,6 +520,32 @@ def test_insufficient_candidate_vocabulary_gets_one_full_regeneration(
     assert client.calls == 2
     assert prepared.model_call_count == 2
     assert prepared.candidates.relationship_candidates
+
+
+def test_partial_critical_coverage_gets_one_full_regeneration(
+    tmp_path: Path,
+) -> None:
+    client = _PartialCriticalCoverageClient(second_valid=True)
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+    assert all(
+        route.start_type_id is not None
+        for route in prepared.candidates.question_routes
+    )
+
+
+def test_repeated_partial_critical_coverage_is_typed_per_question(
+    tmp_path: Path,
+) -> None:
+    client = _PartialCriticalCoverageClient(second_valid=False)
+    with pytest.raises(L1ZeroSupportedRoutesError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    audit = captured.value.audit_payload
+    assert audit.model_call_count == 2
+    assert audit.critical_question_count == 5
+    assert audit.critical_coverable_question_count == 1
+    assert audit.critical_supported_route_count == 1
 
 
 def test_nonempty_unbound_vocabulary_gets_one_full_regeneration(

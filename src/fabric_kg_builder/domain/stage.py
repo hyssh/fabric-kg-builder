@@ -165,6 +165,9 @@ class L1ZeroRouteAudit(ContractModel):
     eligible_relationship_count: int
     eligible_relationship_id_hash: str
     coverable_question_count: int
+    critical_question_count: int
+    critical_supported_route_count: int
+    critical_coverable_question_count: int
     route_repair_attempted: bool
     route_repair_result_code: str
     terminal_error_code: str
@@ -478,9 +481,15 @@ def _zero_route_audit(
     trusted_question_ids = {
         question.id for question in preflight.intake.competency_questions
     }
+    critical_question_ids = {
+        question.id
+        for question in preflight.intake.competency_questions
+        if question.business_critical
+    }
     route_codes: list[str] = []
     route_states: list[Literal["supported", "unsupported"]] = []
     supported_count = 0
+    critical_supported_count = 0
     for route in candidates.question_routes:
         if route.start_type_id is not None:
             if _enumerate_paths(
@@ -489,6 +498,8 @@ def _zero_route_audit(
                 route_codes.append("supported_path_valid")
                 route_states.append("supported")
                 supported_count += 1
+                if route.question_id in critical_question_ids:
+                    critical_supported_count += 1
             else:
                 route_codes.append("supported_path_unavailable")
                 route_states.append("unsupported")
@@ -583,6 +594,16 @@ def _zero_route_audit(
                 for relationship in eligible_relationships
                 for question_id in relationship.competency_question_ids
                 if question_id in trusted_question_ids
+            }
+        ),
+        critical_question_count=len(critical_question_ids),
+        critical_supported_route_count=critical_supported_count,
+        critical_coverable_question_count=len(
+            {
+                question_id
+                for relationship in eligible_relationships
+                for question_id in relationship.competency_question_ids
+                if question_id in critical_question_ids
             }
         ),
         route_repair_attempted=(
@@ -1817,7 +1838,8 @@ def prepare_l1_stage(
     if (
         client is not None
         and model_call_count == 1
-        and initial_route_audit.coverable_question_count == 0
+        and initial_route_audit.critical_coverable_question_count
+        < initial_route_audit.critical_question_count
     ):
         retry_feedback = {
             "reason_code": "minimum_viable_vocabulary_insufficient",
@@ -1834,6 +1856,12 @@ def prepare_l1_stage(
             ),
             "coverable_question_count": (
                 initial_route_audit.coverable_question_count
+            ),
+            "critical_question_count": (
+                initial_route_audit.critical_question_count
+            ),
+            "critical_coverable_question_count": (
+                initial_route_audit.critical_coverable_question_count
             ),
         }
         candidate_regeneration_attempted = True
@@ -1941,7 +1969,10 @@ def prepare_l1_stage(
             second_audit.candidate_attempt_relationship_counts
         )
         candidates = second
-        if second_audit.coverable_question_count == 0:
+        if (
+            second_audit.critical_coverable_question_count
+            < second_audit.critical_question_count
+        ):
             raise L1ZeroSupportedRoutesError(
                 second_audit.model_copy(
                     update={
@@ -1958,7 +1989,8 @@ def prepare_l1_stage(
     if (
         client is not None
         and model_call_count == 1
-        and initial_route_audit.supported_route_count == 0
+        and initial_route_audit.critical_supported_route_count
+        < initial_route_audit.critical_question_count
     ):
         try:
             route_repair_attempted = True
@@ -2557,6 +2589,9 @@ def _approved_contract(
                 notes=draft.approval.notes,
             )
         }
+    )
+    approved = DomainContractV2.model_validate_json(
+        canonical_json(approved)
     )
     if compute_contract_hash(approved) != approval_context.domain_contract_hash:
         raise L1StageError("approved contract hash differs from approval context")
