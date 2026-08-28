@@ -158,6 +158,7 @@ class L1ZeroRouteAudit(ContractModel):
     eligible_relationship_id_hash: str
     route_repair_attempted: bool
     route_repair_result_code: str
+    terminal_error_code: str
     proposed_type_count: int
     proposed_type_id_hash: str
     proposed_relationship_count: int
@@ -312,6 +313,7 @@ def _zero_route_audit(
     model_call_count: Literal[1, 2],
     reason_code: str,
     route_repair_attempted: bool | None = None,
+    route_repair_result_code: str | None = None,
     initial_route_codes: tuple[str, ...] | None = None,
     initial_supported_route_count: int | None = None,
     initial_unsupported_route_count: int | None = None,
@@ -416,7 +418,10 @@ def _zero_route_audit(
             if route_repair_attempted is None
             else route_repair_attempted
         ),
-        route_repair_result_code=reason_code,
+        route_repair_result_code=(
+            route_repair_result_code or reason_code
+        ),
+        terminal_error_code=reason_code,
         proposed_type_count=len(candidates.semantic_type_candidates),
         proposed_type_id_hash=canonical_sha256(
             sorted(
@@ -541,7 +546,6 @@ def _repair_zero_supported_routes(
                 )
             )
         routes: list[ProposalQuestionRouteV2] = []
-        supported_count = 0
         for patch in repaired.question_routes:
             if patch.source_type_id is not None:
                 if (
@@ -562,16 +566,6 @@ def _repair_zero_supported_routes(
                     end_type_id=patch.target_type_id,
                     unsupported_reason=None,
                 )
-                if not _enumerate_paths(route, relationships, max_hops=4):
-                    raise L1ZeroSupportedRoutesError(
-                        _zero_route_audit(
-                            preflight=preflight,
-                            candidates=candidates,
-                            model_call_count=2,
-                            reason_code="route_patch_path_unavailable",
-                        )
-                    )
-                supported_count += 1
             else:
                 route = ProposalQuestionRouteV2(
                     question_id=patch.question_id,
@@ -583,6 +577,20 @@ def _repair_zero_supported_routes(
         repaired_candidates = candidates.model_copy(
             update={"question_routes": tuple(routes)}
         )
+        supported_count = 0
+        for route in repaired_candidates.question_routes:
+            if route.start_type_id is None:
+                continue
+            if not _enumerate_paths(route, relationships, max_hops=4):
+                raise L1ZeroSupportedRoutesError(
+                    _zero_route_audit(
+                        preflight=preflight,
+                        candidates=repaired_candidates,
+                        model_call_count=2,
+                        reason_code="route_patch_path_unavailable",
+                    )
+                )
+            supported_count += 1
         if supported_count == 0:
             raise L1ZeroSupportedRoutesError(
                 _zero_route_audit(
@@ -1273,6 +1281,11 @@ def prepare_l1_stage(
                 ),
                 reason_code="selection_dom_104",
                 route_repair_attempted=model_call_count >= 2,
+                route_repair_result_code=(
+                    "route_patch_validated"
+                    if model_call_count >= 2
+                    else "not_attempted"
+                ),
                 initial_route_codes=(
                     initial_route_audit.unsupported_reason_codes
                 ),

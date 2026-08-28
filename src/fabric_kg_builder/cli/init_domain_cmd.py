@@ -918,7 +918,14 @@ def _run_schema_2_l1(
             )
 
         failures: list[dict[str, str]] = []
-        if isinstance(exc, L1ProposalSchemaRepairError):
+        if isinstance(exc, L1ZeroSupportedRoutesError):
+            failures = [
+                {
+                    "path": "proposal.selection",
+                    "code": exc.audit_payload.terminal_error_code,
+                }
+            ]
+        elif isinstance(exc, L1ProposalSchemaRepairError):
             failures = [
                 {
                     "path": safe_path(tuple(path.split("."))),
