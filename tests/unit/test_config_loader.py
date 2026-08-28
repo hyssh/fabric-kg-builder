@@ -126,6 +126,19 @@ def test_load_config_interpolates_endpoint(tmp_project, monkeypatch):
     assert cfg.foundry.endpoint == "https://test.services.ai.azure.com"
 
 
+def test_chat_deployment_environment_override_wins(
+    tmp_project,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AZURE_AI_FOUNDRY_ENDPOINT",
+        "https://test.services.ai.azure.com",
+    )
+    monkeypatch.setenv("AZURE_AI_CHAT_DEPLOYMENT", "gpt-4-1")
+    cfg = load_config(env="dev")
+    assert cfg.foundry.chat_deployment == "gpt-4-1"
+
+
 def test_load_config_reads_secret_from_env(tmp_project, monkeypatch):
     """Secret values are read from environment, never from yaml."""
     monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://secret.endpoint.example.com")

@@ -44,14 +44,14 @@ foundry:
 enrichment:
   # Maximum concurrent LLM calls. Use 1 for sequential fallback.
   max_concurrent: 4
-  # Chat model deployment — gpt-4.1 @ >=200K TPM.
-  chat_deployment: gpt-4.1
+  # Chat model deployment — gpt-4-1 @ >=200K TPM.
+  chat_deployment: gpt-4-1
   # Embedding model deployment — text-embedding-3-large (1536 dims).
   embedding_deployment: text-embedding-3-large
   # LOCKED: must match the AI Search chunk_vector field width. Reindex if changed.
   embedding_dimensions: 1536
   # Vision uses the chat deployment (multimodal) by default.
-  vision_deployment: gpt-4.1
+  vision_deployment: gpt-4-1
 
 blob_storage:
   container: kg-assets
@@ -76,10 +76,10 @@ foundry:
 
 enrichment:
   max_concurrent: 4
-  chat_deployment: gpt-4.1
+  chat_deployment: gpt-4-1
   embedding_deployment: text-embedding-3-large
   embedding_dimensions: 1536
-  vision_deployment: gpt-4.1
+  vision_deployment: gpt-4-1
 
 blob_storage:
   container: kg-assets
