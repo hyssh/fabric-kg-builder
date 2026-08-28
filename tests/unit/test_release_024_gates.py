@@ -30,6 +30,7 @@ from fabric_kg_builder.agent.l7_release import (
     ObservationBackend,
     ResourceReadback,
     _ReceiptReservation,
+    _search_document_batches,
     _validated_service_url,
     _write_immutable,
     load_l7_config,
@@ -1490,6 +1491,7 @@ def test_failed_search_create_lro_reconciles_owned_resource(
         if item.component == "search-index"
     )
     backend = object.__new__(AzureL7Backend)
+    backend.credential = _ScopedCredential()
     backend._mutation_confirmed = set()
     backend._created_etags = {}
     stored: dict[str, Any] | None = None
@@ -1525,6 +1527,73 @@ def test_failed_search_create_lro_reconciles_owned_resource(
             "search-token",
         )
     assert deleted is True
+
+
+@pytest.mark.unit
+def test_mismatched_owned_search_create_is_conditionally_deleted(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    action = next(
+        item
+        for item in L7Planner(ObservationBackend(observation)).build(
+            config, config_path=config_path
+        ).actions
+        if item.component == "search-index"
+    )
+    backend = object.__new__(AzureL7Backend)
+    backend.credential = _ScopedCredential()
+    backend._mutation_confirmed = set()
+    backend._created_etags = {}
+    deleted = False
+
+    def transport(method: str, url: str, **kwargs: Any) -> _Response:
+        nonlocal deleted
+        if method == "DELETE":
+            deleted = True
+            return _Response(204)
+        if deleted:
+            return _Response(404)
+        return _Response(
+            200,
+            {
+                "name": config.search.index_name,
+                "description": action.ownership_marker,
+                "unexpected": "binding-drift",
+            },
+            etag='"owned"',
+        )
+
+    backend._request = transport
+    with pytest.raises(L7ReleaseError, match="foreign attempt or binding"):
+        backend._reconcile_search_create(
+            config,
+            action,
+            f"indexes/{config.search.index_name}",
+            {
+                "name": config.search.index_name,
+                "description": action.ownership_marker,
+            },
+            "search-token",
+            keep=False,
+        )
+    assert deleted is True
+
+
+@pytest.mark.unit
+def test_search_document_batches_respect_service_count_limit() -> None:
+    batches = _search_document_batches(
+        [{"id": str(index)} for index in range(1001)]
+    )
+    assert [len(batch) for batch in batches] == [1000, 1]
+    assert all(
+        item["@search.action"] == "upload"
+        for batch in batches
+        for item in batch
+    )
 
 
 @pytest.mark.unit

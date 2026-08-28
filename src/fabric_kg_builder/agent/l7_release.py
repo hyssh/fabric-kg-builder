@@ -497,6 +497,49 @@ def _document_values(binding: ArtifactBinding, base: Path) -> list[dict[str, Any
     return [dict(item) for item in value]
 
 
+def _search_document_batches(
+    documents: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    max_bytes = 15 * 1024 * 1024
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for document in documents:
+        action = {"@search.action": "upload", **document}
+        candidate = [*current, action]
+        encoded_size = len(
+            json.dumps(
+                {"value": candidate},
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+        )
+        if len(candidate) <= 1000 and encoded_size <= max_bytes:
+            current = candidate
+            continue
+        if not current:
+            raise L7ReleaseError(
+                "Search document exceeds the safe indexing payload limit"
+            )
+        batches.append(current)
+        current = [action]
+        if (
+            len(
+                json.dumps(
+                    {"value": current},
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode()
+            )
+            > max_bytes
+        ):
+            raise L7ReleaseError(
+                "Search document exceeds the safe indexing payload limit"
+            )
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _ownership_receipt(
     target: FabricDefinitionTarget,
     config: L7ReleaseConfig,
@@ -1938,7 +1981,7 @@ class AzureL7Backend:
             if not key.startswith("@odata.")
         }
         if observed_body != desired:
-            if keep and observed_body.get("description") == action.ownership_marker:
+            if observed_body.get("description") == action.ownership_marker:
                 etag = str(observed.headers.get("ETag") or "")
                 if etag:
                     self._mutation_confirmed.add(
@@ -2006,6 +2049,7 @@ class AzureL7Backend:
             response, schema = self._search_create_put(
                 config, action, path, schema, token
             )
+            body = schema
             if response.status_code not in (200, 201):
                 raise L7ReleaseError(
                     f"Search index create failed with HTTP {response.status_code}"
@@ -2013,24 +2057,33 @@ class AzureL7Backend:
             documents = _document_values(
                 config.search.documents, self.artifact_base
             )
-            if documents:
+            for batch in _search_document_batches(documents):
                 upload = self._request(
                     "POST",
                     self._search_url(
                         config, f"indexes/{config.search.index_name}/docs/index"
                     ),
                     token=token,
-                    body={
-                        "value": [
-                            {"@search.action": "upload", **item}
-                            for item in documents
-                            if isinstance(item, dict)
-                        ]
-                    },
+                    body={"value": batch},
                 )
                 if upload.status_code not in (200, 201):
                     raise L7ReleaseError(
                         f"Search document upload failed with HTTP {upload.status_code}"
+                    )
+                upload_result = self._json(
+                    upload, "Search document upload readback"
+                ).get("value")
+                if (
+                    not isinstance(upload_result, list)
+                    or len(upload_result) != len(batch)
+                    or any(
+                        not isinstance(item, dict)
+                        or item.get("status") is not True
+                        for item in upload_result
+                    )
+                ):
+                    raise L7ReleaseError(
+                        "Search document upload item readback mismatch"
                     )
             count = self._request(
                 "GET",
