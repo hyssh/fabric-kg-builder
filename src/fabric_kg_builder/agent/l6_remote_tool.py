@@ -29,6 +29,7 @@ from fabric_kg_builder.agent.l6_integration import (
 )
 from fabric_kg_builder.app.auth import AuthError, InboundAuthVerifier
 from fabric_kg_builder.contracts.base import canonical_sha256
+from fabric_kg_builder.version import RELEASE_VERSION
 
 
 class L6RemoteToolHandler(Protocol):
@@ -198,7 +199,7 @@ def build_l6_openapi_spec(
         "openapi": "3.1.0",
         "info": {
             "title": "Fabric KG L6 RemoteTool",
-            "version": "0.2.3",
+            "version": RELEASE_VERSION,
             "description": "Canonical evidence-only L6 tools; zero synthesis.",
         },
         "paths": paths,
@@ -263,7 +264,7 @@ def create_l6_remote_tool_app(
         description=(
             "Canonical evidence-only L6 tools. This host performs no synthesis."
         ),
-        version="0.2.3",
+        version=RELEASE_VERSION,
         docs_url=None,
         redoc_url=None,
         openapi_url="/openapi.json",

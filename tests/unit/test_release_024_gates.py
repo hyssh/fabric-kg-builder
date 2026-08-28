@@ -30,12 +30,17 @@ from fabric_kg_builder.agent.l7_release import (
     ObservationBackend,
     ResourceReadback,
     _ReceiptReservation,
+    _validated_service_url,
     load_l7_config,
     load_plan,
 )
 from fabric_kg_builder.agent.project_connections import (
     FoundryProjectConnectionClient,
+    fabric_data_agent_connection_properties,
+    normalize_connection_properties,
+    search_connection_properties,
 )
+from fabric_kg_builder.agent.l6_remote_tool import build_l6_openapi_spec
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.contracts.base import canonical_sha256
 
@@ -222,6 +227,7 @@ def test_release_version_and_36_top_level_commands() -> None:
     assert len(cli.commands) == 36
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
+    assert build_l6_openapi_spec()["info"]["version"] == __version__
 
 
 @pytest.mark.unit
@@ -692,10 +698,12 @@ def test_project_connection_uses_real_token_and_independent_readback() -> None:
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
         timeout: int,
+        allow_redirects: bool,
     ) -> _Response:
         nonlocal created
         calls.append((method, headers))
         assert timeout == 60
+        assert allow_redirects is False
         if method == "GET" and created is None:
             return _Response(404)
         if method == "PUT":
@@ -713,7 +721,12 @@ def test_project_connection_uses_real_token_and_independent_readback() -> None:
         assert created is not None
         readback = json_module_roundtrip(created["properties"])
         if "credentials" in readback:
-            readback["credentials"] = {"keys": None}
+            readback["credentials"] = {
+                "keys": {
+                    "workspace-id": None,
+                    "artifact-id": None,
+                }
+            }
         return _Response(
             200,
             {
@@ -764,7 +777,9 @@ def test_fabric_search_and_arm_tokens_reach_transport_but_not_errors(
         headers: dict[str, str],
         json: dict[str, Any] | None,
         timeout: int,
+        allow_redirects: bool,
     ) -> _Response:
+        assert allow_redirects is False
         captured.append(headers["Authorization"])
         return _Response(200, {})
 
@@ -801,3 +816,350 @@ def test_fabric_search_and_arm_tokens_reach_transport_but_not_errors(
 
 def json_module_roundtrip(value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(value))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "https://evil.example/operation",
+        "//evil.example/operation",
+        "http://api.fabric.microsoft.com/operation",
+        "https://user@api.fabric.microsoft.com/operation",
+        "https://api.fabric.microsoft.com:444/operation",
+    ],
+)
+def test_operation_url_rejects_token_origin_escape(candidate: str) -> None:
+    with pytest.raises(L7ReleaseError, match="origin validation"):
+        _validated_service_url(
+            candidate,
+            expected_origin="https://api.fabric.microsoft.com",
+            base_url="https://api.fabric.microsoft.com/v1/workspaces/w/items/i",
+        )
+
+
+@pytest.mark.unit
+def test_operation_url_accepts_only_relative_or_exact_absolute_origin() -> None:
+    expected = "https://example.search.windows.net"
+    base = f"{expected}/indexes/fabric-kg-024-index"
+    assert _validated_service_url(
+        "/operations/1", expected_origin=expected, base_url=base
+    ) == f"{expected}/operations/1"
+    assert _validated_service_url(
+        f"{expected}/operations/1", expected_origin=expected, base_url=base
+    ) == f"{expected}/operations/1"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "expected_origin",
+    [
+        "https://api.fabric.microsoft.com",
+        "https://example.search.windows.net",
+        "https://management.azure.com",
+        "https://account.services.ai.azure.com",
+    ],
+)
+def test_malicious_lro_location_is_rejected_before_token_attachment(
+    expected_origin: str,
+) -> None:
+    backend = object.__new__(AzureL7Backend)
+    calls = 0
+
+    def should_not_send(*args: object, **kwargs: object) -> _Response:
+        nonlocal calls
+        calls += 1
+        return _Response(200, {"status": "Succeeded"})
+
+    backend._request = should_not_send
+    with pytest.raises(L7ReleaseError, match="origin validation"):
+        backend._wait_lro(
+            "https://evil.example/operations/1?sig=secret",
+            "audience-token",
+            expected_origin=expected_origin,
+            base_url=f"{expected_origin}/resource",
+        )
+    assert calls == 0
+
+
+@pytest.mark.unit
+def test_redirect_is_not_followed_with_search_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[tuple[str, str]] = []
+
+    def redirect(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None,
+        timeout: int,
+        allow_redirects: bool,
+    ) -> _Response:
+        sent.append((url, headers["Authorization"]))
+        response = _Response(302)
+        response.headers["Location"] = "https://evil.example/steal"
+        return response
+
+    monkeypatch.setattr(requests, "request", redirect)
+    with pytest.raises(L7ReleaseError, match="origin validation"):
+        AzureL7Backend._request(
+            "GET",
+            "https://example.search.windows.net/operations/1",
+            token="search-token",
+            expected_origin="https://example.search.windows.net",
+        )
+    assert sent == [
+        (
+            "https://example.search.windows.net/operations/1",
+            "Bearer search-token",
+        )
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("authType", "ApiKey"),
+        ("category", "RemoteTool"),
+        ("target", "https://other.search.windows.net"),
+        ("audience", "api://other"),
+        ("isSharedToAll", False),
+        ("group", "Other"),
+    ],
+)
+def test_connection_security_field_drift_changes_actual_hash(
+    field: str,
+    value: Any,
+) -> None:
+    expected = search_connection_properties(
+        endpoint="https://example.search.windows.net",
+        attempt_id="op-" + "a" * 64,
+    )
+    changed = dict(expected)
+    changed[field] = value
+    assert canonical_sha256(normalize_connection_properties(changed)) != (
+        canonical_sha256(normalize_connection_properties(expected))
+    )
+
+
+@pytest.mark.unit
+def test_connection_extra_property_and_custom_key_name_fail_closed() -> None:
+    search = search_connection_properties(
+        endpoint="https://example.search.windows.net",
+        attempt_id="op-" + "a" * 64,
+    )
+    with pytest.raises(Exception, match="unexpected properties"):
+        normalize_connection_properties({**search, "unexpected": True})
+
+    fabric = fabric_data_agent_connection_properties(
+        workspace_id="workspace",
+        data_agent_id="agent",
+        attempt_id="op-" + "a" * 64,
+    )
+    fabric["credentials"]["keys"]["wrong"] = "value"
+    with pytest.raises(Exception, match="CustomKeys names"):
+        normalize_connection_properties(fabric)
+
+    mixed = fabric_data_agent_connection_properties(
+        workspace_id="workspace",
+        data_agent_id="agent",
+        attempt_id="op-" + "a" * 64,
+    )
+    mixed["credentials"]["keys"]["workspace-id"] = None
+    with pytest.raises(Exception, match="mixed visible and redacted"):
+        normalize_connection_properties(mixed)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("outcome", [500, 409, 429, "timeout"])
+def test_ambiguous_connection_create_reconciles_and_deletes_own_attempt(
+    outcome: int | str,
+) -> None:
+    stored: dict[str, Any] | None = None
+    methods: list[str] = []
+
+    def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+        timeout: int,
+        allow_redirects: bool,
+    ) -> _Response:
+        nonlocal stored
+        methods.append(method)
+        if method == "GET":
+            if stored is None:
+                return _Response(404)
+            return _Response(
+                200,
+                {
+                    "id": url.split("?")[0].removeprefix(
+                        "https://management.azure.com"
+                    ),
+                    "properties": stored,
+                },
+                etag='"owned"',
+            )
+        if method == "PUT":
+            stored = dict((json or {})["properties"])
+            if outcome == "timeout":
+                raise TimeoutError("commit then timeout")
+            return _Response(int(outcome))
+        if method == "DELETE":
+            assert headers["If-Match"] == '"owned"'
+            stored = None
+            return _Response(204)
+        raise AssertionError(method)
+
+    client = FoundryProjectConnectionClient(
+        subscription_id="subscription",
+        resource_group="group",
+        account_name="account",
+        project_name="project",
+        credential=_Credential(),
+        request=request,
+    )
+    with pytest.raises(Exception, match="rolled back|transport failed"):
+        client.upsert_search(
+            name="fabric-kg-024-search",
+            endpoint="https://example.search.windows.net",
+            create_only=True,
+            attempt_id="op-" + "a" * 64,
+        )
+    assert "DELETE" in methods
+    assert stored is None
+
+
+@pytest.mark.unit
+def test_connection_202_lro_uses_validated_arm_location() -> None:
+    stored: dict[str, Any] | None = None
+
+    def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+        timeout: int,
+        allow_redirects: bool,
+    ) -> _Response:
+        nonlocal stored
+        if method == "PUT":
+            stored = dict((json or {})["properties"])
+            response = _Response(202)
+            response.headers["Location"] = "/operations/connection-1"
+            return response
+        if "/operations/" in url:
+            return _Response(200, {"status": "Succeeded"})
+        if stored is None:
+            return _Response(404)
+        return _Response(
+            200,
+            {
+                "id": url.split("?")[0].removeprefix(
+                    "https://management.azure.com"
+                ),
+                "properties": stored,
+            },
+            etag='"owned"',
+        )
+
+    client = FoundryProjectConnectionClient(
+        subscription_id="subscription",
+        resource_group="group",
+        account_name="account",
+        project_name="project",
+        credential=_Credential(),
+        request=request,
+    )
+    result = client.upsert_search(
+        name="fabric-kg-024-search",
+        endpoint="https://example.search.windows.net",
+        create_only=True,
+        attempt_id="op-" + "a" * 64,
+    )
+    assert result.attempt_id == "op-" + "a" * 64
+
+
+@pytest.mark.unit
+def test_default_foundry_transport_uses_requests_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def request(
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> _Response:
+        calls.append(method)
+        return _Response(404)
+
+    monkeypatch.setattr(requests, "request", request)
+    client = FoundryProjectConnectionClient(
+        subscription_id="subscription",
+        resource_group="group",
+        account_name="account",
+        project_name="project",
+        credential=_Credential(),
+    )
+    assert client.get("fabric-kg-024-search") is None
+    assert calls == ["GET"]
+
+
+@pytest.mark.unit
+def test_failed_search_create_lro_reconciles_owned_resource(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    action = next(
+        item
+        for item in L7Planner(ObservationBackend(observation)).build(
+            config, config_path=config_path
+        ).actions
+        if item.component == "search-index"
+    )
+    backend = object.__new__(AzureL7Backend)
+    backend._mutation_confirmed = set()
+    backend._created_etags = {}
+    stored: dict[str, Any] | None = None
+    deleted = False
+
+    def transport(
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> _Response:
+        nonlocal stored, deleted
+        if method == "PUT":
+            stored = dict(kwargs["body"])
+            response = _Response(202)
+            response.headers["Location"] = "/operations/search-1"
+            return response
+        if "/operations/" in url:
+            return _Response(200, {"status": "Failed"})
+        if method == "DELETE":
+            deleted = True
+            return _Response(204)
+        if deleted:
+            return _Response(404)
+        return _Response(200, stored, etag='"owned"')
+
+    backend._request = transport
+    with pytest.raises(L7ReleaseError, match="rolled back"):
+        backend._search_create_put(
+            config,
+            action,
+            f"indexes/{config.search.index_name}",
+            {"name": config.search.index_name},
+            "search-token",
+        )
+    assert deleted is True

@@ -131,6 +131,8 @@ def test_openapi_is_exactly_bound_to_five_canonical_tools():
     }
     assert len(operations) == 5
     assert schema["x-fabric-kg-definition"]["zeroSynthesis"] is True
+    assert schema["info"]["version"] == "0.2.4"
+    assert _raw_app().version == "0.2.4"
 
 
 def test_auth_failure_is_sanitized_before_schema_validation():

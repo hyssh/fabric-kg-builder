@@ -12,18 +12,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol
 from urllib.parse import urlsplit
+from urllib.parse import urljoin
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from fabric_kg_builder.contracts.base import canonical_sha256
+from fabric_kg_builder.version import RELEASE_VERSION
 
 
-RELEASE_VERSION = "0.2.4"
 _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 _MANAGEMENT_SCOPE = "https://management.azure.com/.default"
 _SEARCH_SCOPE = "https://search.azure.com/.default"
 _COGNITIVE_SERVICES_USER_ROLE_ID = "a97b65f3-24c7-4388-baec-2e87135dc908"
 _FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
+_FABRIC_ORIGIN = "https://api.fabric.microsoft.com"
+_ARM_ORIGIN = "https://management.azure.com"
 _FABRIC_TYPES = {
     "DataAgent": "dataAgents",
     "GraphModel": "graphModels",
@@ -35,6 +38,28 @@ _RELEASE_NAME_PATTERN = r"^fabric-kg-024-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 
 class L7ReleaseError(RuntimeError):
     """Raised when an L7 release gate fails closed."""
+
+
+def _validated_service_url(
+    candidate: str,
+    *,
+    expected_origin: str,
+    base_url: str | None = None,
+) -> str:
+    expected = urlsplit(expected_origin)
+    resolved = urljoin(base_url or f"{expected_origin.rstrip('/')}/", candidate)
+    parsed = urlsplit(resolved)
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or parsed.port is not None
+        or parsed.hostname is None
+        or parsed.hostname.casefold() != (expected.hostname or "").casefold()
+        or parsed.scheme.casefold() != expected.scheme.casefold()
+    ):
+        raise L7ReleaseError("service operation URL origin validation failed")
+    return resolved
 
 
 class _StrictModel(BaseModel):
@@ -957,24 +982,39 @@ class L7Planner:
             f"{config.resource_group}/providers/Microsoft.CognitiveServices/accounts/"
             f"{config.foundry.account_name}/projects/{config.foundry.project_name}"
         )
+        from fabric_kg_builder.agent.project_connections import (
+            fabric_data_agent_connection_properties,
+            normalize_connection_properties,
+            search_connection_properties,
+        )
+
+        search_connection_hash = canonical_sha256(
+            normalize_connection_properties(
+                search_connection_properties(
+                    endpoint=config.search.endpoint,
+                    attempt_id=deployment_attempt_id,
+                )
+            )
+        )
+        fabric_connection_hash = canonical_sha256(
+            normalize_connection_properties(
+                fabric_data_agent_connection_properties(
+                    workspace_id=config.fabric_workspace_id,
+                    data_agent_id=config.foundry.data_agent_id,
+                    attempt_id=deployment_attempt_id,
+                )
+            )
+        )
         for kind, name, desired_hash in (
             (
                 "foundry-search-connection",
                 config.foundry.search_connection_name,
-                canonical_sha256(
-                    {"category": "CognitiveSearch", "target": config.search.endpoint}
-                ),
+                search_connection_hash,
             ),
             (
                 "foundry-fabric-connection",
                 config.foundry.fabric_connection_name,
-                canonical_sha256(
-                    {
-                        "category": "CustomKeys",
-                        "workspace_id": config.fabric_workspace_id,
-                        "data_agent_id": config.foundry.data_agent_id,
-                    }
-                ),
+                fabric_connection_hash,
             ),
         ):
             resource_id = f"{project_id}/connections/{name}"
@@ -1131,18 +1171,44 @@ class AzureL7Backend:
         token: str,
         body: dict[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        expected_origin: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         import requests
 
+        parsed = urlsplit(urljoin(base_url or "", url))
+        origin = expected_origin or (
+            f"{parsed.scheme}://{parsed.hostname}" if parsed.hostname else ""
+        )
+        safe_url = _validated_service_url(
+            url,
+            expected_origin=origin,
+            base_url=base_url,
+        )
         merged = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
         merged.update(dict(headers or {}))
         try:
-            return requests.request(
-                method, url, headers=merged, json=body, timeout=60
+            response = requests.request(
+                method,
+                safe_url,
+                headers=merged,
+                json=body,
+                timeout=60,
+                allow_redirects=False,
             )
+            if 300 <= response.status_code < 400:
+                redirect = str(response.headers.get("Location") or "")
+                if redirect:
+                    _validated_service_url(
+                        redirect,
+                        expected_origin=origin,
+                        base_url=safe_url,
+                    )
+                raise L7ReleaseError("service redirect was refused")
+            return response
         except requests.RequestException as exc:
             raise L7ReleaseError(f"{method} transport failed for declared resource") from exc
 
@@ -1195,11 +1261,25 @@ class AzureL7Backend:
             location = str(response.headers.get("Location") or "")
             if not location:
                 raise L7ReleaseError("Fabric getDefinition returned 202 without Location")
-            body = self._wait_lro(location, token)
+            body, operation_url = self._wait_lro(
+                location,
+                token,
+                expected_origin=_FABRIC_ORIGIN,
+                base_url=definition_url,
+            )
             definition = body.get("definition")
             if not isinstance(definition, dict):
+                operation_parts = urlsplit(operation_url)
+                result_url = operation_parts._replace(
+                    path=f"{operation_parts.path.rstrip('/')}/result",
+                    query="",
+                    fragment="",
+                ).geturl()
                 result = self._request(
-                    "GET", f"{location.rstrip('/')}/result", token=token
+                    "GET",
+                    result_url,
+                    token=token,
+                    expected_origin=_FABRIC_ORIGIN,
                 )
                 if result.status_code != 200:
                     raise L7ReleaseError("Fabric getDefinition result readback failed")
@@ -1229,7 +1309,10 @@ class AzureL7Backend:
             "search.index": True,
             "search.knowledge-source": False,
             "search.knowledge-base": False,
-            "foundry.project-connections": True,
+            # ARM preview exposes create-or-update PUT without documented
+            # atomic create-only/CAS semantics. Do not infer ownership from
+            # mutable metadata or conditionally delete an overwritten item.
+            "foundry.project-connections": False,
         }
         if config.search.foundry_role_assignment_id:
             foundry_scope = (
@@ -1390,26 +1473,39 @@ class AzureL7Backend:
                 headers={"If-None-Match": "*"},
             )
         except L7ReleaseError:
-            observed = self._request(
-                "GET", self._search_url(config, path), token=token
+            self._reconcile_search_create(
+                config,
+                action,
+                path,
+                desired,
+                token,
+                keep=False,
             )
-            if observed.status_code == 200:
-                observed_body = self._json(
-                    observed, f"{action.component} uncertain readback"
-                )
-                etag = str(observed.headers.get("ETag") or "")
-                if observed_body.get("description") == marker and etag:
-                    cleanup = self._request(
-                        "DELETE",
-                        self._search_url(config, path),
-                        token=token,
-                        headers={"If-Match": etag},
-                    )
-                    if cleanup.status_code not in (200, 202, 204, 404):
-                        raise L7ReleaseError(
-                            f"{action.component} uncertain cleanup failed"
-                        )
             raise
+        if response.status_code == 202:
+            location = str(response.headers.get("Location") or "")
+            if not location:
+                self._reconcile_search_create(
+                    config, action, path, desired, token, keep=False
+                )
+            try:
+                self._wait_lro(
+                    location,
+                    token,
+                    expected_origin=config.search.endpoint,
+                    base_url=self._search_url(config, path),
+                )
+            except L7ReleaseError:
+                self._reconcile_search_create(
+                    config, action, path, desired, token, keep=False
+                )
+            response = self._reconcile_search_create(
+                config, action, path, desired, token, keep=True
+            )
+        elif response.status_code not in (200, 201):
+            self._reconcile_search_create(
+                config, action, path, desired, token, keep=False
+            )
         if response.status_code in (200, 201):
             key = action.resource_id.casefold()
             self._mutation_confirmed.add(key)
@@ -1417,6 +1513,84 @@ class AzureL7Backend:
             if etag:
                 self._created_etags[key] = etag
         return response, desired
+
+    def _reconcile_search_create(
+        self,
+        config: L7ReleaseConfig,
+        action: DeploymentAction,
+        path: str,
+        desired: dict[str, Any],
+        token: str,
+        *,
+        keep: bool,
+    ) -> Any:
+        resource_url = self._search_url(config, path)
+        observed = self._request("GET", resource_url, token=token)
+        if observed.status_code != 200:
+            raise L7ReleaseError(
+                f"{action.component} create outcome is unconfirmed"
+            )
+        observed_body = {
+            key: value
+            for key, value in self._json(
+                observed, f"{action.component} uncertain readback"
+            ).items()
+            if not key.startswith("@odata.")
+        }
+        if observed_body != desired:
+            if keep and observed_body.get("description") == action.ownership_marker:
+                etag = str(observed.headers.get("ETag") or "")
+                if etag:
+                    self._mutation_confirmed.add(
+                        action.resource_id.casefold()
+                    )
+                    self._created_etags[
+                        action.resource_id.casefold()
+                    ] = etag
+                    self.rollback(config, action)
+            raise L7ReleaseError(
+                f"{action.component} collision has a foreign attempt or binding"
+            )
+        etag = str(observed.headers.get("ETag") or "")
+        if not etag:
+            raise L7ReleaseError(
+                f"{action.component} reconciliation omitted ETag"
+            )
+        key = action.resource_id.casefold()
+        self._mutation_confirmed.add(key)
+        self._created_etags[key] = etag
+        if keep:
+            return observed
+        cleanup = self._request(
+            "DELETE",
+            resource_url,
+            token=token,
+            headers={"If-Match": etag},
+        )
+        if cleanup.status_code == 202:
+            location = str(cleanup.headers.get("Location") or "")
+            if not location:
+                raise L7ReleaseError(
+                    f"{action.component} cleanup returned 202 without Location"
+                )
+            self._wait_lro(
+                location,
+                token,
+                expected_origin=config.search.endpoint,
+                base_url=resource_url,
+            )
+        elif cleanup.status_code not in (200, 204, 404):
+            raise L7ReleaseError(
+                f"{action.component} uncertain cleanup failed"
+            )
+        readback = self._request("GET", resource_url, token=token)
+        if readback.status_code != 404:
+            raise L7ReleaseError(
+                f"{action.component} uncertain cleanup readback failed"
+            )
+        raise L7ReleaseError(
+            f"{action.component} ambiguous create was reconciled and rolled back"
+        )
 
     def _search_create(
         self, config: L7ReleaseConfig, action: DeploymentAction
@@ -1663,7 +1837,12 @@ class AzureL7Backend:
                     raise L7ReleaseError(
                         f"{target.item_type} update returned 202 without Location"
                     )
-                self._wait_lro(location, self._token(_FABRIC_SCOPE))
+                self._wait_lro(
+                    location,
+                    self._token(_FABRIC_SCOPE),
+                    expected_origin=_FABRIC_ORIGIN,
+                    base_url=url,
+                )
             observed = self._fabric_definition(config, target)
             desired = canonical_sha256(definition)
             if observed.definition_hash != desired:
@@ -1715,7 +1894,7 @@ class AzureL7Backend:
             resource_type="ProjectConnection",
             name=action.name,
             etag=item.etag,
-            properties_hash=action.desired_hash,
+            properties_hash=item.properties_hash,
         )
 
     def rollback(self, config: L7ReleaseConfig, action: DeploymentAction) -> ResourceReadback:
@@ -1736,12 +1915,13 @@ class AzureL7Backend:
                     "Fabric rollback lacks conditional ETag authority"
                 )
             collection = _FABRIC_TYPES[target.item_type]
+            rollback_url = (
+                f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/"
+                f"{collection}/{target.item_id}/updateDefinition"
+            )
             response = self._request(
                 "POST",
-                (
-                    f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/"
-                    f"{collection}/{target.item_id}/updateDefinition"
-                ),
+                rollback_url,
                 token=self._token(_FABRIC_SCOPE),
                 body={"definition": previous},
                 headers={"If-Match": current.etag},
@@ -1754,7 +1934,12 @@ class AzureL7Backend:
                     raise L7ReleaseError(
                         "Fabric rollback returned 202 without Location"
                     )
-                self._wait_lro(location, self._token(_FABRIC_SCOPE))
+                self._wait_lro(
+                    location,
+                    self._token(_FABRIC_SCOPE),
+                    expected_origin=_FABRIC_ORIGIN,
+                    base_url=rollback_url,
+                )
             restored = self._fabric_definition(config, target)
             if restored.definition_hash != action.observed_hash:
                 raise L7ReleaseError(
@@ -1781,9 +1966,10 @@ class AzureL7Backend:
                     f"knowledgebases/{config.search.knowledge_base_name}"
                 ),
             }[action.component]
+            delete_url = self._search_url(config, segment)
             response = self._request(
                 "DELETE",
-                self._search_url(config, segment),
+                delete_url,
                 token=self._token(_SEARCH_SCOPE),
                 headers={"If-Match": etag} if etag else None,
             )
@@ -1795,7 +1981,12 @@ class AzureL7Backend:
                     raise L7ReleaseError(
                         f"{action.component} delete returned 202 without Location"
                     )
-                self._wait_lro(location, self._token(_SEARCH_SCOPE))
+                self._wait_lro(
+                    location,
+                    self._token(_SEARCH_SCOPE),
+                    expected_origin=config.search.endpoint,
+                    base_url=delete_url,
+                )
             check = self._request(
                 "GET",
                 self._search_url(config, segment),
@@ -1821,20 +2012,46 @@ class AzureL7Backend:
             name=action.name,
         )
 
-    def _wait_lro(self, location: str, token: str) -> dict[str, Any]:
+    def _wait_lro(
+        self,
+        location: str,
+        token: str,
+        *,
+        expected_origin: str,
+        base_url: str,
+    ) -> tuple[dict[str, Any], str]:
         import time
 
+        operation_url = _validated_service_url(
+            location,
+            expected_origin=expected_origin,
+            base_url=base_url,
+        )
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            response = self._request("GET", location, token=token)
+            response = self._request(
+                "GET",
+                operation_url,
+                token=token,
+                expected_origin=expected_origin,
+            )
+            if 300 <= response.status_code < 400:
+                raise L7ReleaseError("service operation redirect was refused")
             if response.status_code >= 400:
                 raise L7ReleaseError(
                     f"Fabric operation failed with HTTP {response.status_code}"
                 )
             body = self._json(response, "Fabric operation")
+            next_location = str(response.headers.get("Location") or "")
+            if next_location:
+                operation_url = _validated_service_url(
+                    next_location,
+                    expected_origin=expected_origin,
+                    base_url=operation_url,
+                )
             status = str(body.get("status") or "").casefold()
             if status in {"succeeded", "completed"}:
-                return body
+                return body, operation_url
             if status in {"failed", "cancelled", "canceled"}:
                 raise L7ReleaseError("Fabric operation reported failure")
             time.sleep(2)
