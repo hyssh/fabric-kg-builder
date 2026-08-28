@@ -87,9 +87,7 @@ class _Lease:
             stored.lease_expires = (
                 self._backend.now[0] + self._backend.lease_seconds * 1000
             )
-            if self._backend.renewal_response == "valid":
-                return {"lease_id": self.id}
-            return self._backend.renewal_response
+            return None
 
     def release(self, *, timeout=None, **kwargs):
         del kwargs
@@ -222,7 +220,6 @@ class _BlobService:
         self.conflict_next_cas = False
         self.renewals = 0
         self.renew_exception = None
-        self.renewal_response = "valid"
         self.on_renew = None
         self.calls = []
         self.probe_exception = None
@@ -560,7 +557,7 @@ def test_lease_renewal_stops_at_graph_deadline(setup):
     with pytest.raises(TimeoutError):
         authority.execute_graph_once(**values)
 
-    assert backend.renewals > 0
+    assert backend.renewals >= 2
     renewals_at_deadline = backend.renewals
     time.sleep(0.05)
     assert backend.renewals == renewals_at_deadline
@@ -958,13 +955,16 @@ def test_every_azure_renewal_failure_cancels_and_terminalizes(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("response", [None, {}, {"lease_id": "other"}])
-def test_unknown_or_non_successful_renewal_is_lease_loss(setup, response):
+@pytest.mark.parametrize("renewed_id", ["", "lease-changed"])
+def test_changed_or_missing_post_renew_lease_id_is_lease_loss(
+    setup,
+    renewed_id,
+):
     _, backend, provider, _, graph, values = setup
     transport = _CancellableTransport(graph)
     authority = _production_authority(backend, provider, transport)
     authority._lease_seconds = 0.03
-    backend.renewal_response = response
+    backend.on_renew = lambda lease: setattr(lease, "id", renewed_id)
 
     with pytest.raises(L6BlobConflictError, match="lease was lost"):
         authority.execute_graph_once(**values)

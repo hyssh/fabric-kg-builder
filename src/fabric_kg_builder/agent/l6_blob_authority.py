@@ -428,10 +428,16 @@ class AzureBlobL6GraphReceiptAuthority:
         self, blob: Any, *, deadline: float | None = None
     ) -> Any | None:
         try:
-            return blob.acquire_lease(
+            lease = blob.acquire_lease(
                 lease_duration=self._lease_seconds,
                 **self._call_options(deadline),
             )
+            lease_id = getattr(lease, "id", None)
+            if not isinstance(lease_id, str) or not lease_id:
+                raise L6BlobAuthorityError(
+                    "durable L6 authority acquired a lease without identity"
+                )
+            return lease
         except AzureError as exc:
             if getattr(exc, "status_code", None) in {409, 412}:
                 return None
@@ -679,6 +685,12 @@ class AzureBlobL6GraphReceiptAuthority:
         cancellation = threading.Event()
         lease_loss_handled = threading.Event()
         lease_loss_lock = threading.Lock()
+        captured_lease_id = getattr(lease, "id", None)
+        if not isinstance(captured_lease_id, str) or not captured_lease_id:
+            self._release(lease, deadline=deadline)
+            raise L6BlobAuthorityError(
+                "durable L6 authority lease identity is unavailable"
+            )
 
         def terminal_deadline() -> float:
             return self._monotonic() + self._terminalization_timeout
@@ -722,13 +734,11 @@ class AzureBlobL6GraphReceiptAuthority:
                     cancellation.set()
                     return
                 try:
-                    renewed = lease.renew(**self._call_options(deadline))
-                    renewed_id = (
-                        renewed.get("lease_id")
-                        if isinstance(renewed, Mapping)
-                        else getattr(renewed, "lease_id", None)
-                    )
-                    if renewed_id != getattr(lease, "id", None):
+                    # BlobLeaseClient.renew() returns None on success and
+                    # mutates the lease client in place.
+                    lease.renew(**self._call_options(deadline))
+                    renewed_id = getattr(lease, "id", None)
+                    if renewed_id != captured_lease_id:
                         lose_lease()
                         return
                 except (AzureError, TimeoutError):
