@@ -609,6 +609,79 @@ def test_unknown_semantic_type_evidence_does_not_retry(
     )
 
 
+def test_nested_completeness_authority_drift_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    class NestedDriftClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            raw = _candidates("records")
+            raw["semantic_type_candidates"][0]["score_inputs"][
+                "classification_fit"
+            ] = "provider-invalid"
+            raw["completeness_candidates"] = [
+                {
+                    "candidate_id": "candidate:completeness",
+                    "proposed_requirement": {
+                        "scope_type_id": "semantic-type:invented",
+                        "competency_question_ids": ["cq:q1"],
+                        "evidence_span_ids": [],
+                    },
+                    "score_inputs": raw["semantic_type_candidates"][0][
+                        "score_inputs"
+                    ],
+                }
+            ]
+            return raw
+
+    client = NestedDriftClient()
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 1
+    assert "candidate_type_reference_unknown" in (
+        captured.value.validation_error_codes
+    )
+
+
+def test_nested_generalization_authority_drift_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    class NestedDriftClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            raw = _candidates("records")
+            raw["generalization_candidates"] = [
+                {
+                    "candidate_id": "candidate:generalization",
+                    "child_type_id": "semantic-type:invented",
+                    "parent_type_id": "semantic-type:records.record",
+                    "basis": {
+                        "competency_question_ids": ["cq:q1"],
+                        "evidence_span_ids": ["evidence:invented"],
+                    },
+                    "score_inputs": raw["semantic_type_candidates"][0][
+                        "score_inputs"
+                    ],
+                }
+            ]
+            return raw
+
+    client = NestedDriftClient()
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 1
+    assert {
+        "candidate_type_reference_unknown",
+        "candidate_evidence_unknown",
+    } <= set(captured.value.validation_error_codes)
+
+
 def test_repeated_insufficient_candidate_vocabulary_is_typed(
     tmp_path: Path,
 ) -> None:

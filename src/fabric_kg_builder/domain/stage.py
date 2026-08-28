@@ -653,70 +653,100 @@ def _assert_raw_candidate_authority(
             ):
                 type_ids.add(proposed["type_id"])
     failures: list[tuple[str, str]] = []
-
-    candidate_groups = (
-        "domain_boundary_candidates",
-        "semantic_type_candidates",
-        "generalization_candidates",
-        "relationship_candidates",
-        "completeness_candidates",
-        "external_reference_candidates",
-    )
-    for group_name in candidate_groups:
-        values = raw.get(group_name)
-        if not isinstance(values, list):
-            continue
-        for item in values:
-            if not isinstance(item, dict):
-                continue
-            proposed = (
-                item.get("proposed_type")
-                if isinstance(item.get("proposed_type"), dict)
-                else item
-            )
-            for mapping in (item, proposed):
-                for field in (
-                    "competency_question_ids",
-                    "question_ids",
-                ):
-                    references = mapping.get(field)
-                    if isinstance(references, list) and (
-                        {value for value in references if isinstance(value, str)}
-                        - questions
-                    ):
-                        failures.append(
-                            (
-                                f"{group_name}.{field}",
-                                "candidate_question_unknown",
-                            )
-                        )
-                evidence = mapping.get("evidence_span_ids")
-                if isinstance(evidence, list) and (
-                    {value for value in evidence if isinstance(value, str)}
-                    - trusted_evidence_ids
-                ):
-                    failures.append(
-                        (
-                            f"{group_name}.evidence_span_ids",
-                            "candidate_evidence_unknown",
-                        )
-                    )
-            for field in (
-                "source_type_ids",
-                "target_type_ids",
-                "semantic_target_ids",
+    relationship_values = raw.get("relationship_candidates")
+    relationship_ids: set[str] = set()
+    if isinstance(relationship_values, list):
+        for item in relationship_values:
+            if isinstance(item, dict) and isinstance(
+                item.get("relationship_type_id"), str
             ):
-                references = item.get(field)
-                if isinstance(references, list) and (
-                    {value for value in references if isinstance(value, str)}
-                    - type_ids
-                ):
-                    failures.append(
-                        (
-                            f"{group_name}.{field}",
-                            "candidate_type_reference_unknown",
-                        )
+                relationship_ids.add(item["relationship_type_id"])
+
+    type_reference_fields = {
+        "child_type_id",
+        "parent_type_id",
+        "identity_root_type_id",
+        "scope_type_id",
+        "scoped_subtype_id",
+        "aggregate_type_id",
+        "from_type_id",
+        "to_type_id",
+        "source_type_id",
+        "target_type_id",
+        "source_type_ids",
+        "target_type_ids",
+        "semantic_target_ids",
+        "allowed_target_type_ids",
+        "allowed_member_type_ids",
+    }
+    relationship_reference_fields = {
+        "relationship_type_id",
+        "membership_relationship_type_id",
+        "hop_relationship_type_ids",
+    }
+
+    def references(value: object) -> set[str]:
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, list):
+            return {item for item in value if isinstance(item, str)}
+        return set()
+
+    def walk(value: object, path: tuple[str, ...]) -> None:
+        if path and path[0] == "question_routes":
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, (*path, str(index)))
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            item_path = ".".join((*path, key))
+            item_references = references(item)
+            if (
+                key == "question_id"
+                or key.endswith("_question_ids")
+                or key in {"question_ids", "competency_question_ids"}
+            ) and item_references - questions:
+                failures.append(
+                    (item_path, "candidate_question_unknown")
+                )
+            if (
+                key == "evidence_span_id"
+                or key.endswith("_evidence_span_ids")
+                or key == "evidence_span_ids"
+            ) and item_references - trusted_evidence_ids:
+                failures.append(
+                    (item_path, "candidate_evidence_unknown")
+                )
+            if (
+                key in type_reference_fields
+                and item_references - type_ids
+            ):
+                failures.append(
+                    (item_path, "candidate_type_reference_unknown")
+                )
+            relationship_declaration = (
+                key == "relationship_type_id"
+                and len(path) == 2
+                and path[0] == "relationship_candidates"
+            )
+            if (
+                key in relationship_reference_fields
+                and not relationship_declaration
+                and item_references - relationship_ids
+            ):
+                failures.append(
+                    (
+                        item_path,
+                        "candidate_relationship_reference_unknown",
                     )
+                )
+            walk(item, (*path, key))
+
+    walk(raw, ())
+
     if failures:
         raise L1ProposalSchemaRepairError(
             attempt_count=attempt_count,
