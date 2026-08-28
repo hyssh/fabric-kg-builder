@@ -1432,16 +1432,21 @@ def _build_design_context(
             sorted(item.id for item in preflight.intake.competency_questions)
         ),
         "completeness_requirement_ids": tuple(
-            item.requirement_id for item in draft_contract.completeness_requirements
+            sorted(
+                item.requirement_id
+                for item in draft_contract.completeness_requirements
+            )
         ),
         "completeness_requirement_hash": (
             draft_contract.completeness_requirement_hash
         ),
         "hierarchy_hash": draft_contract.hierarchy_closure.hierarchy_hash,
         "identity_policy_hash": draft_contract.identity_policy_hash,
-        "source_unit_ids": tuple(item.source_unit_id for item in source_units),
+        "source_unit_ids": tuple(
+            sorted(item.source_unit_id for item in source_units)
+        ),
         "evidence_span_ids": tuple(
-            item.evidence_span_id for item in evidence_spans
+            sorted(item.evidence_span_id for item in evidence_spans)
         ),
         "prompt_version": DOMAIN_PROPOSAL_PROMPT_VERSION,
         "prompt_hash": DOMAIN_PROPOSAL_PROMPT_HASH,
