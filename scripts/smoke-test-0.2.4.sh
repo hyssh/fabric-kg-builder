@@ -7,6 +7,7 @@ command -v shasum >/dev/null
 
 repo="$(git rev-parse --show-toplevel)"
 outside="$(mktemp -d "${TMPDIR:-/tmp}/fabric-kg-024.XXXXXX")"
+outside="$(cd "$outside" && pwd -P)"
 trap 'chmod -R u+w "$outside" 2>/dev/null || true; rm -rf "$outside"' EXIT
 
 git -C "$repo" archive --format=tar HEAD | tar -xf - -C "$outside"
