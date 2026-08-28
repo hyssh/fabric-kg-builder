@@ -14,6 +14,12 @@ mutation has a before/after journal and conditional rollback. Release-owned
 names must begin with `fabric-kg-024-`; existing `surface-tech-*` and `ks3001`
 resources cannot be adopted or deleted.
 
+Existing Fabric items additionally require an immutable ownership receipt whose
+stable ID, type, display name, definition hash, ETag, attempt, and authority
+match live readback. The executor reserves receipt destinations before mutation
+and does not report success until the immutable receipt is atomically committed
+and fsynced.
+
 RemoteTool hosting, distributed Blob-lease L6 authority, signer
 rotation/revocation, and RDF serialization are deferred. The canonical L6
 five-tool definition remains generated and local in this release.

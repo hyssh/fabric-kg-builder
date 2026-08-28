@@ -22,6 +22,20 @@ Search index/knowledge source/knowledge base names, and release-owned Foundry
 Search/Fabric Data Agent connections. Existing `surface-tech-*` resources are
 never adopted or modified by name.
 
+Every reused Fabric item must use the bounded `fabric-kg-024-*` grammar and
+provide a separately hash-bound ownership receipt matching release, attempt,
+authority, stable item ID, type, display name, current definition hash, and
+ETag. The receipt must also be present in the separately supplied, owner-only,
+read-only registry pinned by `FABRIC_KG_OWNERSHIP_REGISTRY` and
+`FABRIC_KG_OWNERSHIP_REGISTRY_SHA256`. Arbitrary, protected, legacy, and default
+names fail before observation.
+
+Before the first mutation, the executor atomically reserves immutable success
+and failure receipt destinations for a unique attempt. Receipt collisions or
+crash remnants block retries without mutation. Durable success receipt commit
+is inside the rollback boundary; persistence failure triggers conditional
+rollback and a separate failure receipt.
+
 ## Deferred
 
 Public RemoteTool hosting, Blob-lease multi-process L6 authority, signer

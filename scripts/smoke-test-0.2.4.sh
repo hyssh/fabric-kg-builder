@@ -50,9 +50,37 @@ printf '%s\n' '{"documents":[]}' > smoke/docs.json
 bytes_hash() { shasum -a 256 "$1" | awk '{print $1}'; }
 json_hash() { jq -S -c . "$1" | tr -d '\n' | shasum -a 256 | awk '{print $1}'; }
 
+jq -n '{
+  release:"0.2.4",attempt_id:("op-" + ("a"*64)),
+  authority_hash:("1"*64),item_id:"data-agent",item_type:"DataAgent",
+  name:"fabric-kg-024-data-agent",
+  definition_hash:"REPLACE_DEFINITION_HASH",etag:"etag",
+  created_at:"2026-08-27T00:00:00Z"
+}' > smoke/ownership-base.json
+definition_hash="$(jq -S -c '.definition' smoke/data-agent.json | tr -d '\n' | shasum -a 256 | awk '{print $1}')"
+jq --arg definition_hash "$definition_hash" \
+  '.definition_hash = $definition_hash' \
+  smoke/ownership-base.json > smoke/ownership-base.next.json
+mv smoke/ownership-base.next.json smoke/ownership-base.json
+ownership_hash="$(json_hash smoke/ownership-base.json)"
+jq --arg receipt_hash "$ownership_hash" \
+  '. + {receipt_hash:$receipt_hash}' \
+  smoke/ownership-base.json > smoke/ownership.json
+receipt_hash="$(jq -r '.receipt_hash' smoke/ownership.json)"
+jq -n --arg receipt_hash "$receipt_hash" '{
+  version:"1",
+  receipts:{
+    "tenant/workspace/dataagent/data-agent":$receipt_hash
+  }
+}' > smoke/ownership-registry.json
+chmod 444 smoke/ownership-registry.json
+export FABRIC_KG_OWNERSHIP_REGISTRY="$outside/smoke/ownership-registry.json"
+export FABRIC_KG_OWNERSHIP_REGISTRY_SHA256="$(bytes_hash smoke/ownership-registry.json)"
+
 jq -n \
   --arg l6b "$(bytes_hash smoke/l6.json)" --arg l6c "$(json_hash smoke/l6.json)" \
   --arg dab "$(bytes_hash smoke/data-agent.json)" --arg dac "$(json_hash smoke/data-agent.json)" \
+  --arg orb "$(bytes_hash smoke/ownership.json)" --arg orc "$(json_hash smoke/ownership.json)" \
   --arg isb "$(bytes_hash smoke/index.json)" --arg isc "$(json_hash smoke/index.json)" \
   --arg db "$(bytes_hash smoke/docs.json)" --arg dc "$(json_hash smoke/docs.json)" \
   '{
@@ -64,7 +92,8 @@ jq -n \
     fabric_definitions:[{
       name:"fabric-kg-024-data-agent",item_id:"data-agent",
       item_type:"DataAgent",
-      artifact:{path:"data-agent.json",sha256:$dab,canonical_hash:$dac}
+      artifact:{path:"data-agent.json",sha256:$dab,canonical_hash:$dac},
+      ownership_receipt:{path:"ownership.json",sha256:$orb,canonical_hash:$orc}
     }],
     search:{
       endpoint:"https://example.search.windows.net",

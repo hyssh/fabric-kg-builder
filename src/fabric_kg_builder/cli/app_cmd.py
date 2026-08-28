@@ -277,10 +277,18 @@ def deploy_l7_cmd(
     log_path: Path,
 ) -> None:
     """Plan or execute the narrowed 0.2.4 L7 release transaction."""
-    def emit(event: dict[str, Any]) -> None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, sort_keys=True) + "\n")
+    def emit(event: dict[str, Any], *, required: bool = True) -> None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            if required:
+                raise L7ReleaseError(
+                    "sanitized operation log is not durably writable"
+                ) from exc
 
     try:
         config = load_l7_config(config_path)
@@ -295,9 +303,13 @@ def deploy_l7_cmd(
         if dry_run:
             if approve_live:
                 raise L7ReleaseError("--approve-live is invalid in dry-run mode")
-            fresh = planner.build(config, config_path=config_path)
             if resume:
                 persisted = load_plan(plan_path)
+                fresh = planner.build(
+                    config,
+                    config_path=config_path,
+                    attempt_id=persisted.attempt_id,
+                )
                 if (
                     persisted.config_hash != fresh.config_hash
                     or persisted.tenant_id != fresh.tenant_id
@@ -310,7 +322,7 @@ def deploy_l7_cmd(
                     )
                 plan = persisted
             else:
-                plan = fresh
+                plan = planner.build(config, config_path=config_path)
                 persist_plan(plan_path, plan)
             click.echo(f"plan_hash={plan.plan_hash}")
             click.echo(f"plan_path={plan_path}")
@@ -375,14 +387,18 @@ def deploy_l7_cmd(
         click.echo(f"receipt_hash={receipt.receipt_hash}")
         click.echo(f"receipt_path={receipt_path}")
         for entry in receipt.journal:
-            emit({"event": "journal", **entry.model_dump(mode="json")})
+            emit(
+                {"event": "journal", **entry.model_dump(mode="json")},
+                required=False,
+            )
         emit(
             {
                 "event": "complete",
                 "status": receipt.status,
                 "receipt_hash": receipt.receipt_hash,
                 "plan_hash": receipt.plan_hash,
-            }
+            },
+            required=False,
         )
     except L7ReleaseError as exc:
         emit(
@@ -392,7 +408,11 @@ def deploy_l7_cmd(
                 "causal_stage": "preflight-or-execution",
                 "message": str(exc),
                 "receipt_path": str(receipt_path),
-            }
+                "failure_receipt_path": str(
+                    receipt_path.with_name(f"{receipt_path.name}.failure.json")
+                ),
+            },
+            required=False,
         )
         raise click.ClickException(str(exc)) from exc
 

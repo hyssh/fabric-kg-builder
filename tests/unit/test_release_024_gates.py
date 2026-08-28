@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 from click.testing import CliRunner
 
+import fabric_kg_builder.agent.l7_release as l7_release_module
 from fabric_kg_builder import __version__
 from fabric_kg_builder.agent.l7_release import (
     ArtifactBinding,
+    AzureL7Backend,
     DeploymentAction,
     L7Backend,
     L7DeploymentPlan,
@@ -25,6 +29,7 @@ from fabric_kg_builder.agent.l7_release import (
     ObservedIdentity,
     ObservationBackend,
     ResourceReadback,
+    _ReceiptReservation,
     load_l7_config,
     load_plan,
 )
@@ -45,6 +50,29 @@ def _artifact(path: Path, value: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _ownership(
+    path: Path,
+    *,
+    item_id: str,
+    item_type: str,
+    name: str,
+    definition_hash: str,
+) -> dict[str, str]:
+    value = {
+        "release": "0.2.4",
+        "attempt_id": "op-" + "a" * 64,
+        "authority_hash": "1" * 64,
+        "item_id": item_id,
+        "item_type": item_type,
+        "name": name,
+        "definition_hash": definition_hash,
+        "etag": "\"etag-1\"",
+        "created_at": "2026-08-27T00:00:00Z",
+    }
+    value["receipt_hash"] = canonical_sha256(value)
+    return _artifact(path, value)
+
+
 def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
     l6 = _artifact(tmp_path / "l6.json", {"definition_hash": "a" * 64})
     data_agent = _artifact(
@@ -58,6 +86,45 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
         {"name": "ignored", "fields": [{"name": "id", "type": "Edm.String"}]},
     )
     docs = _artifact(tmp_path / "docs.json", {"documents": []})
+    data_agent_ownership = _ownership(
+        tmp_path / "data-agent-ownership.json",
+        item_id="data-agent-1",
+        item_type="DataAgent",
+        name="fabric-kg-024-data-agent",
+        definition_hash=canonical_sha256({"parts": []}),
+    )
+    ontology_ownership = _ownership(
+        tmp_path / "ontology-ownership.json",
+        item_id="ontology-1",
+        item_type="Ontology",
+        name="fabric-kg-024-ontology",
+        definition_hash=canonical_sha256({"parts": [{"path": "x"}]}),
+    )
+    ownership_registry = {
+        "version": "1",
+        "receipts": {
+            "tenant-1/workspace-1/dataagent/data-agent-1": json.loads(
+                (tmp_path / "data-agent-ownership.json").read_text(
+                    encoding="utf-8"
+                )
+            )["receipt_hash"],
+            "tenant-1/workspace-1/ontology/ontology-1": json.loads(
+                (tmp_path / "ontology-ownership.json").read_text(
+                    encoding="utf-8"
+                )
+            )["receipt_hash"],
+        },
+    }
+    registry_path = tmp_path / "ownership-registry.json"
+    registry_bytes = (
+        json.dumps(ownership_registry, sort_keys=True) + "\n"
+    ).encode()
+    registry_path.write_bytes(registry_bytes)
+    registry_path.chmod(0o444)
+    os.environ["FABRIC_KG_OWNERSHIP_REGISTRY"] = str(registry_path)
+    os.environ["FABRIC_KG_OWNERSHIP_REGISTRY_SHA256"] = hashlib.sha256(
+        registry_bytes
+    ).hexdigest()
     config = {
         "release": "0.2.4",
         "tenant_id": "tenant-1",
@@ -75,12 +142,14 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
                 "item_id": "data-agent-1",
                 "item_type": "DataAgent",
                 "artifact": data_agent,
+                "ownership_receipt": data_agent_ownership,
             },
             {
                 "name": "fabric-kg-024-ontology",
                 "item_id": "ontology-1",
                 "item_type": "Ontology",
                 "artifact": ontology,
+                "ownership_receipt": ontology_ownership,
             },
         ],
         "search": {
@@ -286,7 +355,9 @@ def test_failure_after_mutation_persists_sanitized_rollback_receipt(
     assert backend.applied
     assert backend.rolled_back[-1] == backend.applied[0]
     assert set(backend.applied).issubset(set(backend.rolled_back))
-    receipt_text = receipt_path.read_text(encoding="utf-8")
+    receipt_text = receipt_path.with_name(
+        "receipt.json.failure.json"
+    ).read_text(encoding="utf-8")
     assert "Authorization" not in receipt_text
     assert "rollback-after" in receipt_text
 
@@ -331,6 +402,247 @@ def test_fabric_update_without_etag_is_capability_no_go(tmp_path: Path) -> None:
     assert "ETag" in target.reason
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name",
+    [
+        "surface-tech-ontology",
+        "ks3001-ontology",
+        "ontology",
+        "fabric-kg-024-trailing-",
+    ],
+)
+def test_protected_or_arbitrary_fabric_name_fails_before_network(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    config_path, _, _ = _inputs(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["fabric_definitions"][0]["name"] = name
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(L7ReleaseError, match="invalid L7 configuration"):
+        load_l7_config(config_path)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("section", "field", "name"),
+    [
+        ("search", "index_name", "surface-tech-index"),
+        ("search", "knowledge_base_name", "ks3001-kb"),
+        ("foundry", "search_connection_name", "legacy-search"),
+    ],
+)
+def test_all_cloud_names_share_release_ownership_policy(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    name: str,
+) -> None:
+    config_path, _, _ = _inputs(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw[section][field] = name
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(L7ReleaseError, match="invalid L7 configuration"):
+        load_l7_config(config_path)
+
+
+class _SpyBackend(ObservationBackend):
+    def __init__(self, observation: L7Observation) -> None:
+        super().__init__(observation)
+        self.observe_calls = 0
+
+    def observe(self, config: L7ReleaseConfig) -> L7Observation:
+        self.observe_calls += 1
+        return super().observe(config)
+
+
+@pytest.mark.unit
+def test_fabric_ownership_mismatch_fails_before_observation(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path, _ = _inputs(tmp_path)
+    wrong = _ownership(
+        tmp_path / "wrong-ownership.json",
+        item_id="different-item",
+        item_type="DataAgent",
+        name="fabric-kg-024-data-agent",
+        definition_hash=canonical_sha256({"parts": []}),
+    )
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["fabric_definitions"][0]["ownership_receipt"] = wrong
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    config = load_l7_config(config_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    backend = _SpyBackend(observation)
+    with pytest.raises(L7ReleaseError, match="ownership receipt binding"):
+        L7Planner(backend).build(config, config_path=config_path)
+    assert backend.observe_calls == 0
+
+
+class _SuccessBackend(_FailingBackend):
+    def apply(
+        self, config: L7ReleaseConfig, action: DeploymentAction
+    ) -> ResourceReadback:
+        self.applied.append(action.component)
+        return ResourceReadback(
+            resource_id=action.resource_id,
+            exists=True,
+            resource_type=action.resource_type,
+            name=action.name,
+            etag='"after"',
+            properties_hash=action.desired_hash,
+        )
+
+
+@pytest.mark.unit
+def test_preexisting_different_receipt_blocks_all_mutations(tmp_path: Path) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    backend = _SuccessBackend(observation)
+    plan = L7Planner(backend).build(config, config_path=config_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"different":"transaction"}', encoding="utf-8")
+    with pytest.raises(L7ReleaseError, match="preexisting receipt"):
+        L7Executor(L7Planner(backend), backend).execute(
+            config=config,
+            config_path=config_path,
+            plan=plan,
+            approval=plan.plan_hash,
+            receipt_path=receipt_path,
+        )
+    assert backend.applied == []
+
+
+@pytest.mark.unit
+def test_success_receipt_disk_failure_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    backend = _SuccessBackend(observation)
+    plan = L7Planner(backend).build(config, config_path=config_path)
+    receipt_path = tmp_path / "receipt.json"
+
+    def fail_commit(
+        self: _ReceiptReservation, receipt: object
+    ) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_ReceiptReservation, "commit_success", fail_commit)
+    with pytest.raises(L7ReleaseError, match="rollback completed"):
+        L7Executor(L7Planner(backend), backend).execute(
+            config=config,
+            config_path=config_path,
+            plan=plan,
+            approval=plan.plan_hash,
+            receipt_path=receipt_path,
+        )
+    assert backend.rolled_back == list(reversed(backend.applied))
+    failure = json.loads(
+        receipt_path.with_name("receipt.json.failure.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert failure["status"] == "rolled-back"
+
+
+@pytest.mark.unit
+def test_directory_fsync_error_after_link_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    backend = _SuccessBackend(observation)
+    plan = L7Planner(backend).build(config, config_path=config_path)
+    receipt_path = tmp_path / "receipt.json"
+    original = l7_release_module._fsync_parent
+    calls = 0
+
+    def fail_after_link(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("directory fsync failed")
+        original(path)
+
+    monkeypatch.setattr(l7_release_module, "_fsync_parent", fail_after_link)
+    with pytest.raises(L7ReleaseError, match="rollback completed"):
+        L7Executor(L7Planner(backend), backend).execute(
+            config=config,
+            config_path=config_path,
+            plan=plan,
+            approval=plan.plan_hash,
+            receipt_path=receipt_path,
+        )
+    assert backend.rolled_back == list(reversed(backend.applied))
+    assert not receipt_path.exists()
+    assert receipt_path.with_name("receipt.json.failure.json").exists()
+
+
+@pytest.mark.unit
+def test_crash_reservation_blocks_retry_without_mutation(tmp_path: Path) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    backend = _SuccessBackend(observation)
+    plan = L7Planner(backend).build(config, config_path=config_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.with_name(".receipt.json.pending").write_text(
+        '{"status":"reserved"}', encoding="utf-8"
+    )
+    with pytest.raises(L7ReleaseError, match="already reserved"):
+        L7Executor(L7Planner(backend), backend).execute(
+            config=config,
+            config_path=config_path,
+            plan=plan,
+            approval=plan.plan_hash,
+            receipt_path=receipt_path,
+        )
+    assert backend.applied == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_destination", [False, True])
+def test_dangling_receipt_symlink_blocks_mutation(
+    tmp_path: Path,
+    failure_destination: bool,
+) -> None:
+    config_path, observation_path, config = _inputs(tmp_path)
+    observation = L7Observation.model_validate_json(
+        observation_path.read_text(encoding="utf-8")
+    )
+    backend = _SuccessBackend(observation)
+    plan = L7Planner(backend).build(config, config_path=config_path)
+    receipt_path = tmp_path / "receipt.json"
+    blocked = (
+        receipt_path.with_name("receipt.json.failure.json")
+        if failure_destination
+        else receipt_path
+    )
+    blocked.symlink_to(tmp_path / "does-not-exist")
+    with pytest.raises(L7ReleaseError, match="preexisting receipt"):
+        L7Executor(L7Planner(backend), backend).execute(
+            config=config,
+            config_path=config_path,
+            plan=plan,
+            approval=plan.plan_hash,
+            receipt_path=receipt_path,
+        )
+    assert backend.applied == []
+
+
 class _Token:
     token = "real-access-token"
 
@@ -339,6 +651,17 @@ class _Credential:
     def get_token(self, scope: str) -> _Token:
         assert scope == "https://management.azure.com/.default"
         return _Token()
+
+
+class _ScopedCredential:
+    def __init__(self) -> None:
+        self.scopes: list[str] = []
+
+    def get_token(self, scope: str) -> _Token:
+        self.scopes.append(scope)
+        token = _Token()
+        token.token = f"sentinel::{scope}"
+        return token
 
 
 class _Response:
@@ -423,6 +746,57 @@ def test_project_connection_uses_real_token_and_independent_readback() -> None:
         headers["Authorization"] == "Bearer real-access-token"
         for _, headers in calls
     )
+
+
+@pytest.mark.unit
+def test_fabric_search_and_arm_tokens_reach_transport_but_not_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = object.__new__(AzureL7Backend)
+    credential = _ScopedCredential()
+    backend.credential = credential
+    captured: list[str] = []
+
+    def transport(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None,
+        timeout: int,
+    ) -> _Response:
+        captured.append(headers["Authorization"])
+        return _Response(200, {})
+
+    monkeypatch.setattr(requests, "request", transport)
+    scopes = [
+        "https://api.fabric.microsoft.com/.default",
+        "https://search.azure.com/.default",
+        "https://management.azure.com/.default",
+    ]
+    for scope in scopes:
+        token = backend._token(scope)
+        backend._request(
+            "GET",
+            "https://example.search.windows.net",
+            token=token,
+        )
+    assert credential.scopes == scopes
+    assert captured == [f"Bearer sentinel::{scope}" for scope in scopes]
+
+    sentinel = "sentinel-never-log"
+
+    def fail_transport(*args: object, **kwargs: object) -> _Response:
+        raise requests.RequestException(sentinel)
+
+    monkeypatch.setattr(requests, "request", fail_transport)
+    with pytest.raises(L7ReleaseError) as captured_error:
+        backend._request(
+            "GET",
+            "https://example.search.windows.net",
+            token=sentinel,
+        )
+    assert sentinel not in str(captured_error.value)
 
 
 def json_module_roundtrip(value: dict[str, Any]) -> dict[str, Any]:

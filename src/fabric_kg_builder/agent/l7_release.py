@@ -29,6 +29,7 @@ _FABRIC_TYPES = {
     "Ontology": "ontologies",
     "SemanticModel": "semanticModels",
 }
+_RELEASE_NAME_PATTERN = r"^fabric-kg-024-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 
 
 class L7ReleaseError(RuntimeError):
@@ -45,20 +46,72 @@ class ArtifactBinding(_StrictModel):
     canonical_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+def _validate_release_name(value: str) -> str:
+    import re
+
+    if not re.fullmatch(_RELEASE_NAME_PATTERN, value):
+        raise ValueError(
+            "resource name must use bounded release-owned fabric-kg-024-* grammar"
+        )
+    return value
+
+
+def _effective_uid() -> int:
+    getter = getattr(os, "geteuid", None)
+    if not callable(getter):
+        raise L7ReleaseError(
+            "L7 live ownership validation requires POSIX owner semantics"
+        )
+    return int(getter())
+
+
+class FabricOwnershipReceipt(_StrictModel):
+    release: Literal["0.2.4"] = RELEASE_VERSION
+    attempt_id: str = Field(pattern=r"^op-[0-9a-f]{64}$")
+    authority_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    item_id: str = Field(min_length=1)
+    item_type: Literal["DataAgent", "GraphModel", "Ontology", "SemanticModel"]
+    name: str
+    definition_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    etag: str = Field(min_length=1)
+    created_at: datetime
+    receipt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("name")
+    @classmethod
+    def _owned_name(cls, value: str) -> str:
+        return _validate_release_name(value)
+
+    @model_validator(mode="after")
+    def _sealed(self) -> "FabricOwnershipReceipt":
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"receipt_hash"})
+        )
+        if self.receipt_hash != expected:
+            raise ValueError("Fabric ownership receipt hash mismatch")
+        return self
+
+
 class FabricDefinitionTarget(_StrictModel):
-    name: str = Field(min_length=1)
+    name: str
     item_id: str = Field(min_length=1)
     item_type: Literal["DataAgent", "GraphModel", "Ontology", "SemanticModel"]
     artifact: ArtifactBinding
+    ownership_receipt: ArtifactBinding
+
+    @field_validator("name")
+    @classmethod
+    def _owned_name(cls, value: str) -> str:
+        return _validate_release_name(value)
 
 
 class SearchTarget(_StrictModel):
     endpoint: str = Field(pattern=r"^https://[^/]+/?$")
-    index_name: str = Field(pattern=r"^fabric-kg-024-[a-z0-9-]+$")
+    index_name: str
     index_schema: ArtifactBinding
     documents: ArtifactBinding
-    knowledge_source_name: str = Field(pattern=r"^fabric-kg-024-[a-z0-9-]+$")
-    knowledge_base_name: str = Field(pattern=r"^fabric-kg-024-[a-z0-9-]+$")
+    knowledge_source_name: str
+    knowledge_base_name: str
     api_version: str = "2025-11-01-preview"
     foundry_role_assignment_id: str = ""
     foundry_role_principal_id: str = ""
@@ -88,6 +141,11 @@ class SearchTarget(_StrictModel):
             raise ValueError("endpoint must be a trusted Azure AI Search service URL")
         return f"https://{host}"
 
+    @field_validator("index_name", "knowledge_source_name", "knowledge_base_name")
+    @classmethod
+    def _owned_names(cls, value: str) -> str:
+        return _validate_release_name(value)
+
     @model_validator(mode="after")
     def _complete_role_evidence(self) -> "SearchTarget":
         values = (
@@ -106,10 +164,15 @@ class SearchTarget(_StrictModel):
 class FoundryTarget(_StrictModel):
     account_name: str = Field(min_length=1)
     project_name: str = Field(min_length=1)
-    search_connection_name: str = Field(pattern=r"^fabric-kg-024-[a-z0-9-]+$")
-    fabric_connection_name: str = Field(pattern=r"^fabric-kg-024-[a-z0-9-]+$")
+    search_connection_name: str
+    fabric_connection_name: str
     data_agent_id: str = Field(min_length=1)
     deploy_builtin_agent: bool = False
+
+    @field_validator("search_connection_name", "fabric_connection_name")
+    @classmethod
+    def _owned_names(cls, value: str) -> str:
+        return _validate_release_name(value)
 
 
 class L7ReleaseConfig(_StrictModel):
@@ -159,7 +222,6 @@ class ResourceReadback(_StrictModel):
     name: str
     etag: str = ""
     definition_hash: str = ""
-    token: str = ""
     properties_hash: str = ""
 
 
@@ -186,6 +248,7 @@ class DeploymentAction(_StrictModel):
     desired_hash: str
     observed_hash: str = ""
     observed_etag: str = ""
+    ownership_marker: str = ""
     readback_expectation: Mapping[str, Any]
     rollback: RollbackStep
     reason: str = ""
@@ -194,6 +257,7 @@ class DeploymentAction(_StrictModel):
 class L7DeploymentPlan(_StrictModel):
     schema_version: Literal["1.0.0"] = "1.0.0"
     release: Literal["0.2.4"] = RELEASE_VERSION
+    attempt_id: str = Field(pattern=r"^op-[0-9a-f]{64}$")
     config_hash: str
     tenant_id: str
     principal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -238,6 +302,7 @@ class JournalEntry(_StrictModel):
 
 class L7DeploymentReceipt(_StrictModel):
     release: Literal["0.2.4"] = RELEASE_VERSION
+    attempt_id: str = Field(pattern=r"^op-[0-9a-f]{64}$")
     plan_hash: str
     status: Literal["succeeded", "rolled-back", "failed"]
     completed_at: datetime
@@ -326,6 +391,73 @@ def _document_values(binding: ArtifactBinding, base: Path) -> list[dict[str, Any
     return [dict(item) for item in value]
 
 
+def _ownership_receipt(
+    target: FabricDefinitionTarget,
+    config: L7ReleaseConfig,
+    base: Path,
+) -> FabricOwnershipReceipt:
+    try:
+        receipt = FabricOwnershipReceipt.model_validate(
+            _artifact_value(target.ownership_receipt, base)
+        )
+    except ValueError as exc:
+        raise L7ReleaseError(
+            f"invalid Fabric ownership receipt for {target.name}"
+        ) from exc
+    if (
+        receipt.item_id.casefold() != target.item_id.casefold()
+        or receipt.item_type != target.item_type
+        or receipt.name != target.name
+        or receipt.authority_hash != config.authority_hash
+    ):
+        raise L7ReleaseError(
+            f"Fabric ownership receipt binding mismatch for {target.name}"
+        )
+    registry_path_text = os.environ.get("FABRIC_KG_OWNERSHIP_REGISTRY", "")
+    registry_hash = os.environ.get("FABRIC_KG_OWNERSHIP_REGISTRY_SHA256", "")
+    if (
+        not registry_path_text
+        or not Path(registry_path_text).is_absolute()
+        or len(registry_hash) != 64
+    ):
+        raise L7ReleaseError(
+            "Fabric ownership requires an absolute registry path and pinned hash"
+        )
+    registry_path = Path(registry_path_text)
+    try:
+        registry_bytes = registry_path.read_bytes()
+        registry_stat = registry_path.stat()
+    except OSError as exc:
+        raise L7ReleaseError("Fabric ownership registry is unavailable") from exc
+    if (
+        hashlib.sha256(registry_bytes).hexdigest() != registry_hash
+        or registry_stat.st_uid != _effective_uid()
+        or stat.S_IMODE(registry_stat.st_mode) & 0o222
+    ):
+        raise L7ReleaseError(
+            "Fabric ownership registry is not pinned, owner-controlled, and read-only"
+        )
+    try:
+        registry = json.loads(registry_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise L7ReleaseError("Fabric ownership registry is invalid") from exc
+    registry_key = (
+        f"{config.tenant_id.casefold()}/{config.fabric_workspace_id.casefold()}/"
+        f"{target.item_type.casefold()}/{target.item_id.casefold()}"
+    )
+    receipts = (
+        registry.get("receipts")
+        if isinstance(registry, dict)
+        and isinstance(registry.get("receipts"), dict)
+        else {}
+    )
+    if receipts.get(registry_key) != receipt.receipt_hash:
+        raise L7ReleaseError(
+            f"Fabric ownership registry mismatch for {target.name}"
+        )
+    return receipt
+
+
 def load_l7_config(path: Path) -> L7ReleaseConfig:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -349,9 +481,22 @@ def _write_immutable(path: Path, payload: bytes) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temp.write_bytes(payload)
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
     os.chmod(temp, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     temp.replace(path)
+    _fsync_parent(path)
+
+
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def persist_plan(path: Path, plan: L7DeploymentPlan) -> None:
@@ -378,6 +523,224 @@ def persist_receipt(path: Path, receipt: L7DeploymentReceipt) -> None:
     )
 
 
+class _ReceiptReservation:
+    """Reserve both durable receipt outcomes before the first mutation."""
+
+    def __init__(self, path: Path, plan_hash: str, attempt_id: str) -> None:
+        self.path = path
+        self.plan_hash = plan_hash
+        self.attempt_id = attempt_id
+        self.success_pending = path.with_name(f".{path.name}.pending")
+        self.failure_path = path.with_name(f"{path.name}.failure.json")
+        self.failure_pending = path.with_name(f".{path.name}.failure.pending")
+        self.reserved = False
+        self._success_fd = -1
+        self._failure_fd = -1
+        self._marker = b""
+
+    @staticmethod
+    def _entry_exists(path: Path) -> bool:
+        return os.path.lexists(path)
+
+    @staticmethod
+    def _secure_parent(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != _effective_uid()
+            or stat.S_IMODE(parent.st_mode) & 0o022
+        ):
+            raise L7ReleaseError(
+                "receipt directory must be owner-controlled and not group/world writable"
+            )
+
+    @staticmethod
+    def _create(path: Path, payload: bytes) -> int:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            path.unlink(missing_ok=True)
+            raise
+        return descriptor
+
+    def reserve(self) -> None:
+        self._secure_parent(self.path)
+        if self._entry_exists(self.path) or self._entry_exists(self.failure_path):
+            raise L7ReleaseError(
+                "preexisting receipt destination blocks a new transaction"
+            )
+        self._marker = (
+            json.dumps(
+                {
+                    "attempt_id": self.attempt_id,
+                    "plan_hash": self.plan_hash,
+                    "status": "reserved",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode()
+        try:
+            self._success_fd = self._create(
+                self.success_pending, self._marker
+            )
+            try:
+                self._failure_fd = self._create(
+                    self.failure_pending, self._marker
+                )
+            except BaseException:
+                os.close(self._success_fd)
+                self._success_fd = -1
+                self.success_pending.unlink(missing_ok=True)
+                raise
+        except FileExistsError as exc:
+            raise L7ReleaseError(
+                "receipt transaction already reserved; reconcile before retry"
+            ) from exc
+        self.reserved = True
+        try:
+            _fsync_parent(self.path)
+        except BaseException:
+            self.cancel_before_mutation()
+            raise
+        if self._entry_exists(self.path) or self._entry_exists(self.failure_path):
+            self.cancel_before_mutation()
+            raise L7ReleaseError(
+                "receipt destination changed during reservation"
+            )
+
+    @staticmethod
+    def _payload(receipt: L7DeploymentReceipt) -> bytes:
+        return (
+            json.dumps(receipt.model_dump(mode="json"), indent=2, sort_keys=True)
+            + "\n"
+        ).encode()
+
+    @staticmethod
+    def _rewrite(descriptor: int, path: Path, payload: bytes) -> None:
+        opened = os.fstat(descriptor)
+        current = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise L7ReleaseError("receipt reservation inode changed")
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+
+    def _close_descriptors(self) -> None:
+        for attribute in ("_success_fd", "_failure_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, attribute, -1)
+
+    def commit_success(self, receipt: L7DeploymentReceipt) -> None:
+        if not self.reserved or receipt.attempt_id != self.attempt_id:
+            raise L7ReleaseError("success receipt does not own the reservation")
+        self._rewrite(
+            self._success_fd, self.success_pending, self._payload(receipt)
+        )
+        success_identity = os.fstat(self._success_fd)
+        try:
+            os.close(self._failure_fd)
+            self._failure_fd = -1
+            self.failure_pending.unlink()
+            os.link(self.success_pending, self.path, follow_symlinks=False)
+            final_identity = self.path.stat(follow_symlinks=False)
+            if (
+                final_identity.st_dev,
+                final_identity.st_ino,
+            ) != (
+                success_identity.st_dev,
+                success_identity.st_ino,
+            ):
+                raise L7ReleaseError("success receipt link inode mismatch")
+            self.success_pending.unlink()
+            os.close(self._success_fd)
+            self._success_fd = -1
+            _fsync_parent(self.path)
+        except BaseException:
+            if self._entry_exists(self.path):
+                final_identity = self.path.stat(follow_symlinks=False)
+                if (
+                    final_identity.st_dev,
+                    final_identity.st_ino,
+                ) == (
+                    success_identity.st_dev,
+                    success_identity.st_ino,
+                ):
+                    self.path.unlink(missing_ok=True)
+            if self._success_fd >= 0:
+                os.close(self._success_fd)
+                self._success_fd = -1
+            self.success_pending.unlink(missing_ok=True)
+            if self._failure_fd >= 0:
+                os.close(self._failure_fd)
+                self._failure_fd = -1
+            self.failure_pending.unlink(missing_ok=True)
+            self._failure_fd = self._create(
+                self.failure_pending, self._marker
+            )
+            try:
+                _fsync_parent(self.path)
+            except OSError:
+                pass
+            raise
+        self.reserved = False
+
+    def commit_failure(self, receipt: L7DeploymentReceipt) -> None:
+        if not self.reserved or receipt.attempt_id != self.attempt_id:
+            raise L7ReleaseError("failure receipt does not own the reservation")
+        self._rewrite(
+            self._failure_fd, self.failure_pending, self._payload(receipt)
+        )
+        failure_identity = os.fstat(self._failure_fd)
+        if self._success_fd >= 0:
+            os.close(self._success_fd)
+            self._success_fd = -1
+        self.success_pending.unlink(missing_ok=True)
+        os.link(self.failure_pending, self.failure_path, follow_symlinks=False)
+        final_identity = self.failure_path.stat(follow_symlinks=False)
+        if (
+            final_identity.st_dev,
+            final_identity.st_ino,
+        ) != (
+            failure_identity.st_dev,
+            failure_identity.st_ino,
+        ):
+            raise L7ReleaseError("failure receipt link inode mismatch")
+        self.failure_pending.unlink()
+        os.close(self._failure_fd)
+        self._failure_fd = -1
+        _fsync_parent(self.failure_path)
+        self.reserved = False
+
+    def cancel_before_mutation(self) -> None:
+        if not self.reserved:
+            return
+        self._close_descriptors()
+        self.success_pending.unlink(missing_ok=True)
+        self.failure_pending.unlink(missing_ok=True)
+        try:
+            _fsync_parent(self.path)
+        except OSError:
+            pass
+        self.reserved = False
+
+
 def _readback_map(observation: L7Observation) -> dict[str, ResourceReadback]:
     result: dict[str, ResourceReadback] = {}
     for item in observation.resources:
@@ -400,14 +763,29 @@ class L7Planner:
         self.backend = backend
 
     def build(
-        self, config: L7ReleaseConfig, *, config_path: Path
+        self,
+        config: L7ReleaseConfig,
+        *,
+        config_path: Path,
+        attempt_id: str | None = None,
     ) -> L7DeploymentPlan:
+        deployment_attempt_id = attempt_id or ("op-" + secrets.token_hex(32))
+        if not (
+            deployment_attempt_id.startswith("op-")
+            and len(deployment_attempt_id) == 67
+        ):
+            raise L7ReleaseError("deployment attempt ID is invalid")
+        ownership_marker = f"fabric-kg-024-attempt:{deployment_attempt_id}"
         base = config_path.resolve().parent
         _validate_artifact(config.l6_definition, base)
         fabric_desired_hashes = {
             item.item_id: canonical_sha256(
                 _definition_value(item.artifact, base)
             )
+            for item in config.fabric_definitions
+        }
+        ownership_receipts = {
+            item.item_id: _ownership_receipt(item, config, base)
             for item in config.fabric_definitions
         }
         observation = self.backend.observe(config)
@@ -435,6 +813,13 @@ class L7Planner:
             elif observed.resource_type != target.item_type or observed.name != target.name:
                 mutation = "no-go"
                 reason = "Fabric stable ID/type/name readback mismatch"
+            elif (
+                observed.definition_hash
+                != ownership_receipts[target.item_id].definition_hash
+                or observed.etag != ownership_receipts[target.item_id].etag
+            ):
+                mutation = "no-go"
+                reason = "Fabric ownership receipt definition/ETag drift"
             elif not observed.etag:
                 mutation = "no-go"
                 reason = "Fabric definition mutation lacks conditional ETag authority"
@@ -460,6 +845,9 @@ class L7Planner:
                         "type": target.item_type,
                         "name": target.name,
                         "definition_hash": desired_definition_hash,
+                        "ownership_receipt_hash": ownership_receipts[
+                            target.item_id
+                        ].receipt_hash,
                     },
                     rollback=RollbackStep(
                         action="restore-definition" if mutation == "update" else "none",
@@ -476,6 +864,7 @@ class L7Planner:
             raise L7ReleaseError("Search index schema must be a JSON object")
         index_schema = dict(index_schema)
         index_schema["name"] = config.search.index_name
+        index_schema["description"] = ownership_marker
         documents = _document_values(config.search.documents, base)
         index_desired_hash = canonical_sha256(
             {
@@ -498,8 +887,14 @@ class L7Planner:
                 config.search.knowledge_source_name,
                 canonical_sha256(
                     {
-                        "index": config.search.index_name,
                         "name": config.search.knowledge_source_name,
+                        "kind": "searchIndex",
+                        "searchIndexParameters": {
+                            "searchIndexName": config.search.index_name,
+                            "sourceDataFields": [],
+                            "searchFields": [],
+                        },
+                        "description": ownership_marker,
                     }
                 ),
                 "search.knowledge-source",
@@ -511,8 +906,11 @@ class L7Planner:
                 config.search.knowledge_base_name,
                 canonical_sha256(
                     {
-                        "sources": [config.search.knowledge_source_name],
                         "name": config.search.knowledge_base_name,
+                        "knowledgeSources": [
+                            {"name": config.search.knowledge_source_name}
+                        ],
+                        "description": ownership_marker,
                     }
                 ),
                 "search.knowledge-base",
@@ -538,6 +936,7 @@ class L7Planner:
                     name=name,
                     action=action,
                     desired_hash=desired_hash,
+                    ownership_marker=ownership_marker,
                     readback_expectation={
                         "name": name,
                         "hash": desired_hash,
@@ -643,6 +1042,7 @@ class L7Planner:
             observation.model_dump(mode="json", exclude={"observed_at"})
         )
         return L7DeploymentPlan.seal(
+            attempt_id=deployment_attempt_id,
             config_hash=config.config_hash,
             tenant_id=config.tenant_id,
             principal_hash=canonical_sha256(
@@ -962,7 +1362,9 @@ class AzureL7Backend:
         body: dict[str, Any],
         token: str,
     ) -> tuple[Any, dict[str, Any]]:
-        marker = "fabric-kg-024-attempt:" + secrets.token_hex(32)
+        marker = action.ownership_marker
+        if not marker.startswith("fabric-kg-024-attempt:op-"):
+            raise L7ReleaseError("Search action omitted approved ownership marker")
         desired = {**body, "description": marker}
         try:
             response = self._request(
@@ -1083,13 +1485,17 @@ class AzureL7Backend:
             response, body = self._search_create_put(
                 config, action, path, body, token
             )
+        expected_body = body
         if response.status_code not in (200, 201):
             raise L7ReleaseError(
                 f"{action.component} create failed with HTTP {response.status_code}"
             )
         etag = str(response.headers.get("ETag") or "")
-        if etag:
-            self._created_etags[action.resource_id.casefold()] = etag
+        if not etag:
+            raise L7ReleaseError(
+                f"{action.component} create omitted rollback ETag"
+            )
+        self._created_etags[action.resource_id.casefold()] = etag
         readback = self._request(
             "GET", self._search_url(config, path), token=token
         )
@@ -1098,13 +1504,23 @@ class AzureL7Backend:
                 f"{action.component} readback failed with HTTP {readback.status_code}"
             )
         readback_etag = str(readback.headers.get("ETag") or etag)
-        if readback_etag:
-            self._created_etags[action.resource_id.casefold()] = readback_etag
-        body = self._json(readback, f"{action.component} readback")
+        if readback_etag != etag:
+            raise L7ReleaseError(
+                f"{action.component} ETag changed before readback"
+            )
+        self._created_etags[action.resource_id.casefold()] = readback_etag
+        body = {
+            key: value
+            for key, value in self._json(
+                readback, f"{action.component} readback"
+            ).items()
+            if not key.startswith("@odata.")
+        }
         if str(body.get("name") or "") != action.name:
             raise L7ReleaseError(f"{action.component} exact-name readback mismatch")
         if action.component == "search-index":
-            if {key: body.get(key) for key in schema} != schema:
+            observed_schema = body
+            if observed_schema != schema:
                 raise L7ReleaseError("Search index schema readback mismatch")
             search_response = self._request(
                 "POST",
@@ -1134,6 +1550,14 @@ class AzureL7Backend:
                 documents, key=canonical_sha256
             ):
                 raise L7ReleaseError("Search document hash/ACL readback mismatch")
+            actual_hash = canonical_sha256(
+                {
+                    "schema": observed_schema,
+                    "documents": sorted(
+                        clean_documents, key=canonical_sha256
+                    ),
+                }
+            )
         elif action.component == "search-knowledge-source":
             parameters = (
                 body.get("searchIndexParameters")
@@ -1145,19 +1569,36 @@ class AzureL7Backend:
                 or parameters.get("searchIndexName") != config.search.index_name
             ):
                 raise L7ReleaseError("Search knowledge source readback mismatch")
-        elif [
-            item.get("name")
-            for item in body.get("knowledgeSources", [])
-            if isinstance(item, dict)
-        ] != [config.search.knowledge_source_name]:
-            raise L7ReleaseError("Search knowledge base readback mismatch")
+            observed_body = body
+            if observed_body != expected_body:
+                raise L7ReleaseError(
+                    "Search knowledge source exact readback mismatch"
+                )
+            actual_hash = canonical_sha256(observed_body)
+        else:
+            if [
+                item.get("name")
+                for item in body.get("knowledgeSources", [])
+                if isinstance(item, dict)
+            ] != [config.search.knowledge_source_name]:
+                raise L7ReleaseError("Search knowledge base readback mismatch")
+            observed_body = body
+            if observed_body != expected_body:
+                raise L7ReleaseError(
+                    "Search knowledge base exact readback mismatch"
+                )
+            actual_hash = canonical_sha256(observed_body)
+        if actual_hash != action.desired_hash:
+            raise L7ReleaseError(
+                f"{action.component} deployed hash differs from approved plan"
+            )
         return ResourceReadback(
             resource_id=action.resource_id,
             exists=True,
             resource_type=action.resource_type,
             name=action.name,
             etag=readback_etag,
-            properties_hash=action.desired_hash,
+            properties_hash=actual_hash,
         )
 
     def _connection_client(self, config: L7ReleaseConfig) -> Any:
@@ -1399,9 +1840,16 @@ class L7Executor:
             raise L7ReleaseError("--approve-live must exactly equal the plan hash")
         if config.config_hash != plan.config_hash:
             raise L7ReleaseError("current configuration differs from approved plan")
+        reservation = _ReceiptReservation(
+            receipt_path, plan.plan_hash, plan.attempt_id
+        )
         if datetime.now(timezone.utc) >= plan.expires_at:
             raise L7ReleaseError("approved plan has expired")
-        fresh = self.planner.build(config, config_path=config_path)
+        fresh = self.planner.build(
+            config,
+            config_path=config_path,
+            attempt_id=plan.attempt_id,
+        )
         comparable = ("tenant_id", "principal_hash", "config_hash", "observation_hash")
         if any(getattr(fresh, key) != getattr(plan, key) for key in comparable):
             raise L7ReleaseError("immediate live drift check differs from approved plan")
@@ -1412,6 +1860,7 @@ class L7Executor:
             names = ", ".join(item.component for item in blockers)
             raise L7ReleaseError(f"capability NO-GO; no mutations performed: {names}")
 
+        reservation.reserve()
         journal: list[JournalEntry] = []
         applied: list[DeploymentAction] = []
         sequence = 1
@@ -1457,6 +1906,20 @@ class L7Executor:
                     )
                 )
                 sequence += 1
+            receipt = L7DeploymentReceipt.seal(
+                attempt_id=reservation.attempt_id,
+                plan_hash=plan.plan_hash,
+                status="succeeded",
+                completed_at=datetime.now(timezone.utc),
+                journal=tuple(journal),
+                deferred_components=tuple(
+                    item.component
+                    for item in plan.actions
+                    if item.action == "deferred"
+                ),
+            )
+            reservation.commit_success(receipt)
+            return receipt
         except BaseException as exc:
             rollback_errors: list[str] = []
             for action in reversed(applied):
@@ -1494,6 +1957,7 @@ class L7Executor:
                 )
                 sequence += 1
             receipt = L7DeploymentReceipt.seal(
+                attempt_id=reservation.attempt_id,
                 plan_hash=plan.plan_hash,
                 status="failed" if rollback_errors else "rolled-back",
                 completed_at=datetime.now(timezone.utc),
@@ -1502,7 +1966,12 @@ class L7Executor:
                     item.component for item in plan.actions if item.action == "deferred"
                 ),
             )
-            persist_receipt(receipt_path, receipt)
+            try:
+                reservation.commit_failure(receipt)
+            except BaseException as persistence_exc:
+                rollback_errors.append(
+                    f"failure-receipt:{type(persistence_exc).__name__}"
+                )
             detail = (
                 f"; rollback failures: {', '.join(rollback_errors)}"
                 if rollback_errors
@@ -1511,15 +1980,3 @@ class L7Executor:
             raise L7ReleaseError(
                 f"live deployment failed and rollback completed{detail}"
             ) from exc
-
-        receipt = L7DeploymentReceipt.seal(
-            plan_hash=plan.plan_hash,
-            status="succeeded",
-            completed_at=datetime.now(timezone.utc),
-            journal=tuple(journal),
-            deferred_components=tuple(
-                item.component for item in plan.actions if item.action == "deferred"
-            ),
-        )
-        persist_receipt(receipt_path, receipt)
-        return receipt

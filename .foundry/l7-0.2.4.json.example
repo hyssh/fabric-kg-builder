@@ -22,6 +22,11 @@
         "path": "../build/release/data-agent-definition.json",
         "sha256": "<64-hex-file-bytes-hash>",
         "canonical_hash": "<64-hex-canonical-json-hash>"
+      },
+      "ownership_receipt": {
+        "path": "../build/release/data-agent-ownership-receipt.json",
+        "sha256": "<64-hex-file-bytes-hash>",
+        "canonical_hash": "<64-hex-canonical-json-hash>"
       }
     },
     {
@@ -30,6 +35,11 @@
       "item_type": "Ontology",
       "artifact": {
         "path": "../build/release/ontology-definition.json",
+        "sha256": "<64-hex-file-bytes-hash>",
+        "canonical_hash": "<64-hex-canonical-json-hash>"
+      },
+      "ownership_receipt": {
+        "path": "../build/release/ontology-ownership-receipt.json",
         "sha256": "<64-hex-file-bytes-hash>",
         "canonical_hash": "<64-hex-canonical-json-hash>"
       }
