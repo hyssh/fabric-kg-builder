@@ -14,6 +14,7 @@ from fabric_kg_builder.domain.stage import (
     finalize_l1_stage,
     preflight_l1_inputs,
     prepare_l1_stage,
+    _normalize_question_route_shapes,
 )
 
 
@@ -216,6 +217,91 @@ def test_half_defined_route_fails_typed_without_regeneration(
     assert captured.value.error_code == "L1_PROPOSAL_SCHEMA_REPAIR_EXHAUSTED"
     assert "Support evidence-backed" not in str(captured.value)
     assert client.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ({"remove": "end_type_id"}, "route_endpoint_key_missing"),
+        ({"end_type_id": None}, "route_endpoint_pair_half_defined"),
+        ({"start_type_id": 42}, "route_endpoint_type_invalid"),
+        (
+            {
+                "start_type_id": None,
+                "end_type_id": None,
+                "remove": "unsupported_reason",
+            },
+            "unsupported_reason_missing",
+        ),
+        (
+            {
+                "start_type_id": None,
+                "end_type_id": None,
+                "unsupported_reason": 42,
+            },
+            "unsupported_reason_type_invalid",
+        ),
+    ],
+)
+def test_raw_route_classification_uses_stable_codes(
+    mutation: dict,
+    expected_code: str,
+) -> None:
+    raw = _candidates("records")
+    route = raw["question_routes"][0]
+    removed = mutation.get("remove")
+    if removed:
+        route.pop(removed, None)
+    route.update(
+        {
+            key: value
+            for key, value in mutation.items()
+            if key != "remove"
+        }
+    )
+    normalized = _normalize_question_route_shapes(
+        raw,
+        trusted_question_ids=tuple(
+            f"cq:q{index}" for index in range(1, 6)
+        ),
+    )
+    assert (
+        normalized["question_routes"][0]["unsupported_reason"]
+        == expected_code
+    )
+    assert normalized["question_routes"][0]["start_type_id"] is None
+    assert normalized["question_routes"][0]["end_type_id"] is None
+
+
+def test_raw_route_unknown_question_id_fails_typed() -> None:
+    raw = _candidates("records")
+    raw["question_routes"][0]["question_id"] = "model-invented"
+    with pytest.raises(
+        L1ProposalSchemaRepairError,
+        match="route_question_id_unknown",
+    ):
+        _normalize_question_route_shapes(
+            raw,
+            trusted_question_ids=tuple(
+                f"cq:q{index}" for index in range(1, 6)
+            ),
+        )
+
+
+def test_supported_route_reason_is_removed_without_endpoint_change() -> None:
+    raw = _candidates("records")
+    route = raw["question_routes"][0]
+    endpoints = (route["start_type_id"], route["end_type_id"])
+    route["unsupported_reason"] = "model-added reason"
+    normalized = _normalize_question_route_shapes(
+        raw,
+        trusted_question_ids=tuple(
+            f"cq:q{index}" for index in range(1, 6)
+        ),
+    )
+    repaired = normalized["question_routes"][0]
+    assert (repaired["start_type_id"], repaired["end_type_id"]) == endpoints
+    assert repaired["unsupported_reason"] is None
 
 
 class _ZeroRouteRepairClient:

@@ -144,6 +144,7 @@ class L1ZeroRouteAudit(ContractModel):
     intake_hash: str
     candidate_hash: str
     question_ids: tuple[str, ...]
+    question_id_hashes: tuple[str, ...]
     route_states: tuple[Literal["supported", "unsupported"], ...]
     unsupported_reason_codes: tuple[str, ...]
     proposed_type_ids: tuple[str, ...]
@@ -176,37 +177,115 @@ def _sanitized_validation_failures(
 
 def _normalize_question_route_shapes(
     candidate: dict[str, Any],
+    *,
+    trusted_question_ids: tuple[str, ...],
 ) -> dict[str, Any]:
-    """Normalize only nonsemantic route-reason annotations locally."""
+    """Classify raw routes and rebuild them in trusted question order."""
     normalized = json.loads(json.dumps(candidate))
     routes = normalized.get("question_routes")
     if not isinstance(routes, list):
+        normalized["question_routes"] = [
+            {
+                "question_id": question_id,
+                "start_type_id": None,
+                "end_type_id": None,
+                "unsupported_reason": "route_collection_invalid",
+            }
+            for question_id in trusted_question_ids
+        ]
         return normalized
+
+    trusted = set(trusted_question_ids)
+    grouped: dict[str, list[dict[str, Any]]] = {
+        question_id: [] for question_id in trusted_question_ids
+    }
+    unknown_question_id = False
     for route in routes:
         if not isinstance(route, dict):
+            unknown_question_id = True
             continue
-        if "start_type_id" not in route or "end_type_id" not in route:
+        question_id = route.get("question_id")
+        if isinstance(question_id, str) and question_id in trusted:
+            grouped[question_id].append(route)
+        else:
+            unknown_question_id = True
+    if unknown_question_id:
+        raise L1ProposalSchemaRepairError(
+            attempt_count=1,
+            validation_failures=(
+                ("question_routes", "route_question_id_unknown"),
+            ),
+        )
+
+    rebuilt: list[dict[str, Any]] = []
+    for question_id in trusted_question_ids:
+        matches = grouped[question_id]
+        if not matches:
+            code = "route_question_id_missing"
+            route = {}
+        elif len(matches) > 1:
+            code = "route_question_id_duplicate"
+            route = {}
+        else:
+            route = matches[0]
+            code = ""
+        if code:
+            rebuilt.append(
+                {
+                    "question_id": question_id,
+                    "start_type_id": None,
+                    "end_type_id": None,
+                    "unsupported_reason": code,
+                }
+            )
             continue
+
+        has_start = "start_type_id" in route
+        has_end = "end_type_id" in route
         start = route.get("start_type_id")
         end = route.get("end_type_id")
         reason = route.get("unsupported_reason")
-        repairable_missing_reason = (
-            "unsupported_reason" not in route
-            or reason is None
-            or (isinstance(reason, str) and not reason.strip())
+        if not has_start or not has_end:
+            code = "route_endpoint_key_missing"
+        elif not (
+            start is None or isinstance(start, str)
+        ) or not (
+            end is None or isinstance(end, str)
+        ):
+            code = "route_endpoint_type_invalid"
+        elif (start is None) != (end is None):
+            code = "route_endpoint_pair_half_defined"
+        elif start is None:
+            if reason is None or (
+                isinstance(reason, str) and not reason.strip()
+            ):
+                code = "unsupported_reason_missing"
+            elif not isinstance(reason, str):
+                code = "unsupported_reason_type_invalid"
+            else:
+                code = ""
+        else:
+            code = ""
+            if reason is not None and not isinstance(reason, str):
+                code = "supported_reason_type_invalid"
+            rebuilt.append(
+                {
+                    "question_id": question_id,
+                    "start_type_id": start,
+                    "end_type_id": end,
+                    "unsupported_reason": None,
+                }
+            )
+            continue
+        rebuilt.append(
+            {
+                "question_id": question_id,
+                "start_type_id": None,
+                "end_type_id": None,
+                "unsupported_reason": code or str(reason),
+            }
         )
-        if (
-            start is None
-            and end is None
-            and repairable_missing_reason
-        ):
-            route["unsupported_reason"] = "no_supported_route_proposed"
-        elif (
-            start is not None
-            and end is not None
-            and isinstance(reason, str)
-        ):
-            route["unsupported_reason"] = None
+    normalized["question_routes"] = rebuilt
     return normalized
 
 
@@ -228,6 +307,10 @@ def _zero_route_audit(
         question_ids=tuple(
             question.id for question in preflight.intake.competency_questions
         ),
+        question_id_hashes=tuple(
+            canonical_sha256({"question_id": question.id})
+            for question in preflight.intake.competency_questions
+        ),
         route_states=tuple(
             "supported"
             if route.start_type_id is not None
@@ -238,8 +321,20 @@ def _zero_route_audit(
             ""
             if route.start_type_id is not None
             else (
-                "no_supported_route_proposed"
-                if route.unsupported_reason == "no_supported_route_proposed"
+                route.unsupported_reason
+                if route.unsupported_reason
+                in {
+                    "no_supported_route_proposed",
+                    "route_collection_invalid",
+                    "route_endpoint_key_missing",
+                    "route_endpoint_pair_half_defined",
+                    "route_endpoint_type_invalid",
+                    "route_question_id_duplicate",
+                    "route_question_id_missing",
+                    "supported_reason_type_invalid",
+                    "unsupported_reason_missing",
+                    "unsupported_reason_type_invalid",
+                }
                 else "model_unsupported_reason_present"
             )
             for route in candidates.question_routes
@@ -1008,7 +1103,11 @@ def prepare_l1_stage(
         try:
             candidate_values = normalize_candidate_scores(
                 _normalize_question_route_shapes(
-                    original_candidate_values
+                    original_candidate_values,
+                    trusted_question_ids=tuple(
+                        item.id
+                        for item in preflight.intake.competency_questions
+                    ),
                 )
             )
             candidates = DomainProposalCandidatesV2.model_validate(
