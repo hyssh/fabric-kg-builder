@@ -812,10 +812,6 @@ def _repair_zero_supported_routes(
 ) -> DomainProposalCandidatesV2:
         from .selection import _enumerate_paths, eligible_relationship_vocabulary
 
-        ordered_questions = [
-            {"question_id": item.id, "question": item.question}
-            for item in preflight.intake.competency_questions
-        ]
         type_ids = {
             item.proposed_type.type_id
             for item in candidates.semantic_type_candidates
@@ -835,6 +831,27 @@ def _repair_zero_supported_routes(
                     reason_code="proposal_vocabulary_empty",
                 )
             )
+        existing_routes = {
+            route.question_id: route for route in candidates.question_routes
+        }
+        valid_route_ids = {
+            route.question_id
+            for route in candidates.question_routes
+            if route.start_type_id is not None
+            and _enumerate_paths(route, relationships, max_hops=4)
+        }
+        ordered_questions = [
+            {"question_id": item.id, "question": item.question}
+            for item in preflight.intake.competency_questions
+            if item.business_critical and item.id not in valid_route_ids
+        ]
+        diagnostic_by_id = dict(
+            zip(
+                initial_audit.question_ids,
+                initial_audit.unsupported_reason_codes,
+                strict=True,
+            )
+        )
         try:
             route_response = client.complete_json(
                 system=(
@@ -850,13 +867,11 @@ def _repair_zero_supported_routes(
                         "initial_route_diagnostics": [
                             {
                                 "question_id": question["question_id"],
-                                "reason_code": code,
+                                "reason_code": diagnostic_by_id[
+                                    question["question_id"]
+                                ],
                             }
-                            for question, code in zip(
-                                ordered_questions,
-                                initial_audit.unsupported_reason_codes,
-                                strict=True,
-                            )
+                            for question in ordered_questions
                         ],
                         "proposed_type_ids": sorted(type_ids),
                         "proposed_relationships": [
@@ -909,7 +924,7 @@ def _repair_zero_supported_routes(
                     reason_code="route_patch_question_ids_invalid",
                 )
             )
-        routes: list[ProposalQuestionRouteV2] = []
+        repaired_routes = dict(existing_routes)
         for patch in repaired.question_routes:
             if patch.source_type_id is not None:
                 if (
@@ -937,11 +952,20 @@ def _repair_zero_supported_routes(
                     end_type_id=None,
                     unsupported_reason=patch.unsupported_reason,
                 )
-            routes.append(route)
+            repaired_routes[route.question_id] = route
+        routes = [
+            repaired_routes[item.id]
+            for item in preflight.intake.competency_questions
+        ]
         repaired_candidates = candidates.model_copy(
             update={"question_routes": tuple(routes)}
         )
-        supported_count = 0
+        critical_ids = {
+            item.id
+            for item in preflight.intake.competency_questions
+            if item.business_critical
+        }
+        supported_critical_ids: set[str] = set()
         for route in repaired_candidates.question_routes:
             if route.start_type_id is None:
                 continue
@@ -954,14 +978,15 @@ def _repair_zero_supported_routes(
                         reason_code="route_patch_path_unavailable",
                     )
                 )
-            supported_count += 1
-        if supported_count == 0:
+            if route.question_id in critical_ids:
+                supported_critical_ids.add(route.question_id)
+        if supported_critical_ids != critical_ids:
             raise L1ZeroSupportedRoutesError(
                 _zero_route_audit(
                     preflight=preflight,
                     candidates=repaired_candidates,
                     model_call_count=2,
-                    reason_code="route_patch_zero_supported",
+                    reason_code="route_patch_critical_coverage_incomplete",
                 )
             )
         return repaired_candidates

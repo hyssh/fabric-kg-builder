@@ -493,7 +493,7 @@ def test_zero_supported_route_repair_exhaustion_is_typed(
     assert captured.value.audit_payload.model_call_count == 2
     assert (
         captured.value.audit_payload.reason_code
-        == "route_patch_zero_supported"
+        == "route_patch_critical_coverage_incomplete"
     )
 
 
