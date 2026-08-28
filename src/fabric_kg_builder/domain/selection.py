@@ -323,8 +323,12 @@ def select_relationship_vocabulary(
 ) -> SelectionResult:
     """Select the minimum path union plus mandatory governance/role relationships."""
     merged, _aliases, merge_groups = merge_relationship_candidates(candidates)
-    if any(not item.score.ip_governance_eligible for item in merged):
-        merged = [item for item in merged if item.score.ip_governance_eligible]
+    merged = [
+        item
+        for item in merged
+        if item.score.ip_governance_eligible
+        and item.score.ambiguity_conflict_penalty == 0
+    ]
     by_id = {item.relationship_type_id: item for item in merged}
     mandatory = {
         item.relationship_type_id

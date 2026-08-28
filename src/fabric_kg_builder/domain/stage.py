@@ -57,6 +57,8 @@ from .proposal import (
     DOMAIN_PROPOSAL_PROMPT_VERSION,
     DomainProposal,
     DomainProposalCandidatesV2,
+    ProposalQuestionRouteV2,
+    QuestionRouteRepairV2,
     build_domain_proposal,
     build_draft_contract_from_candidates,
     build_proposal_user_message,
@@ -109,6 +111,34 @@ class L1ProposalSchemaRepairError(L1StageError):
             f"{attempt_count} same-authority attempts; validation_codes="
             f"{','.join(validation_error_codes)}"
         )
+
+
+class L1ZeroSupportedRoutesError(L1StageError):
+    """Raised after one strict route-only repair still proves zero coverage."""
+
+    error_code = "L1_ZERO_SUPPORTED_ROUTES"
+
+    def __init__(self, audit_payload: "L1ZeroRouteAudit") -> None:
+        self.audit_payload = audit_payload
+        super().__init__(
+            f"{self.error_code}: no validated relationship path supports any "
+            "competency question after one route-only repair"
+        )
+
+
+class L1ZeroRouteAudit(ContractModel):
+    error_code: Literal["L1_ZERO_SUPPORTED_ROUTES"]
+    reason_code: str
+    model_call_count: Literal[1, 2]
+    model_version: str
+    model_hash: str
+    intake_hash: str
+    candidate_hash: str
+    question_ids: tuple[str, ...]
+    route_states: tuple[Literal["supported", "unsupported"], ...]
+    unsupported_reason_codes: tuple[str, ...]
+    proposed_type_ids: tuple[str, ...]
+    proposed_relationship_ids: tuple[str, ...]
 
 
 def _sanitized_validation_failures(
@@ -166,6 +196,211 @@ def _normalize_question_route_shapes(
         ):
             route["unsupported_reason"] = None
     return normalized
+
+
+def _zero_route_audit(
+    *,
+    preflight: L1Preflight,
+    candidates: DomainProposalCandidatesV2,
+    model_call_count: Literal[1, 2],
+    reason_code: str,
+) -> L1ZeroRouteAudit:
+    return L1ZeroRouteAudit(
+        error_code=L1ZeroSupportedRoutesError.error_code,
+        reason_code=reason_code,
+        model_call_count=model_call_count,
+        model_version=preflight.model_version,
+        model_hash=preflight.model_hash,
+        intake_hash=preflight.intake.intake_hash,
+        candidate_hash=canonical_sha256(candidates),
+        question_ids=tuple(
+            question.id for question in preflight.intake.competency_questions
+        ),
+        route_states=tuple(
+            "supported"
+            if route.start_type_id is not None
+            else "unsupported"
+            for route in candidates.question_routes
+        ),
+        unsupported_reason_codes=tuple(
+            ""
+            if route.start_type_id is not None
+            else (
+                "no_supported_route_proposed"
+                if route.unsupported_reason == "no_supported_route_proposed"
+                else "model_unsupported_reason_present"
+            )
+            for route in candidates.question_routes
+        ),
+        proposed_type_ids=tuple(
+            sorted(
+                item.proposed_type.type_id
+                for item in candidates.semantic_type_candidates
+            )
+        ),
+        proposed_relationship_ids=tuple(
+            sorted(
+                item.relationship_type_id
+                for item in candidates.relationship_candidates
+            )
+        ),
+    )
+
+
+def _repair_zero_supported_routes(
+        *,
+        preflight: L1Preflight,
+        candidates: DomainProposalCandidatesV2,
+        client: Any,
+) -> DomainProposalCandidatesV2:
+        from .selection import _enumerate_paths, merge_relationship_candidates
+
+        ordered_questions = [
+            {"question_id": item.id, "question": item.question}
+            for item in preflight.intake.competency_questions
+        ]
+        type_ids = {
+            item.proposed_type.type_id
+            for item in candidates.semantic_type_candidates
+            if item.score.ip_governance_eligible
+            and item.score.ambiguity_conflict_penalty == 0
+        }
+        eligible_relationships = [
+            item
+            for item in candidates.relationship_candidates
+            if item.score.ip_governance_eligible
+            and item.score.ambiguity_conflict_penalty == 0
+            and set(item.source_type_ids).issubset(type_ids)
+            and set(item.target_type_ids).issubset(type_ids)
+        ]
+        relationships, _aliases, _groups = merge_relationship_candidates(
+            eligible_relationships
+        )
+        if not type_ids or not relationships:
+            raise L1ZeroSupportedRoutesError(
+                _zero_route_audit(
+                    preflight=preflight,
+                    candidates=candidates,
+                    model_call_count=1,
+                    reason_code="proposal_vocabulary_empty",
+                )
+            )
+        try:
+            route_response = client.complete_json(
+                system=(
+                    "Return only question_routes using the exact ordered question IDs "
+                    "and exact proposed type IDs supplied. Do not add or alter types, "
+                    "relationships, evidence, scores, or question order. Use endpoints "
+                    "only when the supplied relationships form a path; otherwise return "
+                    "both endpoints null with a non-empty unsupported_reason."
+                ),
+                user=canonical_json(
+                    {
+                        "ordered_competency_questions": ordered_questions,
+                        "proposed_type_ids": sorted(type_ids),
+                        "proposed_relationships": [
+                            {
+                                "relationship_type_id": item.relationship_type_id,
+                                "source_type_ids": list(item.source_type_ids),
+                                "target_type_ids": list(item.target_type_ids),
+                                "endpoint_policy": item.endpoint_policy,
+                                "competency_question_ids": list(
+                                    item.competency_question_ids
+                                ),
+                            }
+                            for item in relationships
+                        ],
+                    }
+                ),
+                json_schema=QuestionRouteRepairV2.model_json_schema(),
+            )
+        except Exception as exc:
+            raise L1ZeroSupportedRoutesError(
+                _zero_route_audit(
+                    preflight=preflight,
+                    candidates=candidates,
+                    model_call_count=2,
+                    reason_code="route_patch_provider_failure",
+                )
+            ) from exc
+        try:
+            repaired = QuestionRouteRepairV2.model_validate(route_response)
+        except ValidationError as exc:
+            raise L1ZeroSupportedRoutesError(
+                _zero_route_audit(
+                    preflight=preflight,
+                    candidates=candidates,
+                    model_call_count=2,
+                    reason_code="route_patch_schema_invalid",
+                )
+            ) from exc
+        expected_ids = [item["question_id"] for item in ordered_questions]
+        actual_ids = [item.question_id for item in repaired.question_routes]
+        if (
+            actual_ids != expected_ids
+            or len(actual_ids) != len(set(actual_ids))
+        ):
+            raise L1ZeroSupportedRoutesError(
+                _zero_route_audit(
+                    preflight=preflight,
+                    candidates=candidates,
+                    model_call_count=2,
+                    reason_code="route_patch_question_ids_invalid",
+                )
+            )
+        routes: list[ProposalQuestionRouteV2] = []
+        supported_count = 0
+        for patch in repaired.question_routes:
+            if patch.source_type_id is not None:
+                if (
+                    patch.source_type_id not in type_ids
+                    or patch.target_type_id not in type_ids
+                ):
+                    raise L1ZeroSupportedRoutesError(
+                        _zero_route_audit(
+                            preflight=preflight,
+                            candidates=candidates,
+                            model_call_count=2,
+                            reason_code="route_patch_type_id_unknown",
+                        )
+                    )
+                route = ProposalQuestionRouteV2(
+                    question_id=patch.question_id,
+                    start_type_id=patch.source_type_id,
+                    end_type_id=patch.target_type_id,
+                    unsupported_reason=None,
+                )
+                if not _enumerate_paths(route, relationships, max_hops=4):
+                    raise L1ZeroSupportedRoutesError(
+                        _zero_route_audit(
+                            preflight=preflight,
+                            candidates=candidates,
+                            model_call_count=2,
+                            reason_code="route_patch_path_unavailable",
+                        )
+                    )
+                supported_count += 1
+            else:
+                route = ProposalQuestionRouteV2(
+                    question_id=patch.question_id,
+                    start_type_id=None,
+                    end_type_id=None,
+                    unsupported_reason=patch.unsupported_reason,
+                )
+            routes.append(route)
+        repaired_candidates = candidates.model_copy(
+            update={"question_routes": tuple(routes)}
+        )
+        if supported_count == 0:
+            raise L1ZeroSupportedRoutesError(
+                _zero_route_audit(
+                    preflight=preflight,
+                    candidates=repaired_candidates,
+                    model_call_count=2,
+                    reason_code="route_patch_zero_supported",
+                )
+            )
+        return repaired_candidates
 
 
 def _require_reason_only_route_repair(
@@ -782,6 +1017,21 @@ def prepare_l1_stage(
                     item["type"] for item in failures
                 ),
             ) from first_error
+    if (
+        client is not None
+        and model_call_count == 1
+        and all(
+            route.start_type_id is None
+            and route.end_type_id is None
+            for route in candidates.question_routes
+        )
+    ):
+        candidates = _repair_zero_supported_routes(
+            preflight=preflight,
+            candidates=candidates,
+            client=client,
+        )
+        model_call_count = 2
     known_evidence_ids = {item.evidence_span_id for item in evidence_spans}
     draft_contract, merge_groups, selected_candidate_ids = (
         build_draft_contract_from_candidates(

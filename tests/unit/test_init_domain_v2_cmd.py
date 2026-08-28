@@ -8,7 +8,11 @@ from click.testing import CliRunner
 
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.domain.service import load_domain_contract
-from tests.unit.test_l1_stage import _candidates, _intake
+from tests.unit.test_l1_stage import (
+    _ZeroRouteRepairClient,
+    _candidates,
+    _intake,
+)
 
 
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -170,6 +174,46 @@ def test_schema_2_noninteractive_writes_blocked_draft(tmp_path: Path) -> None:
     assert receipt["status"] == "blocked"
     assert receipt["error_codes"] == ["L1_APPROVAL_REQUIRED"]
     assert load_domain_contract(domain_path).approval.status == "draft"
+
+
+def test_zero_route_failure_persists_sanitized_audit(
+    tmp_path: Path,
+) -> None:
+    source, intake_path, _ = _write_inputs(tmp_path)
+    state_root = tmp_path / ".fkg" / "l1"
+    client = _ZeroRouteRepairClient(keep_unsupported=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init-domain",
+            "--input",
+            str(source),
+            "--intake",
+            str(intake_path),
+            "--non-interactive",
+            "--force",
+            "--project-id",
+            "surface-024",
+            "--state-dir",
+            str(state_root),
+            "--out",
+            str(tmp_path / "domain.yaml"),
+        ],
+        obj={
+            "_foundry_client": client,
+            "_foundry_model_version": "gpt-4-1",
+        },
+    )
+    assert result.exit_code != 0
+    assert "L1_ZERO_SUPPORTED_ROUTES" in result.output
+    audit = json.loads(
+        (state_root / "proposal-failure-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["reason_code"] == "route_patch_zero_supported"
+    assert audit["model_call_count"] == 2
+    assert "A governed record describes" not in json.dumps(audit)
 
 
 def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(

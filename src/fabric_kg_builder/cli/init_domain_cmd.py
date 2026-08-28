@@ -694,6 +694,7 @@ def _run_schema_2_l1(
     from fabric_kg_builder.domain.proposal import compute_model_hash
     from fabric_kg_builder.domain.stage import (
         L1StageError,
+        L1ZeroSupportedRoutesError,
         dry_run_l1,
         finalize_l1_stage,
         load_prepared_l1_stage,
@@ -877,5 +878,22 @@ def _run_schema_2_l1(
                 f"receipt={result.receipt.stage_receipt_id}"
             )
             return
+    except L1ZeroSupportedRoutesError as exc:
+        state_root.mkdir(parents=True, exist_ok=True)
+        audit_path = state_root / "proposal-failure-audit.json"
+        temporary_audit = audit_path.with_name(
+            f".{audit_path.name}.{os.getpid()}.tmp"
+        )
+        temporary_audit.write_text(
+            json.dumps(
+                exc.audit_payload.model_dump(mode="json"),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary_audit.replace(audit_path)
+        raise click.ClickException(str(exc)) from exc
     except (L1StageError, ValidationError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc

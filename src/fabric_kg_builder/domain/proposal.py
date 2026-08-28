@@ -286,6 +286,32 @@ class DomainProposalCandidatesV2(ContractModel):
         return value
 
 
+class QuestionRoutePatchV2(ContractModel):
+    question_id: RequiredText
+    source_type_id: RequiredText | None
+    target_type_id: RequiredText | None
+    unsupported_reason: RequiredText | None = None
+
+    @model_validator(mode="after")
+    def _state(self) -> "QuestionRoutePatchV2":
+        if (self.source_type_id is None) != (self.target_type_id is None):
+            raise ValueError("route patch requires both endpoints")
+        if self.source_type_id is None and self.unsupported_reason is None:
+            raise ValueError("unsupported route patch requires a reason")
+        if self.source_type_id is not None and self.unsupported_reason is not None:
+            raise ValueError("supported route patch forbids unsupported_reason")
+        return self
+
+
+class QuestionRouteRepairV2(ContractModel):
+    question_routes: tuple[QuestionRoutePatchV2, ...]
+
+    @field_validator("question_routes", mode="before")
+    @classmethod
+    def _routes(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
 def domain_proposal_candidates_schema() -> dict[str, Any]:
     """Return structured schema with unsupported-route conditional reason."""
     schema = DomainProposalCandidatesV2.model_json_schema()
@@ -872,6 +898,9 @@ def build_proposal_user_message(
 ) -> str:
     payload: dict[str, Any] = {
         "intake": intake.model_dump(mode="json", exclude={"identity"}),
+        "ordered_competency_question_ids": [
+            item.id for item in intake.competency_questions
+        ],
         "complete_corpus_profile": source_profile_summary,
         "bounded_verified_design_evidence": verified_design_evidence,
     }

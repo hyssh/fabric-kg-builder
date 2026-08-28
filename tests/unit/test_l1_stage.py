@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from fabric_kg_builder.contracts.base import canonical_sha256
 from fabric_kg_builder.domain.stage import (
     L1ProposalSchemaRepairError,
+    L1ZeroSupportedRoutesError,
     approve_persisted_l1_draft,
     dry_run_l1,
     finalize_l1_stage,
@@ -214,6 +216,71 @@ def test_half_defined_route_fails_typed_without_regeneration(
     assert captured.value.error_code == "L1_PROPOSAL_SCHEMA_REPAIR_EXHAUSTED"
     assert "Support evidence-backed" not in str(captured.value)
     assert client.calls == 1
+
+
+class _ZeroRouteRepairClient:
+    def __init__(self, *, keep_unsupported: bool = False) -> None:
+        self.calls = 0
+        self.keep_unsupported = keep_unsupported
+
+    def complete_json(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raw = _candidates("records")
+            for route in raw["question_routes"]:
+                route["start_type_id"] = None
+                route["end_type_id"] = None
+                route.pop("unsupported_reason", None)
+            return raw
+        request = json.loads(kwargs["user"])
+        routes = []
+        for index, question in enumerate(
+            request["ordered_competency_questions"]
+        ):
+            if index == 0 and not self.keep_unsupported:
+                routes.append(
+                    {
+                        "question_id": question["question_id"],
+                        "source_type_id": "semantic-type:records.record",
+                        "target_type_id": "semantic-type:records.subject",
+                        "unsupported_reason": None,
+                    }
+                )
+            else:
+                routes.append(
+                    {
+                        "question_id": question["question_id"],
+                        "source_type_id": None,
+                        "target_type_id": None,
+                        "unsupported_reason": "No validated path.",
+                    }
+                )
+        return {"question_routes": routes}
+
+
+def test_zero_supported_routes_use_one_strict_route_only_repair(
+    tmp_path: Path,
+) -> None:
+    client = _ZeroRouteRepairClient()
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+    assert prepared.candidates.question_routes[0].start_type_id == (
+        "semantic-type:records.record"
+    )
+
+
+def test_zero_supported_route_repair_exhaustion_is_typed(
+    tmp_path: Path,
+) -> None:
+    client = _ZeroRouteRepairClient(keep_unsupported=True)
+    with pytest.raises(L1ZeroSupportedRoutesError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert captured.value.audit_payload.model_call_count == 2
+    assert (
+        captured.value.audit_payload.reason_code
+        == "route_patch_zero_supported"
+    )
 
 
 def test_dry_run_inventories_complete_corpus_without_writes(tmp_path: Path) -> None:
