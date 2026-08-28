@@ -453,6 +453,12 @@ def build_draft_contract_from_candidates(
             required_type_ids.add(fact_set.aggregate_type_id)
             required_type_ids.update(fact_set.allowed_member_type_ids)
 
+    eligible_semantic_type_ids = {
+        item.proposed_type.type_id
+        for item in candidates.semantic_type_candidates
+        if item.score.ip_governance_eligible
+        and item.score.ambiguity_conflict_penalty == 0
+    }
     selection = select_relationship_vocabulary(
         candidates.relationship_candidates,
         candidates.question_routes,
@@ -460,6 +466,7 @@ def build_draft_contract_from_candidates(
             item.id for item in intake.competency_questions if item.business_critical
         },
         required_relationship_type_ids=required_relationship_ids,
+        eligible_type_ids=eligible_semantic_type_ids,
     )
     selected_relationship_candidates = list(selection.relationships)
     selected_type_ids = set(required_type_ids)
