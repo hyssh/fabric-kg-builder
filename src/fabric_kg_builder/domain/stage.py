@@ -2575,6 +2575,12 @@ def validate_approval_bindings(
         raise L1StageError("contract approval context ID mismatch")
     if approval.domain_approval_context_hash != approval_context.approval_context_hash:
         raise L1StageError("contract approval context hash mismatch")
+    if approval.approved_by != approval_context.actor:
+        raise L1StageError("contract approval actor mismatch")
+    if approval.approved_at_utc != (
+        approval_context.decided_at_utc.isoformat().replace("+00:00", "Z")
+    ):
+        raise L1StageError("contract approval timestamp mismatch")
     if approval.contract_hash != compute_contract_hash(contract):
         raise L1StageError("approved contract authority hash mismatch")
     equalities = (
