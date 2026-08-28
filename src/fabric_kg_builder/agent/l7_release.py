@@ -22,6 +22,7 @@ RELEASE_VERSION = "0.2.4"
 _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 _MANAGEMENT_SCOPE = "https://management.azure.com/.default"
 _SEARCH_SCOPE = "https://search.azure.com/.default"
+_COGNITIVE_SERVICES_USER_ROLE_ID = "a97b65f3-24c7-4388-baec-2e87135dc908"
 _FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
 _FABRIC_TYPES = {
     "DataAgent": "dataAgents",
@@ -114,7 +115,7 @@ class SearchTarget(_StrictModel):
     knowledge_base_name: str
     api_version: str = "2025-11-01-preview"
     foundry_role_assignment_id: str = ""
-    foundry_role_principal_id: str = ""
+    search_managed_identity_principal_id: str = ""
     foundry_role_definition_id: str = ""
 
     @field_validator("endpoint")
@@ -150,7 +151,7 @@ class SearchTarget(_StrictModel):
     def _complete_role_evidence(self) -> "SearchTarget":
         values = (
             self.foundry_role_assignment_id,
-            self.foundry_role_principal_id,
+            self.search_managed_identity_principal_id,
             self.foundry_role_definition_id,
         )
         if any(values) and not all(values):
@@ -996,6 +997,7 @@ class L7Planner:
                     name=name,
                     action=action,
                     desired_hash=desired_hash,
+                    ownership_marker=ownership_marker,
                     readback_expectation={
                         "stable_id": resource_id,
                         "name": name,
@@ -1230,9 +1232,14 @@ class AzureL7Backend:
             "foundry.project-connections": True,
         }
         if config.search.foundry_role_assignment_id:
+            foundry_scope = (
+                f"/subscriptions/{config.subscription_id}/resourceGroups/"
+                f"{config.resource_group}/providers/Microsoft.CognitiveServices/"
+                f"accounts/{config.foundry.account_name}"
+            )
             role_url = (
-                f"https://management.azure.com/subscriptions/{config.subscription_id}"
-                f"/resourceGroups/{config.resource_group}/providers/Microsoft.Authorization"
+                f"https://management.azure.com{foundry_scope}"
+                f"/providers/Microsoft.Authorization"
                 f"/roleAssignments/{config.search.foundry_role_assignment_id}"
                 "?api-version=2022-04-01"
             )
@@ -1248,9 +1255,17 @@ class AzureL7Backend:
                 )
                 role_present = (
                     str(properties.get("principalId") or "").casefold()
-                    == config.search.foundry_role_principal_id.casefold()
+                    == config.search.search_managed_identity_principal_id.casefold()
                     and str(properties.get("roleDefinitionId") or "").casefold()
                     == config.search.foundry_role_definition_id.casefold()
+                    and str(role_body.get("id") or "").casefold()
+                    == (
+                        f"{foundry_scope}/providers/Microsoft.Authorization/"
+                        f"roleAssignments/{config.search.foundry_role_assignment_id}"
+                    ).casefold()
+                    and config.search.foundry_role_definition_id.casefold().endswith(
+                        f"/roledefinitions/{_COGNITIVE_SERVICES_USER_ROLE_ID}"
+                    )
                 )
             else:
                 role_present = False
@@ -1660,23 +1675,27 @@ class AzureL7Backend:
         if action.component.startswith("search-"):
             return self._search_create(config, action)
         if action.component == "foundry-search-connection":
+            attempt_id = action.ownership_marker.rsplit(":", 1)[-1]
             try:
                 item = self._connection_client(config).upsert_search(
                     name=config.foundry.search_connection_name,
                     endpoint=config.search.endpoint,
                     create_only=True,
+                    attempt_id=attempt_id,
                 )
             except Exception as exc:
                 raise L7ReleaseError(
                     "Foundry Search connection mutation failed"
                 ) from exc
         elif action.component == "foundry-fabric-connection":
+            attempt_id = action.ownership_marker.rsplit(":", 1)[-1]
             try:
                 item = self._connection_client(config).upsert_fabric_data_agent(
                     name=config.foundry.fabric_connection_name,
                     workspace_id=config.fabric_workspace_id,
                     data_agent_id=config.foundry.data_agent_id,
                     create_only=True,
+                    attempt_id=attempt_id,
                 )
             except Exception as exc:
                 raise L7ReleaseError(
@@ -1686,9 +1705,9 @@ class AzureL7Backend:
             raise L7ReleaseError(
                 f"live mutation adapter for {action.component} is unavailable"
             )
+        self._mutation_confirmed.add(action.resource_id.casefold())
         if not item.etag:
             raise L7ReleaseError("Foundry connection create omitted ETag")
-        self._mutation_confirmed.add(action.resource_id.casefold())
         self._created_etags[action.resource_id.casefold()] = item.etag
         return ResourceReadback(
             resource_id=action.resource_id,

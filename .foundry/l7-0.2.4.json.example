@@ -62,8 +62,8 @@
     "knowledge_base_name": "fabric-kg-024-<release-name>-kb",
     "api_version": "2025-11-01-preview",
     "foundry_role_assignment_id": "<search-managed-identity-foundry-role-assignment-guid>",
-    "foundry_role_principal_id": "<search-managed-identity-object-guid>",
-    "foundry_role_definition_id": "<foundry-role-definition-resource-id>"
+    "search_managed_identity_principal_id": "<search-managed-identity-object-guid>",
+    "foundry_role_definition_id": "/subscriptions/<subscription-guid>/providers/Microsoft.Authorization/roleDefinitions/a97b65f3-24c7-4388-baec-2e87135dc908"
   },
   "foundry": {
     "account_name": "<foundry-account>",

@@ -223,6 +223,7 @@ class FoundryProjectConnectionClient:
         properties: dict[str, Any],
         *,
         create_only: bool = False,
+        attempt_id: str | None = None,
     ) -> ProjectConnection:
         existing = self.get(name)
         if create_only and existing is not None:
@@ -231,14 +232,19 @@ class FoundryProjectConnectionClient:
                 "release-owned connection adoption is forbidden."
             )
         resource_id = self.connection_id(name)
-        attempt_id = "op-" + secrets.token_hex(32)
+        operation_attempt_id = attempt_id or ("op-" + secrets.token_hex(32))
+        if not (
+            operation_attempt_id.startswith("op-")
+            and len(operation_attempt_id) == 67
+        ):
+            raise ValueError("connection attempt ID is invalid.")
         attempt_properties = dict(properties)
         metadata = (
             dict(properties.get("metadata"))
             if isinstance(properties.get("metadata"), Mapping)
             else {}
         )
-        metadata["l7AttemptId"] = attempt_id
+        metadata["l7AttemptId"] = operation_attempt_id
         attempt_properties["metadata"] = metadata
         try:
             response = self._send(
@@ -253,7 +259,7 @@ class FoundryProjectConnectionClient:
                     observed = self.get(name)
                     if (
                         observed is not None
-                        and observed.attempt_id == attempt_id
+                        and observed.attempt_id == operation_attempt_id
                         and observed.etag
                     ):
                         self.delete_created(name, expected_etag=observed.etag)
@@ -282,7 +288,7 @@ class FoundryProjectConnectionClient:
                 or parsed.audience != str(properties.get("audience", ""))
                 or parsed.binding_hash
                 != str(expected_metadata.get("bindingHash") or "")
-                or parsed.attempt_id != attempt_id
+                or parsed.attempt_id != operation_attempt_id
             ):
                 raise ProjectConnectionError(
                     f"Foundry project connection '{name}' readback mismatch."
@@ -295,7 +301,10 @@ class FoundryProjectConnectionClient:
         except ProjectConnectionError:
             if create_only:
                 observed = self.get(name)
-                if observed is not None and observed.attempt_id == attempt_id:
+                if (
+                    observed is not None
+                    and observed.attempt_id == operation_attempt_id
+                ):
                     etag = mutation_etag or observed.etag
                     if etag:
                         self.delete_created(name, expected_etag=etag)
@@ -308,6 +317,7 @@ class FoundryProjectConnectionClient:
         workspace_id: str,
         data_agent_id: str,
         create_only: bool = False,
+        attempt_id: str | None = None,
     ) -> ProjectConnection:
         """Create the CustomKeys connection required by MicrosoftFabricPreviewTool."""
         if not workspace_id or not data_agent_id:
@@ -337,6 +347,7 @@ class FoundryProjectConnectionClient:
                 },
             },
             create_only=create_only,
+            attempt_id=attempt_id,
         )
 
     def upsert_search(
@@ -345,6 +356,7 @@ class FoundryProjectConnectionClient:
         name: str,
         endpoint: str,
         create_only: bool = False,
+        attempt_id: str | None = None,
     ) -> ProjectConnection:
         """Create a managed-identity Azure AI Search project connection."""
         if not endpoint.startswith("https://"):
@@ -358,6 +370,7 @@ class FoundryProjectConnectionClient:
                 "isSharedToAll": True,
             },
             create_only=create_only,
+            attempt_id=attempt_id,
         )
 
     def upsert_remote_tool(
