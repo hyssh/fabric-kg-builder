@@ -1088,6 +1088,12 @@ def _run_schema_2_l1(
                 "[init-domain] schema-2 draft persisted with blocked receipt; "
                 "run 'fabric-kg domain approve --approved-by ...'."
             )
+            click.echo(
+                "[init-domain] approval-anchors "
+                f"project_id={preflight.base_identity.project_id} "
+                f"run_id={preflight.run_id} "
+                f"proposal_hash={prepared.proposal.proposal_hash}"
+            )
             return
 
         while True:

@@ -1445,8 +1445,25 @@ def _build_design_context(
         "source_unit_ids": tuple(
             sorted(item.source_unit_id for item in source_units)
         ),
+        "source_unit_content_hash": canonical_sha256(
+            [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    source_units, key=lambda value: value.source_unit_id
+                )
+            ]
+        ),
         "evidence_span_ids": tuple(
             sorted(item.evidence_span_id for item in evidence_spans)
+        ),
+        "evidence_span_content_hash": canonical_sha256(
+            [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    evidence_spans,
+                    key=lambda value: value.evidence_span_id,
+                )
+            ]
         ),
         "prompt_version": DOMAIN_PROPOSAL_PROMPT_VERSION,
         "prompt_hash": DOMAIN_PROPOSAL_PROMPT_HASH,
@@ -3313,11 +3330,34 @@ def load_prepared_l1_stage(
         raise L1StageError(
             "persisted L1 cross-artifact binding mismatch: source units"
         )
+    if design.source_unit_content_hash != canonical_sha256(
+        [
+            item.model_dump(mode="json")
+            for item in sorted(
+                source_units, key=lambda value: value.source_unit_id
+            )
+        ]
+    ):
+        raise L1StageError(
+            "persisted L1 cross-artifact binding mismatch: source-unit content"
+        )
     if tuple(sorted(design.evidence_span_ids)) != tuple(
         sorted(item.evidence_span_id for item in evidence_spans)
     ):
         raise L1StageError(
             "persisted L1 cross-artifact binding mismatch: evidence spans"
+        )
+    if design.evidence_span_content_hash != canonical_sha256(
+        [
+            item.model_dump(mode="json")
+            for item in sorted(
+                evidence_spans,
+                key=lambda value: value.evidence_span_id,
+            )
+        ]
+    ):
+        raise L1StageError(
+            "persisted L1 cross-artifact binding mismatch: evidence content"
         )
     source_unit_ids = {item.source_unit_id for item in source_units}
     source_units_by_id = {
@@ -3447,6 +3487,12 @@ def approve_persisted_l1_draft(
     ):
         raise L1StageError(
             "reviewed domain contract does not match the persisted L1 draft"
+        )
+    if reviewed_contract is not None and (
+        reviewed_contract.approval.status != "draft"
+    ):
+        raise L1StageError(
+            "schema-2 approval requires a current blocked draft"
         )
     return finalize_l1_stage(
         prepared,

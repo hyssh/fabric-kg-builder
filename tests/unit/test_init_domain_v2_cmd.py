@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+
 from pathlib import Path
 
 import yaml
@@ -376,6 +377,9 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
         ],
     )
     assert draft.exit_code == 0, draft.output
+    assert "[init-domain] approval-anchors project_id=" in draft.output
+    assert " run_id=" in draft.output
+    assert " proposal_hash=" in draft.output
     identity = json.loads(
         (state_root / "domain-design-context.json").read_text(
             encoding="utf-8"
@@ -451,6 +455,26 @@ def test_schema_2_explicit_approval_requires_actor_and_seals_receipt(
     assert load_domain_contract(domain_path).approval.status == "approved"
     receipt = json.loads((state_root / "stage-receipt.json").read_text())
     assert receipt["status"] == "succeeded"
+    replay = runner.invoke(
+        cli,
+        [
+            "domain",
+            "approve",
+            "--file",
+            str(domain_path),
+            "--state-dir",
+            str(state_root),
+            "--approved-by",
+            "different-reviewer@example.test",
+            "--project-id",
+            identity["project_id"],
+            "--run-id",
+            identity["run_id"],
+            "--proposal-hash",
+            proposal_hash,
+        ],
+    )
+    assert replay.exit_code != 0
 
 
 def test_schema_2_approval_rejects_cross_run_proposal_replay(

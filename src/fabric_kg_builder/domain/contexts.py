@@ -295,7 +295,9 @@ class DomainDesignContext(ContractModel):
     hierarchy_hash: Sha256
     identity_policy_hash: Sha256
     source_unit_ids: tuple[RequiredText, ...]
+    source_unit_content_hash: Sha256
     evidence_span_ids: tuple[RequiredText, ...]
+    evidence_span_content_hash: Sha256
     prompt_version: RequiredText
     prompt_hash: Sha256
     model_version: RequiredText
