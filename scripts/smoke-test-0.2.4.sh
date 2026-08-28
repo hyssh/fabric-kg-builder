@@ -11,24 +11,17 @@ outside="$(cd "$outside" && pwd -P)"
 trap 'chmod -R u+w "$outside" 2>/dev/null || true; rm -rf "$outside"' EXIT
 
 git -C "$repo" archive --format=tar HEAD | tar -xf - -C "$outside"
-uv build --quiet "$outside" --out-dir "$outside/dist"
-wheel="$(find "$outside/dist" -maxdepth 1 -name 'fabric_kg_builder-0.2.4-*.whl' -print -quit)"
+artifact_out="${FABRIC_KG_SMOKE_ARTIFACT_OUT:-$outside/dist}"
+mkdir -p "$artifact_out"
+uv build --quiet "$outside" --out-dir "$artifact_out"
+wheel="$(find "$artifact_out" -maxdepth 1 -name 'fabric_kg_builder-0.2.4-*.whl' -print -quit)"
 test -n "$wheel"
 
 uv venv --python 3.12 "$outside/venv" >/dev/null
-if ! uv pip install --python "$outside/venv/bin/python" --quiet "$wheel"; then
-  uv pip install --python "$outside/venv/bin/python" --no-deps --reinstall --quiet "$wheel"
-  source_site="$repo/.venv/lib/python3.12/site-packages"
-  target_site="$outside/venv/lib/python3.12/site-packages"
-  test -d "$source_site"
-  for dependency in "$source_site"/*; do
-    name="$(basename "$dependency")"
-    case "$name" in
-      *fabric_kg_builder*|__editable__*) continue ;;
-    esac
-    test -e "$target_site/$name" || ln -s "$dependency" "$target_site/$name"
-  done
-fi
+uv export --project "$outside" --locked --extra agent --extra app --no-dev \
+  --no-emit-project --no-hashes --output-file "$outside/constraints.txt"
+uv pip install --python "$outside/venv/bin/python" --quiet \
+  --constraint "$outside/constraints.txt" "${wheel}[agent,app]"
 unset PYTHONPATH
 cd "$outside"
 
@@ -39,6 +32,16 @@ origin="$(uv pip show --python "$outside/venv/bin/python" fabric-kg-builder | aw
 case "$origin" in
   "$outside/venv"/*) ;;
   *) echo "package origin escaped external venv: $origin" >&2; exit 1 ;;
+esac
+site_packages="$outside/venv/lib/python3.12/site-packages"
+test -z "$(find "$site_packages" -type l -print -quit)"
+direct_url="$site_packages/fabric_kg_builder-0.2.4.dist-info/direct_url.json"
+jq -e '
+  (.url | endswith(".whl"))
+  and ((.dir_info // {}).editable // false | not)
+' "$direct_url" >/dev/null
+case "$(jq -r '.url' "$direct_url")" in
+  *"$repo"*) echo "wheel direct_url resolves under repository" >&2; exit 1 ;;
 esac
 
 mkdir -p smoke
@@ -90,6 +93,7 @@ jq -n \
     l5a_definition_hash:("2"*64), l5b_definition_hash:("3"*64),
     l6_definition:{path:"l6.json",sha256:$l6b,canonical_hash:$l6c},
     fabric_definitions:[{
+      mode:"managed",
       name:"fabric-kg-024-data-agent",item_id:"data-agent",
       item_type:"DataAgent",
       artifact:{path:"data-agent.json",sha256:$dab,canonical_hash:$dac},

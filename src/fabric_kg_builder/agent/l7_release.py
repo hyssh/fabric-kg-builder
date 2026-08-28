@@ -131,16 +131,44 @@ class FabricOwnershipReceipt(_StrictModel):
 
 
 class FabricDefinitionTarget(_StrictModel):
+    mode: Literal["create", "managed"]
     name: str
-    item_id: str = Field(min_length=1)
+    item_id: str | None = None
     item_type: Literal["DataAgent", "GraphModel", "Ontology", "SemanticModel"]
     artifact: ArtifactBinding
-    ownership_receipt: ArtifactBinding
+    ownership_receipt: ArtifactBinding | None = None
+    ownership_receipt_output: str | None = None
 
     @field_validator("name")
     @classmethod
     def _owned_name(cls, value: str) -> str:
         return _validate_release_name(value)
+
+    @model_validator(mode="after")
+    def _intent_fields(self) -> "FabricDefinitionTarget":
+        if self.mode == "create":
+            if self.item_id is not None or self.ownership_receipt is not None:
+                raise ValueError(
+                    "Fabric create intent forbids item_id and ownership_receipt"
+                )
+            if not self.ownership_receipt_output:
+                raise ValueError(
+                    "Fabric create intent requires ownership_receipt_output"
+                )
+            if not Path(self.ownership_receipt_output).is_absolute():
+                raise ValueError(
+                    "Fabric ownership_receipt_output must be absolute"
+                )
+        else:
+            if not self.item_id or self.ownership_receipt is None:
+                raise ValueError(
+                    "Fabric managed intent requires item_id and ownership_receipt"
+                )
+            if self.ownership_receipt_output is not None:
+                raise ValueError(
+                    "Fabric managed intent forbids ownership_receipt_output"
+                )
+        return self
 
 
 class SearchTarget(_StrictModel):
@@ -204,7 +232,7 @@ class FoundryTarget(_StrictModel):
     project_name: str = Field(min_length=1)
     search_connection_name: str
     fabric_connection_name: str
-    data_agent_id: str = Field(min_length=1)
+    data_agent_id: str = ""
     deploy_builtin_agent: bool = False
 
     @field_validator("search_connection_name", "fabric_connection_name")
@@ -220,6 +248,7 @@ class L7ReleaseConfig(_StrictModel):
     resource_group: str = Field(min_length=1)
     expected_principal_id: str = Field(min_length=1)
     fabric_workspace_id: str = Field(min_length=1)
+    ownership_registry_output: str | None = None
     authority_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     l5a_definition_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     l5b_definition_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -232,15 +261,51 @@ class L7ReleaseConfig(_StrictModel):
     @model_validator(mode="after")
     def _unique_targets(self) -> "L7ReleaseConfig":
         names = [item.name for item in self.fabric_definitions]
-        ids = [item.item_id.casefold() for item in self.fabric_definitions]
-        if len(names) != len(set(names)) or len(ids) != len(set(ids)):
-            raise ValueError("Fabric target names and IDs must be unique")
-        if self.foundry.data_agent_id.casefold() not in {
+        ids = [
             item.item_id.casefold()
             for item in self.fabric_definitions
+            if item.item_id is not None
+        ]
+        if len(names) != len(set(names)) or len(ids) != len(set(ids)):
+            raise ValueError("Fabric target names and IDs must be unique")
+        data_agents = [
+            item
+            for item in self.fabric_definitions
             if item.item_type == "DataAgent"
-        }:
-            raise ValueError("Foundry data_agent_id must bind a configured DataAgent")
+        ]
+        if len(data_agents) > 1:
+            raise ValueError("at most one Fabric DataAgent target is allowed")
+        if data_agents:
+            data_agent = data_agents[0]
+            if data_agent.mode == "managed":
+                if self.foundry.data_agent_id.casefold() != str(
+                    data_agent.item_id
+                ).casefold():
+                    raise ValueError(
+                        "Foundry data_agent_id must bind the managed DataAgent"
+                    )
+            elif self.foundry.data_agent_id:
+                raise ValueError(
+                    "Foundry data_agent_id must be empty for DataAgent create intent"
+                )
+        elif self.foundry.data_agent_id or self.foundry.deploy_builtin_agent:
+            raise ValueError(
+                "Foundry Data Agent binding requires a Fabric DataAgent target"
+            )
+        if any(item.mode == "create" for item in self.fabric_definitions):
+            if not self.ownership_registry_output:
+                raise ValueError(
+                    "Fabric create intent requires ownership_registry_output"
+                )
+            if not Path(self.ownership_registry_output).is_absolute():
+                raise ValueError(
+                    "ownership_registry_output must be absolute"
+                )
+        modes = {item.mode for item in self.fabric_definitions}
+        if len(modes) > 1:
+            raise ValueError(
+                "Fabric create and managed targets require separate transactions"
+            )
         return self
 
     @property
@@ -261,6 +326,7 @@ class ResourceReadback(_StrictModel):
     etag: str = ""
     definition_hash: str = ""
     properties_hash: str = ""
+    stable_id: str = ""
 
 
 class L7Observation(_StrictModel):
@@ -817,14 +883,15 @@ class L7Planner:
         base = config_path.resolve().parent
         _validate_artifact(config.l6_definition, base)
         fabric_desired_hashes = {
-            item.item_id: canonical_sha256(
+            item.name: canonical_sha256(
                 _definition_value(item.artifact, base)
             )
             for item in config.fabric_definitions
         }
         ownership_receipts = {
-            item.item_id: _ownership_receipt(item, config, base)
+            str(item.item_id): _ownership_receipt(item, config, base)
             for item in config.fabric_definitions
+            if item.mode == "managed"
         }
         observation = self.backend.observe(config)
         _require_identity(config, observation.identity)
@@ -833,40 +900,59 @@ class L7Planner:
         order = 1
 
         for target in config.fabric_definitions:
-            desired_definition_hash = fabric_desired_hashes[target.item_id]
+            desired_definition_hash = fabric_desired_hashes[target.name]
             resource_id = (
                 f"/workspaces/{config.fabric_workspace_id}/"
-                f"{_FABRIC_TYPES[target.item_type]}/{target.item_id}"
+                f"{_FABRIC_TYPES[target.item_type]}/"
+                + (
+                    str(target.item_id)
+                    if target.mode == "managed"
+                    else f"by-name/{target.name}"
+                )
             )
             observed = reads.get(resource_id.casefold())
-            capable = observation.capabilities.get(
-                f"fabric.{target.item_type}.definition", False
-            )
-            if not capable:
-                mutation = "no-go"
-                reason = "exact definition mutation and getDefinition readback unavailable"
-            elif observed is None or not observed.exists:
-                mutation = "no-go"
-                reason = "configured stable Fabric item is absent; implicit name create forbidden"
-            elif observed.resource_type != target.item_type or observed.name != target.name:
-                mutation = "no-go"
-                reason = "Fabric stable ID/type/name readback mismatch"
-            elif (
-                observed.definition_hash
-                != ownership_receipts[target.item_id].definition_hash
-                or observed.etag != ownership_receipts[target.item_id].etag
-            ):
-                mutation = "no-go"
-                reason = "Fabric ownership receipt definition/ETag drift"
-            elif not observed.etag:
-                mutation = "no-go"
-                reason = "Fabric definition mutation lacks conditional ETag authority"
-            elif observed.definition_hash == desired_definition_hash:
-                mutation = "noop"
-                reason = ""
+            if target.mode == "create":
+                capable = observation.capabilities.get(
+                    f"fabric.{target.item_type}.create", False
+                )
+                if not capable:
+                    mutation = "no-go"
+                    reason = "exact Fabric create/getDefinition/delete capability unavailable"
+                elif observed is not None and observed.exists:
+                    mutation = "no-go"
+                    reason = "release-owned Fabric create name collision"
+                else:
+                    mutation = "create"
+                    reason = ""
             else:
-                mutation = "update"
-                reason = ""
+                capable = observation.capabilities.get(
+                    f"fabric.{target.item_type}.definition", False
+                )
+                receipt = ownership_receipts[str(target.item_id)]
+                if not capable:
+                    mutation = "no-go"
+                    reason = "exact definition mutation and getDefinition readback unavailable"
+                elif observed is None or not observed.exists:
+                    mutation = "no-go"
+                    reason = "configured managed Fabric item is absent"
+                elif observed.resource_type != target.item_type or observed.name != target.name:
+                    mutation = "no-go"
+                    reason = "Fabric stable ID/type/name readback mismatch"
+                elif (
+                    observed.definition_hash != receipt.definition_hash
+                    or observed.etag != receipt.etag
+                ):
+                    mutation = "no-go"
+                    reason = "Fabric ownership receipt definition/ETag drift"
+                elif not observed.etag:
+                    mutation = "no-go"
+                    reason = "Fabric definition mutation lacks conditional ETag authority"
+                elif observed.definition_hash == desired_definition_hash:
+                    mutation = "noop"
+                    reason = ""
+                else:
+                    mutation = "update"
+                    reason = ""
             actions.append(
                 DeploymentAction(
                     order=order,
@@ -876,6 +962,7 @@ class L7Planner:
                     name=target.name,
                     action=mutation,
                     desired_hash=desired_definition_hash,
+                    ownership_marker=ownership_marker,
                     observed_hash=observed.definition_hash if observed else "",
                     observed_etag=observed.etag if observed else "",
                     readback_expectation={
@@ -883,12 +970,22 @@ class L7Planner:
                         "type": target.item_type,
                         "name": target.name,
                         "definition_hash": desired_definition_hash,
-                        "ownership_receipt_hash": ownership_receipts[
-                            target.item_id
-                        ].receipt_hash,
+                        "ownership_receipt_hash": (
+                            ownership_receipts[str(target.item_id)].receipt_hash
+                            if target.mode == "managed"
+                            else ""
+                        ),
                     },
                     rollback=RollbackStep(
-                        action="restore-definition" if mutation == "update" else "none",
+                        action=(
+                            "restore-definition"
+                            if mutation == "update"
+                            else (
+                                "delete-created"
+                                if mutation == "create"
+                                else "none"
+                            )
+                        ),
                         resource_id=resource_id,
                         expected_etag=observed.etag if observed else "",
                     ),
@@ -1000,23 +1097,31 @@ class L7Planner:
             search_connection_properties,
         )
 
-        search_connection_hash = canonical_sha256(
-            normalize_connection_properties(
-                search_connection_properties(
-                    endpoint=config.search.endpoint,
-                    attempt_id=deployment_attempt_id,
+        if config.foundry.deploy_builtin_agent:
+            search_connection_hash = canonical_sha256(
+                normalize_connection_properties(
+                    search_connection_properties(
+                        endpoint=config.search.endpoint,
+                        attempt_id=deployment_attempt_id,
+                    )
                 )
             )
-        )
-        fabric_connection_hash = canonical_sha256(
-            normalize_connection_properties(
-                fabric_data_agent_connection_properties(
-                    workspace_id=config.fabric_workspace_id,
-                    data_agent_id=config.foundry.data_agent_id,
-                    attempt_id=deployment_attempt_id,
+            fabric_connection_hash = canonical_sha256(
+                normalize_connection_properties(
+                    fabric_data_agent_connection_properties(
+                        workspace_id=config.fabric_workspace_id,
+                        data_agent_id=config.foundry.data_agent_id,
+                        attempt_id=deployment_attempt_id,
+                    )
                 )
             )
-        )
+        else:
+            search_connection_hash = canonical_sha256(
+                {"deferred": config.foundry.search_connection_name}
+            )
+            fabric_connection_hash = canonical_sha256(
+                {"deferred": config.foundry.fabric_connection_name}
+            )
         for kind, name, desired_hash in (
             (
                 "foundry-search-connection",
@@ -1031,7 +1136,10 @@ class L7Planner:
         ):
             resource_id = f"{project_id}/connections/{name}"
             observed = reads.get(resource_id.casefold())
-            if not observation.capabilities.get("foundry.project-connections", False):
+            if not config.foundry.deploy_builtin_agent:
+                action = "deferred"
+                reason = "Foundry built-in agent deployment disabled by config"
+            elif not observation.capabilities.get("foundry.project-connections", False):
                 action = "no-go"
                 reason = "exact connection create/readback/conditional delete unavailable"
             elif observed is not None and observed.exists:
@@ -1153,6 +1261,9 @@ class AzureL7Backend:
         self._rollback_definitions: dict[str, dict[str, Any]] = {}
         self._created_etags: dict[str, str] = {}
         self._mutation_confirmed: set[str] = set()
+        self._created_fabric_ids: dict[str, str] = {}
+        self._deleted_fabric_ids: set[str] = set()
+        self._ownership_outputs: dict[Path, bytes] = {}
 
     def _artifact_json(self, binding: ArtifactBinding) -> Any:
         return _artifact_value(binding, self.artifact_base)
@@ -1321,7 +1432,52 @@ class AzureL7Backend:
             name=str(item.get("displayName") or ""),
             etag=str(response.headers.get("ETag") or item_response.headers.get("ETag") or ""),
             definition_hash=canonical_sha256(definition),
+            properties_hash=canonical_sha256(
+                {"description": str(item.get("description") or "")}
+            ),
         )
+
+    def _list_fabric_items(
+        self, config: L7ReleaseConfig
+    ) -> list[dict[str, Any]]:
+        token = self._token(_FABRIC_SCOPE)
+        url = f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/items"
+        items: list[dict[str, Any]] = []
+        for _ in range(100):
+            response = self._request(
+                "GET",
+                url,
+                token=token,
+                expected_origin=_FABRIC_ORIGIN,
+            )
+            if response.status_code != 200:
+                raise L7ReleaseError(
+                    f"Fabric item listing failed with HTTP {response.status_code}"
+                )
+            body = self._json(response, "Fabric item listing")
+            values = body.get("value")
+            if not isinstance(values, list):
+                raise L7ReleaseError("Fabric item listing omitted value array")
+            items.extend(item for item in values if isinstance(item, dict))
+            continuation = str(body.get("continuationUri") or "")
+            if continuation:
+                url = _validated_service_url(
+                    continuation,
+                    expected_origin=_FABRIC_ORIGIN,
+                    base_url=url,
+                )
+                continue
+            continuation_token = str(body.get("continuationToken") or "")
+            if continuation_token:
+                from urllib.parse import quote
+
+                url = (
+                    f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/"
+                    f"items?continuationToken={quote(continuation_token, safe='')}"
+                )
+                continue
+            return items
+        raise L7ReleaseError("Fabric item listing exceeded 100 pages")
 
     def observe(self, config: L7ReleaseConfig) -> L7Observation:
         identity = _decode_identity(self._token(_MANAGEMENT_SCOPE))
@@ -1375,7 +1531,41 @@ class AzureL7Backend:
                 role_present = False
             capabilities["search.knowledge-source"] = role_present
             capabilities["search.knowledge-base"] = role_present
+        create_items = (
+            self._list_fabric_items(config)
+            if any(item.mode == "create" for item in config.fabric_definitions)
+            else []
+        )
         for target in config.fabric_definitions:
+            if target.mode == "create":
+                collection = _FABRIC_TYPES[target.item_type]
+                resource_id = (
+                    f"/workspaces/{config.fabric_workspace_id}/{collection}/"
+                    f"by-name/{target.name}"
+                )
+                collision = next(
+                    (
+                        item
+                        for item in create_items
+                        if item.get("displayName") == target.name
+                    ),
+                    None,
+                )
+                resources.append(
+                    ResourceReadback(
+                        resource_id=resource_id,
+                        exists=collision is not None,
+                        resource_type=str((collision or {}).get("type") or target.item_type),
+                        name=target.name,
+                        stable_id=str((collision or {}).get("id") or ""),
+                        etag=str((collision or {}).get("etag") or ""),
+                    )
+                )
+                # Fabric create/get/delete contracts do not currently expose
+                # documented ETag + conditional-delete CAS authority. Keep
+                # first-run lifecycle planned but block live mutation.
+                capabilities[f"fabric.{target.item_type}.create"] = False
+                continue
             try:
                 resources.append(self._fabric_definition(config, target))
                 capabilities[f"fabric.{target.item_type}.definition"] = True
@@ -1416,34 +1606,35 @@ class AzureL7Backend:
             FoundryProjectConnectionClient,
         )
 
-        client = FoundryProjectConnectionClient(
-            subscription_id=config.subscription_id,
-            resource_group=config.resource_group,
-            account_name=config.foundry.account_name,
-            project_name=config.foundry.project_name,
-            tenant_id=config.tenant_id,
-            credential=self.credential,
-        )
-        for name in (
-            config.foundry.search_connection_name,
-            config.foundry.fabric_connection_name,
-        ):
-            try:
-                item = client.get(name)
-            except Exception as exc:
-                raise L7ReleaseError(
-                    "Foundry project connection readback failed"
-                ) from exc
-            resources.append(
-                ResourceReadback(
-                    resource_id=client.connection_id(name),
-                    exists=item is not None,
-                    resource_type="ProjectConnection",
-                    name=name,
-                    etag=item.etag if item else "",
-                    properties_hash=item.properties_hash if item else "",
-                )
+        if config.foundry.deploy_builtin_agent:
+            client = FoundryProjectConnectionClient(
+                subscription_id=config.subscription_id,
+                resource_group=config.resource_group,
+                account_name=config.foundry.account_name,
+                project_name=config.foundry.project_name,
+                tenant_id=config.tenant_id,
+                credential=self.credential,
             )
+            for name in (
+                config.foundry.search_connection_name,
+                config.foundry.fabric_connection_name,
+            ):
+                try:
+                    item = client.get(name)
+                except Exception as exc:
+                    raise L7ReleaseError(
+                        "Foundry project connection readback failed"
+                    ) from exc
+                resources.append(
+                    ResourceReadback(
+                        resource_id=client.connection_id(name),
+                        exists=item is not None,
+                        resource_type="ProjectConnection",
+                        name=name,
+                        etag=item.etag if item else "",
+                        properties_hash=item.properties_hash if item else "",
+                    )
+                )
         return L7Observation(
             identity=identity,
             resources=tuple(resources),
@@ -1458,8 +1649,15 @@ class AzureL7Backend:
             (
                 item
                 for item in config.fabric_definitions
-                if item.item_id.casefold()
-                == action.resource_id.casefold().rsplit("/", 1)[-1]
+                if (
+                    item.mode == "managed"
+                    and str(item.item_id).casefold()
+                    == action.resource_id.casefold().rsplit("/", 1)[-1]
+                )
+                or (
+                    item.mode == "create"
+                    and item.name == action.name
+                )
             ),
             None,
         )
@@ -1825,9 +2023,273 @@ class AzureL7Backend:
             credential=self.credential,
         )
 
+    def _created_target(
+        self,
+        target: FabricDefinitionTarget,
+        item_id: str,
+    ) -> FabricDefinitionTarget:
+        return target.model_copy(
+            update={
+                "mode": "managed",
+                "item_id": item_id,
+                "ownership_receipt": target.artifact,
+                "ownership_receipt_output": None,
+            }
+        )
+
+    def _create_fabric(
+        self,
+        config: L7ReleaseConfig,
+        target: FabricDefinitionTarget,
+        action: DeploymentAction,
+    ) -> ResourceReadback:
+        if not action.ownership_marker.startswith(
+            "fabric-kg-024-attempt:op-"
+        ):
+            raise L7ReleaseError("Fabric create omitted approved attempt marker")
+        collection = _FABRIC_TYPES[target.item_type]
+        create_url = (
+            f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/{collection}"
+        )
+        definition = self._definition(self._artifact_json(target.artifact))
+        token = self._token(_FABRIC_SCOPE)
+        try:
+            response = self._request(
+                "POST",
+                create_url,
+                token=token,
+                body={
+                    "displayName": target.name,
+                    "description": action.ownership_marker,
+                    "definition": definition,
+                },
+                expected_origin=_FABRIC_ORIGIN,
+            )
+        except L7ReleaseError:
+            self._reconcile_fabric_create(
+                config, target, action, keep=False
+            )
+            raise
+        item_id = ""
+        if response.status_code == 201:
+            body = self._json(response, f"{target.item_type} create")
+            item_id = str(body.get("id") or body.get("itemId") or "")
+        elif response.status_code == 202:
+            location = str(response.headers.get("Location") or "")
+            if not location:
+                self._reconcile_fabric_create(
+                    config, target, action, keep=False
+                )
+            try:
+                outcome = self._wait_lro(
+                    location,
+                    token,
+                    expected_origin=_FABRIC_ORIGIN,
+                    base_url=create_url,
+                )
+            except L7ReleaseError:
+                self._reconcile_fabric_create(
+                    config, target, action, keep=False
+                )
+                raise
+            result = outcome.body.get("result")
+            item_id = str(
+                outcome.body.get("id")
+                or outcome.body.get("itemId")
+                or (
+                    result.get("id")
+                    if isinstance(result, dict)
+                    else ""
+                )
+                or ""
+            )
+        else:
+            self._reconcile_fabric_create(
+                config, target, action, keep=False
+            )
+        if not item_id:
+            return self._reconcile_fabric_create(
+                config, target, action, keep=True
+            )
+        if not item_id:
+            raise L7ReleaseError(f"{target.item_type} create omitted item ID")
+        logical_key = action.resource_id.casefold()
+        self._created_fabric_ids[logical_key] = item_id
+        self._mutation_confirmed.add(logical_key)
+        managed_target = self._created_target(target, item_id)
+        observed = self._fabric_definition(config, managed_target)
+        if observed.etag:
+            self._created_etags[logical_key] = observed.etag
+        if (
+            observed.name != target.name
+            or observed.resource_type != target.item_type
+            or observed.definition_hash != action.desired_hash
+            or observed.properties_hash
+            != canonical_sha256(
+                {"description": action.ownership_marker}
+            )
+            or not observed.etag
+        ):
+            raise L7ReleaseError(
+                f"{target.item_type} create readback mismatch"
+            )
+        return ResourceReadback(
+            resource_id=action.resource_id,
+            stable_id=item_id,
+            exists=True,
+            resource_type=target.item_type,
+            name=target.name,
+            etag=observed.etag,
+            definition_hash=observed.definition_hash,
+        )
+
+    def _reconcile_fabric_create(
+        self,
+        config: L7ReleaseConfig,
+        target: FabricDefinitionTarget,
+        action: DeploymentAction,
+        *,
+        keep: bool,
+    ) -> ResourceReadback:
+        if not action.ownership_marker.startswith(
+            "fabric-kg-024-attempt:op-"
+        ):
+            raise L7ReleaseError("Fabric create omitted approved attempt marker")
+        matches: list[dict[str, Any]] = []
+        import time
+
+        for attempt in range(5):
+            matches = [
+                item
+                for item in self._list_fabric_items(config)
+                if item.get("displayName") == target.name
+                and item.get("type") == target.item_type
+                and item.get("description") == action.ownership_marker
+            ]
+            if len(matches) == 1:
+                break
+            if len(matches) > 1:
+                raise L7ReleaseError(
+                    f"{target.item_type} create reconciliation is ambiguous"
+                )
+            if attempt < 4:
+                time.sleep(2)
+        if len(matches) != 1:
+            raise L7ReleaseError(
+                f"{target.item_type} create outcome is unconfirmed"
+            )
+        item_id = str(matches[0].get("id") or "")
+        if not item_id:
+            raise L7ReleaseError(
+                f"{target.item_type} create reconciliation omitted item ID"
+            )
+        logical_key = action.resource_id.casefold()
+        self._created_fabric_ids[logical_key] = item_id
+        self._mutation_confirmed.add(logical_key)
+        observed = self._fabric_definition(
+            config, self._created_target(target, item_id)
+        )
+        if observed.etag:
+            self._created_etags[logical_key] = observed.etag
+        if (
+            observed.name != target.name
+            or observed.resource_type != target.item_type
+            or observed.definition_hash != action.desired_hash
+            or observed.properties_hash
+            != canonical_sha256(
+                {"description": action.ownership_marker}
+            )
+            or not observed.etag
+        ):
+            raise L7ReleaseError(
+                f"{target.item_type} create reconciliation readback mismatch"
+            )
+        reconciled = ResourceReadback(
+            resource_id=action.resource_id,
+            stable_id=item_id,
+            exists=True,
+            resource_type=target.item_type,
+            name=target.name,
+            etag=observed.etag,
+            definition_hash=observed.definition_hash,
+        )
+        if keep:
+            return reconciled
+        self.rollback(config, action)
+        raise L7ReleaseError(
+            f"{target.item_type} ambiguous create was reconciled and rolled back"
+        )
+
+    def finalize_ownership(
+        self,
+        config: L7ReleaseConfig,
+        plan: L7DeploymentPlan,
+        created: list[tuple[DeploymentAction, ResourceReadback]],
+    ) -> None:
+        receipt_hashes: dict[str, str] = {}
+        for action, observed in created:
+            if not action.component.startswith("fabric-"):
+                continue
+            target = self._target_for_action(config, action)
+            if target.mode != "create" or not target.ownership_receipt_output:
+                continue
+            values: dict[str, Any] = {
+                "release": RELEASE_VERSION,
+                "attempt_id": plan.attempt_id,
+                "authority_hash": config.authority_hash,
+                "item_id": observed.stable_id,
+                "item_type": target.item_type,
+                "name": target.name,
+                "definition_hash": observed.definition_hash,
+                "etag": observed.etag,
+                "created_at": datetime.now(timezone.utc),
+            }
+            provisional = FabricOwnershipReceipt.model_construct(
+                **values,
+                receipt_hash="0" * 64,
+            )
+            values["receipt_hash"] = canonical_sha256(
+                provisional.model_dump(
+                    mode="json", exclude={"receipt_hash"}
+                )
+            )
+            receipt = FabricOwnershipReceipt.model_validate(values)
+            payload = (
+                json.dumps(
+                    receipt.model_dump(mode="json"),
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            path = Path(target.ownership_receipt_output)
+            _write_immutable(path, payload)
+            self._ownership_outputs[path] = payload
+            registry_key = (
+                f"{config.tenant_id.casefold()}/"
+                f"{config.fabric_workspace_id.casefold()}/"
+                f"{target.item_type.casefold()}/"
+                f"{observed.stable_id.casefold()}"
+            )
+            receipt_hashes[registry_key] = receipt.receipt_hash
+        if receipt_hashes:
+            registry_path = Path(str(config.ownership_registry_output))
+            registry_payload = (
+                json.dumps(
+                    {"version": "1", "receipts": receipt_hashes},
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            _write_immutable(registry_path, registry_payload)
+            self._ownership_outputs[registry_path] = registry_payload
+
     def apply(self, config: L7ReleaseConfig, action: DeploymentAction) -> ResourceReadback:
         if action.component.startswith("fabric-"):
             target = self._target_for_action(config, action)
+            if action.action == "create":
+                return self._create_fabric(config, target, action)
             definition = self._definition(self._artifact_json(target.artifact))
             collection = _FABRIC_TYPES[target.item_type]
             url = (
@@ -1969,6 +2431,67 @@ class AzureL7Backend:
             return restored
         if action.rollback.action != "delete-created":
             raise L7ReleaseError("unsupported rollback action")
+        if action.component.startswith("fabric-"):
+            target = self._target_for_action(config, action)
+            item_id = self._created_fabric_ids.get(
+                action.resource_id.casefold(), ""
+            )
+            etag = self._created_etags.get(
+                action.resource_id.casefold(), ""
+            )
+            if not item_id or not etag:
+                raise L7ReleaseError(
+                    "Fabric create rollback lacks stable ID/ETag authority"
+                )
+            collection = _FABRIC_TYPES[target.item_type]
+            delete_url = (
+                f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/"
+                f"{collection}/{item_id}"
+            )
+            response = self._request(
+                "DELETE",
+                delete_url,
+                token=self._token(_FABRIC_SCOPE),
+                headers={"If-Match": etag},
+                expected_origin=_FABRIC_ORIGIN,
+            )
+            if response.status_code == 202:
+                location = str(response.headers.get("Location") or "")
+                if not location:
+                    raise L7ReleaseError(
+                        "Fabric delete returned 202 without Location"
+                    )
+                self._wait_lro(
+                    location,
+                    self._token(_FABRIC_SCOPE),
+                    expected_origin=_FABRIC_ORIGIN,
+                    base_url=delete_url,
+                )
+            elif response.status_code not in (200, 204, 404):
+                raise L7ReleaseError("Fabric create rollback delete failed")
+            check = self._request(
+                "GET",
+                f"{_FABRIC_BASE}/workspaces/{config.fabric_workspace_id}/"
+                f"items/{item_id}",
+                token=self._token(_FABRIC_SCOPE),
+                expected_origin=_FABRIC_ORIGIN,
+            )
+            if check.status_code != 404:
+                raise L7ReleaseError(
+                    "Fabric create rollback deletion readback mismatch"
+                )
+            self._deleted_fabric_ids.add(item_id)
+            if self._deleted_fabric_ids == set(
+                self._created_fabric_ids.values()
+            ):
+                self._cleanup_ownership_outputs()
+            return ResourceReadback(
+                resource_id=action.resource_id,
+                stable_id=item_id,
+                exists=False,
+                resource_type=target.item_type,
+                name=target.name,
+            )
         if action.resource_id.casefold() not in self._mutation_confirmed:
             raise L7ReleaseError(
                 "mutation outcome was not confirmed; unsafe unconditional "
@@ -2032,6 +2555,22 @@ class AzureL7Backend:
             resource_type=action.resource_type,
             name=action.name,
         )
+
+    def _cleanup_ownership_outputs(self) -> None:
+        for path, payload in list(self._ownership_outputs.items()):
+            try:
+                if path.read_bytes() != payload:
+                    raise L7ReleaseError(
+                        "ownership output changed before rollback"
+                    )
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+                path.unlink()
+                _fsync_parent(path)
+            except OSError as exc:
+                raise L7ReleaseError(
+                    "ownership output rollback failed"
+                ) from exc
+            self._ownership_outputs.pop(path, None)
 
     def _wait_lro(
         self,
@@ -2133,6 +2672,9 @@ class L7Executor:
         reservation.reserve()
         journal: list[JournalEntry] = []
         applied: list[DeploymentAction] = []
+        created_readbacks: list[
+            tuple[DeploymentAction, ResourceReadback]
+        ] = []
         sequence = 1
         try:
             for action in plan.actions:
@@ -2176,6 +2718,11 @@ class L7Executor:
                     )
                 )
                 sequence += 1
+                if action.action == "create":
+                    created_readbacks.append((action, observed))
+            finalizer = getattr(self.backend, "finalize_ownership", None)
+            if callable(finalizer):
+                finalizer(config, plan, created_readbacks)
             receipt = L7DeploymentReceipt.seal(
                 attempt_id=reservation.attempt_id,
                 plan_hash=plan.plan_hash,

@@ -57,6 +57,12 @@ roles, unsupported Fabric `getDefinition` operations, or unavailable exact
 Foundry rollback. A direct Search fallback does not satisfy preview agentic
 success.
 
+Fabric first-create intent is modeled separately from managed-existing intent,
+but current Fabric create/delete contracts do not document ETag and conditional
+delete CAS authority. The Azure backend therefore reports create capability
+NO-GO before mutation. Empty-workspace live creation must wait for supported
+rollback authority; fake lifecycle tests do not claim live platform support.
+
 For a reproducible product defect, preserve the sanitized JSONL/receipt, analyze
 the failing causal stage and rollback status, and open a GitHub issue with the
 installed CLI version, candidate SHA, stable resource types, hashes, HTTP status

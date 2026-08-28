@@ -214,6 +214,50 @@ def app_cmd() -> None:
     """M8 agent and app deployment commands."""
 
 
+@app_cmd.command("compile-l6")
+@click.option("--agent-name", required=True)
+@click.option("--fabric-connection-id", required=True)
+@click.option(
+    "--remote-tool-connection-id",
+    default="connection:deferred-remote-tool",
+    show_default=True,
+)
+@click.option(
+    "--out",
+    "output_path",
+    default="build/release/l6-agent-definition.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def compile_l6_cmd(
+    agent_name: str,
+    fabric_connection_id: str,
+    remote_tool_connection_id: str,
+    output_path: Path,
+) -> None:
+    """Compile and persist the canonical local L6 five-tool definition."""
+    from fabric_kg_builder.agent.l6_integration import (
+        build_l6_agent_definition,
+        persist_l6_agent_definition,
+    )
+
+    try:
+        definition = build_l6_agent_definition(
+            agent_name=agent_name,
+            fabric_data_agent_connection_id=fabric_connection_id,
+            foundry_remote_tool_connection_id=remote_tool_connection_id,
+        )
+        definition_hash = persist_l6_agent_definition(
+            output_path,
+            definition,
+            expected_definition=definition,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"definition_path={output_path}")
+    click.echo(f"definition_hash={definition_hash}")
+
+
 @app_cmd.command("deploy-l7")
 @click.option(
     "--config",

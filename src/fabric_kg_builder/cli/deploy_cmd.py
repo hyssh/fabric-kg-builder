@@ -2286,6 +2286,12 @@ PowerShell example:
     show_default=True,
     type=click.Path(path_type=Path),
 )
+@click.option(
+    "--definition-out",
+    default=None,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Write the exact Fabric Data Agent definition JSON for L7 planning.",
+)
 @click.option("--dry-run/--no-dry-run", default=False, show_default=True,
               help="Build the source-preserving Data Agent definition without updating Fabric.")
 @click.option("--manifest", "manifest_path", default=None, type=click.Path(),
@@ -2303,6 +2309,7 @@ def deploy_data_agent_cmd(
     domain_context: str,
     questions: tuple[str, ...],
     receipt_out: Path,
+    definition_out: Path | None,
     dry_run: bool,
     manifest_path: str | None,
 ) -> None:
@@ -2556,6 +2563,19 @@ def deploy_data_agent_cmd(
             ],
         )
         expected = stage_snapshot_from_spec(spec)
+        if definition_out is not None:
+            from fabric_kg_builder.knowledge.data_agent import build_definition_parts
+
+            definition_out.parent.mkdir(parents=True, exist_ok=True)
+            definition_out.write_text(
+                json.dumps(
+                    {"definition": {"parts": build_definition_parts(spec)}},
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
     except DataAgentRequiredExampleEmpty as exc:
         raise click.ClickException(str(exc)) from exc
     except DataAgentExampleValidationFailed as exc:

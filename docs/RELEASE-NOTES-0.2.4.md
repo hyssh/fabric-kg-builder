@@ -20,6 +20,11 @@ match live readback. The executor reserves receipt destinations before mutation
 and does not report success until the immutable receipt is atomically committed
 and fsynced.
 
+Create intent is distinct from managed intent. Because current Fabric
+create/delete APIs do not document ETag/CAS rollback, the live Azure adapter
+fails first-create preflight rather than risk deleting a concurrently changed
+item.
+
 RemoteTool hosting, distributed Blob-lease L6 authority, signer
 rotation/revocation, and RDF serialization are deferred. The canonical L6
 five-tool definition remains generated and local in this release.

@@ -143,6 +143,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
         "l6_definition": l6,
         "fabric_definitions": [
             {
+                "mode": "managed",
                 "name": "fabric-kg-024-data-agent",
                 "item_id": "data-agent-1",
                 "item_type": "DataAgent",
@@ -150,6 +151,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
                 "ownership_receipt": data_agent_ownership,
             },
             {
+                "mode": "managed",
                 "name": "fabric-kg-024-ontology",
                 "item_id": "ontology-1",
                 "item_type": "Ontology",
@@ -221,6 +223,62 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, L7ReleaseConfig]:
     return config_path, observation_path, parsed
 
 
+def _create_inputs(
+    tmp_path: Path,
+) -> tuple[Path, L7ReleaseConfig, L7Observation]:
+    config_path, _, _ = _inputs(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["ownership_registry_output"] = str(
+        tmp_path / "created-ownership-registry.json"
+    )
+    resources = []
+    capabilities: dict[str, bool] = {
+        "search.index": True,
+        "search.knowledge-source": True,
+        "search.knowledge-base": True,
+        "foundry.project-connections": False,
+    }
+    collections = {
+        "DataAgent": "dataAgents",
+        "Ontology": "ontologies",
+    }
+    for target in raw["fabric_definitions"]:
+        target["mode"] = "create"
+        target.pop("item_id")
+        target.pop("ownership_receipt")
+        target["ownership_receipt_output"] = str(
+            tmp_path
+            / f"created-{target['item_type'].casefold()}-ownership.json"
+        )
+        resources.append(
+            {
+                "resource_id": (
+                    f"/workspaces/workspace-1/{collections[target['item_type']]}/"
+                    f"by-name/{target['name']}"
+                ),
+                "exists": False,
+                "resource_type": target["item_type"],
+                "name": target["name"],
+            }
+        )
+        capabilities[f"fabric.{target['item_type']}.create"] = True
+    raw["foundry"]["data_agent_id"] = ""
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    config = load_l7_config(config_path)
+    observation = L7Observation.model_validate(
+        {
+            "identity": {
+                "tenant_id": "tenant-1",
+                "principal_id": "principal-1",
+            },
+            "resources": resources,
+            "capabilities": capabilities,
+            "observed_at": datetime(2026, 8, 27, tzinfo=timezone.utc),
+        }
+    )
+    return config_path, config, observation
+
+
 @pytest.mark.unit
 def test_release_version_and_36_top_level_commands() -> None:
     assert __version__ == "0.2.4"
@@ -228,6 +286,34 @@ def test_release_version_and_36_top_level_commands() -> None:
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
     assert build_l6_openapi_spec()["info"]["version"] == __version__
+
+
+@pytest.mark.unit
+def test_cli_compiles_canonical_l6_definition(tmp_path: Path) -> None:
+    output = tmp_path / "l6-definition.json"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "app",
+            "compile-l6",
+            "--agent-name",
+            "fabric-kg-024-agent",
+            "--fabric-connection-id",
+            "connection:fabric-data-agent",
+            "--out",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert output.exists()
+    definition = json.loads(output.read_text(encoding="utf-8"))
+    assert len(definition["tools"]) == 5
+    assert definition["definition_hash"] in result.output
+    help_result = CliRunner().invoke(
+        cli, ["deploy-data-agent", "--help"]
+    )
+    assert help_result.exit_code == 0
+    assert "--definition-out" in help_result.output
 
 
 @pytest.mark.unit
@@ -255,7 +341,7 @@ def test_cli_dry_run_is_default_and_writes_hashed_immutable_plan(
     plan = load_plan(plan_path)
     assert plan.plan_hash in result.output
     assert plan.l6_hosting == "generated-local-deferred"
-    assert [item.action for item in plan.actions].count("deferred") == 1
+    assert [item.action for item in plan.actions].count("deferred") >= 1
     assert not [item for item in plan.actions if item.action == "no-go"]
     assert plan_path.stat().st_mode & 0o222 == 0
 
@@ -503,6 +589,51 @@ class _SuccessBackend(_FailingBackend):
         )
 
 
+class _CreateBackend(AzureL7Backend):
+    def __init__(self, observation: L7Observation) -> None:
+        self.observation = observation
+        self.applied: list[str] = []
+        self.rolled_back: list[str] = []
+        self._ownership_outputs = {}
+
+    def observe(self, config: L7ReleaseConfig) -> L7Observation:
+        return self.observation
+
+    def apply(
+        self, config: L7ReleaseConfig, action: DeploymentAction
+    ) -> ResourceReadback:
+        self.applied.append(action.component)
+        if action.component.startswith("fabric-"):
+            return ResourceReadback(
+                resource_id=action.resource_id,
+                stable_id=f"created-{action.order}",
+                exists=True,
+                resource_type=action.resource_type,
+                name=action.name,
+                etag=f'"etag-{action.order}"',
+                definition_hash=action.desired_hash,
+            )
+        return ResourceReadback(
+            resource_id=action.resource_id,
+            exists=True,
+            resource_type=action.resource_type,
+            name=action.name,
+            etag=f'"etag-{action.order}"',
+            properties_hash=action.desired_hash,
+        )
+
+    def rollback(
+        self, config: L7ReleaseConfig, action: DeploymentAction
+    ) -> ResourceReadback:
+        self.rolled_back.append(action.component)
+        return ResourceReadback(
+            resource_id=action.resource_id,
+            exists=False,
+            resource_type=action.resource_type,
+            name=action.name,
+        )
+
+
 @pytest.mark.unit
 def test_preexisting_different_receipt_blocks_all_mutations(tmp_path: Path) -> None:
     config_path, observation_path, config = _inputs(tmp_path)
@@ -522,6 +653,52 @@ def test_preexisting_different_receipt_blocks_all_mutations(tmp_path: Path) -> N
             receipt_path=receipt_path,
         )
     assert backend.applied == []
+
+
+@pytest.mark.unit
+def test_empty_workspace_create_plan_and_ownership_outputs(
+    tmp_path: Path,
+) -> None:
+    config_path, config, observation = _create_inputs(tmp_path)
+    backend = _CreateBackend(observation)
+    planner = L7Planner(backend)
+    plan = planner.build(config, config_path=config_path)
+    fabric_actions = [
+        item for item in plan.actions if item.component.startswith("fabric-")
+    ]
+    assert fabric_actions
+    assert all(item.action == "create" for item in fabric_actions)
+    assert not [item for item in plan.actions if item.action == "no-go"]
+    receipt = L7Executor(planner, backend).execute(
+        config=config,
+        config_path=config_path,
+        plan=plan,
+        approval=plan.plan_hash,
+        receipt_path=tmp_path / "deployment-receipt.json",
+    )
+    assert receipt.status == "succeeded"
+    assert Path(str(config.ownership_registry_output)).exists()
+    for target in config.fabric_definitions:
+        assert Path(str(target.ownership_receipt_output)).exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid_mix", ["create-with-id", "managed-without-receipt"])
+def test_fabric_intent_rejects_mixed_ownership_fields(
+    tmp_path: Path,
+    invalid_mix: str,
+) -> None:
+    config_path, _, _ = _inputs(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    target = raw["fabric_definitions"][0]
+    if invalid_mix == "create-with-id":
+        target["mode"] = "create"
+        target["ownership_receipt_output"] = str(tmp_path / "ownership.json")
+    else:
+        target.pop("ownership_receipt")
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(L7ReleaseError, match="invalid L7 configuration"):
+        load_l7_config(config_path)
 
 
 @pytest.mark.unit

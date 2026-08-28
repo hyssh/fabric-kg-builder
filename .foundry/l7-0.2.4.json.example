@@ -5,6 +5,7 @@
   "resource_group": "<resource-group>",
   "expected_principal_id": "<identity-object-guid>",
   "fabric_workspace_id": "<fabric-workspace-guid>",
+  "ownership_registry_output": "/external/release/ownership-registry.json",
   "authority_hash": "<64-hex-authority-hash>",
   "l5a_definition_hash": "<64-hex-l5a-definition-hash>",
   "l5b_definition_hash": "<64-hex-l5b-definition-hash>",
@@ -15,34 +16,26 @@
   },
   "fabric_definitions": [
     {
+      "mode": "create",
       "name": "fabric-kg-024-<release-name>",
-      "item_id": "<fabric-data-agent-guid>",
       "item_type": "DataAgent",
       "artifact": {
         "path": "../build/release/data-agent-definition.json",
         "sha256": "<64-hex-file-bytes-hash>",
         "canonical_hash": "<64-hex-canonical-json-hash>"
       },
-      "ownership_receipt": {
-        "path": "../build/release/data-agent-ownership-receipt.json",
-        "sha256": "<64-hex-file-bytes-hash>",
-        "canonical_hash": "<64-hex-canonical-json-hash>"
-      }
+      "ownership_receipt_output": "/external/release/data-agent-ownership-receipt.json"
     },
     {
+      "mode": "create",
       "name": "fabric-kg-024-<release-name>-ontology",
-      "item_id": "<fabric-ontology-guid>",
       "item_type": "Ontology",
       "artifact": {
         "path": "../build/release/ontology-definition.json",
         "sha256": "<64-hex-file-bytes-hash>",
         "canonical_hash": "<64-hex-canonical-json-hash>"
       },
-      "ownership_receipt": {
-        "path": "../build/release/ontology-ownership-receipt.json",
-        "sha256": "<64-hex-file-bytes-hash>",
-        "canonical_hash": "<64-hex-canonical-json-hash>"
-      }
+      "ownership_receipt_output": "/external/release/ontology-ownership-receipt.json"
     }
   ],
   "search": {
@@ -70,7 +63,7 @@
     "project_name": "<foundry-project>",
     "search_connection_name": "fabric-kg-024-<release-name>-search",
     "fabric_connection_name": "fabric-kg-024-<release-name>-fabric",
-    "data_agent_id": "<fabric-data-agent-guid>",
+    "data_agent_id": "",
     "deploy_builtin_agent": false
   },
   "plan_ttl_seconds": 900
