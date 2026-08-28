@@ -228,6 +228,7 @@ def _stable_semantic_validation_code(
         ("completeness_requirement_hash", "completeness_hash_mismatch"),
         ("external_reference_decision_hash", "external_reference_hash_mismatch"),
         ("identity.contract_kind must be l1.domain_proposal", "proposal_identity_kind_mismatch"),
+        ("domain_contract_hash does not equal domain.service.compute_contract_hash", "proposal_domain_hash_authority_mismatch"),
         ("proposal identity domain hash mismatch", "proposal_identity_domain_hash_mismatch"),
         ("proposal must contain a draft contract", "proposal_draft_status_invalid"),
         ("selected relationship IDs do not match draft contract", "proposal_relationship_selection_mismatch"),
