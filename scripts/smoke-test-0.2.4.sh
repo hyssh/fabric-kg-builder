@@ -18,10 +18,10 @@ wheel="$(find "$artifact_out" -maxdepth 1 -name 'fabric_kg_builder-0.2.4-*.whl' 
 test -n "$wheel"
 
 uv venv --python 3.12 "$outside/venv" >/dev/null
-uv export --project "$outside" --locked --extra agent --extra app --no-dev \
+uv export --project "$outside" --locked --no-dev \
   --no-emit-project --no-hashes --output-file "$outside/constraints.txt"
 uv pip install --python "$outside/venv/bin/python" --quiet \
-  --constraint "$outside/constraints.txt" "${wheel}[agent,app]"
+  --constraint "$outside/constraints.txt" "$wheel"
 unset PYTHONPATH
 cd "$outside"
 
