@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -231,6 +231,14 @@ def _stable_semantic_validation_code(
     if error_type != "value_error":
         return error_type
     return "domain_contract_invariant_unclassified"
+
+
+def _is_authority_validation_failure(code: str) -> bool:
+    return (
+        "authority_drift" in code
+        or code == "route_question_id_unknown"
+        or code.endswith("_unknown")
+    )
 
 
 def _normalize_question_route_shapes(
@@ -578,6 +586,51 @@ def _zero_route_audit(
             )
         ),
     )
+
+
+def _assert_candidate_authority(
+    candidates: DomainProposalCandidatesV2,
+    *,
+    trusted_question_ids: tuple[str, ...],
+    trusted_evidence_ids: set[str],
+    attempt_count: int,
+) -> None:
+    questions = set(trusted_question_ids)
+    type_ids = {
+        item.proposed_type.type_id
+        for item in candidates.semantic_type_candidates
+    }
+    failures: list[tuple[str, str]] = []
+    for relationship in candidates.relationship_candidates:
+        if set(relationship.competency_question_ids) - questions:
+            failures.append(
+                (
+                    "relationship_candidates.competency_question_ids",
+                    "relationship_question_unknown",
+                )
+            )
+        if (
+            set(relationship.source_type_ids)
+            | set(relationship.target_type_ids)
+        ) - type_ids:
+            failures.append(
+                (
+                    "relationship_candidates.source_type_ids",
+                    "relationship_endpoint_unknown",
+                )
+            )
+        if set(relationship.evidence_span_ids) - trusted_evidence_ids:
+            failures.append(
+                (
+                    "relationship_candidates.evidence_span_ids",
+                    "relationship_evidence_unknown",
+                )
+            )
+    if failures:
+        raise L1ProposalSchemaRepairError(
+            attempt_count=attempt_count,
+            validation_failures=tuple(dict.fromkeys(failures)),
+        )
 
 
 def _repair_zero_supported_routes(
@@ -1358,8 +1411,7 @@ def prepare_l1_stage(
             if client is None or model_call_count != 1:
                 raise
             if any(
-                code == "route_question_id_unknown"
-                or "authority_drift" in code
+                _is_authority_validation_failure(code)
                 for _path, code in first_error.validation_failures
             ):
                 raise
@@ -1447,6 +1499,14 @@ def prepare_l1_stage(
                         ),
                     ),
                 ) from second_error
+    _assert_candidate_authority(
+        candidates,
+        trusted_question_ids=trusted_question_ids,
+        trusted_evidence_ids={
+            item.evidence_span_id for item in evidence_spans
+        },
+        attempt_count=model_call_count or 1,
+    )
     initial_route_audit = _zero_route_audit(
         preflight=preflight,
         candidates=candidates,
@@ -1682,7 +1742,14 @@ def prepare_l1_stage(
                 )
                 for item in _sanitized_validation_failures(exc)
             )
-        if client is not None and model_call_count == 1:
+        if (
+            client is not None
+            and model_call_count == 1
+            and not any(
+                _is_authority_validation_failure(code)
+                for _path, code in semantic_failures
+            )
+        ):
             first_diagnostics = _raw_candidate_diagnostics(
                 candidates.model_dump(mode="json"),
                 attempt=1,
@@ -1730,7 +1797,7 @@ def prepare_l1_stage(
                     parent_correction_context_id=parent_correction_context_id,
                     started_at_utc=started,
                 )
-                return retried.model_copy(update={"model_call_count": 2})
+                return replace(retried, model_call_count=2)
             except L1ZeroSupportedRoutesError as second_error:
                 raise L1ZeroSupportedRoutesError(
                     second_error.audit_payload.model_copy(
@@ -1761,6 +1828,22 @@ def prepare_l1_stage(
                         ),
                     ),
                 ) from second_error
+            except Exception as provider_error:
+                provider_failure = (
+                    ("proposal.provider", "provider_retry_failed"),
+                )
+                raise L1ProposalSchemaRepairError(
+                    attempt_count=2,
+                    validation_failures=provider_failure,
+                    candidate_attempts=(
+                        first_diagnostics,
+                        _raw_candidate_diagnostics(
+                            locals().get("second_raw"),
+                            attempt=2,
+                            failures=provider_failure,
+                        ),
+                    ),
+                ) from provider_error
         if not (
             isinstance(exc, ProposalSelectionError)
             and str(exc)

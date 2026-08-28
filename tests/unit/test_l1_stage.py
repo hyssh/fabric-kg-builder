@@ -410,6 +410,23 @@ class _SchemaRegenerationClient:
         return raw
 
 
+class _SemanticRegenerationClient:
+    def __init__(self, *, provider_fails: bool = False) -> None:
+        self.calls = 0
+        self.provider_fails = provider_fails
+
+    def complete_json(self, **kwargs):
+        self.calls += 1
+        if self.calls == 2 and self.provider_fails:
+            raise TimeoutError("provider unavailable")
+        raw = _candidates("records")
+        if self.calls == 1:
+            raw["semantic_type_candidates"][0]["proposed_type"][
+                "identity_key_policy"
+            ] = None
+        return raw
+
+
 def test_zero_supported_routes_use_one_strict_route_only_repair(
     tmp_path: Path,
 ) -> None:
@@ -493,6 +510,51 @@ def test_repeated_structural_provider_failure_has_two_attempt_diagnostics(
         failure["path"] and failure["code"] != "value_error"
         for item in error.candidate_attempts
         for failure in item["failures"]
+    )
+
+
+def test_semantically_invalid_provider_candidate_gets_one_full_regeneration(
+    tmp_path: Path,
+) -> None:
+    client = _SemanticRegenerationClient()
+    prepared = prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 2
+    assert prepared.model_call_count == 2
+
+
+def test_semantic_retry_provider_failure_is_typed_and_sanitized(
+    tmp_path: Path,
+) -> None:
+    client = _SemanticRegenerationClient(provider_fails=True)
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    error = captured.value
+    assert error.attempt_count == 2
+    assert error.validation_failures == (
+        ("proposal.provider", "provider_retry_failed"),
+    )
+    assert len(error.candidate_attempts) == 2
+
+
+def test_semantic_authority_drift_does_not_retry(tmp_path: Path) -> None:
+    class AuthorityDriftClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, **kwargs):
+            self.calls += 1
+            raw = _candidates("records")
+            raw["relationship_candidates"][0][
+                "competency_question_ids"
+            ] = ["cq:invented"]
+            return raw
+
+    client = AuthorityDriftClient()
+    with pytest.raises(L1ProposalSchemaRepairError) as captured:
+        prepare_l1_stage(_preflight(tmp_path), client=client)
+    assert client.calls == 1
+    assert captured.value.validation_error_codes == (
+        "relationship_question_unknown",
     )
 
 
