@@ -409,7 +409,6 @@ class DomainApprovalContext(ContractModel):
                 "identity",
                 "domain_approval_context_id",
                 "approval_context_hash",
-                "decided_at_utc",
             },
         )
         expected_hash = canonical_sha256(values)

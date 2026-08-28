@@ -2506,7 +2506,14 @@ def _approval_context(
         "correction_text": correction_text,
         "correction_hash": correction_hash,
     }
-    context_hash = canonical_sha256(values)
+    context_hash = canonical_sha256(
+        {
+            **values,
+            "decided_at_utc": decided_at_utc.isoformat().replace(
+                "+00:00", "Z"
+            ),
+        }
+    )
     context_id = deterministic_contract_id(
         "domain-approval-context", {"approval_context_hash": context_hash}
     )
