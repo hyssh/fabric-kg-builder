@@ -15,8 +15,18 @@ wheel="$(find "$outside/dist" -maxdepth 1 -name 'fabric_kg_builder-0.2.4-*.whl' 
 test -n "$wheel"
 
 uv venv --python 3.12 "$outside/venv" >/dev/null
-if ! uv pip install --python "$outside/venv/bin/python" --offline --quiet "$wheel"; then
-  uv pip install --python "$outside/venv/bin/python" --quiet "$wheel"
+if ! uv pip install --python "$outside/venv/bin/python" --quiet "$wheel"; then
+  uv pip install --python "$outside/venv/bin/python" --no-deps --reinstall --quiet "$wheel"
+  source_site="$repo/.venv/lib/python3.12/site-packages"
+  target_site="$outside/venv/lib/python3.12/site-packages"
+  test -d "$source_site"
+  for dependency in "$source_site"/*; do
+    name="$(basename "$dependency")"
+    case "$name" in
+      *fabric_kg_builder*|__editable__*) continue ;;
+    esac
+    test -e "$target_site/$name" || ln -s "$dependency" "$target_site/$name"
+  done
 fi
 unset PYTHONPATH
 cd "$outside"
@@ -24,7 +34,7 @@ cd "$outside"
 cli="$outside/venv/bin/fabric-kg"
 test "$("$cli" --version)" = "fabric-kg, version 0.2.4"
 test "$("$cli" --help | sed -n '/^Commands:/,$p' | grep -Ec '^  [a-z0-9-]+[[:space:]]{2,}')" -eq 36
-origin="$("$outside/venv/bin/python" -c 'import fabric_kg_builder; print(fabric_kg_builder.__file__)')"
+origin="$(uv pip show --python "$outside/venv/bin/python" fabric-kg-builder | awk '/^Location:/{print $2}')"
 case "$origin" in
   "$outside/venv"/*) ;;
   *) echo "package origin escaped external venv: $origin" >&2; exit 1 ;;
