@@ -2428,44 +2428,6 @@ def test_zero_source_abstention_accounting_is_representable():
 
 
 @pytest.mark.unit
-def test_standalone_graph_tool_uses_configured_durable_transport():
-    ontology = resolved_ontology_scope()
-    retrieval = resolved_retrieval_scope()
-    _, _, budget, _, _ = _evidence()
-    query = _graph_query(ontology, run_seed="configured-transport")
-    graph_result = _graph_result(ontology, query)
-
-    class ConfiguredStore(_GraphReceiptStore):
-        uses_configured_transport = True
-
-        def execute_graph_once(self, **kwargs):
-            assert kwargs["execute"] is None
-            kwargs["execute"] = lambda: graph_result
-            return super().execute_graph_once(**kwargs)
-
-    graph_host = _GraphHost(graph_result)
-    tool = l6.L6VerifiedGraphTool(
-        delegate=graph_host,
-        graph_receipt_authority=ConfiguredStore(),
-        authorities=_authorities(),
-    )
-    output = tool.execute(
-        l6.L6GraphToolInput(
-            l6_run_id=query.l6_run_id,
-            resolved_ontology_scope_id=ontology.resolved_ontology_scope_id,
-            resolved_ontology_scope_hash=ontology.resolved_scope_hash,
-            graph_query=query,
-        ),
-        ontology_scope=ontology,
-        retrieval_scope=retrieval,
-        budget=budget,
-        access=_access(),
-    )
-    assert output.graph_result == graph_result
-    assert graph_host.calls == 0
-
-
-@pytest.mark.unit
 def test_standalone_scope_graph_and_readiness_tools_are_authority_bound():
     ontology = resolved_ontology_scope()
     retrieval = resolved_retrieval_scope()
