@@ -362,6 +362,115 @@ def _resolve_domain_brief(
     )
 
 
+def _run_schema2_enrichment(
+    *,
+    ctx_obj: dict,
+    input_path: str,
+    domain_file: str,
+    max_concurrent: int,
+    model_override: str | None,
+) -> object:
+    from datetime import datetime, timezone
+
+    from fabric_kg_builder.contracts.base import canonical_sha256
+    from fabric_kg_builder.enrichment.schema2_sources import (
+        IndexedSourceCorpusReader,
+        load_l2_inputs,
+    )
+    from fabric_kg_builder.enrichment.schema2_stage import run_l2
+    from fabric_kg_builder.model.schemas import AssetRow, AssetVersionRow
+
+    domain_path = Path(domain_file)
+    l1_state_root = Path(".fkg") / "l1"
+    inputs = load_l2_inputs(
+        l1_state_root=l1_state_root,
+        domain_path=domain_path,
+    )
+    now = datetime.now(timezone.utc)
+    assets = []
+    versions = []
+    for entry in inputs.corpus_manifest.entries:
+        if entry.disposition != "eligible":
+            continue
+        source_uri = f"https://fabric-kg.invalid/assets/{entry.asset_id}"
+        assets.append(
+            AssetRow(
+                asset_id=entry.asset_id,
+                project_id=inputs.l1_receipt.identity.project_id,
+                original_name=Path(entry.relative_source_ref).name,
+                media_type=entry.media_type,
+                source_uri=source_uri,
+                created_at=now,
+                created_by="fabric-kg",
+            )
+        )
+        versions.append(
+            AssetVersionRow(
+                asset_version_id=entry.asset_version_id,
+                asset_id=entry.asset_id,
+                version_identity=entry.original_byte_hash,
+                content_hash=entry.original_byte_hash,
+                size_bytes=entry.byte_count,
+                original_name=Path(entry.relative_source_ref).name,
+                media_type=entry.media_type,
+                source_uri=source_uri,
+                blob_uri=f"{source_uri}/versions/{entry.asset_version_id}",
+                blob_version_id=entry.original_byte_hash,
+                landing_path=entry.relative_source_ref,
+                registered_at=now,
+                landing_timestamp=now,
+                ingestion_status="ready",
+            )
+        )
+    source = Path(input_path)
+    source_root = source if source.is_dir() else source.parent
+    reader = IndexedSourceCorpusReader(
+        source_root=source_root,
+        assets=tuple(assets),
+        versions=tuple(versions),
+    )
+    client = ctx_obj.get("_foundry_client")
+    if client is None:
+        client = _build_foundry_client(ctx_obj)
+
+    class FoundryCandidateService:
+        def complete(self, *, prompt: str, work_unit: object) -> dict:
+            return client.complete_json(
+                system=(
+                    "Return only a JSON object containing schema-constrained "
+                    "candidate observations for the supplied closed vocabulary. "
+                    "Do not invent type or relationship identifiers."
+                ),
+                user=prompt,
+                json_schema={},
+                max_completion_tokens=8_000,
+                max_attempts=1,
+            )
+
+    model_version = model_override or str(
+        getattr(getattr(client, "_config", None), "chat_deployment", "")
+        or "configured-foundry-chat"
+    )
+    prompt_hash = canonical_sha256(
+        {
+            "stage": "L2",
+            "mode": "schema-constrained-extraction",
+            "model_version": model_version,
+        }
+    )
+    return run_l2(
+        reader=reader,
+        service=FoundryCandidateService(),
+        state_root=Path(".fkg") / "l2",
+        l1_state_root=l1_state_root,
+        domain_path=domain_path,
+        prompt_hash=prompt_hash,
+        model_version=model_version,
+        model_hash=canonical_sha256({"model_version": model_version}),
+        max_concurrent=max_concurrent,
+    )
+
+
 def _apply_row_lineage(
     row,
     lineage: dict[str, str],
@@ -1725,6 +1834,35 @@ def enrich_cmd(
 
     out_dir = Path(output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if domain_file is not None:
+        from fabric_kg_builder.domain.models import DomainContractV2
+        from fabric_kg_builder.domain.service import load_domain_contract
+
+        try:
+            resolved_contract = load_domain_contract(domain_file)
+        except Exception as exc:
+            raise click.ClickException(
+                f"Invalid domain contract: {exc}"
+            ) from exc
+        if isinstance(resolved_contract, DomainContractV2):
+            try:
+                result = _run_schema2_enrichment(
+                    ctx_obj=ctx.obj or {},
+                    input_path=input_path,
+                    domain_file=domain_file,
+                    max_concurrent=effective_max_concurrent,
+                    model_override=model,
+                )
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Schema-2 enrichment failed: {exc}"
+                ) from exc
+            click.echo(
+                "[enrich] schema-2 extraction succeeded; "
+                f"receipt={result.receipt.stage_receipt_id}"
+            )
+            return
 
     # --- B1: Load approved source profile (downstream reuse of init-domain output) ---
     # Silently skipped when profile is absent (legacy projects without init-domain).
