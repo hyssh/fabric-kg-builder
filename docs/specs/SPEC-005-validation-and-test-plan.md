@@ -1612,6 +1612,28 @@ PYTHONPATH=src python3 -m pytest -q -m integration \
   tests/integration/test_l6_agent_integration.py
 ```
 
+### 15.9 L6 RemoteTool and durable authority gate
+
+This gate is offline and fake-backed. It covers Blob lease/ETag concurrency,
+concurrent run claims, crash/expired-claim recovery, atomic Graph and evidence
+receipt issue/consume/replay, immutable signer snapshots, key
+rotation/revocation/validity windows, strict collision verification,
+deadline-aware cancellable Graph transport, lease-loss cancellation, ignored
+late results, and exactly one valid receipt under reclaim races.
+
+The RemoteTool gate covers auth-first bounded streaming, framing and encoding
+rejection, ingress and tool deadlines, disconnect/cancellation, strict
+request/response/OpenAPI schemas, sanitized errors, authenticated readiness
+bound to tenant/audience/caller OID/app role/L6 definition/durable backend, and
+zero synthesis. RDF remains inactive.
+
+```text
+PYTHONPATH=src python3 -m pytest -q \
+  tests/unit/test_l6_blob_authority.py \
+  tests/unit/test_l6_remote_tool.py \
+  tests/unit/test_l6_agent_integration.py
+```
+
 L4 validation command:
 
 ```text
