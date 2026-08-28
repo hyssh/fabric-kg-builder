@@ -239,6 +239,16 @@ def _stable_semantic_validation_code(
         ("proposal_hash does not match proposal content", "proposal_content_hash_mismatch"),
         ("domain_proposal_id does not match deterministic seed", "proposal_id_mismatch"),
         ("proposal identity content_hash mismatch", "proposal_identity_content_hash_mismatch"),
+        ("identity.contract_kind must be", "l1_identity_kind_mismatch"),
+        ("L1 identity contract version must be", "l1_identity_version_mismatch"),
+        ("identity.content_hash must equal the L1 semantic hash", "l1_identity_semantic_hash_mismatch"),
+        ("design_context_hash does not match context content", "design_context_hash_mismatch"),
+        ("domain_design_context_id does not match deterministic seed", "design_context_id_mismatch"),
+        ("source-derived identity requires asset", "identity_source_binding_incomplete"),
+        ("prompt_version and prompt_hash must be paired", "identity_prompt_binding_incomplete"),
+        ("model_version and model_hash must be paired", "identity_model_binding_incomplete"),
+        ("extractor_name and extractor_version must be paired", "identity_extractor_binding_incomplete"),
+        ("source_unit_id requires source-derived identity", "identity_source_unit_binding_incomplete"),
     )
     for fragment, code in known:
         if fragment in message:
