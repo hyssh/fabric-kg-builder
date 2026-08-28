@@ -2164,21 +2164,56 @@ class AzureL7Backend:
             observed_schema = body
             if observed_schema != schema:
                 raise L7ReleaseError("Search index schema readback mismatch")
-            search_response = self._request(
-                "POST",
-                self._search_url(
-                    config, f"indexes/{config.search.index_name}/docs/search"
-                ),
-                token=token,
-                body={"search": "*", "top": len(documents) + 1},
+            search_url = self._search_url(
+                config, f"indexes/{config.search.index_name}/docs/search"
             )
-            if search_response.status_code != 200:
-                raise L7ReleaseError("Search document readback failed")
-            observed_documents = self._json(
-                search_response, "Search document readback"
-            ).get("value")
-            if not isinstance(observed_documents, list):
-                raise L7ReleaseError("Search document readback omitted values")
+            page_request: dict[str, Any] = {
+                "search": "*",
+                "top": min(1000, len(documents) + 1),
+            }
+            observed_documents: list[Any] = []
+            continuation_hashes: set[str] = set()
+            while True:
+                search_response = self._request(
+                    "POST",
+                    search_url,
+                    token=token,
+                    body=page_request,
+                )
+                if search_response.status_code != 200:
+                    raise L7ReleaseError("Search document readback failed")
+                page = self._json(
+                    search_response, "Search document readback"
+                )
+                values = page.get("value")
+                if not isinstance(values, list):
+                    raise L7ReleaseError(
+                        "Search document readback omitted values"
+                    )
+                observed_documents.extend(values)
+                next_link = page.get("@odata.nextLink")
+                next_parameters = page.get("@search.nextPageParameters")
+                if not next_link and next_parameters is None:
+                    break
+                if (
+                    not isinstance(next_link, str)
+                    or not isinstance(next_parameters, dict)
+                    or not next_parameters
+                ):
+                    raise L7ReleaseError(
+                        "Search document continuation was invalid"
+                    )
+                if len(observed_documents) > len(documents):
+                    raise L7ReleaseError(
+                        "Search document continuation exceeded expected count"
+                    )
+                continuation_hash = canonical_sha256(next_parameters)
+                if continuation_hash in continuation_hashes:
+                    raise L7ReleaseError(
+                        "Search document continuation repeated"
+                    )
+                continuation_hashes.add(continuation_hash)
+                page_request = dict(next_parameters)
             clean_documents = [
                 {
                     key: value
