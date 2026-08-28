@@ -112,8 +112,16 @@ class L1ProposalSchemaRepairError(L1StageError):
 
 
 def _sanitized_validation_failures(
-    error: ValidationError,
+    error: ValidationError | ArithmeticError,
 ) -> list[dict[str, Any]]:
+    if not isinstance(error, ValidationError):
+        return [
+            {
+                "location": "score_inputs",
+                "type": "arithmetic_error",
+                "message": "score normalization failed",
+            }
+        ]
     return [
         {
             "location": ".".join(str(part) for part in item["loc"]),
@@ -200,7 +208,7 @@ def _require_reason_only_route_repair(
         elif (
             prior.get("start_type_id") is not None
             and prior.get("end_type_id") is not None
-            and prior.get("unsupported_reason") not in (None, "")
+            and "unsupported_reason" in prior
         ):
             repaired_reason = candidate.pop("unsupported_reason", None)
             prior_candidate.pop("unsupported_reason", None)
@@ -728,7 +736,7 @@ def prepare_l1_stage(
             candidates = DomainProposalCandidatesV2.model_validate(
                 candidate_values
             )
-        except ValidationError as first_error:
+        except (ValidationError, ArithmeticError) as first_error:
             if client is None or model_call_count != 1:
                 raise
             failures = _sanitized_validation_failures(first_error)
@@ -763,16 +771,11 @@ def prepare_l1_stage(
                 candidates = DomainProposalCandidatesV2.model_validate(
                     normalize_candidate_scores(repaired)
                 )
-            except ValidationError as repair_error:
+            except (ValidationError, ArithmeticError) as repair_error:
                 codes = tuple(
-                    sorted(
-                        {
-                            str(item["type"])
-                            for item in repair_error.errors(
-                                include_url=False,
-                                include_input=False,
-                            )
-                        }
+                    item["type"]
+                    for item in _sanitized_validation_failures(
+                        repair_error
                     )
                 )
                 raise L1ProposalSchemaRepairError(
