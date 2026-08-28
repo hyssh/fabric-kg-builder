@@ -1594,6 +1594,18 @@ def test_search_document_batches_respect_service_count_limit() -> None:
         for batch in batches
         for item in batch
     )
+    payload_batches = _search_document_batches(
+        [{"id": str(index), "content": "x" * 16_000} for index in range(1000)]
+    )
+    assert all(
+        len(
+            json.dumps(
+                {"value": batch}, ensure_ascii=True, allow_nan=False
+            ).encode()
+        )
+        <= 15 * 1024 * 1024
+        for batch in payload_batches
+    )
 
 
 @pytest.mark.unit

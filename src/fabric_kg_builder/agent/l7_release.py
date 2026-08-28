@@ -509,8 +509,8 @@ def _search_document_batches(
         encoded_size = len(
             json.dumps(
                 {"value": candidate},
-                separators=(",", ":"),
                 ensure_ascii=True,
+                allow_nan=False,
             ).encode()
         )
         if len(candidate) <= 1000 and encoded_size <= max_bytes:
@@ -526,8 +526,8 @@ def _search_document_batches(
             len(
                 json.dumps(
                     {"value": current},
-                    separators=(",", ":"),
                     ensure_ascii=True,
+                    allow_nan=False,
                 ).encode()
             )
             > max_bytes
