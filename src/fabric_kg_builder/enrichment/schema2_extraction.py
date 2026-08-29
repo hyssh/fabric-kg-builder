@@ -669,9 +669,16 @@ def _make_candidate_record(
                     or raw.stable_source_identity is not None
                 )
             else:
+                expected_stable_identity = (
+                    f"{source_unit_id}:{raw.local_id.casefold()}"
+                )
                 identity_policy_mismatch = (
                     bool(raw.identity_key)
-                    or not raw.stable_source_identity
+                    or (
+                        raw.stable_source_identity is not None
+                        and raw.stable_source_identity
+                        != expected_stable_identity
+                    )
                 )
             if identity_policy_mismatch:
                 definition = None
