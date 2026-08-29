@@ -371,6 +371,7 @@ def _run_schema2_enrichment(
     model_override: str | None,
     force: bool,
 ) -> object:
+    import os
     import shutil
     import stat
     from datetime import datetime, timezone
@@ -390,6 +391,7 @@ def _run_schema2_enrichment(
     domain_path = Path(domain_file)
     l1_state_root = Path(".fkg") / "l1"
     l2_state_root = Path(".fkg") / "l2"
+    run_lock = l2_state_root.parent / ".l2-enrichment.lock"
     if force and l2_state_root.exists():
         current = l2_state_root.lstat()
         if not stat.S_ISDIR(current.st_mode) or l2_state_root.is_symlink():
@@ -489,18 +491,30 @@ def _run_schema2_enrichment(
             "model_version": model_version,
         }
     )
-    return run_l2(
-        reader=reader,
-        service=FoundryCandidateService(),
-        state_root=l2_state_root,
-        l1_state_root=l1_state_root,
-        domain_path=domain_path,
-        prompt_hash=prompt_hash,
-        model_version=model_version,
-        model_hash=canonical_sha256({"model_version": model_version}),
-        max_concurrent=max_concurrent,
-        service_batch_size=max_concurrent,
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lock_descriptor = os.open(run_lock, flags, 0o600)
+    except FileExistsError as exc:
+        raise ValueError(
+            "schema-2 enrichment is already running or requires reconciliation"
+        ) from exc
+    try:
+        return run_l2(
+            reader=reader,
+            service=FoundryCandidateService(),
+            state_root=l2_state_root,
+            l1_state_root=l1_state_root,
+            domain_path=domain_path,
+            prompt_hash=prompt_hash,
+            model_version=model_version,
+            model_hash=canonical_sha256({"model_version": model_version}),
+            max_concurrent=max_concurrent,
+            service_batch_size=max_concurrent,
+        )
+    finally:
+        os.close(lock_descriptor)
+        run_lock.unlink(missing_ok=True)
 
 
 def _apply_row_lineage(

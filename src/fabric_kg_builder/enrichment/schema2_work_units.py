@@ -333,6 +333,34 @@ class WorkUnitCheckpoint:
                     existing = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     existing = None
+                if existing is not None:
+                    try:
+                        fresh_state = json.loads(
+                            self.state_path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        fresh_state = {}
+                    fresh_entry = (
+                        fresh_state.get("work_units", {}).get(
+                            work_unit.work_unit_id
+                        )
+                        if isinstance(fresh_state, dict)
+                        and isinstance(
+                            fresh_state.get("work_units"), dict
+                        )
+                        else None
+                    )
+                    if (
+                        isinstance(fresh_entry, dict)
+                        and fresh_entry.get("status") == "succeeded"
+                        and fresh_entry.get("authority_fingerprint")
+                        == work_unit.authority_fingerprint
+                        and fresh_entry.get("artifact") == artifact_name
+                        and canonical_sha256(existing)
+                        == fresh_entry.get("artifact_hash")
+                    ):
+                        self._state = fresh_state
+                        return existing
                 if existing is not None and canonical_sha256(existing) != artifact_hash:
                     raise L2StageError(
                         "L2_CHECKPOINT_STALE",

@@ -1076,7 +1076,27 @@ def merge_candidate_batches(
                 )
             else:
                 references[reference.candidate_id] = reference
-        dispositions.extend(leaf.batch.candidate_dispositions)
+        for disposition in leaf.batch.candidate_dispositions:
+            target = (
+                disposition.retained_candidate_id
+                if disposition.disposition == "retained"
+                else disposition.deduplicated_into_candidate_id
+            )
+            dispositions.append(
+                disposition.model_copy(
+                    update={
+                        "input_candidate_id": deterministic_contract_id(
+                            "merged-input-candidate",
+                            {
+                                "input_candidate_id": (
+                                    disposition.input_candidate_id
+                                ),
+                                "target_candidate_id": target,
+                            },
+                        )
+                    }
+                )
+            )
     # Input IDs are leaf-stable, but identical source overlap can repeat them.
     disposition_by_id: dict[str, CandidateAccountingDisposition] = {}
     for disposition in sorted(dispositions, key=lambda item: item.input_candidate_id):
