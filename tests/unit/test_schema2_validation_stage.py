@@ -139,15 +139,32 @@ def _approved_l1(
         f"<p>{_SENTENCE}</p>{visual}",
         encoding="utf-8",
     )
+    intake = _intake(domain)
+    intake["competency_questions"] = [
+        (
+            {
+                "id": f"cq:q{index}",
+                "question": question,
+                "business_critical": False,
+            }
+            if isinstance(question, str)
+            else {**question, "business_critical": False}
+        )
+        for index, question in enumerate(
+            intake["competency_questions"],
+            start=1,
+        )
+    ]
     preflight = preflight_l1_inputs(
         source_path=source,
-        intake_raw=_intake(domain),
+        intake_raw=intake,
         project_id=f"project:{domain}",
         run_id=f"run:{domain}",
         model_version="fixture/1.0.0",
         model_hash=canonical_sha256({"fixture": domain}),
     )
     candidates = _candidates(domain)
+    candidates["completeness_candidates"] = []
     if extra_types:
         candidates["semantic_type_candidates"] = list(
             candidates["semantic_type_candidates"]

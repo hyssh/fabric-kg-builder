@@ -489,17 +489,31 @@ def _run_schema2_enrichment(
             "model_version": model_version,
         }
     )
-    import fcntl
-
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_NOFOLLOW", 0)
     lock_descriptor = os.open(run_lock, flags, 0o600)
     try:
-        fcntl.flock(
-            lock_descriptor,
-            fcntl.LOCK_EX | fcntl.LOCK_NB,
-        )
-    except BlockingIOError as exc:
+        try:
+            import fcntl
+
+            fcntl.flock(
+                lock_descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+            unlock = lambda: fcntl.flock(
+                lock_descriptor, fcntl.LOCK_UN
+            )
+        except ImportError:
+            import msvcrt
+
+            if os.fstat(lock_descriptor).st_size == 0:
+                os.write(lock_descriptor, b"\0")
+            os.lseek(lock_descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(lock_descriptor, msvcrt.LK_NBLCK, 1)
+            unlock = lambda: msvcrt.locking(
+                lock_descriptor, msvcrt.LK_UNLCK, 1
+            )
+    except (BlockingIOError, OSError) as exc:
         os.close(lock_descriptor)
         raise ValueError(
             "schema-2 enrichment is already running or requires reconciliation"
@@ -526,7 +540,7 @@ def _run_schema2_enrichment(
             service_batch_size=max_concurrent,
         )
     finally:
-        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        unlock()
         os.close(lock_descriptor)
 
 

@@ -167,7 +167,6 @@ class ProposedCandidateRecord:
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
-    identity_policy_mismatch: bool = False
 
 
 @dataclass(frozen=True)
@@ -834,7 +833,6 @@ def _make_candidate_record(
         proposed_target_semantic_type_id=proposed_target_semantic_type_id,
         proposed_member_role_id=proposed_member_role_id,
         proposed_member_order=proposed_member_order,
-        identity_policy_mismatch=identity_policy_mismatch,
     )
 
 
@@ -940,7 +938,11 @@ def build_candidate_batch(
         by_candidate_id[record.candidate_id] = record
         if record.approved_semantic_id is None:
             audit_reasons["DOMAIN_REREVIEW_REQUESTED"] += 1
-            if record.identity_policy_mismatch:
+            if (
+                record.candidate_kind == "entity"
+                and record.observed_term.casefold()
+                in vocabulary.entities_by_alias
+            ):
                 audit_reasons["IDENTITY_POLICY_MISMATCH"] += 1
             else:
                 audit_reasons[
