@@ -454,7 +454,15 @@ def _run_schema2_enrichment(
                     "array required by the supplied schema. Extract only "
                     "source-grounded observations using the closed vocabulary "
                     "in the user payload. Do not invent type, relationship, "
-                    "property, local entity, or evidence identifiers."
+                    "property, local entity, or evidence identifiers. For each "
+                    "entity, resolve observed_type to one supplied entity type. "
+                    "If its identity_key_policy.key_mode is business_key, emit "
+                    "identity_key with exactly every listed "
+                    "business_key_fields key and source-derived string values, "
+                    "and set stable_source_identity null. If the key mode is "
+                    "stable_source_identity, emit an empty identity_key and a "
+                    "source-derived stable_source_identity. Omit an entity when "
+                    "its required identity value is absent from the source."
                 ),
                 user=prompt,
                 json_schema=raw_candidate_response_schema(),
