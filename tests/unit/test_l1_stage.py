@@ -142,7 +142,42 @@ def _candidates(domain: str = "records") -> dict:
                 "score_inputs": score_inputs,
             }
         ],
-        "completeness_candidates": [],
+        "completeness_candidates": [
+            {
+                "candidate_id": "candidate:completeness",
+                "proposed_requirement": {
+                    "requirement_id": (
+                        f"completeness-requirement:{domain}.record-subject"
+                    ),
+                    "competency_question_ids": question_ids,
+                    "requirement_kind": "required_role_set",
+                    "scope_type_id": record_type_id,
+                    "scoped_subtype_id": None,
+                    "scoped_filter": None,
+                    "rationale": "Critical questions require the governed subject role.",
+                    "source_kind": "competency_question",
+                    "source_question_ids": question_ids,
+                    "governance_references": [],
+                    "evidence_span_ids": [],
+                    "coverage_status": "covered",
+                    "unsupported_reason": None,
+                    "required_roles": {
+                        "mode": "all_of",
+                        "roles": [
+                            {
+                                "role_id": f"role:{domain}.subject",
+                                "relationship_type_id": relationship_type_id,
+                                "allowed_target_type_ids": [subject_type_id],
+                                "satisfaction": "one_allowed_type",
+                            }
+                        ],
+                    },
+                    "structured_fact_set": None,
+                },
+                "score_inputs": score_inputs,
+                "score": {},
+            }
+        ],
         "question_routes": [
             {
                 "question_id": question_id,
@@ -386,6 +421,7 @@ class _CandidateRegenerationClient:
         raw = _candidates("records")
         if self.calls == 1 or not self.second_valid:
             raw["relationship_candidates"] = []
+            raw["completeness_candidates"] = []
             for route in raw["question_routes"]:
                 route["start_type_id"] = None
                 route["end_type_id"] = None

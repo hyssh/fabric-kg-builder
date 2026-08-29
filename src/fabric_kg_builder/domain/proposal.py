@@ -68,8 +68,9 @@ is acceptable only when every business-critical competency question has both
 an evidence-backed relationship path and completeness coverage. Propose enough
 eligible types and relationships to cover every critical question; partial
 critical coverage is a failed proposal, not a successful minimum. For every
-business-critical question, provide a supported path and enough information
-for deterministic completeness coverage; unsupported paths must remain
+business-critical question, include at least one governance-eligible
+completeness candidate bound to that exact question and provide a supported
+path. Unsupported paths or missing completeness authority must remain
 explicitly unsupported.
 Every unsupported question route must keep both endpoint IDs null and include a
 non-empty unsupported_reason. Never convert an unsupported route into a supported
@@ -636,10 +637,17 @@ def build_draft_contract_from_candidates(
         ]
         plan = plans_by_question[question.id]
         path_unsupported = not plan.covered
+        completeness_unsupported = (
+            question.business_critical and not requirements
+        )
         unsupported_reason = (
             plan.unsupported_reason or "no_validated_relationship_path"
             if path_unsupported
-            else None
+            else (
+                "no_covered_completeness_requirement"
+                if completeness_unsupported
+                else None
+            )
         )
         coverage.append(
             CompletenessQuestionCoverageV2(
@@ -652,6 +660,7 @@ def build_draft_contract_from_candidates(
                     if (
                         not unsupported
                         and not path_unsupported
+                        and not completeness_unsupported
                     )
                     else []
                 ),
@@ -660,6 +669,7 @@ def build_draft_contract_from_candidates(
                     if (
                         unsupported
                         or path_unsupported
+                        or completeness_unsupported
                     )
                     else []
                 ),
@@ -668,6 +678,7 @@ def build_draft_contract_from_candidates(
                     if (
                         unsupported
                         or path_unsupported
+                        or completeness_unsupported
                     )
                     else "covered"
                 ),
