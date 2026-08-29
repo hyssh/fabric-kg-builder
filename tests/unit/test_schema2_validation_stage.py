@@ -193,7 +193,13 @@ def _approved_l1(
                     "requirement_id": (
                         f"completeness-requirement:{domain}.record-subjects"
                     ),
-                    "competency_question_ids": ["cq:q1"],
+                    "competency_question_ids": [
+                        "cq:q1",
+                        "cq:q2",
+                        "cq:q3",
+                        "cq:q4",
+                        "cq:q5",
+                    ],
                     "requirement_kind": "structured_fact_set",
                     "scope_type_id": f"semantic-type:{domain}.record",
                     "scoped_subtype_id": None,
