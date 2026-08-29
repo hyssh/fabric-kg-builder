@@ -369,7 +369,10 @@ def _run_schema2_enrichment(
     domain_file: str,
     max_concurrent: int,
     model_override: str | None,
+    force: bool,
 ) -> object:
+    import shutil
+    import stat
     from datetime import datetime, timezone
 
     from fabric_kg_builder.contracts.base import canonical_sha256
@@ -386,6 +389,12 @@ def _run_schema2_enrichment(
 
     domain_path = Path(domain_file)
     l1_state_root = Path(".fkg") / "l1"
+    l2_state_root = Path(".fkg") / "l2"
+    if force and l2_state_root.exists():
+        current = l2_state_root.lstat()
+        if not stat.S_ISDIR(current.st_mode) or l2_state_root.is_symlink():
+            raise ValueError("refusing to reset unsafe L2 state path")
+        shutil.rmtree(l2_state_root)
     inputs = load_l2_inputs(
         l1_state_root=l1_state_root,
         domain_path=domain_path,
@@ -475,7 +484,7 @@ def _run_schema2_enrichment(
     return run_l2(
         reader=reader,
         service=FoundryCandidateService(),
-        state_root=Path(".fkg") / "l2",
+        state_root=l2_state_root,
         l1_state_root=l1_state_root,
         domain_path=domain_path,
         prompt_hash=prompt_hash,
@@ -1876,6 +1885,7 @@ def enrich_cmd(
                     domain_file=schema2_domain_file,
                     max_concurrent=effective_max_concurrent,
                     model_override=model,
+                    force=force,
                 )
             except Exception as exc:
                 raise click.ClickException(
