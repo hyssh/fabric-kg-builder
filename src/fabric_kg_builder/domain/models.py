@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -637,11 +638,17 @@ class OrderingPolicyV2(V2StrictModel):
             self.unique_ordinals,
         )
         if self.mode == "ordered" and any(value is None for value in values):
-            raise ValueError("ordered collections require complete ordinal semantics")
+            raise PydanticCustomError(
+                "completeness_ordering_fields_missing",
+                "ordered collections require complete ordinal semantics",
+            )
         if self.mode == "unordered" and any(
             value is not None for value in values + (self.contiguous,)
         ):
-            raise ValueError("unordered collections cannot declare ordinal semantics")
+            raise PydanticCustomError(
+                "completeness_unordered_fields_forbidden",
+                "unordered collections cannot declare ordinal semantics",
+            )
         return self
 
 
@@ -727,14 +734,23 @@ class StructuredFactSetV2(V2StrictModel):
         ordered = self.ordering_policy.mode == "ordered"
         policy = self.collection_identity_policy
         if policy.ordinals_included != ordered or policy.preserve_member_order != ordered:
-            raise ValueError("collection identity must agree with ordering semantics")
+            raise PydanticCustomError(
+                "completeness_collection_order_identity_mismatch",
+                "collection identity must agree with ordering semantics",
+            )
         if policy.member_roles_included != bool(self.member_role_ids):
-            raise ValueError("collection identity must agree with member roles")
+            raise PydanticCustomError(
+                "completeness_collection_role_identity_mismatch",
+                "collection identity must agree with member roles",
+            )
         if (
             self.membership_source_kind == "source_evidence"
             and not self.membership_evidence_span_ids
         ):
-            raise ValueError("source-supported membership requires exact evidence")
+            raise PydanticCustomError(
+                "completeness_membership_evidence_missing",
+                "source-supported membership requires exact evidence",
+            )
         return self
 
 
@@ -764,17 +780,29 @@ class CompletenessRequirementV2(V2StrictModel):
         if (self.requirement_kind == "required_role_set") != (
             self.required_roles is not None
         ):
-            raise ValueError("required_role_set requires required_roles only")
+            raise PydanticCustomError(
+                "completeness_required_roles_shape_invalid",
+                "required_role_set requires required_roles only",
+            )
         if (self.requirement_kind == "structured_fact_set") != (
             self.structured_fact_set is not None
         ):
-            raise ValueError("structured_fact_set requires structured_fact_set only")
+            raise PydanticCustomError(
+                "completeness_fact_set_shape_invalid",
+                "structured_fact_set requires structured_fact_set only",
+            )
         if (self.coverage_status == "unsupported") != (
             self.unsupported_reason is not None
         ):
-            raise ValueError("unsupported coverage requires exactly one reason")
+            raise PydanticCustomError(
+                "completeness_unsupported_reason_invalid",
+                "unsupported coverage requires exactly one reason",
+            )
         if self.source_kind == "source_evidence" and not self.evidence_span_ids:
-            raise ValueError("source-supported requirement requires exact evidence")
+            raise PydanticCustomError(
+                "completeness_requirement_evidence_missing",
+                "source-supported requirement requires exact evidence",
+            )
         return self
 
 

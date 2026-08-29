@@ -46,6 +46,7 @@ _DEFAULT_CONTRACT_PATH = Path("domain.yaml")
 _L1_AUDIT_PATH_SEGMENTS = {
     "business_goal",
     "competency_questions",
+    "completeness_candidates",
     "contract_version",
     "decisions",
     "domain_boundary_candidates",
@@ -63,6 +64,10 @@ _L1_AUDIT_PATH_SEGMENTS = {
     "question_id",
     "question_routes",
     "relationship_candidates",
+    "proposed_requirement",
+    "required_roles",
+    "roles",
+    "structured_fact_set",
     "root",
     "score",
     "score_inputs",
