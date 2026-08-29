@@ -167,6 +167,7 @@ class ProposedCandidateRecord:
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
+    identity_policy_mismatch: bool = False
 
 
 @dataclass(frozen=True)
@@ -649,8 +650,26 @@ def _make_candidate_record(
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
+    identity_policy_mismatch = False
     if isinstance(raw, RawEntityCandidate):
         definition = vocabulary.entities_by_alias.get(raw.observed_type.casefold())
+        if definition is not None:
+            policy = resolve_identity_root_policy(
+                definition.type_id,
+                contract.candidate_model.entity_types,
+            )
+            if policy.key_mode == "business_key":
+                identity_policy_mismatch = (
+                    set(raw.identity_key) != set(policy.business_key_fields)
+                    or raw.stable_source_identity is not None
+                )
+            else:
+                identity_policy_mismatch = (
+                    bool(raw.identity_key)
+                    or not raw.stable_source_identity
+                )
+            if identity_policy_mismatch:
+                definition = None
         entity_id = _entity_identity(
             raw,
             definition=definition,
@@ -813,6 +832,7 @@ def _make_candidate_record(
         proposed_target_semantic_type_id=proposed_target_semantic_type_id,
         proposed_member_role_id=proposed_member_role_id,
         proposed_member_order=proposed_member_order,
+        identity_policy_mismatch=identity_policy_mismatch,
     )
 
 
@@ -918,13 +938,16 @@ def build_candidate_batch(
         by_candidate_id[record.candidate_id] = record
         if record.approved_semantic_id is None:
             audit_reasons["DOMAIN_REREVIEW_REQUESTED"] += 1
-            audit_reasons[
-                {
-                    "entity": "UNKNOWN_ENTITY_TYPE",
-                    "relationship": "UNKNOWN_RELATIONSHIP_TYPE",
-                    "property": "UNKNOWN_PROPERTY",
-                }[record.candidate_kind]
-            ] += 1
+            if record.identity_policy_mismatch:
+                audit_reasons["IDENTITY_POLICY_MISMATCH"] += 1
+            else:
+                audit_reasons[
+                    {
+                        "entity": "UNKNOWN_ENTITY_TYPE",
+                        "relationship": "UNKNOWN_RELATIONSHIP_TYPE",
+                        "property": "UNKNOWN_PROPERTY",
+                    }[record.candidate_kind]
+                ] += 1
         dispositions.append(
             CandidateAccountingDisposition(
                 identity=accounting_identity,
