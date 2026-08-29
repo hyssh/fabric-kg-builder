@@ -147,6 +147,25 @@ def test_closed_vocabulary_unknowns_are_audited_not_mutated() -> None:
     assert "inventedmachinekind" not in vocabulary.entities_by_alias
 
 
+def test_distinct_same_anchor_observations_are_conflict_accounted() -> None:
+    response = _response()
+    duplicate = dict(response[0])
+    duplicate["label"] = f"{duplicate['label']} alternate"
+    result = _build(_domain(), [response[0], duplicate])
+
+    candidate_ids = [
+        item.candidate_id for item in result.batch.candidates
+    ]
+    assert len(candidate_ids) == 1
+    assert dict(result.audit_reason_counts)[
+        "CANDIDATE_PAYLOAD_CONFLICT"
+    ] == 1
+    assert any(
+        item.reason_codes == ("CANDIDATE_PAYLOAD_CONFLICT",)
+        for item in result.batch.candidate_dispositions
+    )
+
+
 def test_candidates_are_proposed_only_and_do_not_mint_evidence() -> None:
     domain = _domain()
     result = _build(domain, _response())

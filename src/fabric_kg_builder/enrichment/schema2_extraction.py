@@ -886,14 +886,19 @@ def build_candidate_batch(
         base_identity,
         contract_kind="c0.candidate_lifecycle_record",
     )
-    for record in sorted(records, key=lambda item: item.input_candidate_id):
+    for record in sorted(
+        records,
+        key=lambda item: (
+            item.candidate_id,
+            item.payload_hash,
+            item.input_candidate_id,
+        ),
+    ):
         retained = by_candidate_id.get(record.candidate_id)
         if retained is not None:
-            if retained.payload_hash != record.payload_hash:
-                raise L2StageError(
-                    "L2_CANDIDATE_ID_COLLISION",
-                    f"candidate ID collision {record.candidate_id}",
-                )
+            conflict = retained.payload_hash != record.payload_hash
+            if conflict:
+                audit_reasons["CANDIDATE_PAYLOAD_CONFLICT"] += 1
             dispositions.append(
                 CandidateAccountingDisposition(
                     identity=accounting_identity,
@@ -902,7 +907,11 @@ def build_candidate_batch(
                     retained_candidate_id=None,
                     deduplicated_into_candidate_id=retained.candidate_id,
                     current_state=None,
-                    reason_codes=(),
+                    reason_codes=(
+                        ("CANDIDATE_PAYLOAD_CONFLICT",)
+                        if conflict
+                        else ()
+                    ),
                 )
             )
             continue
