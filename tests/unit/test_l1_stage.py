@@ -520,6 +520,15 @@ def test_provider_schema_requires_exact_root_or_child_identity_state() -> None:
     assert child["generalization_basis"]["$ref"].endswith(
         "/GeneralizationBasisV2"
     )
+    completeness = schema["$defs"]["CompletenessRequirementV2"][
+        "anyOf"
+    ]
+    required_roles = completeness[0]["properties"]
+    fact_set = completeness[1]["properties"]
+    assert required_roles["requirement_kind"]["const"] == "required_role_set"
+    assert required_roles["structured_fact_set"] == {"type": "null"}
+    assert fact_set["requirement_kind"]["const"] == "structured_fact_set"
+    assert fact_set["required_roles"] == {"type": "null"}
 
 
 def test_zero_supported_route_repair_exhaustion_is_typed(

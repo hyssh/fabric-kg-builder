@@ -71,7 +71,11 @@ critical coverage is a failed proposal, not a successful minimum. For every
 business-critical question, include at least one governance-eligible
 completeness candidate bound to that exact question and provide a supported
 path. Unsupported paths or missing completeness authority must remain
-explicitly unsupported.
+explicitly unsupported. Completeness requirement shape is exact: when
+requirement_kind is `required_role_set`, required_roles must be non-null and
+structured_fact_set must be null; when requirement_kind is
+`structured_fact_set`, structured_fact_set must be non-null and required_roles
+must be null.
 Every unsupported question route must keep both endpoint IDs null and include a
 non-empty unsupported_reason. Never convert an unsupported route into a supported
 route during schema repair and never add unapproved vocabulary. Propose sufficient
@@ -444,6 +448,34 @@ def domain_proposal_candidates_schema() -> dict[str, Any]:
                     "identity_key_policy": {"type": "null"},
                     "generalization_basis": {
                         "$ref": "#/$defs/GeneralizationBasisV2"
+                    },
+                }
+            },
+        ]
+    completeness = schema.get("$defs", {}).get(
+        "CompletenessRequirementV2"
+    )
+    if isinstance(completeness, dict):
+        completeness["anyOf"] = [
+            {
+                "properties": {
+                    "requirement_kind": {
+                        "const": "required_role_set"
+                    },
+                    "required_roles": {
+                        "$ref": "#/$defs/RequiredRoleCoverageV2"
+                    },
+                    "structured_fact_set": {"type": "null"},
+                }
+            },
+            {
+                "properties": {
+                    "requirement_kind": {
+                        "const": "structured_fact_set"
+                    },
+                    "required_roles": {"type": "null"},
+                    "structured_fact_set": {
+                        "$ref": "#/$defs/StructuredFactSetV2"
                     },
                 }
             },
