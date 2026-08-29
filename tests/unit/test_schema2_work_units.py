@@ -200,6 +200,31 @@ def test_late_duplicate_writer_reuses_first_committed_leaf(
     assert checkpoint.reuse(root) == {"candidate_count": 1}
 
 
+def test_orphaned_valid_leaf_is_reconciled_after_crash(
+    tmp_path: Path,
+) -> None:
+    root = root_work_unit(
+        _source_unit("Facility A contains Pump 1."),
+        pass_name="candidate-extraction",
+        authority_fingerprint="a" * 64,
+    )
+    artifact_dir = tmp_path / "leaves"
+    artifact_dir.mkdir()
+    artifact = artifact_dir / (
+        f"{root.work_unit_id.replace(':', '-', 1)}.json"
+    )
+    artifact.write_text('{"candidate_count":1}\n', encoding="utf-8")
+    checkpoint = WorkUnitCheckpoint(
+        tmp_path / "checkpoint.json",
+        artifact_dir,
+    )
+
+    committed = checkpoint.record_leaf(root, {"candidate_count": 2})
+
+    assert committed == {"candidate_count": 1}
+    assert checkpoint.reuse(root) == {"candidate_count": 1}
+
+
 def test_corrupt_leaf_is_rerun_and_repaired(tmp_path: Path) -> None:
     root = root_work_unit(
         _source_unit("Facility A contains Pump 1."),

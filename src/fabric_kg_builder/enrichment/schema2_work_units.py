@@ -361,6 +361,21 @@ class WorkUnitCheckpoint:
                     ):
                         self._state = fresh_state
                         return existing
+                    if fresh_entry is None:
+                        self._state["work_units"][
+                            work_unit.work_unit_id
+                        ] = {
+                            "status": "succeeded",
+                            "authority_fingerprint": (
+                                work_unit.authority_fingerprint
+                            ),
+                            "slice_start": work_unit.slice_start,
+                            "slice_end": work_unit.slice_end,
+                            "artifact": artifact_name,
+                            "artifact_hash": canonical_sha256(existing),
+                        }
+                        self._persist_locked()
+                        return existing
                 if existing is not None and canonical_sha256(existing) != artifact_hash:
                     raise L2StageError(
                         "L2_CHECKPOINT_STALE",
