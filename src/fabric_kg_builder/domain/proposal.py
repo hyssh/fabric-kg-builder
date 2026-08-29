@@ -393,6 +393,16 @@ class QuestionRouteRepairV2(ContractModel):
 def domain_proposal_candidates_schema() -> dict[str, Any]:
     """Return structured schema with unsupported-route conditional reason."""
     schema = DomainProposalCandidatesV2.model_json_schema()
+    properties = schema.get("properties", {})
+    for field_name, minimum in (
+        ("semantic_type_candidates", 5),
+        ("relationship_candidates", 5),
+        ("completeness_candidates", 5),
+        ("question_routes", 5),
+    ):
+        field_schema = properties.get(field_name)
+        if isinstance(field_schema, dict):
+            field_schema["minItems"] = minimum
     route = schema.get("$defs", {}).get("ProposalQuestionRouteV2")
     if not isinstance(route, dict):
         raise ProposalArtifactError("proposal route schema is unavailable")

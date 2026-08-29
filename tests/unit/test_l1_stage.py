@@ -508,6 +508,9 @@ def test_zero_supported_routes_use_one_strict_route_only_repair(
 
 def test_provider_schema_requires_exact_root_or_child_identity_state() -> None:
     schema = domain_proposal_candidates_schema()
+    assert schema["properties"]["semantic_type_candidates"]["minItems"] == 5
+    assert schema["properties"]["relationship_candidates"]["minItems"] == 5
+    assert schema["properties"]["completeness_candidates"]["minItems"] == 5
     entity = schema["$defs"]["DomainEntityTypeV2"]
     assert len(entity["anyOf"]) == 2
     root = entity["anyOf"][0]["properties"]
