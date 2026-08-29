@@ -1986,16 +1986,31 @@ def prepare_l1_stage(
                 attempt_count=2,
             )
         except L1ProposalSchemaRepairError as exc:
-            raise L1ZeroSupportedRoutesError(
-                initial_route_audit.model_copy(
-                    update={
-                        "model_call_count": 2,
-                        "candidate_regeneration_attempted": True,
-                        "candidate_regeneration_result_code": (
-                            "candidate_regeneration_schema_invalid"
-                        ),
-                    }
+            first_failures = tuple(
+                (
+                    f"question_routes.{question_id}",
+                    "critical_route_or_vocabulary_incomplete",
                 )
+                for question_id in _uncoverable_critical_question_ids(
+                    preflight,
+                    candidates,
+                )
+            )
+            raise L1ProposalSchemaRepairError(
+                attempt_count=2,
+                validation_failures=exc.validation_failures,
+                candidate_attempts=(
+                    _raw_candidate_diagnostics(
+                        candidates.model_dump(mode="json"),
+                        attempt=1,
+                        failures=first_failures,
+                    ),
+                    _raw_candidate_diagnostics(
+                        second_raw,
+                        attempt=2,
+                        failures=exc.validation_failures,
+                    ),
+                ),
             ) from exc
         second_audit = _zero_route_audit(
             preflight=preflight,
