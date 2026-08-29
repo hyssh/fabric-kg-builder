@@ -1936,7 +1936,15 @@ def prepare_l1_stage(
             second_raw = client.complete_json(
                 system=(
                     DOMAIN_PROPOSAL_SYSTEM_PROMPT
-                    + "\nTrusted local candidate-regeneration feedback:\n"
+                    + "\nThis is the one final bounded full-candidate attempt. "
+                    "The prior candidate is rejected. Partial critical coverage "
+                    "must not be returned. Every exact ID in "
+                    "`uncovered_critical_question_ids` must appear in at least "
+                    "one evidence-backed relationship candidate, one valid "
+                    "question route over proposed endpoints, and one covered "
+                    "completeness requirement. Preserve the same sealed "
+                    "authority and do not invent evidence or IDs.\n"
+                    "Trusted local candidate-regeneration feedback:\n"
                     + canonical_json(retry_feedback)
                 ),
                 user=proposal_user_message,
