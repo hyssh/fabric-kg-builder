@@ -302,6 +302,29 @@ class WorkUnitCheckpoint:
         with self._lock:
             self.artifact_dir.mkdir(parents=True, exist_ok=True)
             path = self.artifact_dir / artifact_name
+            prior_entry = self._state["work_units"].get(
+                work_unit.work_unit_id
+            )
+            if (
+                isinstance(prior_entry, dict)
+                and prior_entry.get("status") == "succeeded"
+                and prior_entry.get("authority_fingerprint")
+                == work_unit.authority_fingerprint
+                and prior_entry.get("artifact") == artifact_name
+                and path.exists()
+            ):
+                try:
+                    prior_result = json.loads(
+                        path.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    prior_result = None
+                if (
+                    prior_result is not None
+                    and canonical_sha256(prior_result)
+                    == prior_entry.get("artifact_hash")
+                ):
+                    return
             existing: object | None = None
             if path.exists():
                 try:

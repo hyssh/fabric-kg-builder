@@ -181,6 +181,24 @@ def test_successful_leaves_are_reused_without_remote_work(tmp_path: Path) -> Non
     assert second_service.calls == 0
 
 
+def test_late_duplicate_writer_reuses_first_committed_leaf(
+    tmp_path: Path,
+) -> None:
+    root = root_work_unit(
+        _source_unit("Facility A contains Pump 1."),
+        pass_name="candidate-extraction",
+        authority_fingerprint="a" * 64,
+    )
+    checkpoint = WorkUnitCheckpoint(
+        tmp_path / "checkpoint.json",
+        tmp_path / "leaves",
+    )
+    checkpoint.record_leaf(root, {"candidate_count": 1})
+    checkpoint.record_leaf(root, {"candidate_count": 2})
+
+    assert checkpoint.reuse(root) == {"candidate_count": 1}
+
+
 def test_corrupt_leaf_is_rerun_and_repaired(tmp_path: Path) -> None:
     root = root_work_unit(
         _source_unit("Facility A contains Pump 1."),
