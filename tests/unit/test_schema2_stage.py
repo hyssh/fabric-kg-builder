@@ -256,6 +256,22 @@ def test_enrich_dispatches_approved_schema2_contract(
     assert "schema-2 extraction succeeded" in result.output
     assert calls and calls[0]["domain_file"] == str(domain_path)
 
+    yml_path = tmp_path / "domain.yml"
+    domain_path.replace(yml_path)
+    monkeypatch.chdir(tmp_path)
+    discovered = CliRunner().invoke(
+        cli,
+        [
+            "enrich",
+            "--input",
+            str(source),
+            "--out",
+            str(tmp_path / "enriched-yml"),
+        ],
+    )
+    assert discovered.exit_code == 0, discovered.output
+    assert calls[-1]["domain_file"] == "domain.yml"
+
 
 def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
     tmp_path: Path,

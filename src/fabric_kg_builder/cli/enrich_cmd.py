@@ -1850,8 +1850,14 @@ def enrich_cmd(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     schema2_domain_file = domain_file
-    if schema2_domain_file is None and Path("domain.yaml").exists():
-        schema2_domain_file = "domain.yaml"
+    if schema2_domain_file is None:
+        from fabric_kg_builder.domain.guard import locate_domain_contract
+
+        discovered_domain, _legacy = locate_domain_contract(
+            output_dir=out_dir
+        )
+        if discovered_domain is not None:
+            schema2_domain_file = str(discovered_domain)
     if schema2_domain_file is not None:
         from fabric_kg_builder.domain.models import DomainContractV2
         from fabric_kg_builder.domain.service import load_domain_contract
