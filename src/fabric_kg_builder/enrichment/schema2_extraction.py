@@ -659,8 +659,10 @@ def _make_candidate_record(
                 contract.candidate_model.entity_types,
             )
             if policy.key_mode == "business_key":
+                normalized_key = _normalized_identity_key(raw)
                 identity_policy_mismatch = (
                     set(raw.identity_key) != set(policy.business_key_fields)
+                    or any(not value for value in normalized_key.values())
                     or raw.stable_source_identity is not None
                 )
             else:
@@ -1061,16 +1063,19 @@ def merge_candidate_batches(
     """Create one deterministic C0 carrier for a cross-leaf governed collection."""
 
     references: dict[str, ExtractionCandidateReference] = {}
+    conflicted_candidate_ids: set[str] = set()
     dispositions: list[CandidateAccountingDisposition] = []
     for leaf in leaves:
         for reference in leaf.batch.candidates:
             prior = references.get(reference.candidate_id)
             if prior is not None and prior != reference:
-                raise L2StageError(
-                    "L2_CANDIDATE_ID_COLLISION",
-                    f"cross-leaf candidate conflict {reference.candidate_id}",
+                conflicted_candidate_ids.add(reference.candidate_id)
+                references[reference.candidate_id] = min(
+                    (prior, reference),
+                    key=canonical_sha256,
                 )
-            references[reference.candidate_id] = reference
+            else:
+                references[reference.candidate_id] = reference
         dispositions.extend(leaf.batch.candidate_dispositions)
     # Input IDs are leaf-stable, but identical source overlap can repeat them.
     disposition_by_id: dict[str, CandidateAccountingDisposition] = {}
@@ -1106,7 +1111,11 @@ def merge_candidate_batches(
                     retained_candidate_id=None,
                     deduplicated_into_candidate_id=target,
                     current_state=None,
-                    reason_codes=(),
+                    reason_codes=(
+                        ("CANDIDATE_PAYLOAD_CONFLICT",)
+                        if target in conflicted_candidate_ids
+                        else ()
+                    ),
                 )
             )
         else:
@@ -1119,7 +1128,11 @@ def merge_candidate_batches(
                     retained_candidate_id=target,
                     deduplicated_into_candidate_id=None,
                     current_state=AssertionState.PROPOSED,
-                    reason_codes=(),
+                    reason_codes=(
+                        ("CANDIDATE_PAYLOAD_CONFLICT",)
+                        if target in conflicted_candidate_ids
+                        else ()
+                    ),
                 )
             )
     if accounted_retained != retained_ids:

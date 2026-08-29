@@ -296,7 +296,9 @@ class WorkUnitCheckpoint:
             return None
         return children
 
-    def record_leaf(self, work_unit: L2WorkUnit, result: dict[str, Any]) -> None:
+    def record_leaf(
+        self, work_unit: L2WorkUnit, result: dict[str, Any]
+    ) -> dict[str, Any]:
         artifact_hash = canonical_sha256(result)
         artifact_name = f"{work_unit.work_unit_id.replace(':', '-', 1)}.json"
         with self._lock:
@@ -324,7 +326,7 @@ class WorkUnitCheckpoint:
                     and canonical_sha256(prior_result)
                     == prior_entry.get("artifact_hash")
                 ):
-                    return
+                    return prior_result
             existing: object | None = None
             if path.exists():
                 try:
@@ -356,6 +358,7 @@ class WorkUnitCheckpoint:
                 "artifact_hash": artifact_hash,
             }
             self._persist_locked()
+            return result
 
     def record_split(
         self,
@@ -460,7 +463,7 @@ def execute_work_unit(
             return
 
         result = processor(work_unit, response)
-        checkpoint.record_leaf(work_unit, result)
+        result = checkpoint.record_leaf(work_unit, result)
         leaves.append(work_unit.work_unit_id)
         results.append(result)
 

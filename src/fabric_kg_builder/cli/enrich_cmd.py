@@ -499,6 +499,7 @@ def _run_schema2_enrichment(
         model_version=model_version,
         model_hash=canonical_sha256({"model_version": model_version}),
         max_concurrent=max_concurrent,
+        service_batch_size=max_concurrent,
     )
 
 

@@ -180,6 +180,17 @@ def test_invalid_business_key_is_downgraded_for_rereview() -> None:
     assert reasons["DOMAIN_REREVIEW_REQUESTED"] == 1
 
 
+def test_blank_business_key_is_downgraded_for_rereview() -> None:
+    response = _response()
+    entity = dict(response[0])
+    entity["identity_key"] = {"facility_id": "   "}
+    result = _build(_domain(), [entity])
+
+    record = result.proposed_candidates[0]
+    assert record.approved_semantic_id is None
+    assert record.identity_policy_mismatch is True
+
+
 def test_candidates_are_proposed_only_and_do_not_mint_evidence() -> None:
     domain = _domain()
     result = _build(domain, _response())

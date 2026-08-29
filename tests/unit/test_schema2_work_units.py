@@ -194,8 +194,9 @@ def test_late_duplicate_writer_reuses_first_committed_leaf(
         tmp_path / "leaves",
     )
     checkpoint.record_leaf(root, {"candidate_count": 1})
-    checkpoint.record_leaf(root, {"candidate_count": 2})
+    committed = checkpoint.record_leaf(root, {"candidate_count": 2})
 
+    assert committed == {"candidate_count": 1}
     assert checkpoint.reuse(root) == {"candidate_count": 1}
 
 
