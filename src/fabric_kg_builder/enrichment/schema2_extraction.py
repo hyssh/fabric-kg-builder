@@ -238,7 +238,11 @@ def extraction_leaf_from_dict(raw: dict[str, Any]) -> ExtractionLeafResult:
         candidates = tuple(
             ProposedCandidateRecord(
                 **{
-                    **candidate,
+                    **{
+                        key: value
+                        for key, value in candidate.items()
+                        if key != "identity_policy_mismatch"
+                    },
                     "proposed_anchor": (
                         ProposedAnchor.model_validate(candidate["proposed_anchor"])
                         if candidate.get("proposed_anchor") is not None

@@ -30,6 +30,8 @@ from fabric_kg_builder.enrichment.schema2_extraction import (
     build_required_member_set_proposals,
     compile_closed_vocabulary,
     derive_collection_member_fragments,
+    extraction_leaf_from_dict,
+    extraction_leaf_to_dict,
 )
 from fabric_kg_builder.enrichment.schema2_sources import L2StageError
 
@@ -187,6 +189,20 @@ def test_blank_business_key_is_downgraded_for_rereview() -> None:
 
     record = result.proposed_candidates[0]
     assert record.approved_semantic_id is None
+
+
+def test_legacy_identity_mismatch_flag_is_removed_on_checkpoint_load() -> None:
+    leaf = _build(_domain(), [_response()[0]])
+    payload = extraction_leaf_to_dict(leaf)
+    payload["proposed_candidates"][0][
+        "identity_policy_mismatch"
+    ] = False
+
+    loaded = extraction_leaf_from_dict(payload)
+
+    assert not hasattr(
+        loaded.proposed_candidates[0], "identity_policy_mismatch"
+    )
 
 
 def test_candidates_are_proposed_only_and_do_not_mint_evidence() -> None:
