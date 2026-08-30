@@ -38,10 +38,73 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+import time
+from typing import Any, Callable
 
 from pydantic import ValidationError
 from ..config.schema import FoundryConfig
+
+# Transport failures that are safe to retry with an identical deterministic
+# request.  Configuration, authority, and schema errors are never retried.
+_RETRYABLE_TRANSPORT_TYPE_NAMES = frozenset(
+    {
+        "APIConnectionError",
+        "APIConnectionTimeoutError",
+        "APITimeoutError",
+        "InternalServerError",
+        "RateLimitError",
+    }
+)
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_NON_RETRYABLE_STATUS_CODES = frozenset({400, 401, 403, 404, 409, 413, 422})
+_TRANSPORT_RETRY_MAX_ATTEMPTS = 6
+_TRANSPORT_RETRY_BASE_SECONDS = 1.0
+_TRANSPORT_RETRY_MAX_SECONDS = 30.0
+
+
+def _transport_error_is_retryable(exc: BaseException) -> bool:
+    """Return True when *exc* is a transient transport failure.
+
+    Retrying is only safe for connectivity, timeout, throttling, and server
+    faults.  Request, authentication, authorization, and validation failures
+    are deterministic and must surface immediately.
+    """
+    if isinstance(exc, (ValidationError, ValueError, TypeError)):
+        return False
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        if status in _NON_RETRYABLE_STATUS_CODES:
+            return False
+        return status in _RETRYABLE_STATUS_CODES
+    return any(
+        klass.__name__ in _RETRYABLE_TRANSPORT_TYPE_NAMES
+        for klass in type(exc).__mro__
+    )
+
+
+def _call_with_transport_retry(
+    operation: Callable[[], Any],
+    *,
+    max_attempts: int = _TRANSPORT_RETRY_MAX_ATTEMPTS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    """Invoke *operation*, retrying only transient transport failures."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1.")
+    delay = _TRANSPORT_RETRY_BASE_SECONDS
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= max_attempts or not _transport_error_is_retryable(
+                exc
+            ):
+                raise
+            sleep(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
+            delay *= 2
+    raise AssertionError("unreachable transport retry state")
 
 
 class FoundryClient:
@@ -248,8 +311,10 @@ class FoundryClient:
                 "max_completion_tokens": max_completion_tokens,
             }
             try:
-                response = self._client.chat.completions.create(
-                    **request_values
+                response = _call_with_transport_retry(
+                    lambda: self._client.chat.completions.create(
+                        **request_values
+                    )
                 )
             except Exception as exc:
                 if (
@@ -264,8 +329,10 @@ class FoundryClient:
                     "type": "json_object"
                 }
                 strict_rejected = True
-                response = self._client.chat.completions.create(
-                    **request_values
+                response = _call_with_transport_retry(
+                    lambda: self._client.chat.completions.create(
+                        **request_values
+                    )
                 )
             raw = response.choices[0].message.content
             try:
@@ -300,10 +367,12 @@ class FoundryClient:
         configured dimension (1536).  Changing this value requires a full
         rebuild of the AI Search vector index — see SPEC-004 §9.2.
         """
-        response = self._client.embeddings.create(
-            model=self._config.embedding_deployment,
-            input=texts,
-            dimensions=self._config.embedding_dimensions,
+        response = _call_with_transport_retry(
+            lambda: self._client.embeddings.create(
+                model=self._config.embedding_deployment,
+                input=texts,
+                dimensions=self._config.embedding_dimensions,
+            )
         )
         return [item.embedding for item in response.data]
 def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:

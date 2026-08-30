@@ -347,7 +347,7 @@ def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
                         "label": "Record 1",
                         "aliases": [],
                         "identity_key": {},
-                        "stable_source_identity": "record-1",
+                        "stable_source_identity": None,
                         "anchors": [],
                     },
                     {
@@ -357,7 +357,7 @@ def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
                         "label": "Subject 1",
                         "aliases": [],
                         "identity_key": {},
-                        "stable_source_identity": "subject-1",
+                        "stable_source_identity": None,
                         "anchors": [],
                     },
                     {
