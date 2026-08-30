@@ -9,7 +9,10 @@
   before the audit was written. Operators saw only a path and a catch-all code
   with nothing to act on. The proposal failure audit now carries a redacted,
   whitespace-collapsed, 200-character `detail` for every failure whose message is
-  available, alongside the unchanged stable `code`.
+  available, alongside the unchanged stable `code`. The message is carried on
+  `L1ProposalSchemaRepairError` itself, so it survives every repair re-raise and
+  reaches both the top-level audit failures and the per-attempt candidate
+  diagnostics.
 - Fixed L3 discarding almost all verifiable evidence. Model-authored anchor
   offsets were trusted verbatim, so a candidate was rejected whenever the model
   miscounted code points even though its quoted text appeared verbatim in the

@@ -107,10 +107,12 @@ class L1ProposalSchemaRepairError(L1StageError):
         attempt_count: int,
         validation_error_codes: tuple[str, ...] = (),
         validation_failures: tuple[tuple[str, str], ...] = (),
+        validation_details: Mapping[tuple[str, str], str] | None = None,
         candidate_attempts: tuple[dict[str, Any], ...] = (),
     ) -> None:
         self.attempt_count = attempt_count
         self.candidate_attempts = candidate_attempts
+        self.validation_details = dict(validation_details or {})
         self.validation_failures = validation_failures or tuple(
             ("proposal", code) for code in validation_error_codes
         )
@@ -406,15 +408,17 @@ def _validate_proposal_candidate(
         return DomainProposalCandidatesV2.model_validate(values)
     except (ValidationError, ArithmeticError) as error:
         failures = _sanitized_validation_failures(error)
+        entries = tuple(
+            (item["location"] or "proposal.root", item["type"])
+            for item in failures
+        )
+        details: dict[tuple[str, str], str] = {}
+        for entry, item in zip(entries, failures):
+            details.setdefault(entry, item["message"])
         raise L1ProposalSchemaRepairError(
             attempt_count=attempt_count,
-            validation_failures=tuple(
-                (
-                    item["location"] or "proposal.root",
-                    item["type"],
-                )
-                for item in failures
-            ),
+            validation_failures=entries,
+            validation_details=details,
         ) from error
 
 
@@ -1738,12 +1742,14 @@ def prepare_l1_stage(
             raise L1ProposalSchemaRepairError(
                 attempt_count=2,
                 validation_failures=exc.validation_failures,
+                validation_details=exc.validation_details,
                 candidate_attempts=(
                     first_diagnostics,
                     _raw_candidate_diagnostics(
                         second_raw,
                         attempt=2,
                         failures=exc.validation_failures,
+                        details=exc.validation_details,
                     ),
                 ),
             ) from exc
@@ -1779,6 +1785,7 @@ def prepare_l1_stage(
                 first_raw,
                 attempt=1,
                 failures=first_error.validation_failures,
+                details=first_error.validation_details,
             )
             rejected_candidate_diagnostics = first_diagnostics
             retry_feedback = {
@@ -1860,12 +1867,14 @@ def prepare_l1_stage(
                 raise L1ProposalSchemaRepairError(
                     attempt_count=2,
                     validation_failures=second_error.validation_failures,
+                    validation_details=second_error.validation_details,
                     candidate_attempts=(
                         first_diagnostics,
                         _raw_candidate_diagnostics(
                             second_raw,
                             attempt=2,
                             failures=second_error.validation_failures,
+                            details=second_error.validation_details,
                         ),
                     ),
                 ) from second_error
@@ -2025,6 +2034,7 @@ def prepare_l1_stage(
             raise L1ProposalSchemaRepairError(
                 attempt_count=2,
                 validation_failures=exc.validation_failures,
+                validation_details=exc.validation_details,
                 candidate_attempts=(
                     _raw_candidate_diagnostics(
                         candidates.model_dump(mode="json"),
@@ -2035,6 +2045,7 @@ def prepare_l1_stage(
                         second_raw,
                         attempt=2,
                         failures=exc.validation_failures,
+                        details=exc.validation_details,
                     ),
                 ),
             ) from exc
@@ -2249,15 +2260,18 @@ def prepare_l1_stage(
                 ) from second_error
             except L1ProposalSchemaRepairError as second_error:
                 second_failures = second_error.validation_failures
+                second_details = second_error.validation_details
                 raise L1ProposalSchemaRepairError(
                     attempt_count=2,
                     validation_failures=second_failures,
+                    validation_details=second_details,
                     candidate_attempts=(
                         first_diagnostics,
                         _raw_candidate_diagnostics(
                             locals().get("second_raw"),
                             attempt=2,
                             failures=second_failures,
+                            details=second_details,
                         ),
                     ),
                 ) from second_error
@@ -2451,12 +2465,14 @@ def prepare_l1_stage(
                 raise L1ProposalSchemaRepairError(
                     attempt_count=2,
                     validation_failures=second_error.validation_failures,
+                    validation_details=second_error.validation_details,
                     candidate_attempts=(
                         current_diagnostics,
                         _raw_candidate_diagnostics(
                             locals().get("second_raw"),
                             attempt=2,
                             failures=second_error.validation_failures,
+                            details=second_error.validation_details,
                         ),
                     ),
                 ) from second_error

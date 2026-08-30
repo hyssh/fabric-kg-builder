@@ -1180,3 +1180,23 @@ def test_candidate_diagnostics_omit_detail_when_unavailable() -> None:
     assert diagnostics["failures"] == [
         {"path": "proposal.selection", "code": "proposal_selection_invalid"}
     ]
+
+
+def test_proposal_candidate_validation_carries_the_message() -> None:
+    from fabric_kg_builder.domain.stage import (
+        L1ProposalSchemaRepairError,
+        _validate_proposal_candidate,
+    )
+
+    with pytest.raises(L1ProposalSchemaRepairError) as raised:
+        _validate_proposal_candidate(
+            {"semantic_type_candidates": "not-a-list"},
+            trusted_question_ids=(),
+            attempt_count=1,
+        )
+
+    error = raised.value
+    assert error.validation_failures
+    assert set(error.validation_details) <= set(error.validation_failures)
+    assert error.validation_details, "validation messages must survive"
+    assert all(text.strip() for text in error.validation_details.values())
