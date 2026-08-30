@@ -13,3 +13,6 @@
   failures (connectivity, timeout, throttling, server faults) are retried with
   bounded backoff instead of aborting a resumable run, while request,
   authentication, authorization, and validation failures still fail fast.
+  A single empty or unparseable model completion is likewise retried and, if
+  it persists, reported as an exact empty-completion failure rather than an
+  opaque JSON parse position.

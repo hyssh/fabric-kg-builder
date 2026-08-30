@@ -468,7 +468,7 @@ def _run_schema2_enrichment(
                 user=prompt,
                 json_schema=raw_candidate_response_schema(),
                 max_completion_tokens=8_000,
-                max_attempts=1,
+                max_attempts=3,
             )
             return RawCandidateResponse.model_validate(raw).model_dump(
                 mode="json"

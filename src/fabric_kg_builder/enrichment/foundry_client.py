@@ -284,6 +284,7 @@ class FoundryClient:
         last_error: json.JSONDecodeError | None = None
         raw = ""
         strict_rejected = False
+        empty_response = False
         for attempt in range(max_attempts):
             attempt_system = system + schema_instruction
             if attempt:
@@ -342,12 +343,25 @@ class FoundryClient:
                     )
                 )
             raw = response.choices[0].message.content
+            if not raw or not raw.strip():
+                last_error = json.JSONDecodeError(
+                    "empty model response", "", 0
+                )
+                empty_response = True
+                continue
+            empty_response = False
             try:
                 return json.loads(raw)
             except json.JSONDecodeError as exc:
                 last_error = exc
 
         assert last_error is not None
+        if empty_response:
+            raise ValueError(
+                "Foundry returned an empty completion after "
+                f"{max_attempts} attempt(s); the deployment produced no "
+                "content for this request"
+            )
         raise ValueError(
             f"Foundry response could not be parsed as JSON after {max_attempts} "
             f"attempt(s); line={last_error.lineno}; column={last_error.colno}"

@@ -455,3 +455,36 @@ def test_complete_json_retries_transient_transport_failure(monkeypatch) -> None:
     assert result == json.loads(good.choices[0].message.content)
     assert sdk_mock.chat.completions.create.call_count == 2
     assert slept == [1.0]
+
+
+def test_empty_completion_is_retried_then_reported_distinctly() -> None:
+    """An empty completion must retry and then fail with an exact reason."""
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    empty = MagicMock()
+    empty.choices = [MagicMock(message=MagicMock(content=""))]
+    sdk_mock.chat.completions.create.return_value = empty
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+
+    with pytest.raises(ValueError, match="empty completion"):
+        client.complete_json(
+            system="system", user="user", json_schema={}, max_attempts=2
+        )
+
+    assert sdk_mock.chat.completions.create.call_count == 2
+
+
+def test_empty_completion_recovers_on_retry() -> None:
+    """A single empty completion must not abort a resumable run."""
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    good = sdk_mock.chat.completions.create.return_value
+    empty = MagicMock()
+    empty.choices = [MagicMock(message=MagicMock(content="   "))]
+    sdk_mock.chat.completions.create.side_effect = [empty, good]
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+
+    result = client.complete_json(
+        system="system", user="user", json_schema={}, max_attempts=3
+    )
+
+    assert result == json.loads(good.choices[0].message.content)
+    assert sdk_mock.chat.completions.create.call_count == 2
