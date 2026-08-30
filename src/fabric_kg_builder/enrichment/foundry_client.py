@@ -77,18 +77,24 @@ def _transport_error_is_retryable(exc: BaseException) -> bool:
     if isinstance(status, int):
         if status in _NON_RETRYABLE_STATUS_CODES:
             return False
-        return status in _RETRYABLE_STATUS_CODES
+        if status in _RETRYABLE_STATUS_CODES or status >= 500:
+            return True
     return any(
         klass.__name__ in _RETRYABLE_TRANSPORT_TYPE_NAMES
         for klass in type(exc).__mro__
     )
 
 
+def _transport_retry_sleep(seconds: float) -> None:
+    """Indirection point so tests can stub backoff without touching stdlib."""
+    time.sleep(seconds)
+
+
 def _call_with_transport_retry(
     operation: Callable[[], Any],
     *,
     max_attempts: int = _TRANSPORT_RETRY_MAX_ATTEMPTS,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> Any:
     """Invoke *operation*, retrying only transient transport failures."""
     if max_attempts < 1:
@@ -102,7 +108,8 @@ def _call_with_transport_retry(
                 exc
             ):
                 raise
-            sleep(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
+            backoff = sleep if sleep is not None else _transport_retry_sleep
+            backoff(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
             delay *= 2
     raise AssertionError("unreachable transport retry state")
 

@@ -360,7 +360,7 @@ def test_transport_retry_does_not_retry_client_errors() -> None:
     for status in (400, 401, 403, 404, 422):
         calls = {"n": 0}
 
-        def operation() -> None:
+        def operation(status: int = status) -> None:
             calls["n"] += 1
             raise _FakeStatusError(status)
 
@@ -378,7 +378,7 @@ def test_transport_retry_retries_server_and_throttle_errors() -> None:
     for status in (408, 429, 500, 502, 503, 504):
         calls = {"n": 0}
 
-        def operation() -> str:
+        def operation(status: int = status) -> str:
             calls["n"] += 1
             if calls["n"] < 2:
                 raise _FakeStatusError(status)
@@ -410,8 +410,36 @@ def test_transport_retry_gives_up_after_bounded_attempts() -> None:
     assert calls["n"] == 3
 
 
-def test_complete_json_retries_transient_transport_failure() -> None:
+def test_transport_retry_retries_unenumerated_server_faults() -> None:
+    """Gateway/proxy 5xx codes are still transient server faults."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    for status in (507, 520, 522, 524, 529):
+        calls = {"n": 0}
+
+        def operation(status: int = status) -> str:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise _FakeStatusError(status)
+            return "ok"
+
+        assert (
+            module._call_with_transport_retry(
+                operation, sleep=lambda _seconds: None
+            )
+            == "ok"
+        )
+        assert calls["n"] == 2
+
+
+def test_complete_json_retries_transient_transport_failure(monkeypatch) -> None:
     """complete_json must survive one transient connection error."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        module, "_transport_retry_sleep", slept.append
+    )
     sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
     good = sdk_mock.chat.completions.create.return_value
     sdk_mock.chat.completions.create.side_effect = [
@@ -420,16 +448,10 @@ def test_complete_json_retries_transient_transport_failure() -> None:
     ]
     client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
 
-    from fabric_kg_builder.enrichment import foundry_client as module
-
-    original_sleep = module.time.sleep
-    module.time.sleep = lambda _seconds: None
-    try:
-        result = client.complete_json(
-            system="system", user="user", json_schema={}
-        )
-    finally:
-        module.time.sleep = original_sleep
+    result = client.complete_json(
+        system="system", user="user", json_schema={}
+    )
 
     assert result == json.loads(good.choices[0].message.content)
     assert sdk_mock.chat.completions.create.call_count == 2
+    assert slept == [1.0]
