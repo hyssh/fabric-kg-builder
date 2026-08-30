@@ -955,3 +955,118 @@ def test_noninteractive_stage_is_blocked_until_explicit_approval(
     assert approved.status == "succeeded"
     assert approved.contract is not None
     assert approved.contract.approval.status == "approved"
+
+
+def test_interrupted_commit_completes_forward_from_staged_domain_bytes(
+    tmp_path,
+) -> None:
+    """A crash before the domain rename must still publish the sealed bytes."""
+    import hashlib
+    import json as _json
+
+    from fabric_kg_builder.domain.stage import (
+        reconcile_interrupted_l1_commit,
+    )
+
+    state_root = tmp_path / ".fkg" / "l1"
+    state_root.mkdir(parents=True)
+    (state_root / "stage-receipt.json").write_text("{}", encoding="utf-8")
+    domain_path = tmp_path / "domain.yaml"
+    domain_path.write_text("stale: true\n", encoding="utf-8")
+    staged = b"approved: true\n"
+    domain_temp = tmp_path / ".domain.yaml.999.tmp"
+    domain_temp.write_bytes(staged)
+    backup_root = state_root.with_name(f".{state_root.name}.previous")
+    backup_root.mkdir()
+    (state_root.with_name(f".{state_root.name}.commit-journal")).write_text(
+        _json.dumps(
+            {
+                "schema_version": "1.0.0",
+                "state_root": str(state_root),
+                "backup_root": str(backup_root),
+                "domain_path": str(domain_path),
+                "domain_temp": str(domain_temp),
+                "domain_sha256": hashlib.sha256(staged).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repair = reconcile_interrupted_l1_commit(
+        state_root=state_root, domain_path=domain_path
+    )
+
+    assert repair == "completed_forward"
+    assert domain_path.read_bytes() == staged
+    assert not backup_root.exists()
+    assert not (
+        state_root.with_name(f".{state_root.name}.commit-journal")
+    ).exists()
+
+
+def test_interrupted_commit_rolls_back_when_staged_bytes_are_lost(
+    tmp_path,
+) -> None:
+    """Without staged bytes the state root must match the retained domain."""
+    import hashlib
+    import json as _json
+
+    from fabric_kg_builder.domain.stage import (
+        reconcile_interrupted_l1_commit,
+    )
+
+    state_root = tmp_path / ".fkg" / "l1"
+    state_root.mkdir(parents=True)
+    (state_root / "stage-receipt.json").write_text(
+        '{"generation": "new"}', encoding="utf-8"
+    )
+    backup_root = state_root.with_name(f".{state_root.name}.previous")
+    backup_root.mkdir()
+    (backup_root / "stage-receipt.json").write_text(
+        '{"generation": "previous"}', encoding="utf-8"
+    )
+    domain_path = tmp_path / "domain.yaml"
+    domain_path.write_text("stale: true\n", encoding="utf-8")
+    (state_root.with_name(f".{state_root.name}.commit-journal")).write_text(
+        _json.dumps(
+            {
+                "schema_version": "1.0.0",
+                "state_root": str(state_root),
+                "backup_root": str(backup_root),
+                "domain_path": str(domain_path),
+                "domain_temp": str(tmp_path / ".domain.yaml.missing.tmp"),
+                "domain_sha256": hashlib.sha256(b"approved: true\n").hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repair = reconcile_interrupted_l1_commit(
+        state_root=state_root, domain_path=domain_path
+    )
+
+    assert repair == "rolled_back"
+    assert (state_root / "stage-receipt.json").read_text(
+        encoding="utf-8"
+    ) == '{"generation": "previous"}'
+    assert domain_path.read_text(encoding="utf-8") == "stale: true\n"
+    assert not backup_root.exists()
+
+
+def test_reconcile_is_a_no_op_without_a_commit_journal(tmp_path) -> None:
+    """Ordinary runs must not pay for interrupted-commit repair."""
+    from fabric_kg_builder.domain.stage import (
+        reconcile_interrupted_l1_commit,
+    )
+
+    state_root = tmp_path / ".fkg" / "l1"
+    state_root.mkdir(parents=True)
+    domain_path = tmp_path / "domain.yaml"
+    domain_path.write_text("approved: true\n", encoding="utf-8")
+
+    assert (
+        reconcile_interrupted_l1_commit(
+            state_root=state_root, domain_path=domain_path
+        )
+        is None
+    )

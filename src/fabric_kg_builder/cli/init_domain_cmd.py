@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -693,6 +694,29 @@ def _schema_2_actor() -> str:
     )
 
 
+_SECRET_DETAIL_PATTERN = re.compile(
+    r"(?i)\b(?:bearer\s+[A-Za-z0-9._~+/-]+=*"
+    r"|(?:api[-_]?key|access[-_]?token|client[-_]?secret|password|sig|sv|se)"
+    r"\s*[=:]\s*[^\s,;&)'\"]+)"
+)
+_MAX_FAILURE_DETAIL_CHARS = 500
+
+
+def _sanitize_failure_detail(exc: BaseException) -> str:
+    """Return a bounded, secret-free rendering of *exc* for the audit record.
+
+    Operators need the real precondition cause (bad endpoint, missing
+    environment variable, failed sign-in) to act on a failure, but the audit
+    record is persisted and shared, so credential material must never reach it.
+    """
+    detail = f"{type(exc).__name__}: {exc}".strip()
+    detail = _SECRET_DETAIL_PATTERN.sub("[redacted]", detail)
+    detail = " ".join(detail.split())
+    if len(detail) > _MAX_FAILURE_DETAIL_CHARS:
+        detail = detail[:_MAX_FAILURE_DETAIL_CHARS] + "…"
+    return detail
+
+
 def _persist_early_l1_failure_audit(
     *,
     state_root: Path,
@@ -700,12 +724,16 @@ def _persist_early_l1_failure_audit(
     run_id: str,
     path: str,
     code: str,
+    detail: str | None = None,
 ) -> Path:
     state_root.mkdir(parents=True, exist_ok=True)
     audit_path = state_root / "proposal-failure-audit.json"
     temporary = audit_path.with_name(
         f".{audit_path.name}.{os.getpid()}.tmp"
     )
+    failure: dict[str, object] = {"path": path, "code": code}
+    if detail:
+        failure["detail"] = detail
     payload = {
         "schema_version": "1.0.0",
         "error_code": "L1_STAGE_FAILED",
@@ -715,7 +743,7 @@ def _persist_early_l1_failure_audit(
         "model_hash": None,
         "intake_hash": None,
         "attempt_count": 0,
-        "failures": [{"path": path, "code": code}],
+        "failures": [failure],
     }
     with temporary.open("w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2, sort_keys=True)
@@ -830,15 +858,17 @@ def _run_schema_2_l1(
         try:
             intake_raw = _load_mapping(Path(intake_path))
         except Exception as exc:
+            detail = _sanitize_failure_detail(exc)
             audit_path = _persist_early_l1_failure_audit(
                 state_root=state_root,
                 project_id=effective_project_id,
                 run_id=run_id,
                 path="preflight.intake",
                 code="intake_load_failed",
+                detail=detail,
             )
             raise click.ClickException(
-                f"L1_STAGE_FAILED; audit={audit_path}"
+                f"L1_STAGE_FAILED; audit={audit_path}; detail={detail}"
             ) from exc
     elif non_interactive or dry_run:
         fail_precondition("preflight.intake", "intake_required")
@@ -858,15 +888,17 @@ def _run_schema_2_l1(
                 {"model_version": model_version, "candidates": candidates_raw}
             )
         except Exception as exc:
+            detail = _sanitize_failure_detail(exc)
             audit_path = _persist_early_l1_failure_audit(
                 state_root=state_root,
                 project_id=effective_project_id,
                 run_id=run_id,
                 path="proposal.candidates",
                 code="candidate_load_failed",
+                detail=detail,
             )
             raise click.ClickException(
-                f"L1_STAGE_FAILED; audit={audit_path}"
+                f"L1_STAGE_FAILED; audit={audit_path}; detail={detail}"
             ) from exc
     else:
         candidates = None
@@ -880,15 +912,17 @@ def _run_schema_2_l1(
                 client, model_version = _build_schema_2_client(ctx)
                 model_hash = compute_model_hash(client, model_version)
             except Exception as exc:
+                detail = _sanitize_failure_detail(exc)
                 audit_path = _persist_early_l1_failure_audit(
                     state_root=state_root,
                     project_id=effective_project_id,
                     run_id=run_id,
                     path="proposal.provider",
                     code="client_construction_failed",
+                    detail=detail,
                 )
                 raise click.ClickException(
-                    f"L1_STAGE_FAILED; audit={audit_path}"
+                    f"L1_STAGE_FAILED; audit={audit_path}; detail={detail}"
                 ) from exc
     previous = None
     if resume and (state_root / "stage-receipt.json").exists():

@@ -622,3 +622,59 @@ def test_schema_1_compatibility_requires_explicit_flag(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert load_domain_contract(tmp_path / "domain.yaml").schema_version == "1.0"
+
+
+def test_sanitized_failure_detail_preserves_cause_without_secrets() -> None:
+    """Operators need the real cause; audits must never carry credentials."""
+    from fabric_kg_builder.cli.init_domain_cmd import (
+        _sanitize_failure_detail,
+    )
+
+    detail = _sanitize_failure_detail(
+        EnvironmentError(
+            "AZURE_OPENAI_ENDPOINT is not set; api_key=sk-secret-value "
+            "Authorization: Bearer eyJhbGciOi.payload.signature"
+        )
+    )
+
+    assert "AZURE_OPENAI_ENDPOINT is not set" in detail
+    assert detail.startswith("OSError:")
+    assert "sk-secret-value" not in detail
+    assert "eyJhbGciOi.payload.signature" not in detail
+    assert "[redacted]" in detail
+
+
+def test_sanitized_failure_detail_is_bounded() -> None:
+    """A pathological provider message cannot flood the audit record."""
+    from fabric_kg_builder.cli.init_domain_cmd import (
+        _sanitize_failure_detail,
+    )
+
+    detail = _sanitize_failure_detail(RuntimeError("x" * 5_000))
+
+    assert len(detail) <= 520
+
+
+def test_early_failure_audit_records_detail(tmp_path) -> None:
+    """The persisted audit must carry the sanitized cause, not just a code."""
+    import json as _json
+
+    from fabric_kg_builder.cli.init_domain_cmd import (
+        _persist_early_l1_failure_audit,
+    )
+
+    audit_path = _persist_early_l1_failure_audit(
+        state_root=tmp_path / ".fkg" / "l1",
+        project_id="project:test",
+        run_id="run:test",
+        path="proposal.provider",
+        code="client_construction_failed",
+        detail="EnvironmentError: AZURE_OPENAI_ENDPOINT is not set",
+    )
+
+    payload = _json.loads(audit_path.read_text(encoding="utf-8"))
+    failure = payload["failures"][0]
+    assert failure["code"] == "client_construction_failed"
+    assert failure["detail"] == (
+        "EnvironmentError: AZURE_OPENAI_ENDPOINT is not set"
+    )

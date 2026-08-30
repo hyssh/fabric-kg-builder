@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -3162,6 +3163,67 @@ def _artifact_payloads(
     return payloads
 
 
+def _commit_journal_path(state_root: Path) -> Path:
+    return state_root.with_name(f".{state_root.name}.commit-journal")
+
+
+def reconcile_interrupted_l1_commit(
+    *,
+    state_root: Path,
+    domain_path: Path,
+) -> str | None:
+    """Repair an L1 state commit that was interrupted between renames.
+
+    ``domain.yaml`` and the state root are two filesystem objects, so a crash
+    between their renames can leave an approved contract that does not match
+    its own sealed state. The commit journal records the intended domain bytes,
+    so the interrupted commit is completed forward when the staged bytes
+    survive and rolled back to the retained ``.previous`` state otherwise.
+    Returns the applied repair, or ``None`` when nothing was interrupted.
+    """
+    journal_path = _commit_journal_path(state_root)
+    if not journal_path.exists():
+        return None
+    try:
+        record = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise L1StageError(
+            "interrupted L1 state commit journal is unreadable"
+        ) from exc
+    expected = str(record.get("domain_sha256") or "")
+    backup_root = Path(str(record.get("backup_root") or ""))
+    domain_temp = Path(str(record.get("domain_temp") or ""))
+    if not expected:
+        raise L1StageError(
+            "interrupted L1 state commit journal is incomplete"
+        )
+
+    def _digest(path: Path) -> str | None:
+        if not path.is_file():
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    if _digest(domain_path) == expected:
+        repair = "already_committed"
+    elif _digest(domain_temp) == expected:
+        os.replace(domain_temp, domain_path)
+        repair = "completed_forward"
+    elif backup_root.is_dir():
+        if state_root.exists():
+            shutil.rmtree(state_root)
+        os.replace(backup_root, state_root)
+        repair = "rolled_back"
+    else:
+        raise L1StageError(
+            "interrupted L1 state commit cannot be reconciled; "
+            "no staged domain bytes and no retained previous state"
+        )
+    if backup_root.is_dir():
+        shutil.rmtree(backup_root)
+    journal_path.unlink(missing_ok=True)
+    return repair
+
+
 def _persist_payloads(
     payloads: dict[Path, bytes],
     *,
@@ -3182,6 +3244,15 @@ def _persist_payloads(
             raise L1StageError(
                 "an L1 state transition is already in progress"
             ) from exc
+    try:
+        reconcile_interrupted_l1_commit(
+            state_root=state_root, domain_path=domain_path
+        )
+    except L1StageError:
+        if lock_descriptor >= 0:
+            os.close(lock_descriptor)
+            lock_path.unlink(missing_ok=True)
+        raise
     state_root.parent.mkdir(parents=True, exist_ok=True)
     temp_root = Path(
         tempfile.mkdtemp(prefix=".l1-stage-", dir=str(state_root.parent))
@@ -3216,10 +3287,31 @@ def _persist_payloads(
         backup_root = state_root.with_name(f".{state_root.name}.previous")
         if backup_root.exists():
             shutil.rmtree(backup_root)
+        journal_path = _commit_journal_path(state_root)
+        journal_temp = journal_path.with_name(
+            f"{journal_path.name}.{os.getpid()}.tmp"
+        )
+        journal = {
+            "schema_version": "1.0.0",
+            "state_root": str(state_root),
+            "backup_root": str(backup_root),
+            "domain_path": str(domain_path),
+            "domain_temp": str(domain_temp),
+            "domain_sha256": hashlib.sha256(
+                payloads[Path("domain.yaml")]
+            ).hexdigest(),
+        }
+        with journal_temp.open("w", encoding="utf-8") as stream:
+            json.dump(journal, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        journal_temp.replace(journal_path)
         if state_root.exists():
             os.replace(state_root, backup_root)
         os.replace(temp_root, state_root)
         os.replace(domain_temp, domain_path)
+        journal_path.unlink(missing_ok=True)
         if backup_root.exists():
             shutil.rmtree(backup_root)
     finally:
