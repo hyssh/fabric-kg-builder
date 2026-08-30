@@ -17,10 +17,13 @@ read-only preflight, persists its exact plan/hash, and immediately executes that
 same plan without a prompt. Supplying `--approve-live` instead consumes only the
 matching persisted plan.
 
-The live plan covers exact Fabric definition readback, release-owned Azure AI
-Search index/knowledge source/knowledge base names, and release-owned Foundry
-Search/Fabric Data Agent connections. Existing `surface-tech-*` resources are
-never adopted or modified by name.
+The live plan is *capable of* covering exact Fabric definition readback,
+release-owned Azure AI Search index/knowledge source/knowledge base names, and
+release-owned Foundry Search/Fabric Data Agent connections. Which of those a
+given run actually plans depends entirely on its configuration; see
+"Fabric was not exercised by this run" below for what the recorded live run
+did and did not cover. Existing `surface-tech-*` resources are never adopted
+or modified by name.
 
 Every reused Fabric item must use the bounded `fabric-kg-024-*` grammar and
 provide a separately hash-bound ownership receipt matching release, attempt,
@@ -116,6 +119,39 @@ Deferred in this transaction, and explicitly not claimed as successful:
 `search-knowledge-source`, `search-knowledge-base`,
 `foundry-search-connection`, `foundry-fabric-connection`,
 `foundry-built-in-agent`.
+
+### Fabric was not exercised by this run
+
+The configuration for this run declared `"fabric_definitions": []`, so the
+approved plan contained **no Fabric action of any kind** — not a no-op action,
+not a zero-diff comparison. The plan's six actions were the one Search index
+create plus the five deferred components listed above. This run therefore
+proves nothing about the Fabric Lakehouse, Semantic Model, Ontology, Graph
+model, or Data Agent path, and must not be read as covering it.
+
+Three independent reasons, each on its own sufficient:
+
+1. No compiled definition bytes exist. `build/parquet`, `build/semantic`,
+   `build/ontology`, `build/graph`, and `build/agents` are all empty in the
+   acceptance workspace. L2 enrichment succeeded and wrote schema-2 candidates
+   under `.fkg/l2/`, but no later stage has run. `app deploy-l7` requires
+   compiled canonical definition bytes and a hash for every definition-bearing
+   Fabric item, so there was nothing it could plan.
+2. The release identity cannot reach the configured workspace.
+   `GET /v1/workspaces/{configured id}` returns `403 InsufficientPrivileges`,
+   and that workspace does not appear in the identity's workspace list. Even
+   with artifacts present, preflight would have returned a capability NO-GO.
+3. Lakehouse provisioning and table loading are outside `app deploy-l7` by
+   design. Its Fabric item types are `DataAgent`, `GraphModel`, `Ontology`,
+   and `SemanticModel` only; it does not create a Lakehouse, upload to
+   OneLake, or register Delta tables. Those remain the separate
+   `deploy-lakehouse`, `deploy-ontology`, `deploy-graph`, and
+   `deploy-data-agent` commands.
+
+A live Fabric deployment is therefore still outstanding as a separate,
+currently blocked step. It is unblocked by granting the release identity
+access to the intended workspace and by producing the compiled definition
+artifacts; see the schema-2 stage gap noted below.
 
 Two product defects were found and fixed by this run rather than worked
 around. A failed live mutation reported only that rollback had completed,
