@@ -55,7 +55,7 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 from .schema2_sources import L2StageError
 
 L2_PROMPT_VERSION = "l2-schema-constrained/1.1.0"
-L2_EXTRACTOR_VERSION = "1.1.0"
+L2_EXTRACTOR_VERSION = "1.2.0"
 UNKNOWN_SEMANTIC_TYPE = {
     "entity": "unapproved-observation:entity",
     "relationship": "unapproved-observation:relationship",
@@ -167,6 +167,10 @@ class ProposedCandidateRecord:
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
+    #: Sorted normalized business key that minted ``semantic_id`` under a
+    #: ``business_key`` identity policy. L3 cannot reproduce a business-key
+    #: entity ID without it, so the carrier must persist it verbatim.
+    normalized_business_key: tuple[tuple[str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +250,14 @@ def extraction_leaf_from_dict(raw: dict[str, Any]) -> ExtractionLeafResult:
                     "proposed_anchor": (
                         ProposedAnchor.model_validate(candidate["proposed_anchor"])
                         if candidate.get("proposed_anchor") is not None
+                        else None
+                    ),
+                    "normalized_business_key": (
+                        tuple(
+                            (str(field), str(value))
+                            for field, value in candidate["normalized_business_key"]
+                        )
+                        if candidate.get("normalized_business_key") is not None
                         else None
                     ),
                 }
@@ -653,6 +665,7 @@ def _make_candidate_record(
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
+    normalized_business_key: tuple[tuple[str, str], ...] | None = None
     identity_policy_mismatch = False
     if isinstance(raw, RawEntityCandidate):
         definition = vocabulary.entities_by_alias.get(raw.observed_type.casefold())
@@ -668,6 +681,9 @@ def _make_candidate_record(
                     or any(not value for value in normalized_key.values())
                     or raw.stable_source_identity is not None
                 )
+                if not identity_policy_mismatch:
+                    # L3 re-proves this ID and cannot do so without the key.
+                    normalized_business_key = tuple(sorted(normalized_key.items()))
             else:
                 expected_stable_identity = (
                     f"{source_unit_id}:{raw.local_id.casefold()}"
@@ -844,6 +860,7 @@ def _make_candidate_record(
         proposed_target_semantic_type_id=proposed_target_semantic_type_id,
         proposed_member_role_id=proposed_member_role_id,
         proposed_member_order=proposed_member_order,
+        normalized_business_key=normalized_business_key,
     )
 
 

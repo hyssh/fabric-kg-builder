@@ -17,7 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 
 from fabric_kg_builder.contracts.base import (
     canonical_json,
@@ -181,6 +187,18 @@ class ProposedCandidateView(_StrictView):
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
+    normalized_business_key: tuple[tuple[str, str], ...] | None = None
+
+    @field_validator("normalized_business_key", mode="before")
+    @classmethod
+    def _coerce_persisted_key(cls, value: object) -> object:
+        # JSON restores the persisted key as nested lists; the strict view still
+        # rejects any shape other than exact (field, value) string pairs.
+        if not isinstance(value, list):
+            return value
+        return tuple(
+            tuple(pair) if isinstance(pair, list) else pair for pair in value
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1296,6 +1314,11 @@ def _identity_witness(
         local_reference=record.local_reference,
         hierarchy=hierarchy,
         project_id=project_id,
+        normalized_business_key=(
+            dict(record.normalized_business_key)
+            if record.normalized_business_key is not None
+            else None
+        ),
     )
     return outcome.recomputed, outcome.witness_kind, outcome.reason_codes
 
@@ -2429,6 +2452,11 @@ def _reconcile_candidate_bindings(
             local_reference=record.local_reference,
             hierarchy=inputs.hierarchy,
             project_id=project_id,
+            normalized_business_key=(
+                dict(record.normalized_business_key)
+                if record.normalized_business_key is not None
+                else None
+            ),
         )
         if (
             outcome.recomputed != result.identity_recomputed

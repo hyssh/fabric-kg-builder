@@ -310,6 +310,67 @@ def _assets(source, crosswalk, policy, target_ids):
     )
 
 
+def _source_assets(derived_assets, spans, policy):
+    """Build one governed source asset per cited source file.
+
+    L5b cites evidence against the original source file, so the sealed asset
+    set must carry those files alongside the four derived target definitions.
+    """
+
+    template = derived_assets[0]
+    by_file = {}
+    for span in spans:
+        if span.source_file_id in by_file:
+            continue
+        locator_values = span.locator.model_dump(mode="python")
+        locator_values.pop("locator_hash", None)
+        locator_values["char_start"] = None
+        locator_values["char_end"] = None
+        source_locator = ImmutableSourceLocator(
+            **locator_values,
+            locator_hash=canonical_sha256(locator_values),
+        )
+        storage_values = {
+            "storage_kind": "other",
+            "storage_account_resource_id": "resource:fabric-workspace",
+            "container_id": "container:source",
+            "object_id": span.identity.asset_id,
+            "object_version_id": span.asset_version_id,
+        }
+        identity_values = template.identity.model_dump(mode="python")
+        identity_values.update({
+            "source_file_id": span.source_file_id,
+            "asset_id": span.identity.asset_id,
+            "asset_version_id": span.asset_version_id,
+            "content_hash": span.identity.content_hash,
+            "immutable_locator": source_locator,
+        })
+        values = {
+            "identity": CanonicalIdentityEnvelope.model_validate(identity_values),
+            "governed_asset_reference_id": (
+                f"governed-asset-reference:source:{span.source_file_id}"
+            ),
+            "asset_kind": "original",
+            "source_file_id": span.source_file_id,
+            "asset_id": span.identity.asset_id,
+            "asset_version_id": span.asset_version_id,
+            "immutable_locator": source_locator,
+            "content_hash": span.identity.content_hash,
+            "storage_reference": StorageReference(
+                **storage_values,
+                storage_reference_hash=canonical_sha256(storage_values),
+            ),
+            "access_policy_id": policy.access_policy_id,
+            "access_policy_hash": policy.policy_hash,
+            "on_demand_url_policy": "not_permitted",
+        }
+        by_file[span.source_file_id] = GovernedAssetReference(
+            **values,
+            asset_reference_hash=canonical_sha256(values),
+        )
+    return tuple(by_file[key] for key in sorted(by_file))
+
+
 def _crosswalk(source) -> PublicationCrosswalkV1_1:
     manifest = pq.read_table(
         source.resolve("semantic_required_member_manifests")

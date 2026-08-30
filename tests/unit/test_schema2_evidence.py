@@ -1787,6 +1787,79 @@ def test_identity_witness_recomputes_a_derivable_stable_source_identity() -> Non
     assert outcome.witness_kind not in NON_ASSERTABLE_WITNESS_KINDS
 
 
+def test_identity_witness_recomputes_a_persisted_business_key() -> None:
+    hierarchy = _witness_hierarchy()
+    policy = hierarchy.identity_policy_by_type["semantic-type:x.keyed"]
+    entity_id = recompute_entity_id(
+        project_id="project:l3-tests",
+        policy=policy,
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    outcome = resolve_identity_witness(
+        semantic_id=entity_id,
+        approved_semantic_id="semantic-type:x.keyed",
+        source_unit_id="source-unit:1",
+        local_reference="Keyed-1",
+        hierarchy=hierarchy,
+        project_id="project:l3-tests",
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    assert outcome.recomputed is True
+    assert outcome.witness_kind == "persisted_business_key"
+    assert outcome.reason_codes == ()
+    assert outcome.witness_kind not in NON_ASSERTABLE_WITNESS_KINDS
+
+
+def test_a_business_key_that_does_not_reproduce_the_id_is_rejected() -> None:
+    hierarchy = _witness_hierarchy()
+    policy = hierarchy.identity_policy_by_type["semantic-type:x.keyed"]
+    entity_id = recompute_entity_id(
+        project_id="project:l3-tests",
+        policy=policy,
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    outcome = resolve_identity_witness(
+        semantic_id=entity_id,
+        approved_semantic_id="semantic-type:x.keyed",
+        source_unit_id="source-unit:1",
+        local_reference="Keyed-1",
+        hierarchy=hierarchy,
+        project_id="project:l3-tests",
+        normalized_business_key={"serial": "sn-2"},
+    )
+
+    assert outcome.recomputed is False
+    assert outcome.witness_kind == "opaque_business_key"
+    assert outcome.reason_codes == ("IDENTITY_POLICY_VIOLATION",)
+    assert classify_state(outcome.reason_codes) is not AssertionState.ASSERTED
+
+
+def test_a_business_key_entity_without_a_persisted_key_stays_unresolved() -> None:
+    hierarchy = _witness_hierarchy()
+    policy = hierarchy.identity_policy_by_type["semantic-type:x.keyed"]
+    entity_id = recompute_entity_id(
+        project_id="project:l3-tests",
+        policy=policy,
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    outcome = resolve_identity_witness(
+        semantic_id=entity_id,
+        approved_semantic_id="semantic-type:x.keyed",
+        source_unit_id="source-unit:1",
+        local_reference="Keyed-1",
+        hierarchy=hierarchy,
+        project_id="project:l3-tests",
+    )
+
+    assert outcome.recomputed is False
+    assert outcome.witness_kind == "business_key_witness_unavailable"
+    assert outcome.reason_codes == ("IDENTITY_WITNESS_UNAVAILABLE",)
+
+
 def test_identity_witness_recomputes_an_unapproved_observation_identity() -> None:
     hierarchy = _witness_hierarchy()
     derived = derived_stable_source_identity(

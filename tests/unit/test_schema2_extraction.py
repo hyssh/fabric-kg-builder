@@ -168,6 +168,39 @@ def test_distinct_same_anchor_observations_are_conflict_accounted() -> None:
     )
 
 
+def test_a_business_key_entity_persists_the_key_that_minted_its_id() -> None:
+    from fabric_kg_builder.enrichment.schema2_evidence import recompute_entity_id
+
+    domain = _domain()
+    result = _build(domain, [_response()[0]])
+    record = result.proposed_candidates[0]
+
+    assert record.normalized_business_key is not None
+    persisted = dict(record.normalized_business_key)
+    policy = next(
+        item.identity_key_policy
+        for item in domain.candidate_model.entity_types
+        if item.type_id == record.approved_semantic_id
+    )
+
+    assert recompute_entity_id(
+        project_id=_identity().project_id,
+        policy=policy,
+        normalized_business_key=persisted,
+    ) == record.semantic_id
+
+
+def test_the_persisted_business_key_survives_a_checkpoint_round_trip() -> None:
+    leaf = _build(_domain(), [_response()[0]])
+    restored = extraction_leaf_from_dict(extraction_leaf_to_dict(leaf))
+
+    assert (
+        restored.proposed_candidates[0].normalized_business_key
+        == leaf.proposed_candidates[0].normalized_business_key
+    )
+    assert restored.proposed_candidates[0].normalized_business_key is not None
+
+
 def test_invalid_business_key_is_downgraded_for_rereview() -> None:
     response = _response()
     entity = dict(response[0])

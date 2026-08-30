@@ -1178,6 +1178,7 @@ def resolve_identity_witness(
     local_reference: str | None,
     hierarchy: CompiledHierarchy,
     project_id: str,
+    normalized_business_key: Mapping[str, str] | None = None,
 ) -> IdentityWitnessOutcome:
     """Recompute one stable entity ID, or fail closed when it is not provable.
 
@@ -1224,11 +1225,24 @@ def resolve_identity_witness(
             reason_codes=("HIERARCHY_CONCEPT_MISSING",),
         )
     if policy.key_mode != "stable_source_identity":
-        # The frozen carrier does not persist the normalized business key.
+        if policy.key_mode != "business_key" or not normalized_business_key:
+            # The frozen carrier does not persist the normalized business key.
+            return IdentityWitnessOutcome(
+                recomputed=False,
+                witness_kind="business_key_witness_unavailable",
+                reason_codes=("IDENTITY_WITNESS_UNAVAILABLE",),
+            )
+        recomputed = recompute_entity_id(
+            project_id=project_id,
+            policy=policy,
+            normalized_business_key=normalized_business_key,
+        )
+        if recomputed == semantic_id:
+            return IdentityWitnessOutcome(True, "persisted_business_key", ())
         return IdentityWitnessOutcome(
             recomputed=False,
-            witness_kind="business_key_witness_unavailable",
-            reason_codes=("IDENTITY_WITNESS_UNAVAILABLE",),
+            witness_kind="opaque_business_key",
+            reason_codes=("IDENTITY_POLICY_VIOLATION",),
         )
     recomputed = recompute_entity_id(
         project_id=project_id,

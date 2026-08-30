@@ -1049,7 +1049,7 @@ def _serving_rows(
         if any(
             not item.identity_recomputed
             or item.identity_witness_kind not in {
-                "business_key",
+                "persisted_business_key",
                 "derived_source_identity",
             }
             for item in group

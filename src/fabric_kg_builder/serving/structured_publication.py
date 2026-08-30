@@ -2053,6 +2053,45 @@ def _governed_asset_identity(
     return CanonicalIdentityEnvelope.model_validate(values)
 
 
+def _validate_governed_source_assets(
+    source: SealedL4ServingSource,
+    access_policy: AccessPolicy,
+    source_assets: Sequence[GovernedAssetReference],
+) -> None:
+    """Validate the optional original-source assets L5b cites evidence against."""
+
+    seen_files: set[str] = set()
+    seen_ids: set[str] = set()
+    for asset in source_assets:
+        if (
+            asset.asset_kind != "original"
+            or asset.source_file_id.startswith("l5a-definition:")
+            or asset.source_file_id in seen_files
+            or asset.asset_id in seen_ids
+            or asset.identity.project_id != source.receipt.identity.project_id
+            or asset.identity.domain_schema_version != "2.0"
+            or asset.identity.domain_contract_hash
+            != source.receipt.identity.domain_contract_hash
+            or asset.identity.semantic_contract_hash
+            != source.projection.sealed_semantic_contract_hash
+            or source.input_manifest.artifact_manifest_id
+            not in asset.identity.parent_artifact_ids
+        ):
+            raise L5aPublicationError(
+                "L5A_GOVERNED_ASSET_AUTHORITY_MISMATCH",
+                f"governed source asset {asset.asset_id} is not exactly anchored",
+            )
+        seen_files.add(asset.source_file_id)
+        seen_ids.add(asset.asset_id)
+        try:
+            asset.validate_access_policy(access_policy)
+        except ValueError as exc:
+            raise L5aPublicationError(
+                "L5A_ACCESS_POLICY_MISMATCH",
+                str(exc),
+            ) from exc
+
+
 def _validate_governed_assets(
     source: SealedL4ServingSource,
     definitions: Mapping[L5ATargetKind, Mapping[str, Any]],
@@ -2060,15 +2099,23 @@ def _validate_governed_assets(
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
 ) -> None:
-    assets_by_target = {asset.asset_id: asset for asset in governed_assets}
+    assets_by_target = {
+        asset.asset_id: asset
+        for asset in governed_assets
+        if asset.asset_kind == "derived"
+    }
+    source_assets = tuple(
+        asset for asset in governed_assets if asset.asset_kind != "derived"
+    )
     if (
-        len(assets_by_target) != len(governed_assets)
+        len(assets_by_target) + len(source_assets) != len(governed_assets)
         or set(assets_by_target) != set(target_ids.values())
     ):
         raise L5aPublicationError(
             "L5A_GOVERNED_ASSET_AUTHORITY_MISMATCH",
             "governed assets must exactly cover the four target definitions",
         )
+    _validate_governed_source_assets(source, access_policy, source_assets)
     for kind in L5A_TARGET_ORDER:
         target_id = target_ids[kind]
         asset = assets_by_target[target_id]

@@ -15,6 +15,30 @@
   satisfies `text[start:end] == quote`, so this strengthens rather than relaxes
   the evidence contract. The extraction verifier and L3 validator versions move
   to `1.1.0` accordingly, which also invalidates stale leaf checkpoints.
+- Fixed L3 being unable to assert any entity whose type uses a `business_key`
+  identity policy. L2 normalized the business key in memory to mint the entity
+  ID and then discarded it, so L3 had no witness with which to reproduce that
+  ID and returned `IDENTITY_WITNESS_UNAVAILABLE` for every such candidate. Any
+  domain whose types all use `business_key` therefore had a structurally empty
+  accepted set: on a 14,947-unit corpus this accounted for 37,579 unresolved
+  candidates, unchanged by the evidence-anchor fix above because the two
+  defects are independent. The normalized key is now persisted on the proposed
+  candidate carrier and re-hashed by L3, which asserts only when it reproduces
+  the recorded ID exactly (`persisted_business_key`), reports
+  `IDENTITY_POLICY_VIOLATION` when it does not, and keeps
+  `IDENTITY_WITNESS_UNAVAILABLE` only for legacy carriers that never recorded
+  a key. The L2 extractor version moves to `1.2.0` because the carrier shape
+  changed. Existing L2 state does not contain the key and cannot be
+  backfilled, so it must be re-run to benefit.
+- Fixed L5b being unable to publish any evidence document. L5a required the
+  sealed governed-asset set to be exactly the four derived target definitions,
+  while L5b required a governed asset for each cited original source file, so
+  `L5B_GOVERNED_SOURCE_ASSET_MISSING` was unavoidable as soon as any evidence
+  became applicable. This was masked while the accepted set was empty. L5a now
+  additionally accepts `original`-kind source assets and validates them against
+  the same sealed identity anchor and access policy as the derived
+  definitions, and rejects unanchored, duplicate, or definition-shadowing
+  entries.
 - Activated the schema-2 L3 and L4 stages in the CLI as `validate-evidence`
   and `project-serving`. Both were already implemented and tested but had no
   entry point, so a completed schema-2 L2 handoff could not be carried any
