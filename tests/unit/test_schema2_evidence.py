@@ -412,6 +412,79 @@ def test_invalid_ranges_and_quotes_never_mint(
     assert expected in outcome.reason_codes
 
 
+def test_shifted_anchor_offsets_are_relocated_deterministically() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        # Model reports the right quote at the wrong offsets.
+        anchor=ProposedOccurrenceAnchor(span_start=14, span_end=20, quote="Pump 1"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is not None
+    assert outcome.span.span_start == 20
+    assert outcome.span.span_end == 26
+    assert outcome.span.quote == "Pump 1"
+    assert unit.text[outcome.span.span_start : outcome.span.span_end] == "Pump 1"
+    assert "EVIDENCE_ANCHOR_RELOCATED" in outcome.reason_codes
+
+
+def test_relocation_repairs_inconsistent_model_span_arithmetic() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    # span_end - span_start (9) disagrees with len(quote) (8): unmatchable as-is.
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=1, span_end=10, quote="Facility"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is not None
+    assert (outcome.span.span_start, outcome.span.span_end) == (0, 8)
+    assert "EVIDENCE_ANCHOR_RELOCATED" in outcome.reason_codes
+
+
+def test_ambiguous_quote_is_never_relocated_by_guessing() -> None:
+    unit = _unit("Pump 1 feeds Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=2, span_end=8, quote="Pump 1"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is None
+    assert "EVIDENCE_QUOTE_MISMATCH" in outcome.reason_codes
+    assert "EVIDENCE_ANCHOR_RELOCATED" not in outcome.reason_codes
+
+
+def test_exact_anchor_is_minted_without_a_relocation_reason() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=0, span_end=8, quote="Facility"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is not None
+    assert "EVIDENCE_ANCHOR_RELOCATED" not in outcome.reason_codes
+
+
+def test_quote_absent_from_source_text_is_still_rejected() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=0, span_end=7, quote="Turbine"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is None
+    assert "EVIDENCE_QUOTE_MISMATCH" in outcome.reason_codes
+
+
 def test_missing_anchor_is_unresolved_and_source_drift_is_rejected() -> None:
     unit = _unit("Facility A contains Pump 1.")
 

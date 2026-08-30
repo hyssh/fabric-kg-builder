@@ -65,11 +65,11 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 L3_STAGE_NAME = "Evidence Validation"
 L3_STAGE_CONTRACT_VERSION = "1.0.0"
 L3_VALIDATOR_NAME = "l3-evidence-validator"
-L3_VALIDATOR_VERSION = "1.0.0"
+L3_VALIDATOR_VERSION = "1.1.0"
 
 # Verifier identity is purpose-scoped: L3 never reuses an L1 design verifier ID.
 L3_EXTRACTION_VERIFIER_NAME = "fabric-kg.local-evidence-verifier/extraction_assertion"
-L3_EXTRACTION_VERIFIER_VERSION = "1.0.0"
+L3_EXTRACTION_VERIFIER_VERSION = "1.1.0"
 L3_EXTRACTION_PURPOSE = "extraction_assertion"
 L3_EXTRACTION_PURPOSE_VERSION = "1.0.0"
 L3_EVIDENCE_SPAN_VERSION = "1.1.0"
@@ -122,7 +122,11 @@ UNRESOLVED_REASONS = frozenset(
 )
 #: Recorded for audit only; they never change the deterministic target state.
 INFORMATIONAL_REASONS = frozenset(
-    {"DOMAIN_REREVIEW_REQUESTED", "MODEL_EVIDENCE_ID_IGNORED"}
+    {
+        "DOMAIN_REREVIEW_REQUESTED",
+        "EVIDENCE_ANCHOR_RELOCATED",
+        "MODEL_EVIDENCE_ID_IGNORED",
+    }
 )
 
 COMPLETENESS_REASONS = frozenset(
@@ -194,6 +198,21 @@ def sorted_reasons(reasons: Iterable[str]) -> tuple[str, ...]:
     """Return the deterministic sorted unique reason-code tuple."""
 
     return tuple(sorted({str(reason) for reason in reasons}))
+
+
+def locate_unique_quote(text: str, quote: str) -> tuple[int, int] | None:
+    """Return the only code-point bounds of ``quote`` in ``text``.
+
+    Model-authored offsets are arithmetic, not evidence, so a disagreeing
+    anchor is re-derived from the source text itself. Ambiguity is never
+    resolved by guessing: a quote occurring more than once yields ``None`` so
+    the candidate stays rejected.
+    """
+
+    first = text.find(quote)
+    if first == -1 or text.find(quote, first + 1) != -1:
+        return None
+    return first, first + len(quote)
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +315,12 @@ def verify_and_mint_extraction_span(
 ) -> EvidenceOutcome:
     """Verify an untrusted anchor exactly, then mint one C0 1.1 span.
 
-    The anchor is never trusted for identity. Bounds are Unicode code points in
-    the exact NFC SourceUnit text, the quote must equal the exact substring, and
-    the SourceUnit text hash, locator, and source identity must all agree.
+    The anchor is never trusted for identity, nor for arithmetic. Bounds are
+    Unicode code points in the exact NFC SourceUnit text. When the proposed
+    bounds do not already delimit the quote, they are re-derived from the
+    source text and accepted only when the quote occurs exactly once; the
+    minted span therefore always satisfies ``text[start:end] == quote``. The
+    SourceUnit text hash, locator, and source identity must all agree.
     """
 
     if anchor is None:
@@ -316,20 +338,38 @@ def verify_and_mint_extraction_span(
         reasons.add("EVIDENCE_SOURCE_MISMATCH")
     if source_unit.text_content_hash != utf8_sha256(source_unit.text):
         reasons.add("EVIDENCE_SOURCE_MISMATCH")
-    if not (
+    bounds_valid = (
         0 <= anchor.span_start < anchor.span_end <= source_unit.codepoint_count
-    ):
+    )
+    quote = normalize_nfc(anchor.quote)
+    if not quote:
         reasons.add("EVIDENCE_SPAN_INVALID")
         return EvidenceOutcome(
             span=None,
             reason_codes=sorted_reasons(reasons),
             ignored_model_evidence_id=ignored,
         )
-    quote = normalize_nfc(anchor.quote)
-    if not quote:
-        reasons.add("EVIDENCE_SPAN_INVALID")
-    elif source_unit.text[anchor.span_start : anchor.span_end] != quote:
-        reasons.add("EVIDENCE_QUOTE_MISMATCH")
+    if bounds_valid and (
+        source_unit.text[anchor.span_start : anchor.span_end] == quote
+    ):
+        span_start, span_end = anchor.span_start, anchor.span_end
+    else:
+        # The anchor is untrusted for arithmetic too: re-derive the bounds from
+        # the exact source text and only accept an unambiguous occurrence.
+        located = locate_unique_quote(source_unit.text, quote)
+        if located is None:
+            reasons.add(
+                "EVIDENCE_QUOTE_MISMATCH"
+                if bounds_valid
+                else "EVIDENCE_SPAN_INVALID"
+            )
+            return EvidenceOutcome(
+                span=None,
+                reason_codes=sorted_reasons(reasons),
+                ignored_model_evidence_id=ignored,
+            )
+        span_start, span_end = located
+        reasons.add("EVIDENCE_ANCHOR_RELOCATED")
     if reasons - INFORMATIONAL_REASONS:
         return EvidenceOutcome(
             span=None,
@@ -338,8 +378,8 @@ def verify_and_mint_extraction_span(
         )
     span = EvidenceSpanV1_1.mint_verified(
         source_unit=source_unit,
-        span_start=anchor.span_start,
-        span_end=anchor.span_end,
+        span_start=span_start,
+        span_end=span_end,
         verifier_name=verifier_name,
         verifier_version=verifier_version,
         purpose=L3_EXTRACTION_PURPOSE,

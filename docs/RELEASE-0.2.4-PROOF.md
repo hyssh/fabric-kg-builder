@@ -5,7 +5,7 @@
 - Version: `0.2.4`
 - Base: `bfb9f2b24ff820174267932bf1dd3171788077a0`
 - Acceptance runtime: installed `fabric-kg` wheel in an external Python 3.12 virtual environment
-- Top-level command inventory: 36
+- Top-level command inventory: 38
 
 ## Scope
 

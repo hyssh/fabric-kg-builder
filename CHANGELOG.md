@@ -2,6 +2,31 @@
 
 ## 0.2.4
 
+- Fixed L3 discarding almost all verifiable evidence. Model-authored anchor
+  offsets were trusted verbatim, so a candidate was rejected whenever the model
+  miscounted code points even though its quoted text appeared verbatim in the
+  SourceUnit. On a 14,947-unit corpus this rejected 40,175 of 46,304 candidates
+  with `EVIDENCE_QUOTE_MISMATCH` and left the accepted set empty. The anchor is
+  now untrusted for arithmetic as well as identity: when the proposed bounds do
+  not already delimit the quote, the bounds are re-derived from the exact NFC
+  source text and accepted only when the quote occurs exactly once, recording
+  the informational `EVIDENCE_ANCHOR_RELOCATED` reason code. Ambiguous quotes
+  and quotes absent from the text stay rejected, and every minted span still
+  satisfies `text[start:end] == quote`, so this strengthens rather than relaxes
+  the evidence contract. The extraction verifier and L3 validator versions move
+  to `1.1.0` accordingly, which also invalidates stale leaf checkpoints.
+- Activated the schema-2 L3 and L4 stages in the CLI as `validate-evidence`
+  and `project-serving`. Both were already implemented and tested but had no
+  entry point, so a completed schema-2 L2 handoff could not be carried any
+  further. `validate-evidence` verifies every L2-proposed candidate against its
+  recorded source text and mints evidence spans, reusing leaf checkpoints on
+  re-run; `project-serving` projects a validated result into the canonical
+  audit and asserted-only serving Parquet tables. Both stages are local and
+  make no LLM, Foundry, Document Intelligence, embedding, Search, or Fabric
+  call. Schema-2 keeps its own serving shape rather than being down-converted
+  into the schema-1 `build/enriched`/`compile-data` tables, which cannot
+  represent assertion state, publication authority, or required-member
+  manifests.
 - Added strict `app deploy-l7` planning with dry-run as the default, immutable
   plan hashing, exact live approval, expiry/drift gates, and sanitized rollback
   receipts.

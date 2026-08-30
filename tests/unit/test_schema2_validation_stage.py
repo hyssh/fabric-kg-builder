@@ -763,12 +763,13 @@ def test_l3_emits_no_remote_resource_usage_or_projection(tmp_path: Path) -> None
     assert not list(state_root.rglob("*projection*"))
 
 
-def test_l3_is_not_activated_in_the_product_cli() -> None:
+def test_l3_is_activated_in_the_product_cli() -> None:
     result = CliRunner().invoke(cli, ["--help"])
 
     assert result.exit_code == 0
-    assert "l3" not in result.output.casefold()
-    assert "validation-stage" not in result.output.casefold()
+    # 0.2.4 wires the schema-2 evidence-validation stage into the product CLI.
+    assert "validate-evidence" in cli.commands
+    assert "validate-evidence" in result.output
 
 
 # ---------------------------------------------------------------------------

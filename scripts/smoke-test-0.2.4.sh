@@ -27,7 +27,7 @@ cd "$outside"
 
 cli="$outside/venv/bin/fabric-kg"
 test "$("$cli" --version)" = "fabric-kg, version 0.2.4"
-test "$("$cli" --help | sed -n '/^Commands:/,$p' | grep -Ec '^  [a-z0-9-]+[[:space:]]{2,}')" -eq 36
+test "$("$cli" --help | sed -n '/^Commands:/,$p' | grep -Ec '^  [a-z0-9-]+[[:space:]]{2,}')" -eq 38
 approve_help="$("$cli" domain approve --help)"
 grep -q -- '--project-id' <<<"$approve_help"
 grep -q -- '--run-id' <<<"$approve_help"
