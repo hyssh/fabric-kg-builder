@@ -25,3 +25,10 @@
   `preflight` from `execution`, states `mutation_possible`, and advertises
   receipt paths only when receipts were persisted. Azure AI Search `401`/`403`
   readback failures now name the endpoint and the exact roles required.
+- Surfaced the actual reason for every `init-domain` schema-2 precondition
+  failure instead of a bare `L1_STAGE_FAILED` code.
+- Treated the L1 commit journal as untrusted input: reconciliation derives the
+  backup root itself, requires the journal to describe the current commit, and
+  never deletes or relocates a path the journal names.
+- Extended failure-detail redaction to quoted values, storage/service-bus
+  connection keys, URL userinfo, and bare JWTs.
