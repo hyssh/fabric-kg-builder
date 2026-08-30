@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -3163,6 +3164,13 @@ def _artifact_payloads(
     return payloads
 
 
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+def _DOMAIN_TEMP_PATTERN(domain_path: Path) -> re.Pattern[str]:
+    return re.compile(rf"\.{re.escape(domain_path.name)}\.\d+\.tmp")
+
+
 def _commit_journal_path(state_root: Path) -> Path:
     return state_root.with_name(f".{state_root.name}.commit-journal")
 
@@ -3182,20 +3190,49 @@ def reconcile_interrupted_l1_commit(
     Returns the applied repair, or ``None`` when nothing was interrupted.
     """
     journal_path = _commit_journal_path(state_root)
-    if not journal_path.exists():
-        return None
     try:
-        record = json.loads(journal_path.read_text(encoding="utf-8"))
+        descriptor = os.open(
+            journal_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise L1StageError(
+            "interrupted L1 state commit journal is unreadable"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            record = json.load(stream)
     except (OSError, ValueError) as exc:
         raise L1StageError(
             "interrupted L1 state commit journal is unreadable"
         ) from exc
-    expected = str(record.get("domain_sha256") or "")
-    backup_root = Path(str(record.get("backup_root") or ""))
-    domain_temp = Path(str(record.get("domain_temp") or ""))
-    if not expected:
+    if not isinstance(record, dict):
         raise L1StageError(
             "interrupted L1 state commit journal is incomplete"
+        )
+    expected = str(record.get("domain_sha256") or "")
+    if not expected or not _SHA256_PATTERN.fullmatch(expected):
+        raise L1StageError(
+            "interrupted L1 state commit journal is incomplete"
+        )
+    # The journal is an ordinary file in the project directory, so its paths
+    # are untrusted input. Only the exact paths this commit derives are ever
+    # deleted or renamed, and the journal must name this same commit.
+    if str(record.get("state_root") or "") != str(state_root) or str(
+        record.get("domain_path") or ""
+    ) != str(domain_path):
+        raise L1StageError(
+            "interrupted L1 state commit journal describes a different commit"
+        )
+    backup_root = state_root.with_name(f".{state_root.name}.previous")
+    domain_temp = Path(str(record.get("domain_temp") or ""))
+    if domain_temp.parent != domain_path.parent or not _DOMAIN_TEMP_PATTERN(
+        domain_path
+    ).fullmatch(domain_temp.name):
+        raise L1StageError(
+            "interrupted L1 state commit journal names an unexpected "
+            "staged domain file"
         )
 
     def _digest(path: Path) -> str | None:

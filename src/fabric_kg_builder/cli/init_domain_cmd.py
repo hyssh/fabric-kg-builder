@@ -694,10 +694,24 @@ def _schema_2_actor() -> str:
     )
 
 
+_SECRET_DETAIL_KEYS = (
+    r"api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token"
+    r"|client[-_]?secret|secret|password|passwd|pwd"
+    r"|account[-_]?key|shared[-_]?access[-_]?key"
+    r"|shared[-_]?access[-_]?signature|primary[-_]?key|secondary[-_]?key"
+    r"|subscription[-_]?key|sas[-_]?token|connection[-_]?string"
+    r"|sig|sv|se|st|sp"
+)
+# Values are frequently rendered quoted (JSON, dict repr, YAML marks), so the
+# quoted forms must be matched before the bare form.
 _SECRET_DETAIL_PATTERN = re.compile(
-    r"(?i)\b(?:bearer\s+[A-Za-z0-9._~+/-]+=*"
-    r"|(?:api[-_]?key|access[-_]?token|client[-_]?secret|password|sig|sv|se)"
-    r"\s*[=:]\s*[^\s,;&)'\"]+)"
+    r"(?i)(?:"
+    r"bearer\s+[A-Za-z0-9._~+/-]+=*"
+    r"|eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"
+    r"|//[^/@\s:]+:[^/@\s]+@"
+    rf"|\b(?:{_SECRET_DETAIL_KEYS})\b[\"']?\s*[=:]\s*"
+    r"""(?:"[^"]*"|'[^']*'|[^\s,;&)'"]+)"""
+    r")"
 )
 _MAX_FAILURE_DETAIL_CHARS = 500
 
@@ -806,53 +820,53 @@ def _run_schema_2_l1(
     )
     run_id = f"run:{uuid.uuid4().hex}"
 
-    def fail_precondition(path: str, code: str) -> None:
+    def fail_precondition(path: str, code: str, reason: str) -> None:
         audit_path = _persist_early_l1_failure_audit(
             state_root=state_root,
             project_id=effective_project_id,
             run_id=run_id,
             path=path,
             code=code,
+            detail=reason,
         )
         raise click.ClickException(
-            f"L1_STAGE_FAILED; audit={audit_path}"
+            f"L1_STAGE_FAILED; audit={audit_path}; detail={reason}"
         )
 
     if input_path is None:
-        fail_precondition("preflight.source", "input_required")
-        raise click.ClickException(
+        fail_precondition(
+            "preflight.source",
+            "input_required",
             "Schema-2 L1 requires --input for complete corpus inventory. "
-            "Use --legacy-schema-1 for the prior workflow."
+            "Use --legacy-schema-1 for the prior workflow.",
         )
     if force_interactive and non_interactive:
-        fail_precondition("preflight.mode", "mode_conflict")
-        raise click.ClickException(
-            "--interactive and --non-interactive are mutually exclusive"
+        fail_precondition(
+            "preflight.mode",
+            "mode_conflict",
+            "--interactive and --non-interactive are mutually exclusive",
         )
     if approve:
-        fail_precondition("preflight.approval", "approve_not_supported")
-        raise click.ClickException(
+        fail_precondition(
+            "preflight.approval",
+            "approve_not_supported",
             "--approve is schema-1-only. Schema-2 requires the one-summary "
-            "interactive decision or explicit 'fabric-kg domain approve'."
+            "interactive decision or explicit 'fabric-kg domain approve'.",
         )
     source_path = Path(input_path)
     if not source_path.exists():
-        audit_path = _persist_early_l1_failure_audit(
-            state_root=state_root,
-            project_id=effective_project_id,
-            run_id=run_id,
-            path="preflight.source",
-            code="source_not_found",
-        )
-        raise click.ClickException(
-            f"L1_STAGE_FAILED; audit={audit_path}"
+        fail_precondition(
+            "preflight.source",
+            "source_not_found",
+            f"source path does not exist: {source_path}",
         )
     out_path = Path(output_path)
     if out_path.exists() and not force and not resume:
-        fail_precondition("preflight.output", "output_exists")
-        raise click.ClickException(
+        fail_precondition(
+            "preflight.output",
+            "output_exists",
             f"Domain contract already exists at '{out_path}'. "
-            "Use --resume or --force."
+            "Use --resume or --force.",
         )
     if intake_path is not None:
         try:
@@ -871,9 +885,11 @@ def _run_schema_2_l1(
                 f"L1_STAGE_FAILED; audit={audit_path}; detail={detail}"
             ) from exc
     elif non_interactive or dry_run:
-        fail_precondition("preflight.intake", "intake_required")
-        raise click.ClickException(
-            "--intake is required for schema-2 non-interactive and dry-run modes"
+        fail_precondition(
+            "preflight.intake",
+            "intake_required",
+            "--intake is required for schema-2 non-interactive and dry-run "
+            "modes",
         )
     else:
         intake_raw = _collect_schema_2_intake()

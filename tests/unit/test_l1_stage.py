@@ -1034,7 +1034,7 @@ def test_interrupted_commit_rolls_back_when_staged_bytes_are_lost(
                 "state_root": str(state_root),
                 "backup_root": str(backup_root),
                 "domain_path": str(domain_path),
-                "domain_temp": str(tmp_path / ".domain.yaml.missing.tmp"),
+                "domain_temp": str(tmp_path / ".domain.yaml.4242.tmp"),
                 "domain_sha256": hashlib.sha256(b"approved: true\n").hexdigest(),
             }
         ),
@@ -1070,3 +1070,65 @@ def test_reconcile_is_a_no_op_without_a_commit_journal(tmp_path) -> None:
         )
         is None
     )
+
+
+def test_interrupted_commit_journal_cannot_target_paths_outside_the_commit(
+    tmp_path,
+) -> None:
+    """A planted journal must never delete or relocate attacker-named paths."""
+    import hashlib
+    import json as _json
+
+    import pytest
+
+    from fabric_kg_builder.domain.stage import (
+        L1StageError,
+        reconcile_interrupted_l1_commit,
+    )
+
+    state_root = tmp_path / ".fkg" / "l1"
+    state_root.mkdir(parents=True)
+    domain_path = tmp_path / "domain.yaml"
+    domain_bytes = b"approved: true\n"
+    domain_path.write_bytes(domain_bytes)
+    victim = tmp_path / "Documents"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep", encoding="utf-8")
+    journal_path = state_root.with_name(f".{state_root.name}.commit-journal")
+
+    def _write(record: dict) -> None:
+        journal_path.write_text(_json.dumps(record), encoding="utf-8")
+
+    base = {
+        "schema_version": "1.0.0",
+        "state_root": str(state_root),
+        "backup_root": str(victim),
+        "domain_path": str(domain_path),
+        "domain_temp": str(tmp_path / ".domain.yaml.1.tmp"),
+        "domain_sha256": hashlib.sha256(domain_bytes).hexdigest(),
+    }
+
+    # An attacker-named backup_root is ignored, never deleted.
+    _write(base)
+    assert (
+        reconcile_interrupted_l1_commit(
+            state_root=state_root, domain_path=domain_path
+        )
+        == "already_committed"
+    )
+    assert (victim / "keep.txt").is_file()
+
+    # A journal for a different commit, or naming a foreign staged file, is
+    # refused outright rather than acted on.
+    for override in (
+        {"state_root": str(tmp_path / "other")},
+        {"domain_path": str(tmp_path / "other.yaml")},
+        {"domain_temp": str(victim / "evil.tmp")},
+        {"domain_sha256": "not-a-digest"},
+    ):
+        _write({**base, **override})
+        with pytest.raises(L1StageError):
+            reconcile_interrupted_l1_commit(
+                state_root=state_root, domain_path=domain_path
+            )
+        assert (victim / "keep.txt").is_file()

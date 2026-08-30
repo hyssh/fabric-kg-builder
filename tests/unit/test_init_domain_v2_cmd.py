@@ -173,9 +173,11 @@ def test_schema2_precondition_failure_replaces_current_audit(
     assert result.exit_code != 0
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     assert audit["error_code"] == "L1_STAGE_FAILED"
-    assert audit["failures"] == [
-        {"path": "preflight.intake", "code": "intake_required"}
-    ]
+    assert len(audit["failures"]) == 1
+    failure = audit["failures"][0]
+    assert failure["path"] == "preflight.intake"
+    assert failure["code"] == "intake_required"
+    assert "--intake is required" in failure["detail"]
 
 
 def test_schema_2_noninteractive_writes_blocked_draft(tmp_path: Path) -> None:
@@ -678,3 +680,80 @@ def test_early_failure_audit_records_detail(tmp_path) -> None:
     assert failure["detail"] == (
         "EnvironmentError: AZURE_OPENAI_ENDPOINT is not set"
     )
+
+
+def test_schema2_preconditions_surface_actionable_reasons(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "records.txt").write_text("records", encoding="utf-8")
+    runner = CliRunner()
+
+    cases = [
+        (["init-domain"], "input_required", "--input"),
+        (
+            [
+                "init-domain",
+                "--input",
+                str(source),
+                "--interactive",
+                "--non-interactive",
+            ],
+            "mode_conflict",
+            "mutually exclusive",
+        ),
+        (
+            ["init-domain", "--input", str(source), "--approve"],
+            "approve_not_supported",
+            "schema-1-only",
+        ),
+        (
+            ["init-domain", "--input", str(tmp_path / "missing")],
+            "source_not_found",
+            "does not exist",
+        ),
+    ]
+
+    for index, (args, code, needle) in enumerate(cases):
+        state_root = tmp_path / f"state-{index}"
+        result = runner.invoke(cli, [*args, "--state-dir", str(state_root)])
+        assert result.exit_code != 0, result.output
+        assert needle in result.output, result.output
+        audit = json.loads(
+            (state_root / "proposal-failure-audit.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        failure = audit["failures"][0]
+        assert failure["code"] == code
+        assert needle in failure["detail"]
+
+
+def test_sanitize_failure_detail_redacts_quoted_and_connection_secrets() -> None:
+    from fabric_kg_builder.cli.init_domain_cmd import _sanitize_failure_detail
+
+    leaky = [
+        'api_key: "sk-live-ABC123"',
+        "'password': 'hunter2'",
+        "Endpoint=sb://x;SharedAccessKey=abc123def=;",
+        "DefaultEndpointsProtocol=https;AccountKey=Zm9vYmFy==;",
+        "https://user:s3cr3t@host/db",
+        "token eyJhbGciOiJIUzI1NiJ9.eyJvaWQiOiJ4In0.sig1234",
+    ]
+    for message in leaky:
+        detail = _sanitize_failure_detail(ValueError(message))
+        assert "[redacted]" in detail
+        for secret in (
+            "sk-live-ABC123",
+            "hunter2",
+            "abc123def",
+            "Zm9vYmFy",
+            "s3cr3t",
+            "eyJvaWQiOiJ4In0",
+        ):
+            assert secret not in detail
+
+    # Actionable, non-credential causes must survive verbatim.
+    kept = _sanitize_failure_detail(
+        ValueError("missing environment variable AZURE_OPENAI_ENDPOINT")
+    )
+    assert kept.endswith("AZURE_OPENAI_ENDPOINT")
