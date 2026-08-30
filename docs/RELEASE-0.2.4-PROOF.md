@@ -46,12 +46,64 @@ Record the final candidate SHA, archive hash, wheel hash, sdist hash, test
 counts, external package origin, plan hash, and sanitized receipt hash here.
 Do not paste access tokens, secrets, connection strings, or user configuration.
 
+### Run of 2026-08-30
+
+| Item | Value |
+| --- | --- |
+| Candidate SHA | `4e33ef6` |
+| Wheel | `fabric_kg_builder-0.2.4-py3-none-any.whl` sha256 `f3927b305da36eee274461b365fa8b4d52c9a5f6ca6f8f1b740813b6ae182a70` |
+| Sdist | `fabric_kg_builder-0.2.4.tar.gz` sha256 `39d28adc6c946989df6dc856627ba9f9722ce1fdf7419ba135ddeeb4d3370c5a` |
+| External runtime | Python 3.12.13, non-editable install, `PYTHONPATH` unset, run outside the repository |
+| Package origin | external venv `site-packages/fabric_kg_builder/__init__.py` |
+| Top-level commands | 36 |
+| Unit + contract | 4104 passed, 4 deselected |
+| Integration | 7 passed |
+| Dry-run smoke plan hash | `55201c7116b231ffc04f90b374907d59179217ce188775e60523a81f8cf222e5` |
+
+Pipeline stages completed live against the real Foundry `gpt-4-1` deployment
+through the installed CLI only:
+
+| Stage | Result |
+| --- | --- |
+| L1 domain intake, review, approve | succeeded |
+| L2 schema-constrained extraction | succeeded, 14,947 / 14,947 SourceUnits, receipt `stage-receipt:999b62c887a5dc537d040150ede7e851` |
+| L7 release transaction (`app deploy-l7 --live`) | blocked before any mutation by an environment authorization blocker (below) |
+
+Schema-2 L3 evidence validation, serving projection, and publication remain
+excluded from CLI activation in this release line per SPEC-005, so the
+schema-2 corpus is not yet the input to `deploy-l7`. The live L7 transaction
+was exercised with release-owned Search artifacts derived from the real L2
+SourceUnits.
+
 ## Environment and Administrative Blockers
 
 Record exact capability NO-GO results, including missing Search managed-identity
 roles, unsupported Fabric `getDefinition` operations, or unavailable exact
 Foundry rollback. A direct Search fallback does not satisfy preview agentic
 success.
+
+### Azure AI Search authorization (live blocker, 2026-08-30)
+
+`app deploy-l7 --live` failed closed during preflight readback:
+
+```
+Search indexes readback failed with HTTP 403; the release identity lacks Azure
+AI Search data-plane authorization on https://<search-service>.search.windows.net
+```
+
+The release identity holds exactly one role assignment in the target
+subscription, `Foundry User` on the Foundry account. It has no Azure AI Search
+control-plane or data-plane role, so even `Microsoft.Search/searchServices/read`
+is denied, and it cannot grant itself the missing roles. Clearing this requires
+a subscription administrator to assign Search Service Contributor plus Search
+Index Data Contributor to the release identity and to permit Microsoft Entra
+authentication on the service.
+
+The transaction performed zero mutations. The emitted failure event reports
+`causal_stage=preflight` and `mutation_possible=false`, and advertises no
+receipt paths because no receipt was reserved. Search publication and the
+preview agentic knowledge base therefore remain unverified live; no direct
+fallback is claimed as preview success.
 
 Fabric first-create intent is modeled separately from managed-existing intent,
 but current Fabric create/delete contracts do not document ETag and conditional

@@ -25,6 +25,21 @@ a local subprocess.
 - Plan SHA-256:
 - Result:
 
+### Run of 2026-08-30
+
+- Candidate SHA: `4e33ef6`
+- Python: 3.12.13
+- Installed package origin: external venv `site-packages/fabric_kg_builder/__init__.py`
+- Wheel SHA-256: `f3927b305da36eee274461b365fa8b4d52c9a5f6ca6f8f1b740813b6ae182a70`
+- Sdist SHA-256: `39d28adc6c946989df6dc856627ba9f9722ce1fdf7419ba135ddeeb4d3370c5a`
+- Plan SHA-256: `55201c7116b231ffc04f90b374907d59179217ce188775e60523a81f8cf222e5`
+- Result: external base-wheel smoke passed; 36 top-level commands; dry-run
+  reported `mutations=0` and `l6_hosting=generated-local-deferred`.
+
+The subsequent authorized one-shot live run failed closed during preflight with
+an Azure AI Search `HTTP 403` authorization blocker and performed zero
+mutations. See `RELEASE-0.2.4-PROOF.md` for the exact blocker and remediation.
+
 Live deployment is intentionally excluded from implementation-session smoke
 testing. Attach only sanitized plan and receipt evidence after an authorized
 operator supplies ignored external configuration.
