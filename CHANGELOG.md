@@ -2,6 +2,14 @@
 
 ## 0.2.4
 
+- Fixed L1 proposal validation failures reporting no diagnosable cause. When a
+  contract invariant message matched none of the known fragments the failure was
+  recorded as the catch-all `domain_contract_invariant_unclassified`, and the
+  underlying validation message — already sanitized and bounded — was dropped
+  before the audit was written. Operators saw only a path and a catch-all code
+  with nothing to act on. The proposal failure audit now carries a redacted,
+  whitespace-collapsed, 200-character `detail` for every failure whose message is
+  available, alongside the unchanged stable `code`.
 - Fixed L3 discarding almost all verifiable evidence. Model-authored anchor
   offsets were trusted verbatim, so a candidate was rejected whenever the model
   miscounted code points even though its quoted text appeared verbatim in the

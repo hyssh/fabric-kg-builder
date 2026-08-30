@@ -1132,3 +1132,51 @@ def test_interrupted_commit_journal_cannot_target_paths_outside_the_commit(
                 state_root=state_root, domain_path=domain_path
             )
         assert (victim / "keep.txt").is_file()
+
+
+def test_candidate_diagnostics_preserve_the_validation_message() -> None:
+    from fabric_kg_builder.domain.stage import _raw_candidate_diagnostics
+
+    failure = ("proposal.draft_contract.root", "domain_contract_invariant_unclassified")
+    diagnostics = _raw_candidate_diagnostics(
+        {},
+        attempt=1,
+        failures=(failure,),
+        details={failure: "  root type must\nidentify itself  "},
+    )
+
+    assert diagnostics["failures"] == [
+        {
+            "path": failure[0],
+            "code": failure[1],
+            "detail": "root type must identify itself",
+        }
+    ]
+
+
+def test_candidate_diagnostics_bound_the_validation_message() -> None:
+    from fabric_kg_builder.domain.stage import _raw_candidate_diagnostics
+
+    failure = ("proposal.root", "value_error")
+    diagnostics = _raw_candidate_diagnostics(
+        {},
+        attempt=1,
+        failures=(failure,),
+        details={failure: "x" * 500},
+    )
+
+    assert diagnostics["failures"][0]["detail"] == "x" * 200
+
+
+def test_candidate_diagnostics_omit_detail_when_unavailable() -> None:
+    from fabric_kg_builder.domain.stage import _raw_candidate_diagnostics
+
+    diagnostics = _raw_candidate_diagnostics(
+        {},
+        attempt=1,
+        failures=(("proposal.selection", "proposal_selection_invalid"),),
+    )
+
+    assert diagnostics["failures"] == [
+        {"path": "proposal.selection", "code": "proposal_selection_invalid"}
+    ]

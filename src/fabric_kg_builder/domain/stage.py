@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from pydantic import ValidationError
 
@@ -418,11 +418,19 @@ def _validate_proposal_candidate(
         ) from error
 
 
+def _failure_detail(message: str) -> str:
+    """Render one validation message as a bounded, secret-free diagnostic."""
+    from fabric_kg_builder.release.redact import redact_secret_text
+
+    return redact_secret_text(" ".join(str(message).split()))[:200]
+
+
 def _raw_candidate_diagnostics(
     raw: object,
     *,
     attempt: int,
     failures: tuple[tuple[str, str], ...],
+    details: Mapping[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
     mapping = raw if isinstance(raw, dict) else {}
     return {
@@ -442,7 +450,15 @@ def _raw_candidate_diagnostics(
             else 0
         ),
         "failures": [
-            {"path": path or "proposal.root", "code": code}
+            {
+                "path": path or "proposal.root",
+                "code": code,
+                **(
+                    {"detail": _failure_detail(detail)}
+                    if (detail := (details or {}).get((path, code)))
+                    else {}
+                ),
+            }
             for path, code in failures
         ],
     }
@@ -2120,6 +2136,7 @@ def prepare_l1_stage(
         )
         )
     except (ProposalSelectionError, ValidationError, ArithmeticError) as exc:
+        semantic_details: dict[tuple[str, str], str] = {}
         if isinstance(exc, ProposalSelectionError):
             semantic_failures = (
                 (
@@ -2135,8 +2152,9 @@ def prepare_l1_stage(
                 ),
             )
         else:
-            semantic_failures = tuple(
-                (
+            semantic_failures = ()
+            for item in _sanitized_validation_failures(exc):
+                entry = (
                     "proposal.draft_contract."
                     + (item["location"] or "root"),
                     _stable_semantic_validation_code(
@@ -2144,8 +2162,8 @@ def prepare_l1_stage(
                         item["type"],
                     ),
                 )
-                for item in _sanitized_validation_failures(exc)
-            )
+                semantic_failures += (entry,)
+                semantic_details.setdefault(entry, item["message"])
         if (
             client is not None
             and model_call_count == 1
@@ -2158,6 +2176,7 @@ def prepare_l1_stage(
                 candidates.model_dump(mode="json"),
                 attempt=1,
                 failures=semantic_failures,
+                details=semantic_details,
             )
             feedback = {
                 "reason_code": "provider_candidate_semantic_validation_failed",
@@ -2274,6 +2293,7 @@ def prepare_l1_stage(
                             candidates.model_dump(mode="json"),
                             attempt=2 if model_call_count >= 2 else 1,
                             failures=semantic_failures,
+                            details=semantic_details,
                         ),
                     )
                     if item is not None
@@ -2339,8 +2359,10 @@ def prepare_l1_stage(
             identity=design_context.identity,
         )
     except ValidationError as exc:
-        proposal_failures = tuple(
-            (
+        proposal_details: dict[tuple[str, str], str] = {}
+        proposal_failures = ()
+        for item in exc.errors(include_url=False, include_input=False):
+            entry = (
                 "proposal."
                 + (
                     ".".join(
@@ -2354,15 +2376,13 @@ def prepare_l1_stage(
                     str(item["type"]),
                 ),
             )
-            for item in exc.errors(
-                include_url=False,
-                include_input=False,
-            )
-        )
+            proposal_failures += (entry,)
+            proposal_details.setdefault(entry, str(item["msg"]))
         current_diagnostics = _raw_candidate_diagnostics(
             candidates.model_dump(mode="json"),
             attempt=2 if model_call_count >= 2 else 1,
             failures=proposal_failures,
+            details=proposal_details,
         )
         if (
             client is not None
