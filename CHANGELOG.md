@@ -16,6 +16,15 @@
   A single empty or unparseable model completion is likewise retried and, if
   it persists, reported as an exact empty-completion failure rather than an
   opaque JSON parse position.
+- Survived sustained provider outages during schema-2 enrichment. Beyond the
+  request-local retry budget, a shared circuit breaker applies bounded delayed
+  backoff across every concurrent worker, so a multi-minute outage no longer
+  terminates a checkpoint-resumable stage and no worker burns an independent
+  budget. The breaker remains bounded — `FABRIC_KG_FOUNDRY_OUTAGE_BUDGET_SECONDS`
+  (default 900) caps the total wait, after which queued work fails fast with
+  the underlying transport error as its cause. Deterministic request, identity,
+  and authority failures still bypass the breaker entirely, and sanitized
+  outage counters are written to `enrichment-metrics.json`.
 - Recorded the real L1 failure cause in the early-failure audit and error, with
   bounded, secret-redacted detail instead of a bare code.
 - Made the L1 state commit crash-safe: a commit journal reconciles an

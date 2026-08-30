@@ -22,6 +22,7 @@ from ..domain import (
     require_ready_domain_contract,
     write_domain_run_manifest,
 )
+from ..enrichment.foundry_client import transport_retry_metrics
 from ..enrichment.orchestrator import (
     enrichment_execution_identity_hash,
     enrichment_request_timeout_seconds,
@@ -121,7 +122,7 @@ class _GloballyBoundedFoundryClient:
 
     def metrics(self) -> dict[str, object]:
         with self._lock:
-            return {
+            metrics: dict[str, object] = {
                 "configured_max_concurrent": self._max_concurrent,
                 "observed_peak_concurrency": self._peak,
                 "llm_calls": self._calls,
@@ -131,6 +132,9 @@ class _GloballyBoundedFoundryClient:
                 ),
                 "contains_source_content": False,
             }
+        metrics.update(transport_retry_metrics())
+        metrics["contains_source_content"] = False
+        return metrics
 
     def __getattr__(self, name: str):
         return getattr(self._client, name)

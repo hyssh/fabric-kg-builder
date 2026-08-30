@@ -403,11 +403,18 @@ def test_transport_retry_gives_up_after_bounded_attempts() -> None:
         calls["n"] += 1
         raise _FakeConnectionError("Connection error.")
 
-    with pytest.raises(_FakeConnectionError):
+    breaker = module._TransportOutageBreaker(
+        budget_seconds=0.0, sleep=lambda _seconds: None
+    )
+    with pytest.raises(module.TransportOutageError) as excinfo:
         module._call_with_transport_retry(
-            operation, max_attempts=3, sleep=lambda _seconds: None
+            operation,
+            max_attempts=3,
+            sleep=lambda _seconds: None,
+            breaker=breaker,
         )
     assert calls["n"] == 3
+    assert isinstance(excinfo.value.__cause__, _FakeConnectionError)
 
 
 def test_transport_retry_retries_unenumerated_server_faults() -> None:
@@ -488,3 +495,190 @@ def test_empty_completion_recovers_on_retry() -> None:
 
     assert result == json.loads(good.choices[0].message.content)
     assert sdk_mock.chat.completions.create.call_count == 2
+
+
+class _FakeClock:
+    """Deterministic monotonic clock whose sleeps advance time."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _breaker(clock: _FakeClock, **kwargs):
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    return module._TransportOutageBreaker(
+        monotonic=clock.monotonic, sleep=clock.sleep, **kwargs
+    )
+
+
+def test_outage_tier_recovers_after_sustained_provider_outage() -> None:
+    """A multi-minute outage must not terminate a resumable stage."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=900.0)
+    calls = {"n": 0}
+
+    def operation() -> str:
+        calls["n"] += 1
+        # Outlast the request-local budget by several minutes.
+        if clock.now - 1000.0 < 240.0:
+            raise _FakeConnectionError("Connection error.")
+        return "ok"
+
+    result = module._call_with_transport_retry(
+        operation, max_attempts=3, sleep=clock.sleep, breaker=breaker
+    )
+
+    assert result == "ok"
+    metrics = breaker.metrics()
+    assert metrics["transport_outages"] == 1
+    assert metrics["transport_outages_recovered"] == 1
+    assert metrics["transport_delayed_retries"] > 0
+    assert metrics["transport_outage_budget_exhausted"] is False
+
+
+def test_outage_tier_is_bounded_by_its_budget() -> None:
+    """A permanent outage still terminates once the budget is spent."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=120.0)
+
+    def operation() -> None:
+        raise _FakeConnectionError("Connection error.")
+
+    with pytest.raises(module.TransportOutageError) as excinfo:
+        module._call_with_transport_retry(
+            operation, max_attempts=2, sleep=clock.sleep, breaker=breaker
+        )
+
+    assert excinfo.value.budget_seconds == 120.0
+    # The breaker must never wait meaningfully past its own budget.
+    assert clock.now - 1000.0 <= 120.0 + 30.0
+    assert breaker.metrics()["transport_outage_budget_exhausted"] is True
+
+
+def test_outage_tier_never_retries_deterministic_failures() -> None:
+    """Authority and request errors bypass the outage tier entirely."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=900.0)
+
+    for status in (400, 401, 403, 404, 409, 413, 422):
+        calls = {"n": 0}
+
+        def operation(status: int = status) -> None:
+            calls["n"] += 1
+            raise _FakeStatusError(status)
+
+        with pytest.raises(_FakeStatusError):
+            module._call_with_transport_retry(
+                operation, sleep=clock.sleep, breaker=breaker
+            )
+        assert calls["n"] == 1
+
+    assert breaker.metrics()["transport_outages"] == 0
+
+
+def test_exhausted_breaker_fails_queued_workers_fast() -> None:
+    """Once the budget is spent, queued work must not keep calling out."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=0.0)
+
+    def failing() -> None:
+        raise _FakeConnectionError("Connection error.")
+
+    with pytest.raises(module.TransportOutageError):
+        module._call_with_transport_retry(
+            failing, max_attempts=1, sleep=clock.sleep, breaker=breaker
+        )
+
+    calls = {"n": 0}
+
+    def queued() -> str:
+        calls["n"] += 1
+        return "ok"
+
+    with pytest.raises(module.TransportOutageError):
+        module._call_with_transport_retry(
+            queued, sleep=clock.sleep, breaker=breaker
+        )
+    assert calls["n"] == 0
+
+
+def test_concurrent_workers_share_one_outage_budget() -> None:
+    """Parallel workers must not each burn an independent outage budget."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=60.0)
+
+    def operation() -> None:
+        raise _FakeConnectionError("Connection error.")
+
+    for _ in range(4):
+        with pytest.raises(module.TransportOutageError):
+            module._call_with_transport_retry(
+                operation, max_attempts=1, sleep=clock.sleep, breaker=breaker
+            )
+
+    # One shared window, not one per worker.
+    assert breaker.metrics()["transport_outages"] == 1
+
+
+def test_breaker_metrics_are_sanitized() -> None:
+    """Metrics carry timing and counts only — never request content."""
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=30.0)
+    breaker.record_outage()
+
+    metrics = breaker.metrics()
+
+    assert metrics["contains_source_content"] is False
+    assert set(metrics) == {
+        "transport_outages",
+        "transport_outages_recovered",
+        "transport_delayed_retries",
+        "transport_delay_seconds_total",
+        "transport_longest_outage_seconds",
+        "transport_outage_budget_exhausted",
+        "contains_source_content",
+    }
+    assert all(
+        isinstance(value, (int, float, bool)) for value in metrics.values()
+    )
+
+
+def test_outage_budget_override_rejects_invalid_values(monkeypatch) -> None:
+    """A malformed budget override is a configuration error, not a default."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    monkeypatch.setenv(module._TRANSPORT_OUTAGE_BUDGET_ENV, "not-a-number")
+    with pytest.raises(ValueError, match="must be a number"):
+        module._configured_outage_budget_seconds()
+
+    monkeypatch.setenv(module._TRANSPORT_OUTAGE_BUDGET_ENV, "-1")
+    with pytest.raises(ValueError, match="must not be negative"):
+        module._configured_outage_budget_seconds()
+
+    monkeypatch.setenv(module._TRANSPORT_OUTAGE_BUDGET_ENV, " 45 ")
+    assert module._configured_outage_budget_seconds() == 45.0
+
+    monkeypatch.delenv(module._TRANSPORT_OUTAGE_BUDGET_ENV)
+    assert (
+        module._configured_outage_budget_seconds()
+        == module._TRANSPORT_OUTAGE_BUDGET_SECONDS
+    )

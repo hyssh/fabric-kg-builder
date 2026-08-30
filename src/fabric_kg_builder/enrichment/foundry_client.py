@@ -37,12 +37,16 @@ This matches the ``make_foundry_client`` factory in tests/conftest.py.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import time
 from typing import Any, Callable
 
 from pydantic import ValidationError
 from ..config.schema import FoundryConfig
+
+_LOGGER = logging.getLogger(__name__)
 
 # Transport failures that are safe to retry with an identical deterministic
 # request.  Configuration, authority, and schema errors are never retried.
@@ -60,6 +64,38 @@ _NON_RETRYABLE_STATUS_CODES = frozenset({400, 401, 403, 404, 409, 413, 422})
 _TRANSPORT_RETRY_MAX_ATTEMPTS = 6
 _TRANSPORT_RETRY_BASE_SECONDS = 1.0
 _TRANSPORT_RETRY_MAX_SECONDS = 30.0
+
+# A long checkpoint-resumable stage must survive a provider outage that
+# outlives the request-local retry budget.  The shared breaker below holds a
+# single wall-clock budget for the whole run so concurrent workers escalate
+# together instead of each burning an independent budget.
+_TRANSPORT_OUTAGE_BUDGET_SECONDS = 900.0
+_TRANSPORT_OUTAGE_MAX_SECONDS = 60.0
+_TRANSPORT_OUTAGE_BUDGET_ENV = "FABRIC_KG_FOUNDRY_OUTAGE_BUDGET_SECONDS"
+
+
+def _configured_outage_budget_seconds() -> float:
+    """Return the outage budget, honouring an explicit environment override.
+
+    An unparseable or negative override is a configuration error and must not
+    be silently coerced into the default.
+    """
+    raw = os.environ.get(_TRANSPORT_OUTAGE_BUDGET_ENV)
+    if raw is None or not raw.strip():
+        return _TRANSPORT_OUTAGE_BUDGET_SECONDS
+    try:
+        budget = float(raw.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"{_TRANSPORT_OUTAGE_BUDGET_ENV} must be a number of seconds; "
+            f"got {raw.strip()!r}"
+        ) from exc
+    if budget < 0.0:
+        raise ValueError(
+            f"{_TRANSPORT_OUTAGE_BUDGET_ENV} must not be negative; "
+            f"got {budget}"
+        )
+    return budget
 
 
 def _transport_error_is_retryable(exc: BaseException) -> bool:
@@ -90,28 +126,250 @@ def _transport_retry_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+class TransportOutageError(RuntimeError):
+    """Raised when a provider outage outlives the shared outage budget."""
+
+    def __init__(self, elapsed_seconds: float, budget_seconds: float) -> None:
+        super().__init__(
+            "Foundry transport unavailable for "
+            f"{elapsed_seconds:.1f}s, exceeding the {budget_seconds:.1f}s "
+            f"outage budget (raise {_TRANSPORT_OUTAGE_BUDGET_ENV} to wait "
+            "longer); completed work remains checkpointed and resumable"
+        )
+        self.elapsed_seconds = elapsed_seconds
+        self.budget_seconds = budget_seconds
+
+
+class _TransportOutageBreaker:
+    """Shared, bounded delayed-retry policy for provider outages.
+
+    Every worker that exhausts its request-local retry budget reports here.
+    The first report opens an outage window; concurrent workers then share
+    that window's wall-clock budget and its escalating backoff rather than
+    each retrying independently.  A single success closes the window for
+    everyone.  When the budget is spent the breaker latches open so queued
+    work fails fast instead of prolonging a dead run.
+
+    ``monotonic`` and ``sleep`` are injected so tests can drive the policy
+    with a fake clock instead of real time.
+    """
+
+    def __init__(
+        self,
+        *,
+        budget_seconds: float | None = None,
+        base_seconds: float = _TRANSPORT_RETRY_BASE_SECONDS,
+        max_seconds: float = _TRANSPORT_OUTAGE_MAX_SECONDS,
+        monotonic: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
+        self._budget_override = budget_seconds
+        self._base_seconds = base_seconds
+        self._max_seconds = max_seconds
+        self._monotonic = monotonic or time.monotonic
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._opened_at: float | None = None
+        self._resume_at = 0.0
+        self._delay = base_seconds
+        self._exhausted = False
+        self._outages = 0
+        self._delayed_retries = 0
+        self._delay_seconds_total = 0.0
+        self._longest_outage_seconds = 0.0
+        self._recovered_outages = 0
+
+    def _budget(self) -> float:
+        if self._budget_override is not None:
+            return self._budget_override
+        return _configured_outage_budget_seconds()
+
+    def await_recovery(self) -> None:
+        """Hold a worker back while an outage window is already open.
+
+        This is what keeps eight concurrent workers from hammering a provider
+        that one of them has already found to be down.
+        """
+        while True:
+            with self._lock:
+                if self._exhausted:
+                    raise TransportOutageError(
+                        self._elapsed_locked(), self._budget()
+                    )
+                if self._opened_at is None:
+                    return
+                remaining = self._resume_at - self._monotonic()
+                if remaining <= 0.0:
+                    return
+            self.sleep(min(remaining, self._max_seconds))
+
+    def _elapsed_locked(self) -> float:
+        if self._opened_at is None:
+            return 0.0
+        return max(0.0, self._monotonic() - self._opened_at)
+
+    def record_outage(self) -> float:
+        """Register an exhausted request-local budget and return the wait.
+
+        Raises :class:`TransportOutageError` once the shared budget is spent.
+        """
+        budget = self._budget()
+        with self._lock:
+            if self._exhausted:
+                raise TransportOutageError(self._elapsed_locked(), budget)
+            now = self._monotonic()
+            if self._opened_at is None:
+                self._opened_at = now
+                self._delay = self._base_seconds
+                self._outages += 1
+                _LOGGER.warning(
+                    "foundry transport outage opened; "
+                    "budget_seconds=%.1f",
+                    budget,
+                )
+            elapsed = max(0.0, now - self._opened_at)
+            remaining = budget - elapsed
+            if remaining <= 0.0:
+                self._exhausted = True
+                self._longest_outage_seconds = max(
+                    self._longest_outage_seconds, elapsed
+                )
+                _LOGGER.error(
+                    "foundry transport outage budget exhausted; "
+                    "elapsed_seconds=%.1f; budget_seconds=%.1f",
+                    elapsed,
+                    budget,
+                )
+                raise TransportOutageError(elapsed, budget)
+            delay = min(self._delay, self._max_seconds, remaining)
+            self._delay = min(self._delay * 2.0, self._max_seconds)
+            self._resume_at = now + delay
+            self._delayed_retries += 1
+            self._delay_seconds_total += delay
+            self._longest_outage_seconds = max(
+                self._longest_outage_seconds, elapsed
+            )
+        return delay
+
+    def record_success(self) -> None:
+        """Close any open outage window."""
+        with self._lock:
+            if self._opened_at is None:
+                return
+            elapsed = max(0.0, self._monotonic() - self._opened_at)
+            self._longest_outage_seconds = max(
+                self._longest_outage_seconds, elapsed
+            )
+            self._recovered_outages += 1
+            self._opened_at = None
+            self._resume_at = 0.0
+            self._delay = self._base_seconds
+        _LOGGER.warning(
+            "foundry transport outage recovered; elapsed_seconds=%.1f",
+            elapsed,
+        )
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep via the injected clock, or the late-bound module default."""
+        if self._sleep is None:
+            _transport_retry_sleep(seconds)
+        else:
+            self._sleep(seconds)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._opened_at = None
+            self._resume_at = 0.0
+            self._delay = self._base_seconds
+            self._exhausted = False
+            self._outages = 0
+            self._delayed_retries = 0
+            self._delay_seconds_total = 0.0
+            self._longest_outage_seconds = 0.0
+            self._recovered_outages = 0
+
+    def metrics(self) -> dict[str, object]:
+        """Return sanitized counters.
+
+        These describe timing and counts only — never request content,
+        prompts, tokens, credentials, or endpoints.
+        """
+        with self._lock:
+            return {
+                "transport_outages": self._outages,
+                "transport_outages_recovered": self._recovered_outages,
+                "transport_delayed_retries": self._delayed_retries,
+                "transport_delay_seconds_total": round(
+                    self._delay_seconds_total, 6
+                ),
+                "transport_longest_outage_seconds": round(
+                    self._longest_outage_seconds, 6
+                ),
+                "transport_outage_budget_exhausted": self._exhausted,
+                "contains_source_content": False,
+            }
+
+
+_TRANSPORT_OUTAGE_BREAKER = _TransportOutageBreaker()
+
+
+def transport_retry_metrics() -> dict[str, object]:
+    """Sanitized transport retry counters for the current process."""
+    return _TRANSPORT_OUTAGE_BREAKER.metrics()
+
+
+def reset_transport_retry_state() -> None:
+    """Clear shared outage state (used by tests and per-run setup)."""
+    _TRANSPORT_OUTAGE_BREAKER.reset()
+
+
 def _call_with_transport_retry(
     operation: Callable[[], Any],
     *,
     max_attempts: int = _TRANSPORT_RETRY_MAX_ATTEMPTS,
     sleep: Callable[[float], None] | None = None,
+    breaker: _TransportOutageBreaker | None = None,
 ) -> Any:
-    """Invoke *operation*, retrying only transient transport failures."""
+    """Invoke *operation*, retrying only transient transport failures.
+
+    Two bounded tiers protect an identical, deterministic request:
+
+    * a fast request-local tier of ``max_attempts`` attempts with exponential
+      backoff, which absorbs ordinary blips; and
+    * a shared outage tier that applies delayed backoff across all workers so
+      a multi-minute provider outage does not terminate a resumable stage.
+
+    Both tiers are bounded.  Deterministic request, authentication,
+    authorization, validation, and schema failures are never retried.
+    """
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1.")
-    delay = _TRANSPORT_RETRY_BASE_SECONDS
-    for attempt in range(1, max_attempts + 1):
+    if breaker is None:
+        breaker = _TRANSPORT_OUTAGE_BREAKER
+    backoff = sleep if sleep is not None else breaker.sleep
+    while True:
+        breaker.await_recovery()
+        delay = _TRANSPORT_RETRY_BASE_SECONDS
+        last_exc: BaseException | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = operation()
+            except Exception as exc:
+                if not _transport_error_is_retryable(exc):
+                    raise
+                last_exc = exc
+                if attempt >= max_attempts:
+                    break
+                backoff(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
+                delay *= 2
+            else:
+                breaker.record_success()
+                return result
         try:
-            return operation()
-        except Exception as exc:
-            if attempt >= max_attempts or not _transport_error_is_retryable(
-                exc
-            ):
-                raise
-            backoff = sleep if sleep is not None else _transport_retry_sleep
-            backoff(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
-            delay *= 2
-    raise AssertionError("unreachable transport retry state")
+            wait = breaker.record_outage()
+        except TransportOutageError as exhausted:
+            raise exhausted from last_exc
+        backoff(wait)
 
 
 class FoundryClient:

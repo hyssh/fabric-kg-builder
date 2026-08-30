@@ -431,3 +431,22 @@ class TestEnrichCmdSurfacePdfPattern:
             f"enrich exited {result.exit_code} on Surface PDF pattern.\n"
             f"Output: {result.output}\nException: {result.exception}"
         )
+
+
+def test_enrich_metrics_include_sanitized_transport_counters() -> None:
+    """Operators need outage counters in the run metrics artifact."""
+    from fabric_kg_builder.cli.enrich_cmd import _GloballyBoundedFoundryClient
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    class _Client:
+        def complete_json(self, *args, **kwargs):
+            return {}
+
+    module.reset_transport_retry_state()
+    metrics = _GloballyBoundedFoundryClient(_Client(), 4).metrics()
+
+    assert metrics["configured_max_concurrent"] == 4
+    assert metrics["transport_outages"] == 0
+    assert metrics["transport_delayed_retries"] == 0
+    assert metrics["transport_outage_budget_exhausted"] is False
+    assert metrics["contains_source_content"] is False
