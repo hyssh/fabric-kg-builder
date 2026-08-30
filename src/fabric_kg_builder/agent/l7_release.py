@@ -1819,8 +1819,18 @@ class AzureL7Backend:
             )
             response = self._request("GET", url, token=search_token)
             if response.status_code not in (200, 404):
+                detail = ""
+                if response.status_code in (401, 403):
+                    detail = (
+                        "; the release identity lacks Azure AI Search data-plane "
+                        "authorization on "
+                        f"{config.search.endpoint} (Search Service Contributor "
+                        "plus Search Index Data Contributor are required, and "
+                        "the service must permit Microsoft Entra authentication)"
+                    )
                 raise L7ReleaseError(
-                    f"Search {kind} readback failed with HTTP {response.status_code}"
+                    f"Search {kind} readback failed with HTTP "
+                    f"{response.status_code}{detail}"
                 )
             resources.append(
                 ResourceReadback(

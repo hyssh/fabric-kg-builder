@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -1735,3 +1736,86 @@ def test_fabric_lro_rejects_external_final_result_location() -> None:
     assert calls == [
         "https://api.fabric.microsoft.com/operations/definition-1"
     ]
+
+
+@pytest.mark.unit
+def test_preflight_failure_event_reports_no_mutation_and_no_phantom_receipt(
+    tmp_path: Path,
+) -> None:
+    """A pre-mutation failure must not imply a rollback or a written receipt."""
+    config_path, observation_path, _ = _inputs(tmp_path)
+    (tmp_path / "docs.json").write_text('{"documents":[{"id":"drift"}]}')
+    events_path = tmp_path / "events.jsonl"
+    receipt_path = tmp_path / "receipt.json"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "app",
+            "deploy-l7",
+            "--config",
+            str(config_path),
+            "--observation",
+            str(observation_path),
+            "--log",
+            str(events_path),
+            "--out",
+            str(receipt_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    failures = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("event") == "failure"
+    ]
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["causal_stage"] == "preflight"
+    assert failure["mutation_possible"] is False
+    assert "receipt_path" not in failure
+    assert "failure_receipt_path" not in failure
+    assert not receipt_path.exists()
+    assert not receipt_path.with_name("receipt.json.failure.json").exists()
+
+
+@pytest.mark.unit
+def test_search_authorization_failure_names_the_required_roles(
+    tmp_path: Path,
+) -> None:
+    """A 403 readback must tell the operator exactly what access is missing."""
+    config_path, _, config = _inputs(tmp_path)
+    backend = AzureL7Backend(config_path.parent)
+
+    class _Denied:
+        status_code = 403
+        headers: dict[str, str] = {}
+        text = ""
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {}
+
+    claims = {"tid": config.tenant_id, "oid": config.expected_principal_id}
+    token = ".".join(
+        [
+            "header",
+            base64.urlsafe_b64encode(
+                json.dumps(claims).encode("utf-8")
+            ).decode("ascii"),
+            "signature",
+        ]
+    )
+    backend._token = lambda scope: token  # type: ignore[method-assign]
+    backend._request = (  # type: ignore[method-assign]
+        lambda method, url, **kwargs: _Denied()
+    )
+
+    with pytest.raises(L7ReleaseError) as excinfo:
+        backend.observe(config)
+
+    message = str(excinfo.value)
+    assert "HTTP 403" in message
+    assert "Search Index Data Contributor" in message
+    assert config.search.endpoint in message

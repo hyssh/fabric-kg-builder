@@ -327,6 +327,7 @@ def deploy_l7_cmd(
                     "sanitized operation log is not durably writable"
                 ) from exc
 
+    entered_execution = False
     try:
         config = load_l7_config(config_path)
         if observation_path is not None and not dry_run:
@@ -413,6 +414,7 @@ def deploy_l7_cmd(
                 ),
             }
         )
+        entered_execution = True
         receipt = L7Executor(planner, backend).execute(
             config=config,
             config_path=config_path,
@@ -438,19 +440,24 @@ def deploy_l7_cmd(
             required=False,
         )
     except L7ReleaseError as exc:
-        emit(
-            {
-                "event": "failure",
-                "error_type": type(exc).__name__,
-                "causal_stage": "preflight-or-execution",
-                "message": str(exc),
-                "receipt_path": str(receipt_path),
-                "failure_receipt_path": str(
-                    receipt_path.with_name(f"{receipt_path.name}.failure.json")
-                ),
-            },
-            required=False,
+        failure_receipt_path = receipt_path.with_name(
+            f"{receipt_path.name}.failure.json"
         )
+        failure_event: dict[str, object] = {
+            "event": "failure",
+            "error_type": type(exc).__name__,
+            "causal_stage": "execution" if entered_execution else "preflight",
+            "mutation_possible": entered_execution,
+            "message": str(exc),
+        }
+        if entered_execution:
+            for key, candidate in (
+                ("receipt_path", receipt_path),
+                ("failure_receipt_path", failure_receipt_path),
+            ):
+                if candidate.exists():
+                    failure_event[key] = str(candidate)
+        emit(failure_event, required=False)
         raise click.ClickException(str(exc)) from exc
 
 
