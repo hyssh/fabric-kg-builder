@@ -223,6 +223,83 @@ def _canonical_json_size(value: Any) -> int:
     return len((canonical_json(value) + "\n").encode("utf-8"))
 
 
+def _abbreviate_check_value(value: Any) -> str:
+    text = str(value)
+    if len(text) > 16 and all(character in "0123456789abcdef" for character in text):
+        return f"{text[:12]}..."
+    return text
+
+
+def _manifest_mismatch_reasons(
+    checks: Mapping[str, tuple[Any, Any]],
+) -> list[str]:
+    """Name each manifest field whose recorded value disagrees with the payload."""
+
+    return [
+        f"{name} (manifest={_abbreviate_check_value(expected)} "
+        f"payload={_abbreviate_check_value(actual)})"
+        for name, (expected, actual) in checks.items()
+        if expected != actual
+    ]
+
+
+def _manifest_shape_drift_note(
+    checks: Mapping[str, tuple[Any, Any]],
+    *,
+    producing_stage: str,
+) -> str | None:
+    """Explain a content mismatch that looks like a stale persisted artifact.
+
+    A field added to a contract model after an artifact was written is filled with
+    its default on load, so the round-tripped payload serializes differently from
+    the bytes on disk. The tell is that every identity check still agrees - same
+    declared schema, same row count, same canonical id set - and only the content
+    hash and byte count move. That is a stale-artifact condition rather than
+    corruption, and the remedy is to re-run the stage that produced it.
+    """
+
+    def agrees(name: str) -> bool:
+        pair = checks.get(name)
+        return pair is None or pair[0] == pair[1]
+
+    def differs(name: str) -> bool:
+        pair = checks.get(name)
+        return pair is not None and pair[0] != pair[1]
+
+    identity_checks = (
+        "contract_kind",
+        "contract_version",
+        "schema_hash",
+        "row_count",
+        "canonical_id_set_hash",
+    )
+    if not all(agrees(name) for name in identity_checks):
+        return None
+    if not (differs("content_hash") or differs("byte_count")):
+        return None
+    return (
+        "the declared schema, row count and canonical id set all still agree, so "
+        "the stored bytes were most likely written by an earlier contract model; "
+        f"re-run {producing_stage} to regenerate this artifact"
+    )
+
+
+def _manifest_invalid_error(
+    subject: str,
+    checks: Mapping[str, tuple[Any, Any]],
+    *,
+    producing_stage: str,
+) -> L4ProjectionError:
+    reasons = _manifest_mismatch_reasons(checks)
+    message = f"{subject} differs from its manifest entry"
+    if reasons:
+        message = f"{message}: {', '.join(reasons)}"
+    drift = _manifest_shape_drift_note(checks, producing_stage=producing_stage)
+    if drift is not None:
+        message = f"{message}; {drift}"
+    return L4ProjectionError("L4_INPUT_MANIFEST_INVALID", message)
+
+
 def _l3_current_state_index(source: L3StageResult) -> dict[str, Any]:
     by_state: defaultdict[str, set[str]] = defaultdict(set)
     for leaf in source.leaves:
@@ -467,25 +544,42 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
         recomputed_candidate_id_set_hash = canonical_sha256(
             sorted(candidate.candidate_id for candidate in batch.candidates)
         )
-        if (
-            batch_entry.contract_kind != "c0.extraction_candidate_batch"
-            or batch_entry.contract_version != "1.0.0"
-            or batch_entry.schema_hash
-            != canonical_sha256(type(batch).model_json_schema())
-            or batch.batch_hash != recomputed_batch_hash
-            or batch_entry.content_hash != recomputed_batch_hash
-            or batch_entry.byte_count != _canonical_json_size(batch)
-            or batch.candidate_id_set_hash != recomputed_candidate_id_set_hash
-            or batch_entry.canonical_id_set_hash
-            != recomputed_candidate_id_set_hash
-            or batch_entry.row_count != len(batch.candidates)
-            or batch.retained_candidate_count != len(batch.candidates)
-            or batch.input_candidate_count
-            != len(batch.candidate_dispositions)
-        ):
-            raise L4ProjectionError(
-                "L4_INPUT_MANIFEST_INVALID",
-                f"L2 candidate batch {batch_id} differs from its manifest entry",
+        batch_checks: dict[str, tuple[Any, Any]] = {
+            "contract_kind": (
+                batch_entry.contract_kind,
+                "c0.extraction_candidate_batch",
+            ),
+            "contract_version": (batch_entry.contract_version, "1.0.0"),
+            "schema_hash": (
+                batch_entry.schema_hash,
+                canonical_sha256(type(batch).model_json_schema()),
+            ),
+            "batch_hash": (batch.batch_hash, recomputed_batch_hash),
+            "content_hash": (batch_entry.content_hash, recomputed_batch_hash),
+            "byte_count": (batch_entry.byte_count, _canonical_json_size(batch)),
+            "candidate_id_set_hash": (
+                batch.candidate_id_set_hash,
+                recomputed_candidate_id_set_hash,
+            ),
+            "canonical_id_set_hash": (
+                batch_entry.canonical_id_set_hash,
+                recomputed_candidate_id_set_hash,
+            ),
+            "row_count": (batch_entry.row_count, len(batch.candidates)),
+            "retained_candidate_count": (
+                batch.retained_candidate_count,
+                len(batch.candidates),
+            ),
+            "input_candidate_count": (
+                batch.input_candidate_count,
+                len(batch.candidate_dispositions),
+            ),
+        }
+        if any(expected != actual for expected, actual in batch_checks.values()):
+            raise _manifest_invalid_error(
+                f"L2 candidate batch {batch_id}",
+                batch_checks,
+                producing_stage="L2 enrichment",
             )
         proposals = source.inputs.proposed_partitions[batch_id]
         proposal_entry = _artifact_by_id(
@@ -496,21 +590,34 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
         proposal_payload = [
             proposal.model_dump(mode="json") for proposal in proposals
         ]
-        if (
-            proposal_entry.contract_kind != "l2.proposed_candidate_partition"
-            or proposal_entry.contract_version != "1.0.0"
-            or proposal_entry.schema_hash != L2_RESPONSE_SCHEMA_HASH
-            or proposal_entry.content_hash != canonical_sha256(proposal_payload)
-            or proposal_entry.byte_count != _canonical_json_size(proposal_payload)
-            or proposal_entry.row_count != len(proposals)
-            or proposal_entry.canonical_id_set_hash
-            != canonical_sha256(
-                sorted(proposal.candidate_id for proposal in proposals)
-            )
-        ):
-            raise L4ProjectionError(
-                "L4_INPUT_MANIFEST_INVALID",
-                f"L2 proposal partition {batch_id} differs from its manifest entry",
+        proposal_checks: dict[str, tuple[Any, Any]] = {
+            "contract_kind": (
+                proposal_entry.contract_kind,
+                "l2.proposed_candidate_partition",
+            ),
+            "contract_version": (proposal_entry.contract_version, "1.0.0"),
+            "schema_hash": (proposal_entry.schema_hash, L2_RESPONSE_SCHEMA_HASH),
+            "content_hash": (
+                proposal_entry.content_hash,
+                canonical_sha256(proposal_payload),
+            ),
+            "byte_count": (
+                proposal_entry.byte_count,
+                _canonical_json_size(proposal_payload),
+            ),
+            "row_count": (proposal_entry.row_count, len(proposals)),
+            "canonical_id_set_hash": (
+                proposal_entry.canonical_id_set_hash,
+                canonical_sha256(
+                    sorted(proposal.candidate_id for proposal in proposals)
+                ),
+            ),
+        }
+        if any(expected != actual for expected, actual in proposal_checks.values()):
+            raise _manifest_invalid_error(
+                f"L2 proposal partition {batch_id}",
+                proposal_checks,
+                producing_stage="L2 enrichment",
             )
         proposal_by_candidate = {
             proposal.candidate_id: proposal for proposal in proposals

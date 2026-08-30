@@ -2537,3 +2537,91 @@ def test_required_member_projection_preserves_empty_manifest_authority(
     assert manifest_rows[0]["member_count"] == 0
     assert member_rows == ()
     validate_required_member_projection((manifest,), manifest_rows, member_rows)
+
+
+def test_manifest_invalid_error_names_each_mismatching_field() -> None:
+    """An opaque "differs from its manifest entry" hides what actually differs."""
+
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    error = _manifest_invalid_error(
+        "L2 proposal partition batch-1",
+        {
+            "contract_kind": ("a", "a"),
+            "row_count": (3, 4),
+            "byte_count": (1071, 1102),
+        },
+        producing_stage="L2 enrichment",
+    )
+    message = str(error)
+    assert error.code == "L4_INPUT_MANIFEST_INVALID"
+    assert "row_count (manifest=3 payload=4)" in message
+    assert "byte_count (manifest=1071 payload=1102)" in message
+    assert "contract_kind" not in message
+
+
+def test_manifest_invalid_error_abbreviates_long_hashes() -> None:
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    stored = "06ca950020c9150bd48883240d6e986cc008c9febe3eb796c2ca23ebd95d4e09"
+    message = str(
+        _manifest_invalid_error(
+            "L2 proposal partition batch-1",
+            {"content_hash": (stored, "6edee460abca" + "0" * 52)},
+            producing_stage="L2 enrichment",
+        )
+    )
+    assert "06ca950020c9..." in message
+    assert stored not in message
+
+
+def test_manifest_invalid_error_reports_stale_artifact_remedy() -> None:
+    """Same schema, rows and id set but different bytes means a stale artifact."""
+
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    message = str(
+        _manifest_invalid_error(
+            "L2 proposal partition batch-1",
+            {
+                "contract_kind": ("a", "a"),
+                "contract_version": ("1.0.0", "1.0.0"),
+                "schema_hash": ("s", "s"),
+                "row_count": (1, 1),
+                "canonical_id_set_hash": ("i", "i"),
+                "content_hash": ("x", "y"),
+                "byte_count": (1071, 1102),
+            },
+            producing_stage="L2 enrichment",
+        )
+    )
+    assert "re-run L2 enrichment to regenerate this artifact" in message
+
+
+def test_manifest_invalid_error_omits_remedy_when_identity_also_differs() -> None:
+    """A genuine id-set divergence is not a stale-artifact condition."""
+
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    message = str(
+        _manifest_invalid_error(
+            "L2 proposal partition batch-1",
+            {
+                "schema_hash": ("s", "s"),
+                "row_count": (1, 1),
+                "canonical_id_set_hash": ("i", "different"),
+                "content_hash": ("x", "y"),
+            },
+            producing_stage="L2 enrichment",
+        )
+    )
+    assert "re-run" not in message
+    assert "canonical_id_set_hash" in message
