@@ -16,6 +16,15 @@
   A single empty or unparseable model completion is likewise retried and, if
   it persists, reported as an exact empty-completion failure rather than an
   opaque JSON parse position.
+- Survived sustained provider outages during schema-2 enrichment. Beyond the
+  request-local retry budget, a shared circuit breaker applies bounded delayed
+  backoff across every concurrent worker, so a multi-minute outage no longer
+  terminates a checkpoint-resumable stage and no worker burns an independent
+  budget. The breaker remains bounded — `FABRIC_KG_FOUNDRY_OUTAGE_BUDGET_SECONDS`
+  (default 900) caps the total wait, after which queued work fails fast with
+  the underlying transport error as its cause. Deterministic request, identity,
+  and authority failures still bypass the breaker entirely, and sanitized
+  outage counters are written to `enrichment-metrics.json`.
 - Recorded the real L1 failure cause in the early-failure audit and error, with
   bounded, secret-redacted detail instead of a bare code.
 - Made the L1 state commit crash-safe: a commit journal reconciles an
@@ -32,3 +41,17 @@
   never deletes or relocates a path the journal names.
 - Extended failure-detail redaction to quoted values, storage/service-bus
   connection keys, URL userinfo, and bare JWTs.
+- Allowed `app deploy-l7` to prove the direct Azure AI Search index path when
+  the Search managed identity lacks its Foundry role, via an explicit
+  `search.agentic_components: "deferred"` opt-in. The preview knowledge source
+  and knowledge base are then reported as deferred components and are never
+  created or claimed as successful; the default remains a capability NO-GO, a
+  release-owned name collision is still a NO-GO, and the index itself can never
+  be deferred.
+- Recorded why a live `app deploy-l7` mutation failed: the rollback receipt now
+  carries a bounded `failure_cause` and the raised error names it, instead of
+  reporting only that rollback completed.
+- Compared Azure AI Search readbacks against the shape the release actually
+  declared. The service populates every unset property on create, so requiring
+  a verbatim echo of the submitted index could never succeed; declared values,
+  missing declared keys, and list-length drift are all still rejected.

@@ -67,13 +67,73 @@ through the installed CLI only:
 | --- | --- |
 | L1 domain intake, review, approve | succeeded |
 | L2 schema-constrained extraction | succeeded, 14,947 / 14,947 SourceUnits, receipt `stage-receipt:999b62c887a5dc537d040150ede7e851` |
-| L7 release transaction (`app deploy-l7 --live`) | blocked before any mutation by an environment authorization blocker (below) |
+| L7 release transaction (`app deploy-l7 --live`) | superseded by the run of 2026-08-30 (b), below |
 
 Schema-2 L3 evidence validation, serving projection, and publication remain
 excluded from CLI activation in this release line per SPEC-005, so the
 schema-2 corpus is not yet the input to `deploy-l7`. The live L7 transaction
 was exercised with release-owned Search artifacts derived from the real L2
 SourceUnits.
+
+### Run of 2026-08-30 (b) — live GO
+
+The Search authorization blocker recorded below was cleared by an
+administrator, and the live transaction was then re-run one-shot through the
+installed CLI only.
+
+| Item | Value |
+| --- | --- |
+| Candidate SHA | `9ee0ba7` |
+| Wheel | `fabric_kg_builder-0.2.4-py3-none-any.whl` |
+| External runtime | Python 3.12.13, non-editable install, `PYTHONPATH` unset, run outside the repository |
+| Unit + contract | 4112 passed, 4 deselected |
+| Live plan hash | `4621e880aacabe40f99bc9861169418c4af4d59ec224f8b0c35a31abd9242b3b` |
+| Sanitized receipt hash | `b9ed5c0fb6d291b4cdf7631cdf4ff017f669d9d8c1e9f434a8d4d356c1b33733` |
+| Attempt | `op-bcd610fd61bb208bde9bfe951548b27b7a0f0174ac810447f9fde1853ca80ff9` |
+| Status | `succeeded` |
+
+Command:
+
+```
+fabric-kg app deploy-l7 --config <ignored external config> --live \
+  --plan build/release/l7-0.2.4-plan.json \
+  --out build/release/l7-0.2.4-receipt.json \
+  --log build/release/l7-0.2.4-events.jsonl
+```
+
+Mutated resources, release-owned only:
+
+| Resource | Action | Verification |
+| --- | --- | --- |
+| Azure AI Search index `fabric-kg-024-surface-index` | create | readback verified, 400 of 400 declared documents, declared schema and document hashes match the approved plan |
+
+No other resource was created, updated, or deleted. The pre-existing
+`surface-tech-*` and `ks0001-*` indexes were not touched. The deferred
+components were confirmed absent afterwards (`knowledgesources` and
+`knowledgebases` both return `404`).
+
+Deferred in this transaction, and explicitly not claimed as successful:
+`search-knowledge-source`, `search-knowledge-base`,
+`foundry-search-connection`, `foundry-fabric-connection`,
+`foundry-built-in-agent`.
+
+Two product defects were found and fixed by this run rather than worked
+around. A failed live mutation reported only that rollback had completed,
+discarding the cause; the failure receipt now carries `failure_cause`. And the
+Search readback required the service to echo the submitted index verbatim,
+which can never succeed because Azure AI Search populates every unset property
+on create; the readback is now projected onto the declared shape, so declared
+values still bind exactly while server defaults are ignored.
+
+### Azure AI Search preview agentic capability (still deferred)
+
+The Search service managed identity holds no role on the Foundry account, so
+the preview knowledge source and knowledge base cannot be deployed. Clearing it
+requires an administrator to assign `Cognitive Services User` to the Search
+service managed identity on the Foundry account. Until then the release must be
+run with `search.agentic_components: "deferred"`, which proves the direct index
+path and records both components as deferred. Preview agentic success is not
+claimed.
 
 ## Environment and Administrative Blockers
 
@@ -82,7 +142,7 @@ roles, unsupported Fabric `getDefinition` operations, or unavailable exact
 Foundry rollback. A direct Search fallback does not satisfy preview agentic
 success.
 
-### Azure AI Search authorization (live blocker, 2026-08-30)
+### Azure AI Search authorization (live blocker, 2026-08-30 — since cleared)
 
 `app deploy-l7 --live` failed closed during preflight readback:
 
@@ -101,9 +161,11 @@ authentication on the service.
 
 The transaction performed zero mutations. The emitted failure event reports
 `causal_stage=preflight` and `mutation_possible=false`, and advertises no
-receipt paths because no receipt was reserved. Search publication and the
-preview agentic knowledge base therefore remain unverified live; no direct
-fallback is claimed as preview success.
+receipt paths because no receipt was reserved.
+
+An administrator subsequently assigned Search Service Contributor and Search
+Index Data Contributor to the release identity, after which the live run of
+2026-08-30 (b) above succeeded.
 
 Fabric first-create intent is modeled separately from managed-existing intent,
 but current Fabric create/delete contracts do not document ETag and conditional

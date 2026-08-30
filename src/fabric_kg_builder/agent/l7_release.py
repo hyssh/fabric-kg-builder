@@ -194,6 +194,7 @@ class SearchTarget(_StrictModel):
     knowledge_source_name: str
     knowledge_base_name: str
     api_version: str = "2025-11-01-preview"
+    agentic_components: Literal["required", "deferred"] = "required"
     foundry_role_assignment_id: str = ""
     search_managed_identity_principal_id: str = ""
     foundry_role_definition_id: str = ""
@@ -425,6 +426,7 @@ class L7DeploymentReceipt(_StrictModel):
     completed_at: datetime
     journal: tuple[JournalEntry, ...]
     deferred_components: tuple[str, ...]
+    failure_cause: str = ""
     receipt_hash: str = ""
 
     @model_validator(mode="after")
@@ -443,6 +445,50 @@ class L7DeploymentReceipt(_StrictModel):
             provisional.model_dump(mode="json", exclude={"receipt_hash"})
         )
         return cls.model_validate(values)
+
+
+_MAX_FAILURE_CAUSE_CHARS = 400
+
+
+def _failure_cause(exc: BaseException) -> str:
+    """Name why a live mutation failed so the receipt is actionable.
+
+    Backend errors already carry only status codes and the operator's own
+    configured endpoints, never credentials, so the rendering is safe to
+    persist alongside the rollback journal.
+    """
+    rendered = " ".join(f"{type(exc).__name__}: {exc}".split())
+    if len(rendered) > _MAX_FAILURE_CAUSE_CHARS:
+        rendered = rendered[:_MAX_FAILURE_CAUSE_CHARS] + "…"
+    return rendered
+
+
+def _declared_projection(declared: Any, observed: Any) -> Any:
+    """Project *observed* onto the shape the release actually declared.
+
+    Azure AI Search populates every unset property on create (field-level
+    ``retrievable``/``analyzer``/``synonymMaps``, service-level ``similarity``,
+    ``tokenizers``, semantic ranking defaults, and more), so requiring the
+    service to echo the submitted document verbatim can never succeed. The
+    projection keeps the comparison exact for everything the release declared
+    while ignoring server-populated defaults it never asked for. A declared key
+    that is missing from the readback is omitted here, so the comparison still
+    fails.
+    """
+    if isinstance(declared, dict) and isinstance(observed, dict):
+        return {
+            key: _declared_projection(value, observed[key])
+            for key, value in declared.items()
+            if key in observed
+        }
+    if isinstance(declared, list) and isinstance(observed, list):
+        if len(declared) != len(observed):
+            return observed
+        return [
+            _declared_projection(item, other)
+            for item, other in zip(declared, observed)
+        ]
+    return observed
 
 
 class L7Backend(Protocol):
@@ -1286,9 +1332,25 @@ class L7Planner:
         )
         for component, resource_id, name, desired_hash, capability in search_resources:
             observed = reads.get(resource_id.casefold())
+            agentic = capability != "search.index"
             if not observation.capabilities.get(capability, False):
-                action = "no-go"
-                reason = "required Search capability or managed-identity role unavailable"
+                if agentic and config.search.agentic_components == "deferred":
+                    # The preview agentic components need the Search service
+                    # managed identity to hold Cognitive Services User on the
+                    # Foundry account. Explicitly deferring them proves the
+                    # direct index path without ever reporting preview success.
+                    action = "deferred"
+                    reason = (
+                        "explicitly deferred; the Search managed identity lacks "
+                        "the required Foundry role, so the preview agentic "
+                        "capability is not deployed or claimed"
+                    )
+                else:
+                    action = "no-go"
+                    reason = (
+                        "required Search capability or managed-identity role "
+                        "unavailable"
+                    )
             elif observed is not None and observed.exists:
                 action = "no-go"
                 reason = "release-owned Search name collision; adoption is forbidden"
@@ -2200,7 +2262,7 @@ class AzureL7Backend:
         if str(body.get("name") or "") != action.name:
             raise L7ReleaseError(f"{action.component} exact-name readback mismatch")
         if action.component == "search-index":
-            observed_schema = body
+            observed_schema = _declared_projection(schema, body)
             if observed_schema != schema:
                 raise L7ReleaseError("Search index schema readback mismatch")
             search_url = self._search_url(
@@ -2285,7 +2347,7 @@ class AzureL7Backend:
                 or parameters.get("searchIndexName") != config.search.index_name
             ):
                 raise L7ReleaseError("Search knowledge source readback mismatch")
-            observed_body = body
+            observed_body = _declared_projection(expected_body, body)
             if observed_body != expected_body:
                 raise L7ReleaseError(
                     "Search knowledge source exact readback mismatch"
@@ -2298,7 +2360,7 @@ class AzureL7Backend:
                 if isinstance(item, dict)
             ] != [config.search.knowledge_source_name]:
                 raise L7ReleaseError("Search knowledge base readback mismatch")
-            observed_body = body
+            observed_body = _declared_projection(expected_body, body)
             if observed_body != expected_body:
                 raise L7ReleaseError(
                     "Search knowledge base exact readback mismatch"
@@ -3167,6 +3229,7 @@ class L7Executor:
                             "rollback-finalizer:"
                             f"{type(rollback_exc).__name__}"
                         )
+            cause = _failure_cause(exc)
             receipt = L7DeploymentReceipt.seal(
                 attempt_id=reservation.attempt_id,
                 plan_hash=plan.plan_hash,
@@ -3176,6 +3239,7 @@ class L7Executor:
                 deferred_components=tuple(
                     item.component for item in plan.actions if item.action == "deferred"
                 ),
+                failure_cause=cause,
             )
             try:
                 reservation.commit_failure(receipt)
@@ -3189,5 +3253,6 @@ class L7Executor:
                 else ""
             )
             raise L7ReleaseError(
-                f"live deployment failed and rollback completed{detail}"
+                f"live deployment failed and rollback completed{detail}; "
+                f"cause: {cause}"
             ) from exc
