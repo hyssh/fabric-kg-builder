@@ -463,6 +463,34 @@ def _failure_cause(exc: BaseException) -> str:
     return rendered
 
 
+def _declared_projection(declared: Any, observed: Any) -> Any:
+    """Project *observed* onto the shape the release actually declared.
+
+    Azure AI Search populates every unset property on create (field-level
+    ``retrievable``/``analyzer``/``synonymMaps``, service-level ``similarity``,
+    ``tokenizers``, semantic ranking defaults, and more), so requiring the
+    service to echo the submitted document verbatim can never succeed. The
+    projection keeps the comparison exact for everything the release declared
+    while ignoring server-populated defaults it never asked for. A declared key
+    that is missing from the readback is omitted here, so the comparison still
+    fails.
+    """
+    if isinstance(declared, dict) and isinstance(observed, dict):
+        return {
+            key: _declared_projection(value, observed[key])
+            for key, value in declared.items()
+            if key in observed
+        }
+    if isinstance(declared, list) and isinstance(observed, list):
+        if len(declared) != len(observed):
+            return observed
+        return [
+            _declared_projection(item, other)
+            for item, other in zip(declared, observed)
+        ]
+    return observed
+
+
 class L7Backend(Protocol):
     def observe(self, config: L7ReleaseConfig) -> L7Observation: ...
 
@@ -2234,7 +2262,7 @@ class AzureL7Backend:
         if str(body.get("name") or "") != action.name:
             raise L7ReleaseError(f"{action.component} exact-name readback mismatch")
         if action.component == "search-index":
-            observed_schema = body
+            observed_schema = _declared_projection(schema, body)
             if observed_schema != schema:
                 raise L7ReleaseError("Search index schema readback mismatch")
             search_url = self._search_url(
@@ -2319,7 +2347,7 @@ class AzureL7Backend:
                 or parameters.get("searchIndexName") != config.search.index_name
             ):
                 raise L7ReleaseError("Search knowledge source readback mismatch")
-            observed_body = body
+            observed_body = _declared_projection(expected_body, body)
             if observed_body != expected_body:
                 raise L7ReleaseError(
                     "Search knowledge source exact readback mismatch"
@@ -2332,7 +2360,7 @@ class AzureL7Backend:
                 if isinstance(item, dict)
             ] != [config.search.knowledge_source_name]:
                 raise L7ReleaseError("Search knowledge base readback mismatch")
-            observed_body = body
+            observed_body = _declared_projection(expected_body, body)
             if observed_body != expected_body:
                 raise L7ReleaseError(
                     "Search knowledge base exact readback mismatch"

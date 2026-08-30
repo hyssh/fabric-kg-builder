@@ -1936,3 +1936,56 @@ def test_search_index_is_never_deferrable(tmp_path: Path) -> None:
     plan = _plan_for(config_path, observation_path, tmp_path / "plan.json")
     by_component = {item.component: item for item in plan.actions}
     assert by_component["search-index"].action == "no-go"
+
+
+@pytest.mark.unit
+def test_readback_ignores_service_defaults_but_not_declared_drift() -> None:
+    """Azure AI Search fills every unset property; declared values still bind."""
+    from fabric_kg_builder.agent.l7_release import _declared_projection
+
+    declared = {
+        "name": "fabric-kg-024-index",
+        "fields": [
+            {"name": "id", "type": "Edm.String", "key": True},
+            {"name": "content", "type": "Edm.String", "searchable": True},
+        ],
+    }
+    observed = {
+        "@odata.etag": '"tag"',
+        "name": "fabric-kg-024-index",
+        "similarity": {"@odata.type": "#BM25Similarity"},
+        "suggesters": [],
+        "fields": [
+            {
+                "name": "id",
+                "type": "Edm.String",
+                "key": True,
+                "retrievable": True,
+                "analyzer": None,
+                "synonymMaps": [],
+            },
+            {
+                "name": "content",
+                "type": "Edm.String",
+                "searchable": True,
+                "retrievable": True,
+                "synonymMaps": [],
+            },
+        ],
+    }
+    assert _declared_projection(declared, observed) == declared
+
+    # A declared value the service changed is still caught.
+    drifted = json.loads(json.dumps(observed))
+    drifted["fields"][1]["searchable"] = False
+    assert _declared_projection(declared, drifted) != declared
+
+    # A declared key the service dropped is still caught.
+    missing = json.loads(json.dumps(observed))
+    del missing["fields"][0]["key"]
+    assert _declared_projection(declared, missing) != declared
+
+    # An extra declared field the service never returned is still caught.
+    truncated = json.loads(json.dumps(observed))
+    truncated["fields"] = truncated["fields"][:1]
+    assert _declared_projection(declared, truncated) != declared

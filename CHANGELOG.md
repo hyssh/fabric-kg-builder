@@ -42,3 +42,7 @@
 - Recorded why a live `app deploy-l7` mutation failed: the rollback receipt now
   carries a bounded `failure_cause` and the raised error names it, instead of
   reporting only that rollback completed.
+- Compared Azure AI Search readbacks against the shape the release actually
+  declared. The service populates every unset property on create, so requiring
+  a verbatim echo of the submitted index could never succeed; declared values,
+  missing declared keys, and list-length drift are all still rejected.
