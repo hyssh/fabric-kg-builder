@@ -426,6 +426,7 @@ class L7DeploymentReceipt(_StrictModel):
     completed_at: datetime
     journal: tuple[JournalEntry, ...]
     deferred_components: tuple[str, ...]
+    failure_cause: str = ""
     receipt_hash: str = ""
 
     @model_validator(mode="after")
@@ -444,6 +445,22 @@ class L7DeploymentReceipt(_StrictModel):
             provisional.model_dump(mode="json", exclude={"receipt_hash"})
         )
         return cls.model_validate(values)
+
+
+_MAX_FAILURE_CAUSE_CHARS = 400
+
+
+def _failure_cause(exc: BaseException) -> str:
+    """Name why a live mutation failed so the receipt is actionable.
+
+    Backend errors already carry only status codes and the operator's own
+    configured endpoints, never credentials, so the rendering is safe to
+    persist alongside the rollback journal.
+    """
+    rendered = " ".join(f"{type(exc).__name__}: {exc}".split())
+    if len(rendered) > _MAX_FAILURE_CAUSE_CHARS:
+        rendered = rendered[:_MAX_FAILURE_CAUSE_CHARS] + "…"
+    return rendered
 
 
 class L7Backend(Protocol):
@@ -3184,6 +3201,7 @@ class L7Executor:
                             "rollback-finalizer:"
                             f"{type(rollback_exc).__name__}"
                         )
+            cause = _failure_cause(exc)
             receipt = L7DeploymentReceipt.seal(
                 attempt_id=reservation.attempt_id,
                 plan_hash=plan.plan_hash,
@@ -3193,6 +3211,7 @@ class L7Executor:
                 deferred_components=tuple(
                     item.component for item in plan.actions if item.action == "deferred"
                 ),
+                failure_cause=cause,
             )
             try:
                 reservation.commit_failure(receipt)
@@ -3206,5 +3225,6 @@ class L7Executor:
                 else ""
             )
             raise L7ReleaseError(
-                f"live deployment failed and rollback completed{detail}"
+                f"live deployment failed and rollback completed{detail}; "
+                f"cause: {cause}"
             ) from exc

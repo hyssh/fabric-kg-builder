@@ -39,3 +39,6 @@
   created or claimed as successful; the default remains a capability NO-GO, a
   release-owned name collision is still a NO-GO, and the index itself can never
   be deferred.
+- Recorded why a live `app deploy-l7` mutation failed: the rollback receipt now
+  carries a bounded `failure_cause` and the raised error names it, instead of
+  reporting only that rollback completed.

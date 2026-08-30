@@ -468,6 +468,11 @@ def test_failure_after_mutation_persists_sanitized_rollback_receipt(
         "receipt.json.failure.json"
     ).read_text(encoding="utf-8")
     assert "Authorization" not in receipt_text
+    # The rollback journal alone cannot explain why the mutation failed.
+    assert (
+        json.loads(receipt_text)["failure_cause"]
+        == "RuntimeError: expected mutation failure"
+    )
     assert "rollback-after" in receipt_text
 
 
