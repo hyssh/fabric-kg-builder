@@ -30,7 +30,13 @@ def test_generic_structured_completeness_is_sealed_from_candidate_input(
             "candidate_id": "candidate:completeness",
             "proposed_requirement": {
                 "requirement_id": "completeness-requirement:collections.members",
-                "competency_question_ids": ["cq:q1"],
+                "competency_question_ids": [
+                    "cq:q1",
+                    "cq:q2",
+                    "cq:q3",
+                    "cq:q4",
+                    "cq:q5",
+                ],
                 "requirement_kind": "structured_fact_set",
                 "scope_type_id": record_type,
                 "scoped_subtype_id": None,

@@ -12,7 +12,7 @@
     },
     "l1.domain_design_context": {
       "schema": "l1-domain-design-context-1.0.0.schema.json",
-      "schema_hash": "6acc5cd073b65b3a73c4608305b36966f360057fbf1f06c4ca2b3902bd3e6743",
+      "schema_hash": "9120f4fd1f36bef165a497d582062f5c16f4101e7962f1ab094c57eeed3299b2",
       "version": "1.0.0"
     },
     "l1.domain_intake": {

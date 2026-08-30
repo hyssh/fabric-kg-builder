@@ -121,6 +121,20 @@ RawCandidate = Annotated[
 _RAW_CANDIDATES = TypeAdapter(list[RawCandidate])
 
 
+class RawCandidateResponse(_StrictProposal):
+    candidates: tuple[RawCandidate, ...]
+
+    @field_validator("candidates", mode="before")
+    @classmethod
+    def _json_candidates(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
+def raw_candidate_response_schema() -> dict[str, Any]:
+    """Return the exact L2 Foundry response envelope schema."""
+    return RawCandidateResponse.model_json_schema()
+
+
 @dataclass(frozen=True)
 class ClosedVocabulary:
     contract_hash: str
@@ -224,7 +238,11 @@ def extraction_leaf_from_dict(raw: dict[str, Any]) -> ExtractionLeafResult:
         candidates = tuple(
             ProposedCandidateRecord(
                 **{
-                    **candidate,
+                    **{
+                        key: value
+                        for key, value in candidate.items()
+                        if key != "identity_policy_mismatch"
+                    },
                     "proposed_anchor": (
                         ProposedAnchor.model_validate(candidate["proposed_anchor"])
                         if candidate.get("proposed_anchor") is not None
@@ -635,8 +653,35 @@ def _make_candidate_record(
     proposed_target_semantic_type_id: str | None = None
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
+    identity_policy_mismatch = False
     if isinstance(raw, RawEntityCandidate):
         definition = vocabulary.entities_by_alias.get(raw.observed_type.casefold())
+        if definition is not None:
+            policy = resolve_identity_root_policy(
+                definition.type_id,
+                contract.candidate_model.entity_types,
+            )
+            if policy.key_mode == "business_key":
+                normalized_key = _normalized_identity_key(raw)
+                identity_policy_mismatch = (
+                    set(raw.identity_key) != set(policy.business_key_fields)
+                    or any(not value for value in normalized_key.values())
+                    or raw.stable_source_identity is not None
+                )
+            else:
+                expected_stable_identity = (
+                    f"{source_unit_id}:{raw.local_id.casefold()}"
+                )
+                identity_policy_mismatch = (
+                    bool(raw.identity_key)
+                    or (
+                        raw.stable_source_identity is not None
+                        and raw.stable_source_identity
+                        != expected_stable_identity
+                    )
+                )
+            if identity_policy_mismatch:
+                definition = None
         entity_id = _entity_identity(
             raw,
             definition=definition,
@@ -872,14 +917,19 @@ def build_candidate_batch(
         base_identity,
         contract_kind="c0.candidate_lifecycle_record",
     )
-    for record in sorted(records, key=lambda item: item.input_candidate_id):
+    for record in sorted(
+        records,
+        key=lambda item: (
+            item.candidate_id,
+            item.payload_hash,
+            item.input_candidate_id,
+        ),
+    ):
         retained = by_candidate_id.get(record.candidate_id)
         if retained is not None:
-            if retained.payload_hash != record.payload_hash:
-                raise L2StageError(
-                    "L2_CANDIDATE_ID_COLLISION",
-                    f"candidate ID collision {record.candidate_id}",
-                )
+            conflict = retained.payload_hash != record.payload_hash
+            if conflict:
+                audit_reasons["CANDIDATE_PAYLOAD_CONFLICT"] += 1
             dispositions.append(
                 CandidateAccountingDisposition(
                     identity=accounting_identity,
@@ -888,20 +938,31 @@ def build_candidate_batch(
                     retained_candidate_id=None,
                     deduplicated_into_candidate_id=retained.candidate_id,
                     current_state=None,
-                    reason_codes=(),
+                    reason_codes=(
+                        ("CANDIDATE_PAYLOAD_CONFLICT",)
+                        if conflict
+                        else ()
+                    ),
                 )
             )
             continue
         by_candidate_id[record.candidate_id] = record
         if record.approved_semantic_id is None:
             audit_reasons["DOMAIN_REREVIEW_REQUESTED"] += 1
-            audit_reasons[
-                {
-                    "entity": "UNKNOWN_ENTITY_TYPE",
-                    "relationship": "UNKNOWN_RELATIONSHIP_TYPE",
-                    "property": "UNKNOWN_PROPERTY",
-                }[record.candidate_kind]
-            ] += 1
+            if (
+                record.candidate_kind == "entity"
+                and record.observed_term.casefold()
+                in vocabulary.entities_by_alias
+            ):
+                audit_reasons["IDENTITY_POLICY_MISMATCH"] += 1
+            else:
+                audit_reasons[
+                    {
+                        "entity": "UNKNOWN_ENTITY_TYPE",
+                        "relationship": "UNKNOWN_RELATIONSHIP_TYPE",
+                        "property": "UNKNOWN_PROPERTY",
+                    }[record.candidate_kind]
+                ] += 1
         dispositions.append(
             CandidateAccountingDisposition(
                 identity=accounting_identity,
@@ -1015,17 +1076,40 @@ def merge_candidate_batches(
     """Create one deterministic C0 carrier for a cross-leaf governed collection."""
 
     references: dict[str, ExtractionCandidateReference] = {}
+    conflicted_candidate_ids: set[str] = set()
     dispositions: list[CandidateAccountingDisposition] = []
     for leaf in leaves:
         for reference in leaf.batch.candidates:
             prior = references.get(reference.candidate_id)
             if prior is not None and prior != reference:
-                raise L2StageError(
-                    "L2_CANDIDATE_ID_COLLISION",
-                    f"cross-leaf candidate conflict {reference.candidate_id}",
+                conflicted_candidate_ids.add(reference.candidate_id)
+                references[reference.candidate_id] = min(
+                    (prior, reference),
+                    key=canonical_sha256,
                 )
-            references[reference.candidate_id] = reference
-        dispositions.extend(leaf.batch.candidate_dispositions)
+            else:
+                references[reference.candidate_id] = reference
+        for disposition in leaf.batch.candidate_dispositions:
+            target = (
+                disposition.retained_candidate_id
+                if disposition.disposition == "retained"
+                else disposition.deduplicated_into_candidate_id
+            )
+            dispositions.append(
+                disposition.model_copy(
+                    update={
+                        "input_candidate_id": deterministic_contract_id(
+                            "merged-input-candidate",
+                            {
+                                "input_candidate_id": (
+                                    disposition.input_candidate_id
+                                ),
+                                "target_candidate_id": target,
+                            },
+                        )
+                    }
+                )
+            )
     # Input IDs are leaf-stable, but identical source overlap can repeat them.
     disposition_by_id: dict[str, CandidateAccountingDisposition] = {}
     for disposition in sorted(dispositions, key=lambda item: item.input_candidate_id):
@@ -1060,7 +1144,11 @@ def merge_candidate_batches(
                     retained_candidate_id=None,
                     deduplicated_into_candidate_id=target,
                     current_state=None,
-                    reason_codes=(),
+                    reason_codes=(
+                        ("CANDIDATE_PAYLOAD_CONFLICT",)
+                        if target in conflicted_candidate_ids
+                        else ()
+                    ),
                 )
             )
         else:
@@ -1073,7 +1161,11 @@ def merge_candidate_batches(
                     retained_candidate_id=target,
                     deduplicated_into_candidate_id=None,
                     current_state=AssertionState.PROPOSED,
-                    reason_codes=(),
+                    reason_codes=(
+                        ("CANDIDATE_PAYLOAD_CONFLICT",)
+                        if target in conflicted_candidate_ids
+                        else ()
+                    ),
                 )
             )
     if accounted_retained != retained_ids:

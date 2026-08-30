@@ -1042,8 +1042,8 @@ def validate_compiled_semantic_artifacts(
             )
 
             try:
-                _parsed_quality = _SemanticModelQualityReport.model_validate(
-                    json.loads(_quality_path.read_text(encoding="utf-8"))
+                _parsed_quality = _SemanticModelQualityReport.model_validate_json(
+                    _quality_path.read_text(encoding="utf-8")
                 )
             except _ValidationError as exc:
                 _spec008a_findings.append(ArtifactFinding(
@@ -1081,8 +1081,8 @@ def validate_compiled_semantic_artifacts(
             )
 
             try:
-                _parsed_dependency = _SemanticDependencyGraph.model_validate(
-                    json.loads(_dependency_path.read_text(encoding="utf-8"))
+                _parsed_dependency = _SemanticDependencyGraph.model_validate_json(
+                    _dependency_path.read_text(encoding="utf-8")
                 )
             except _ValidationError as exc:
                 _spec008a_findings.append(ArtifactFinding(

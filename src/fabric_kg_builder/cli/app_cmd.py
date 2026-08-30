@@ -35,6 +35,17 @@ from fabric_kg_builder.agent.evaluator import (
     run_evaluation,
     EvalCase,
 )
+from fabric_kg_builder.agent.l7_release import (
+    AzureL7Backend,
+    L7Executor,
+    L7Planner,
+    L7ReleaseError,
+    ObservationBackend,
+    load_l7_config,
+    load_observation,
+    load_plan,
+    persist_plan,
+)
 from fabric_kg_builder.lineage.registry import AssetRegistry, record_deployment
 
 _DEFAULT_REGISTRY_PATH = Path("build") / "lineage" / "registry.json"
@@ -201,6 +212,253 @@ def _record_app_lineage(
 )
 def app_cmd() -> None:
     """M8 agent and app deployment commands."""
+
+
+@app_cmd.command("compile-l6")
+@click.option("--agent-name", required=True)
+@click.option("--fabric-connection-id", required=True)
+@click.option(
+    "--out",
+    "output_path",
+    default="build/release/l6-agent-definition.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def compile_l6_cmd(
+    agent_name: str,
+    fabric_connection_id: str,
+    output_path: Path,
+) -> None:
+    """Compile and persist the canonical local L6 five-tool definition."""
+    from fabric_kg_builder.agent.l6_integration import (
+        build_l6_agent_definition,
+        persist_l6_agent_definition,
+    )
+
+    try:
+        definition = build_l6_agent_definition(
+            agent_name=agent_name,
+            fabric_data_agent_connection_id=fabric_connection_id,
+        )
+        definition_hash = persist_l6_agent_definition(
+            output_path,
+            definition,
+            expected_definition=definition,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"definition_path={output_path}")
+    click.echo(f"definition_hash={definition_hash}")
+
+
+@app_cmd.command("deploy-l7")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Strict non-secret 0.2.4 L7 JSON configuration.",
+)
+@click.option(
+    "--dry-run/--live",
+    default=True,
+    show_default=True,
+    help="Generate a GET-only plan by default; live requires exact approval.",
+)
+@click.option(
+    "--plan",
+    "plan_path",
+    default="build/release/l7-0.2.4-plan.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--observation",
+    "observation_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Dry-run-only local observation fixture for black-box smoke tests.",
+)
+@click.option("--resume", is_flag=True, help="Reuse only the exact persisted plan.")
+@click.option(
+    "--approve-live",
+    default=None,
+    help=(
+        "Optional exact persisted plan hash. Without it, --live performs and "
+        "persists a fresh preflight plan, then approves that exact hash internally."
+    ),
+)
+@click.option(
+    "--out",
+    "receipt_path",
+    default="build/release/l7-0.2.4-receipt.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--log",
+    "log_path",
+    default="build/release/l7-0.2.4-events.jsonl",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Sanitized structured operation event log.",
+)
+def deploy_l7_cmd(
+    config_path: Path,
+    dry_run: bool,
+    plan_path: Path,
+    observation_path: Path | None,
+    resume: bool,
+    approve_live: str | None,
+    receipt_path: Path,
+    log_path: Path,
+) -> None:
+    """Plan or execute the narrowed 0.2.4 L7 release transaction."""
+    def emit(event: dict[str, Any], *, required: bool = True) -> None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            if required:
+                raise L7ReleaseError(
+                    "sanitized operation log is not durably writable"
+                ) from exc
+
+    entered_execution = False
+    try:
+        config = load_l7_config(config_path)
+        if observation_path is not None and not dry_run:
+            raise L7ReleaseError("--observation is forbidden in live mode")
+        backend = (
+            ObservationBackend(load_observation(observation_path))
+            if observation_path is not None
+            else AzureL7Backend(config_path.parent)
+        )
+        planner = L7Planner(backend)
+        if dry_run:
+            if approve_live:
+                raise L7ReleaseError("--approve-live is invalid in dry-run mode")
+            if resume:
+                persisted = load_plan(plan_path)
+                fresh = planner.build(
+                    config,
+                    config_path=config_path,
+                    attempt_id=persisted.attempt_id,
+                )
+                if (
+                    persisted.config_hash != fresh.config_hash
+                    or persisted.tenant_id != fresh.tenant_id
+                    or persisted.principal_hash != fresh.principal_hash
+                    or persisted.observation_hash != fresh.observation_hash
+                    or persisted.actions != fresh.actions
+                ):
+                    raise L7ReleaseError(
+                        "--resume requires exact current config, identity, and readback"
+                    )
+                plan = persisted
+            else:
+                plan = planner.build(config, config_path=config_path)
+                persist_plan(plan_path, plan)
+            click.echo(f"plan_hash={plan.plan_hash}")
+            click.echo(f"plan_path={plan_path}")
+            click.echo("mode=dry-run; mutations=0")
+            click.echo("l6_hosting=generated-local-deferred")
+            blockers = [item.component for item in plan.actions if item.action == "no-go"]
+            if blockers:
+                click.echo(f"capability_no_go={','.join(blockers)}")
+            emit(
+                {
+                    "event": "plan",
+                    "mode": "dry-run",
+                    "plan_hash": plan.plan_hash,
+                    "expires_at": plan.expires_at.isoformat(),
+                    "actions": [
+                        {
+                            "component": item.component,
+                            "action": item.action,
+                            "resource_id": item.resource_id,
+                            "desired_hash": item.desired_hash,
+                            "etag": item.observed_etag,
+                        }
+                        for item in plan.actions
+                    ],
+                }
+            )
+            return
+        if resume:
+            raise L7ReleaseError(
+                "--resume is a dry-run readback check; live always consumes --plan"
+            )
+        if approve_live:
+            plan = load_plan(plan_path)
+            approval = approve_live
+        else:
+            plan = planner.build(config, config_path=config_path)
+            persist_plan(plan_path, plan)
+            approval = plan.plan_hash
+        emit(
+            {
+                "event": "preflight-approved",
+                "mode": "live",
+                "plan_hash": plan.plan_hash,
+                "expires_at": plan.expires_at.isoformat(),
+                "mutation_count": len(
+                    [
+                        item
+                        for item in plan.actions
+                        if item.action in {"create", "update"}
+                    ]
+                ),
+            }
+        )
+        entered_execution = True
+        receipt = L7Executor(planner, backend).execute(
+            config=config,
+            config_path=config_path,
+            plan=plan,
+            approval=approval,
+            receipt_path=receipt_path,
+        )
+        click.echo(f"status={receipt.status}")
+        click.echo(f"receipt_hash={receipt.receipt_hash}")
+        click.echo(f"receipt_path={receipt_path}")
+        for entry in receipt.journal:
+            emit(
+                {"event": "journal", **entry.model_dump(mode="json")},
+                required=False,
+            )
+        emit(
+            {
+                "event": "complete",
+                "status": receipt.status,
+                "receipt_hash": receipt.receipt_hash,
+                "plan_hash": receipt.plan_hash,
+            },
+            required=False,
+        )
+    except L7ReleaseError as exc:
+        failure_receipt_path = receipt_path.with_name(
+            f"{receipt_path.name}.failure.json"
+        )
+        failure_event: dict[str, object] = {
+            "event": "failure",
+            "error_type": type(exc).__name__,
+            "causal_stage": "execution" if entered_execution else "preflight",
+            "mutation_possible": entered_execution,
+            "message": str(exc),
+        }
+        if entered_execution:
+            for key, candidate in (
+                ("receipt_path", receipt_path),
+                ("failure_receipt_path", failure_receipt_path),
+            ):
+                if candidate.exists():
+                    failure_event[key] = str(candidate)
+        emit(failure_event, required=False)
+        raise click.ClickException(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

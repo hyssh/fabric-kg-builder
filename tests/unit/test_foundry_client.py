@@ -9,6 +9,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from tests.conftest import make_foundry_client
 from fabric_kg_builder.config.schema import FoundryConfig
@@ -103,6 +104,129 @@ def test_complete_json_passes_correct_deployment() -> None:
     assert call_kwargs.kwargs["model"] == "gpt-5-4-mini"
 
 
+def test_complete_json_uses_strict_structured_output_schema() -> None:
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    schema = {
+        "type": "object",
+        "properties": {"source_file_id": {"type": "string"}},
+        "required": ["source_file_id"],
+        "additionalProperties": False,
+    }
+    client.complete_json("sys", "usr", schema)
+    response_format = (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+    )
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    strict_schema = response_format["json_schema"]["schema"]
+    assert strict_schema["required"] == ["source_file_id"]
+    assert strict_schema["additionalProperties"] is False
+
+
+def test_oversized_schema_falls_back_to_json_object() -> None:
+    from fabric_kg_builder.domain.proposal import (
+        domain_proposal_candidates_schema,
+    )
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    client.complete_json(
+        "sys",
+        "usr",
+        domain_proposal_candidates_schema(),
+    )
+    response_format = (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+    )
+    assert response_format == {"type": "json_object"}
+
+
+def test_untyped_schema_branch_falls_back_to_json_object() -> None:
+    from fabric_kg_builder.domain.models import DomainReviewPayload
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    client.complete_json(
+        "sys",
+        "usr",
+        DomainReviewPayload.model_json_schema(),
+    )
+    response_format = (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+    )
+    assert response_format == {"type": "json_object"}
+
+
+def test_strict_capability_rejection_retries_json_object_once() -> None:
+    class UnsupportedStrictSchema(Exception):
+        status_code = 400
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    success = sdk_mock.chat.completions.create.return_value
+    sdk_mock.chat.completions.create.side_effect = [
+        UnsupportedStrictSchema(),
+        success,
+    ]
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    result = client.complete_json(
+        "sys",
+        "usr",
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        },
+    )
+    assert result == _FIXTURE_PAYLOAD
+    assert sdk_mock.chat.completions.create.call_count == 2
+    assert (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+        == {"type": "json_object"}
+    )
+
+
+def test_local_sdk_strict_validation_retries_json_object_once() -> None:
+    class RequiredValue(BaseModel):
+        value: str
+
+    try:
+        RequiredValue.model_validate({})
+    except ValidationError as validation_error:
+        local_rejection = validation_error
+
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    success = sdk_mock.chat.completions.create.return_value
+    sdk_mock.chat.completions.create.side_effect = [
+        local_rejection,
+        success,
+    ]
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+    result = client.complete_json(
+        "sys",
+        "usr",
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        },
+    )
+    assert result == _FIXTURE_PAYLOAD
+    assert sdk_mock.chat.completions.create.call_count == 2
+    assert (
+        sdk_mock.chat.completions.create.call_args.kwargs[
+            "response_format"
+        ]
+        == {"type": "json_object"}
+    )
+
+
 def test_complete_json_puts_system_in_system_role() -> None:
     """System prompt must be sent with role='system', user content with role='user'."""
     sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
@@ -187,3 +311,180 @@ def test_embed_requests_correct_deployment() -> None:
 
     call_kwargs = sdk_mock.embeddings.create.call_args.kwargs
     assert call_kwargs["model"] == "embedding"
+
+
+# ---------------------------------------------------------------------------
+# Transient transport retry (issue: L2 aborted on a single "Connection error.")
+# ---------------------------------------------------------------------------
+
+
+class _FakeConnectionError(Exception):
+    """Stands in for ``openai.APIConnectionError`` without importing the SDK."""
+
+
+_FakeConnectionError.__name__ = "APIConnectionError"
+
+
+class _FakeStatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+def test_transport_retry_recovers_from_connection_error() -> None:
+    """A transient connection failure must be retried, not surfaced."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    calls = {"n": 0}
+
+    def operation() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _FakeConnectionError("Connection error.")
+        return "ok"
+
+    slept: list[float] = []
+    result = module._call_with_transport_retry(
+        operation, sleep=slept.append
+    )
+
+    assert result == "ok"
+    assert calls["n"] == 3
+    assert slept == [1.0, 2.0]
+
+
+def test_transport_retry_does_not_retry_client_errors() -> None:
+    """Deterministic request/authority failures must surface immediately."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    for status in (400, 401, 403, 404, 422):
+        calls = {"n": 0}
+
+        def operation(status: int = status) -> None:
+            calls["n"] += 1
+            raise _FakeStatusError(status)
+
+        with pytest.raises(_FakeStatusError):
+            module._call_with_transport_retry(
+                operation, sleep=lambda _seconds: None
+            )
+        assert calls["n"] == 1
+
+
+def test_transport_retry_retries_server_and_throttle_errors() -> None:
+    """Server faults and throttling are retryable transport failures."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    for status in (408, 429, 500, 502, 503, 504):
+        calls = {"n": 0}
+
+        def operation(status: int = status) -> str:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise _FakeStatusError(status)
+            return "ok"
+
+        assert (
+            module._call_with_transport_retry(
+                operation, sleep=lambda _seconds: None
+            )
+            == "ok"
+        )
+        assert calls["n"] == 2
+
+
+def test_transport_retry_gives_up_after_bounded_attempts() -> None:
+    """Retries are bounded so a hard outage still terminates."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    calls = {"n": 0}
+
+    def operation() -> None:
+        calls["n"] += 1
+        raise _FakeConnectionError("Connection error.")
+
+    with pytest.raises(_FakeConnectionError):
+        module._call_with_transport_retry(
+            operation, max_attempts=3, sleep=lambda _seconds: None
+        )
+    assert calls["n"] == 3
+
+
+def test_transport_retry_retries_unenumerated_server_faults() -> None:
+    """Gateway/proxy 5xx codes are still transient server faults."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    for status in (507, 520, 522, 524, 529):
+        calls = {"n": 0}
+
+        def operation(status: int = status) -> str:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise _FakeStatusError(status)
+            return "ok"
+
+        assert (
+            module._call_with_transport_retry(
+                operation, sleep=lambda _seconds: None
+            )
+            == "ok"
+        )
+        assert calls["n"] == 2
+
+
+def test_complete_json_retries_transient_transport_failure(monkeypatch) -> None:
+    """complete_json must survive one transient connection error."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        module, "_transport_retry_sleep", slept.append
+    )
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    good = sdk_mock.chat.completions.create.return_value
+    sdk_mock.chat.completions.create.side_effect = [
+        _FakeConnectionError("Connection error."),
+        good,
+    ]
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+
+    result = client.complete_json(
+        system="system", user="user", json_schema={}
+    )
+
+    assert result == json.loads(good.choices[0].message.content)
+    assert sdk_mock.chat.completions.create.call_count == 2
+    assert slept == [1.0]
+
+
+def test_empty_completion_is_retried_then_reported_distinctly() -> None:
+    """An empty completion must retry and then fail with an exact reason."""
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    empty = MagicMock()
+    empty.choices = [MagicMock(message=MagicMock(content=""))]
+    sdk_mock.chat.completions.create.return_value = empty
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+
+    with pytest.raises(ValueError, match="empty completion"):
+        client.complete_json(
+            system="system", user="user", json_schema={}, max_attempts=2
+        )
+
+    assert sdk_mock.chat.completions.create.call_count == 2
+
+
+def test_empty_completion_recovers_on_retry() -> None:
+    """A single empty completion must not abort a resumable run."""
+    sdk_mock = make_foundry_client(_FIXTURE_PAYLOAD)
+    good = sdk_mock.chat.completions.create.return_value
+    empty = MagicMock()
+    empty.choices = [MagicMock(message=MagicMock(content="   "))]
+    sdk_mock.chat.completions.create.side_effect = [empty, good]
+    client = FoundryClient(_FOUNDRY_CONFIG, _sdk_client=sdk_mock)
+
+    result = client.complete_json(
+        system="system", user="user", json_schema={}, max_attempts=3
+    )
+
+    assert result == json.loads(good.choices[0].message.content)
+    assert sdk_mock.chat.completions.create.call_count == 2

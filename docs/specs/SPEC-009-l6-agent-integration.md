@@ -167,10 +167,8 @@ JSON, and reads back exact bytes and semantic content.
 The definition requires:
 
 - an existing Fabric Data Agent project connection;
-- an existing Foundry RemoteTool project connection for the L6 endpoint;
 - managed identity/RBAC configured outside the definition;
 - no embedded token, key, signed URL, principal metadata, or provider secret.
 
-No resource is deployed by L6. L7 owns endpoint publication, project connection
-creation, live Data Agent/Foundry definition deployment, smoke tests, and
-post-deploy acceptance.
+No resource is deployed by L6. L7 owns local CLI orchestration, live Data Agent
+definition deployment, smoke tests, and post-deploy acceptance.

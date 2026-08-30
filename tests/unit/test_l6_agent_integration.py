@@ -3171,7 +3171,6 @@ def test_tool_schemas_instructions_and_definition_readback(tmp_path: Path):
     definition = l6.build_l6_agent_definition(
         agent_name="kg-l6",
         fabric_data_agent_connection_id="connection:fabric",
-        foundry_remote_tool_connection_id="connection:remote-tool",
     )
     path = tmp_path / "l6-agent-definition.json"
     definition_hash = l6.persist_l6_agent_definition(path, definition)
@@ -3199,27 +3198,20 @@ def test_tool_schemas_instructions_and_definition_readback(tmp_path: Path):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("fabric_id", "remote_id"),
+    "fabric_id",
     (
-        (
-            "/subscriptions/00000000-0000-4000-8000-000000000001/"
-            "resourceGroups/kg-rg/providers/Microsoft.Fabric/capacities/kg-cap",
-            "connection:remote-tool",
-        ),
-        (
-            "fabric:workspace/00000000-0000-4000-8000-000000000001/"
-            "item/00000000-0000-4000-8000-000000000002",
-            "00000000-0000-4000-8000-000000000003",
-        ),
+        "/subscriptions/00000000-0000-4000-8000-000000000001/"
+        "resourceGroups/kg-rg/providers/Microsoft.Fabric/capacities/kg-cap",
+        "fabric:workspace/00000000-0000-4000-8000-000000000001/"
+        "item/00000000-0000-4000-8000-000000000002",
     ),
 )
 def test_agent_definition_accepts_stable_arm_and_fabric_connections(
-    fabric_id, remote_id
+    fabric_id
 ):
     definition = l6.build_l6_agent_definition(
         agent_name="KG evidence agent",
         fabric_data_agent_connection_id=fabric_id,
-        foundry_remote_tool_connection_id=remote_id,
     )
     assert definition["connections"]["fabric_data_agent"][
         "project_connection_id"
@@ -3246,7 +3238,6 @@ def test_agent_definition_rejects_unsafe_connection_metadata(unsafe_value):
         l6.build_l6_agent_definition(
             agent_name="KG evidence agent",
             fabric_data_agent_connection_id=unsafe_value,
-            foundry_remote_tool_connection_id="connection:remote-tool",
         )
 
 
@@ -3275,7 +3266,6 @@ def test_agent_definition_rejects_unsafe_display_name(unsafe_name):
         l6.build_l6_agent_definition(
             agent_name=unsafe_name,
             fabric_data_agent_connection_id="connection:fabric",
-            foundry_remote_tool_connection_id="connection:remote-tool",
         )
 
 
@@ -3284,7 +3274,6 @@ def test_persistence_recursively_rejects_tampered_definition_text(tmp_path: Path
     definition = l6.build_l6_agent_definition(
         agent_name="KG evidence agent",
         fabric_data_agent_connection_id="connection:fabric",
-        foundry_remote_tool_connection_id="connection:remote-tool",
     )
     tampered_tools = [dict(item) for item in definition["tools"]]
     tampered_tools[0]["description"] = "client_secret=do-not-store"
@@ -3330,7 +3319,6 @@ def _canonical_l6_definition():
     return l6.build_l6_agent_definition(
         agent_name="KG evidence agent",
         fabric_data_agent_connection_id="connection:fabric",
-        foundry_remote_tool_connection_id="connection:remote-tool",
     )
 
 
@@ -3407,7 +3395,7 @@ def test_l6_complete_definition_drift_is_rejected(tmp_path, mutation):
             candidate["tools"][0],
         )
     elif mutation == "connection":
-        candidate["connections"]["l6_remote_tool"]["type"] = "fabric_data_agent"
+        candidate["connections"]["fabric_data_agent"]["type"] = "unexpected"
     elif mutation == "call_limits":
         candidate["limits"]["selected_search_requests"] = 2
     elif mutation == "extra_field":
@@ -3486,7 +3474,6 @@ def test_l6_definition_rejects_derived_canonical_authority(tmp_path):
     derived = DerivedAuthority(
         agent_name="KG evidence agent",
         fabric_data_agent_connection_id="connection:fabric",
-        foundry_remote_tool_connection_id="connection:remote-tool",
     )
     with pytest.raises(ValueError, match="lacks canonical authority"):
         l6.persist_l6_agent_definition(tmp_path / "agent.json", derived)

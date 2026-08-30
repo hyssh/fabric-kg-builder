@@ -38,9 +38,80 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+import time
+from typing import Any, Callable
 
+from pydantic import ValidationError
 from ..config.schema import FoundryConfig
+
+# Transport failures that are safe to retry with an identical deterministic
+# request.  Configuration, authority, and schema errors are never retried.
+_RETRYABLE_TRANSPORT_TYPE_NAMES = frozenset(
+    {
+        "APIConnectionError",
+        "APIConnectionTimeoutError",
+        "APITimeoutError",
+        "InternalServerError",
+        "RateLimitError",
+    }
+)
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_NON_RETRYABLE_STATUS_CODES = frozenset({400, 401, 403, 404, 409, 413, 422})
+_TRANSPORT_RETRY_MAX_ATTEMPTS = 6
+_TRANSPORT_RETRY_BASE_SECONDS = 1.0
+_TRANSPORT_RETRY_MAX_SECONDS = 30.0
+
+
+def _transport_error_is_retryable(exc: BaseException) -> bool:
+    """Return True when *exc* is a transient transport failure.
+
+    Retrying is only safe for connectivity, timeout, throttling, and server
+    faults.  Request, authentication, authorization, and validation failures
+    are deterministic and must surface immediately.
+    """
+    if isinstance(exc, (ValidationError, ValueError, TypeError)):
+        return False
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        if status in _NON_RETRYABLE_STATUS_CODES:
+            return False
+        if status in _RETRYABLE_STATUS_CODES or status >= 500:
+            return True
+    return any(
+        klass.__name__ in _RETRYABLE_TRANSPORT_TYPE_NAMES
+        for klass in type(exc).__mro__
+    )
+
+
+def _transport_retry_sleep(seconds: float) -> None:
+    """Indirection point so tests can stub backoff without touching stdlib."""
+    time.sleep(seconds)
+
+
+def _call_with_transport_retry(
+    operation: Callable[[], Any],
+    *,
+    max_attempts: int = _TRANSPORT_RETRY_MAX_ATTEMPTS,
+    sleep: Callable[[float], None] | None = None,
+) -> Any:
+    """Invoke *operation*, retrying only transient transport failures."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1.")
+    delay = _TRANSPORT_RETRY_BASE_SECONDS
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= max_attempts or not _transport_error_is_retryable(
+                exc
+            ):
+                raise
+            backoff = sleep if sleep is not None else _transport_retry_sleep
+            backoff(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
+            delay *= 2
+    raise AssertionError("unreachable transport retry state")
 
 
 class FoundryClient:
@@ -145,7 +216,9 @@ class FoundryClient:
             "chat_deployment": self._config.chat_deployment,
             "api_version": self._config.api_version,
             "request_timeout_seconds": self._config.request_timeout_seconds,
-            "completion_format": "json_object",
+            "completion_format": (
+                "json_schema_strict_when_compatible_else_json_object"
+            ),
             "temperature": 0.0,
             "seed": 42,
             "max_completion_tokens": 4_096,
@@ -210,32 +283,89 @@ class FoundryClient:
         )
         last_error: json.JSONDecodeError | None = None
         raw = ""
+        strict_rejected = False
+        empty_response = False
         for attempt in range(max_attempts):
             attempt_system = system + schema_instruction
             if attempt:
                 attempt_system += retry_instruction
-            response = self._client.chat.completions.create(
-                model=self._config.chat_deployment,
-                messages=[
+            strict_schema = None
+            if json_schema and not strict_rejected:
+                try:
+                    strict_schema = _azure_strict_schema(json_schema)
+                except ValueError:
+                    strict_schema = None
+            response_format = (
+                {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fabric_kg_structured_response",
+                        "strict": True,
+                        "schema": strict_schema,
+                    },
+                }
+                if strict_schema is not None
+                else {"type": "json_object"}
+            )
+            request_values = {
+                "model": self._config.chat_deployment,
+                "messages": [
                     {"role": "system", "content": attempt_system},
                     {"role": "user", "content": user},
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-                seed=42,
-                max_completion_tokens=max_completion_tokens,
-            )
+                "response_format": response_format,
+                "temperature": 0.0,
+                "seed": 42,
+                "max_completion_tokens": max_completion_tokens,
+            }
+            try:
+                response = _call_with_transport_retry(
+                    lambda: self._client.chat.completions.create(
+                        **request_values
+                    )
+                )
+            except Exception as exc:
+                if (
+                    strict_schema is None
+                    or (
+                        getattr(exc, "status_code", None) != 400
+                        and not isinstance(exc, ValidationError)
+                    )
+                ):
+                    raise
+                request_values["response_format"] = {
+                    "type": "json_object"
+                }
+                strict_rejected = True
+                response = _call_with_transport_retry(
+                    lambda: self._client.chat.completions.create(
+                        **request_values
+                    )
+                )
             raw = response.choices[0].message.content
+            if not raw or not raw.strip():
+                last_error = json.JSONDecodeError(
+                    "empty model response", "", 0
+                )
+                empty_response = True
+                continue
+            empty_response = False
             try:
                 return json.loads(raw)
             except json.JSONDecodeError as exc:
                 last_error = exc
 
         assert last_error is not None
+        if empty_response:
+            raise ValueError(
+                "Foundry returned an empty completion after "
+                f"{max_attempts} attempt(s); the deployment produced no "
+                "content for this request"
+            )
         raise ValueError(
             f"Foundry response could not be parsed as JSON after {max_attempts} "
-            f"attempt(s): {last_error}\nRaw content (first 500 chars): {raw[:500]}"
-        ) from last_error
+            f"attempt(s); line={last_error.lineno}; column={last_error.colno}"
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* and return one float vector per input string.
@@ -258,9 +388,72 @@ class FoundryClient:
         configured dimension (1536).  Changing this value requires a full
         rebuild of the AI Search vector index — see SPEC-004 §9.2.
         """
-        response = self._client.embeddings.create(
-            model=self._config.embedding_deployment,
-            input=texts,
-            dimensions=self._config.embedding_dimensions,
+        response = _call_with_transport_retry(
+            lambda: self._client.embeddings.create(
+                model=self._config.embedding_deployment,
+                input=texts,
+                dimensions=self._config.embedding_dimensions,
+            )
         )
         return [item.embedding for item in response.data]
+def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Convert generated schemas to Azure structured-output subset."""
+    normalized = json.loads(json.dumps(schema))
+    property_count = 0
+    unsupported_constraints = {
+        "contains",
+        "exclusiveMaximum",
+        "exclusiveMinimum",
+        "format",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "multipleOf",
+        "pattern",
+        "patternProperties",
+        "uniqueItems",
+    }
+
+    def visit(value: Any, object_depth: int = 0) -> None:
+        nonlocal property_count
+        if isinstance(value, dict):
+            if not value:
+                raise ValueError(
+                    "Azure strict schema cannot contain untyped branches"
+                )
+            value.pop("default", None)
+            for keyword in unsupported_constraints:
+                value.pop(keyword, None)
+            properties = value.get("properties")
+            if value.get("type") == "object" and isinstance(properties, dict):
+                object_depth += 1
+                if object_depth > 5:
+                    raise ValueError(
+                        "Azure strict schema exceeds nesting limit"
+                    )
+                property_count += len(properties)
+                value["additionalProperties"] = False
+                value["required"] = list(properties)
+            if "oneOf" in value:
+                value["anyOf"] = value.pop("oneOf")
+            if "allOf" in value:
+                raise ValueError(
+                    "Azure strict schema cannot contain allOf"
+                )
+            for key, child in value.items():
+                visit(child, 0 if key == "$defs" else object_depth)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, object_depth)
+
+    if normalized.get("type") != "object" or "anyOf" in normalized:
+        raise ValueError("Azure strict schema root must be one object")
+    visit(normalized)
+    if property_count > 100:
+        raise ValueError(
+            "Azure strict schema exceeds the 100-property limit"
+        )
+    return normalized

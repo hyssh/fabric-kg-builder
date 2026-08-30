@@ -296,18 +296,86 @@ class WorkUnitCheckpoint:
             return None
         return children
 
-    def record_leaf(self, work_unit: L2WorkUnit, result: dict[str, Any]) -> None:
+    def record_leaf(
+        self, work_unit: L2WorkUnit, result: dict[str, Any]
+    ) -> dict[str, Any]:
         artifact_hash = canonical_sha256(result)
         artifact_name = f"{work_unit.work_unit_id.replace(':', '-', 1)}.json"
         with self._lock:
             self.artifact_dir.mkdir(parents=True, exist_ok=True)
             path = self.artifact_dir / artifact_name
+            prior_entry = self._state["work_units"].get(
+                work_unit.work_unit_id
+            )
+            if (
+                isinstance(prior_entry, dict)
+                and prior_entry.get("status") == "succeeded"
+                and prior_entry.get("authority_fingerprint")
+                == work_unit.authority_fingerprint
+                and prior_entry.get("artifact") == artifact_name
+                and path.exists()
+            ):
+                try:
+                    prior_result = json.loads(
+                        path.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    prior_result = None
+                if (
+                    prior_result is not None
+                    and canonical_sha256(prior_result)
+                    == prior_entry.get("artifact_hash")
+                ):
+                    return prior_result
             existing: object | None = None
             if path.exists():
                 try:
                     existing = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     existing = None
+                if existing is not None:
+                    try:
+                        fresh_state = json.loads(
+                            self.state_path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        fresh_state = {}
+                    fresh_entry = (
+                        fresh_state.get("work_units", {}).get(
+                            work_unit.work_unit_id
+                        )
+                        if isinstance(fresh_state, dict)
+                        and isinstance(
+                            fresh_state.get("work_units"), dict
+                        )
+                        else None
+                    )
+                    if (
+                        isinstance(fresh_entry, dict)
+                        and fresh_entry.get("status") == "succeeded"
+                        and fresh_entry.get("authority_fingerprint")
+                        == work_unit.authority_fingerprint
+                        and fresh_entry.get("artifact") == artifact_name
+                        and canonical_sha256(existing)
+                        == fresh_entry.get("artifact_hash")
+                    ):
+                        self._state = fresh_state
+                        return existing
+                    if fresh_entry is None:
+                        self._state["work_units"][
+                            work_unit.work_unit_id
+                        ] = {
+                            "status": "succeeded",
+                            "authority_fingerprint": (
+                                work_unit.authority_fingerprint
+                            ),
+                            "slice_start": work_unit.slice_start,
+                            "slice_end": work_unit.slice_end,
+                            "artifact": artifact_name,
+                            "artifact_hash": canonical_sha256(existing),
+                        }
+                        self._persist_locked()
+                        return existing
                 if existing is not None and canonical_sha256(existing) != artifact_hash:
                     raise L2StageError(
                         "L2_CHECKPOINT_STALE",
@@ -333,6 +401,7 @@ class WorkUnitCheckpoint:
                 "artifact_hash": artifact_hash,
             }
             self._persist_locked()
+            return result
 
     def record_split(
         self,
@@ -437,7 +506,7 @@ def execute_work_unit(
             return
 
         result = processor(work_unit, response)
-        checkpoint.record_leaf(work_unit, result)
+        result = checkpoint.record_leaf(work_unit, result)
         leaves.append(work_unit.work_unit_id)
         results.append(result)
 

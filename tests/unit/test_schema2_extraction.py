@@ -30,6 +30,8 @@ from fabric_kg_builder.enrichment.schema2_extraction import (
     build_required_member_set_proposals,
     compile_closed_vocabulary,
     derive_collection_member_fragments,
+    extraction_leaf_from_dict,
+    extraction_leaf_to_dict,
 )
 from fabric_kg_builder.enrichment.schema2_sources import L2StageError
 
@@ -145,6 +147,62 @@ def test_closed_vocabulary_unknowns_are_audited_not_mutated() -> None:
         item.type_id for item in domain.candidate_model.entity_types
     }
     assert "inventedmachinekind" not in vocabulary.entities_by_alias
+
+
+def test_distinct_same_anchor_observations_are_conflict_accounted() -> None:
+    response = _response()
+    duplicate = dict(response[0])
+    duplicate["label"] = f"{duplicate['label']} alternate"
+    result = _build(_domain(), [response[0], duplicate])
+
+    candidate_ids = [
+        item.candidate_id for item in result.batch.candidates
+    ]
+    assert len(candidate_ids) == 1
+    assert dict(result.audit_reason_counts)[
+        "CANDIDATE_PAYLOAD_CONFLICT"
+    ] == 1
+    assert any(
+        item.reason_codes == ("CANDIDATE_PAYLOAD_CONFLICT",)
+        for item in result.batch.candidate_dispositions
+    )
+
+
+def test_invalid_business_key_is_downgraded_for_rereview() -> None:
+    response = _response()
+    entity = dict(response[0])
+    entity["identity_key"] = {"wrong_key": "facility-a"}
+    result = _build(_domain(), [entity])
+
+    record = result.proposed_candidates[0]
+    assert record.approved_semantic_id is None
+    reasons = dict(result.audit_reason_counts)
+    assert reasons["IDENTITY_POLICY_MISMATCH"] == 1
+    assert reasons["DOMAIN_REREVIEW_REQUESTED"] == 1
+
+
+def test_blank_business_key_is_downgraded_for_rereview() -> None:
+    response = _response()
+    entity = dict(response[0])
+    entity["identity_key"] = {"facility_id": "   "}
+    result = _build(_domain(), [entity])
+
+    record = result.proposed_candidates[0]
+    assert record.approved_semantic_id is None
+
+
+def test_legacy_identity_mismatch_flag_is_removed_on_checkpoint_load() -> None:
+    leaf = _build(_domain(), [_response()[0]])
+    payload = extraction_leaf_to_dict(leaf)
+    payload["proposed_candidates"][0][
+        "identity_policy_mismatch"
+    ] = False
+
+    loaded = extraction_leaf_from_dict(payload)
+
+    assert not hasattr(
+        loaded.proposed_candidates[0], "identity_policy_mismatch"
+    )
 
 
 def test_candidates_are_proposed_only_and_do_not_mint_evidence() -> None:

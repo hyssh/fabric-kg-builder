@@ -17,6 +17,7 @@ from fabric_kg_builder.cli import cli
 from fabric_kg_builder.cli.build_deploy_cmd import (
     BuildDeployError,
     _semantic_compatibility_gate,
+    _update_grounding_metadata,
 )
 from fabric_kg_builder.cli.semantic_cmd import (
     compile_agent_cmd,
@@ -630,6 +631,48 @@ def test_live_semantic_gate_requires_explicit_baseline_initialization(
 
     assert initialized["level"] == "baseline"
     assert initialized["baseline_initialization_approved"] is True
+
+
+def test_grounding_metadata_removes_stale_remote_knowledge_connection(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "grounding.yaml"
+    metadata_path.write_text(
+        yaml.safe_dump(
+            {
+                "environments": {
+                    "live": {
+                        "connections": {
+                            "knowledgeBase": "stale-remote-connection"
+                        },
+                        "knowledge": {
+                            "knowledgeBaseMcpEndpoint": "https://old.example/mcp"
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _update_grounding_metadata(
+        metadata_path=metadata_path,
+        environment="live",
+        search_connection_id="search-connection",
+        search_index_name="fabric-kg-024-index",
+        data_agent_connection_id="fabric-data-agent-connection",
+        knowledge_base_name="fabric-kg-024-kb",
+    )
+
+    live = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))[
+        "environments"
+    ]["live"]
+    assert live["connections"] == {
+        "search": "search-connection",
+        "fabricDataAgent": "fabric-data-agent-connection",
+    }
+    assert live["knowledge"]["knowledgeBaseName"] == "fabric-kg-024-kb"
+    assert "knowledgeBaseMcpEndpoint" not in live["knowledge"]
 
 
 def test_compatibility_classifier_allows_optional_property_addition() -> None:

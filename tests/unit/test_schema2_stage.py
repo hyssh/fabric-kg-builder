@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
 
 from fabric_kg_builder.cli import cli
+from fabric_kg_builder.cli import enrich_cmd as enrich_cmd_module
 from fabric_kg_builder.contracts.base import canonical_sha256
 from fabric_kg_builder.domain.stage import (
     finalize_l1_stage,
@@ -23,6 +25,8 @@ from fabric_kg_builder.enrichment import schema2_sources
 from fabric_kg_builder.enrichment.schema2_extraction import (
     L2_EXTRACTOR_VERSION,
     L2_PROMPT_VERSION,
+    RawCandidateResponse,
+    raw_candidate_response_schema,
 )
 from fabric_kg_builder.enrichment.schema2_stage import (
     L2_RESPONSE_SCHEMA_HASH,
@@ -64,7 +68,13 @@ def _approved_l1(
                     "requirement_id": (
                         "completeness-requirement:l2-stage.record-subjects"
                     ),
-                    "competency_question_ids": ["cq:q1"],
+                    "competency_question_ids": [
+                        "cq:q1",
+                        "cq:q2",
+                        "cq:q3",
+                        "cq:q4",
+                        "cq:q5",
+                    ],
                     "requirement_kind": "structured_fact_set",
                     "scope_type_id": "semantic-type:l2-stage.record",
                     "scoped_subtype_id": None,
@@ -181,6 +191,88 @@ def test_l2_is_not_activated_in_product_cli() -> None:
     assert "l2" not in result.output.casefold()
 
 
+def test_l2_foundry_response_schema_requires_candidate_envelope() -> None:
+    schema = raw_candidate_response_schema()
+    assert schema["required"] == ["candidates"]
+    parsed = RawCandidateResponse.model_validate(
+        {
+            "candidates": [
+                {
+                    "candidate_kind": "entity",
+                    "local_id": "device-1",
+                    "observed_type": "Device",
+                    "label": "Device 1",
+                    "identity_key": {},
+                    "stable_source_identity": "device-1",
+                }
+            ]
+        }
+    )
+    assert parsed.candidates[0].candidate_kind == "entity"
+    with pytest.raises(Exception, match="extra_forbidden"):
+        RawCandidateResponse.model_validate(
+            {"candidates": [], "unexpected": True}
+        )
+
+
+def test_enrich_dispatches_approved_schema2_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _state_root, domain_path = _approved_l1(tmp_path)
+    source = tmp_path / "source"
+    monkeypatch.setattr(
+        enrich_cmd_module,
+        "_resolve_max_concurrent",
+        lambda _ctx, _override: 1,
+    )
+    calls: list[dict[str, object]] = []
+
+    def run_schema2(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            receipt=SimpleNamespace(stage_receipt_id="receipt:l2")
+        )
+
+    monkeypatch.setattr(
+        enrich_cmd_module,
+        "_run_schema2_enrichment",
+        run_schema2,
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "enrich",
+            "--input",
+            str(source),
+            "--domain-file",
+            str(domain_path),
+            "--out",
+            str(tmp_path / "enriched"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "schema-2 extraction succeeded" in result.output
+    assert calls and calls[0]["domain_file"] == str(domain_path)
+
+    yml_path = tmp_path / "domain.yml"
+    domain_path.replace(yml_path)
+    monkeypatch.chdir(tmp_path)
+    discovered = CliRunner().invoke(
+        cli,
+        [
+            "enrich",
+            "--input",
+            str(source),
+            "--out",
+            str(tmp_path / "enriched-yml"),
+        ],
+    )
+    assert discovered.exit_code == 0, discovered.output
+    assert calls[-1]["domain_file"] == "domain.yml"
+
+
 def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -255,7 +347,7 @@ def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
                         "label": "Record 1",
                         "aliases": [],
                         "identity_key": {},
-                        "stable_source_identity": "record-1",
+                        "stable_source_identity": None,
                         "anchors": [],
                     },
                     {
@@ -265,7 +357,7 @@ def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
                         "label": "Subject 1",
                         "aliases": [],
                         "identity_key": {},
-                        "stable_source_identity": "subject-1",
+                        "stable_source_identity": None,
                         "anchors": [],
                     },
                     {

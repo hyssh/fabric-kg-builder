@@ -1,4 +1,4 @@
-"""Isolated L2 stage wiring; intentionally not activated in the product CLI."""
+"""Schema-constrained L2 stage wiring activated by ``fabric-kg enrich``."""
 
 from __future__ import annotations
 

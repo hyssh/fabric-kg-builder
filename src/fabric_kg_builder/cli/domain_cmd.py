@@ -329,6 +329,22 @@ def domain_review_cmd(
     help="Schema-2 bounded design sample manifest JSON.",
 )
 @click.option(
+    "--project-id",
+    envvar="FABRIC_KG_PROJECT_ID",
+    default=None,
+    help="Expected schema-2 project ID (or FABRIC_KG_PROJECT_ID).",
+)
+@click.option(
+    "--run-id",
+    default=None,
+    help="Expected immutable schema-2 run ID.",
+)
+@click.option(
+    "--proposal-hash",
+    default=None,
+    help="Expected immutable proposal hash printed by init-domain.",
+)
+@click.option(
     "--state-dir",
     default=str(Path(".fkg") / "l1"),
     show_default=True,
@@ -344,6 +360,9 @@ def domain_approve_cmd(
     source_profile_path: str | None,
     source_corpus_manifest_path: str | None,
     design_sample_manifest_path: str | None,
+    project_id: str | None,
+    run_id: str | None,
+    proposal_hash: str | None,
     state_dir: str,
 ) -> None:
     """Record explicit approval metadata after a current passing review."""
@@ -387,6 +406,10 @@ def domain_approve_cmd(
                 actor=approved_by.strip(),
                 state_root=state_root,
                 domain_path=Path(contract_path),
+                reviewed_contract=contract,
+                expected_project_id=project_id,
+                expected_run_id=run_id,
+                expected_proposal_hash=proposal_hash,
             )
         except L1StageError as exc:
             raise click.ClickException(str(exc)) from exc

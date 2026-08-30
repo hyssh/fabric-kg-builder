@@ -68,7 +68,7 @@ def test_schema_2_uses_c0_evidence_span_vocabulary(tmp_path: Path) -> None:
     assert "source_evidence_ids" not in rendered
 
 
-def test_approved_schema_2_remains_fail_closed_for_enrichment(
+def test_approved_schema_2_is_ready_for_l2_enrichment(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -89,8 +89,8 @@ def test_approved_schema_2_remains_fail_closed_for_enrichment(
 
     status = evaluate_domain_guard_status(str(domain_path))
 
-    assert status.ready_for_enrichment is False
-    assert any("L2 schema-constrained extraction" in item for item in status.messages)
+    assert status.ready_for_enrichment is True
+    assert any("approved and intact" in item for item in status.messages)
 
 
 def test_schema_2_guard_accepts_custom_l1_state_directory(
@@ -116,4 +116,4 @@ def test_schema_2_guard_accepts_custom_l1_state_directory(
     )
 
     assert not any("missing or invalid" in item for item in status.messages)
-    assert any("L2 schema-constrained extraction" in item for item in status.messages)
+    assert any("approved and intact" in item for item in status.messages)

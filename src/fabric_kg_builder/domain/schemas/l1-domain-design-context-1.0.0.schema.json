@@ -4,24 +4,6 @@
       "additionalProperties": false,
       "description": "Shared identity references; contract-specific IDs remain authoritative.",
       "properties": {
-        "contract_kind": {
-          "minLength": 1,
-          "pattern": ".*\\S.*",
-          "title": "Contract Kind",
-          "type": "string"
-        },
-        "contract_version": {
-          "const": "1.0.0",
-          "default": "1.0.0",
-          "title": "Contract Version",
-          "type": "string"
-        },
-        "project_id": {
-          "minLength": 1,
-          "pattern": ".*\\S.*",
-          "title": "Project Id",
-          "type": "string"
-        },
         "asset_id": {
           "anyOf": [
             {
@@ -48,37 +30,11 @@
           ],
           "title": "Asset Version Id"
         },
-        "run_id": {
+        "canonical_schema_version": {
           "minLength": 1,
           "pattern": ".*\\S.*",
-          "title": "Run Id",
+          "title": "Canonical Schema Version",
           "type": "string"
-        },
-        "source_file_id": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "pattern": ".*\\S.*",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Source File Id"
-        },
-        "source_unit_id": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "pattern": ".*\\S.*",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Source Unit Id"
         },
         "content_hash": {
           "anyOf": [
@@ -92,12 +48,16 @@
           ],
           "title": "Content Hash"
         },
-        "domain_schema_version": {
-          "enum": [
-            "1.0",
-            "2.0"
-          ],
-          "title": "Domain Schema Version",
+        "contract_kind": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Contract Kind",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Contract Version",
           "type": "string"
         },
         "domain_contract_hash": {
@@ -105,73 +65,13 @@
           "title": "Domain Contract Hash",
           "type": "string"
         },
-        "semantic_contract_hash": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+        "domain_schema_version": {
+          "enum": [
+            "1.0",
+            "2.0"
           ],
-          "title": "Semantic Contract Hash"
-        },
-        "canonical_schema_version": {
-          "minLength": 1,
-          "pattern": ".*\\S.*",
-          "title": "Canonical Schema Version",
+          "title": "Domain Schema Version",
           "type": "string"
-        },
-        "prompt_version": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "pattern": ".*\\S.*",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Prompt Version"
-        },
-        "prompt_hash": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Prompt Hash"
-        },
-        "model_version": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "pattern": ".*\\S.*",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Model Version"
-        },
-        "model_hash": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Model Hash"
         },
         "extractor_name": {
           "anyOf": [
@@ -199,6 +99,41 @@
           ],
           "title": "Extractor Version"
         },
+        "immutable_locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImmutableSourceLocator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Hash"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Version"
+        },
         "parent_artifact_ids": {
           "default": [],
           "items": {
@@ -215,15 +150,80 @@
           "title": "Parent Record Ids",
           "type": "array"
         },
-        "immutable_locator": {
+        "project_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "prompt_hash": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ImmutableSourceLocator"
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
             },
             {
               "type": "null"
             }
-          ]
+          ],
+          "title": "Prompt Hash"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Version"
+        },
+        "run_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "semantic_contract_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Semantic Contract Hash"
+        },
+        "source_file_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source File Id"
+        },
+        "source_unit_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Unit Id"
         }
       },
       "required": [
@@ -254,12 +254,6 @@
       "additionalProperties": false,
       "description": "Typed immutable adapter over ``build_source_locator``.",
       "properties": {
-        "locator_version": {
-          "const": "1.0",
-          "default": "1.0",
-          "title": "Locator Version",
-          "type": "string"
-        },
         "blob_uri": {
           "anyOf": [
             {
@@ -284,71 +278,6 @@
           "default": null,
           "title": "Blob Version Id"
         },
-        "source_uri": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Source Uri"
-        },
-        "page": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Page"
-        },
-        "sheet": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sheet"
-        },
-        "slide": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Slide"
-        },
-        "section_path": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Section Path"
-        },
         "cell_range": {
           "anyOf": [
             {
@@ -360,19 +289,6 @@
           ],
           "default": null,
           "title": "Cell Range"
-        },
-        "char_start": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Char Start"
         },
         "char_end": {
           "anyOf": [
@@ -387,40 +303,18 @@
           "default": null,
           "title": "Char End"
         },
-        "polygon": {
+        "char_start": {
           "anyOf": [
             {
-              "$ref": "#/$defs/JsonValue"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "sheet_zone": {
-          "anyOf": [
-            {
-              "type": "string"
+              "minimum": 0,
+              "type": "integer"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "title": "Sheet Zone"
-        },
-        "tile_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Tile Id"
+          "title": "Char Start"
         },
         "coordinate_system": {
           "anyOf": [
@@ -434,16 +328,16 @@
           "default": null,
           "title": "Coordinate System"
         },
-        "transform": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonValue"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "locator_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Locator Hash",
+          "type": "string"
+        },
+        "locator_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Locator Version",
+          "type": "string"
         },
         "native_layer_id": {
           "anyOf": [
@@ -469,10 +363,116 @@
           "default": null,
           "title": "Native Object Id"
         },
-        "locator_hash": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Locator Hash",
-          "type": "string"
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "polygon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "section_path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Path"
+        },
+        "sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet"
+        },
+        "sheet_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet Zone"
+        },
+        "slide": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slide"
+        },
+        "source_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Uri"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "transform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -485,74 +485,9 @@
   },
   "additionalProperties": false,
   "properties": {
-    "identity": {
-      "$ref": "#/$defs/CanonicalIdentityEnvelope"
-    },
-    "contract_version": {
-      "const": "1.0.0",
-      "default": "1.0.0",
-      "title": "Contract Version",
-      "type": "string"
-    },
-    "domain_design_context_id": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Domain Design Context Id",
-      "type": "string"
-    },
-    "domain_intake_id": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Domain Intake Id",
-      "type": "string"
-    },
-    "domain_intake_hash": {
+    "budget_snapshot_hash": {
       "pattern": "^[0-9a-f]{64}$",
-      "title": "Domain Intake Hash",
-      "type": "string"
-    },
-    "source_profile_id": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Source Profile Id",
-      "type": "string"
-    },
-    "source_profile_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Source Profile Hash",
-      "type": "string"
-    },
-    "input_manifest_id": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Input Manifest Id",
-      "type": "string"
-    },
-    "input_manifest_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Input Manifest Hash",
-      "type": "string"
-    },
-    "source_corpus_manifest_id": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Source Corpus Manifest Id",
-      "type": "string"
-    },
-    "source_corpus_manifest_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Source Corpus Manifest Hash",
-      "type": "string"
-    },
-    "design_sample_manifest_id": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Design Sample Manifest Id",
-      "type": "string"
-    },
-    "design_sample_manifest_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Design Sample Manifest Hash",
+      "title": "Budget Snapshot Hash",
       "type": "string"
     },
     "competency_question_ids": {
@@ -564,6 +499,11 @@
       "title": "Competency Question Ids",
       "type": "array"
     },
+    "completeness_requirement_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Completeness Requirement Hash",
+      "type": "string"
+    },
     "completeness_requirement_ids": {
       "items": {
         "minLength": 1,
@@ -573,29 +513,49 @@
       "title": "Completeness Requirement Ids",
       "type": "array"
     },
-    "completeness_requirement_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Completeness Requirement Hash",
+    "contract_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Contract Version",
       "type": "string"
     },
-    "hierarchy_hash": {
+    "design_context_hash": {
       "pattern": "^[0-9a-f]{64}$",
-      "title": "Hierarchy Hash",
+      "title": "Design Context Hash",
       "type": "string"
     },
-    "identity_policy_hash": {
+    "design_sample_manifest_hash": {
       "pattern": "^[0-9a-f]{64}$",
-      "title": "Identity Policy Hash",
+      "title": "Design Sample Manifest Hash",
       "type": "string"
     },
-    "source_unit_ids": {
-      "items": {
-        "minLength": 1,
-        "pattern": ".*\\S.*",
-        "type": "string"
-      },
-      "title": "Source Unit Ids",
-      "type": "array"
+    "design_sample_manifest_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Design Sample Manifest Id",
+      "type": "string"
+    },
+    "domain_design_context_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Design Context Id",
+      "type": "string"
+    },
+    "domain_intake_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Domain Intake Hash",
+      "type": "string"
+    },
+    "domain_intake_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Intake Id",
+      "type": "string"
+    },
+    "evidence_span_content_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evidence Span Content Hash",
+      "type": "string"
     },
     "evidence_span_ids": {
       "items": {
@@ -606,21 +566,28 @@
       "title": "Evidence Span Ids",
       "type": "array"
     },
-    "prompt_version": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Prompt Version",
-      "type": "string"
-    },
-    "prompt_hash": {
+    "hierarchy_hash": {
       "pattern": "^[0-9a-f]{64}$",
-      "title": "Prompt Hash",
+      "title": "Hierarchy Hash",
       "type": "string"
     },
-    "model_version": {
+    "identity": {
+      "$ref": "#/$defs/CanonicalIdentityEnvelope"
+    },
+    "identity_policy_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Identity Policy Hash",
+      "type": "string"
+    },
+    "input_manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Input Manifest Hash",
+      "type": "string"
+    },
+    "input_manifest_id": {
       "minLength": 1,
       "pattern": ".*\\S.*",
-      "title": "Model Version",
+      "title": "Input Manifest Id",
       "type": "string"
     },
     "model_hash": {
@@ -628,31 +595,10 @@
       "title": "Model Hash",
       "type": "string"
     },
-    "selector_version": {
+    "model_version": {
       "minLength": 1,
       "pattern": ".*\\S.*",
-      "title": "Selector Version",
-      "type": "string"
-    },
-    "selector_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Selector Hash",
-      "type": "string"
-    },
-    "scorer_version": {
-      "minLength": 1,
-      "pattern": ".*\\S.*",
-      "title": "Scorer Version",
-      "type": "string"
-    },
-    "scorer_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Scorer Hash",
-      "type": "string"
-    },
-    "budget_snapshot_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Budget Snapshot Hash",
+      "title": "Model Version",
       "type": "string"
     },
     "parent_correction_context_id": {
@@ -669,10 +615,74 @@
       "default": null,
       "title": "Parent Correction Context Id"
     },
-    "design_context_hash": {
+    "prompt_hash": {
       "pattern": "^[0-9a-f]{64}$",
-      "title": "Design Context Hash",
+      "title": "Prompt Hash",
       "type": "string"
+    },
+    "prompt_version": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Prompt Version",
+      "type": "string"
+    },
+    "scorer_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Scorer Hash",
+      "type": "string"
+    },
+    "scorer_version": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Scorer Version",
+      "type": "string"
+    },
+    "selector_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Selector Hash",
+      "type": "string"
+    },
+    "selector_version": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Selector Version",
+      "type": "string"
+    },
+    "source_corpus_manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Corpus Manifest Hash",
+      "type": "string"
+    },
+    "source_corpus_manifest_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Source Corpus Manifest Id",
+      "type": "string"
+    },
+    "source_profile_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Profile Hash",
+      "type": "string"
+    },
+    "source_profile_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Source Profile Id",
+      "type": "string"
+    },
+    "source_unit_content_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Unit Content Hash",
+      "type": "string"
+    },
+    "source_unit_ids": {
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Source Unit Ids",
+      "type": "array"
     }
   },
   "required": [
@@ -694,7 +704,9 @@
     "hierarchy_hash",
     "identity_policy_hash",
     "source_unit_ids",
+    "source_unit_content_hash",
     "evidence_span_ids",
+    "evidence_span_content_hash",
     "prompt_version",
     "prompt_hash",
     "model_version",
@@ -707,7 +719,5 @@
     "design_context_hash"
   ],
   "title": "DomainDesignContext",
-  "type": "object",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "l1-domain-design-context-1.0.0.schema.json"
+  "type": "object"
 }

@@ -17,10 +17,11 @@ normalizes model-proposed candidates, and seals one immutable
 `DomainContractV2` after one explicit user decision.
 
 L1 does not extract canonical entities or relationships, publish an ontology,
-mutate a running schema, import external ontology content, or activate schema-2
-enrichment. L2 and later layers remain fail-closed until their required receipt
-integration is implemented. Schema-1 behavior is unchanged and is selected with
-`--legacy-schema-1`.
+mutate a running schema, or import external ontology content. After approval,
+`fabric-kg enrich --domain-file domain.yaml` activates schema-constrained L2
+and emits its receipt; later layers remain fail-closed until their required
+receipt integration is implemented. Schema-1 behavior is unchanged and is
+selected with `--legacy-schema-1`.
 
 ## 2. Inputs and immutable outputs
 
@@ -130,12 +131,19 @@ fabric-kg init-domain \
 
 fabric-kg domain approve \
   --file domain.yaml \
+  --project-id "$PROJECT_ID" \
+  --run-id "$L1_RUN_ID" \
+  --proposal-hash "$L1_PROPOSAL_HASH" \
   --proposal .fkg/l1/domain-proposal.json \
   --design-context .fkg/l1/domain-design-context.json \
   --source-profile .fkg/l1/domain-source-profile.json \
   --source-corpus-manifest .fkg/l1/source-corpus-manifest.json \
   --design-sample-manifest .fkg/l1/design-sample-manifest.json
 ```
+
+`PROJECT_ID`, `L1_RUN_ID`, and `L1_PROPOSAL_HASH` are independent approval
+inputs retained from the `init-domain` invocation/output. Approval fails if
+they do not match the complete persisted L1 artifact set.
 
 The one-summary decision is `approve`, `correct`, or `abort`. Corrections create
 a new proposal linked to the prior proposal; approval never mutates a proposal.
