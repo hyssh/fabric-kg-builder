@@ -15,6 +15,17 @@
   satisfies `text[start:end] == quote`, so this strengthens rather than relaxes
   the evidence contract. The extraction verifier and L3 validator versions move
   to `1.1.0` accordingly, which also invalidates stale leaf checkpoints.
+- Fixed relationship endpoints being discarded for the same untrusted-offset
+  reason as the extraction anchor above. When a proposed occurrence anchor did
+  not exactly delimit its own quote the endpoint was immediately reported
+  `ENDPOINT_EVIDENCE_UNGROUNDED`, even though the adjacent anchorless path
+  already located endpoints by exact text and would have succeeded. Supplying
+  an anchor was therefore strictly worse than supplying none. A proposed
+  endpoint anchor is now re-derived from the span text when its bounds do not
+  hold, accepted only on a unique occurrence, and recorded with the
+  informational `ENDPOINT_ANCHOR_RELOCATED` reason code; ambiguous and absent
+  quotes stay ungrounded. Informational codes no longer make an otherwise
+  fully grounded outcome report as ungrounded.
 - Fixed L3 being unable to assert any entity whose type uses a `business_key`
   identity policy. L2 normalized the business key in memory to mint the entity
   ID and then discarded it, so L3 had no witness with which to reproduce that

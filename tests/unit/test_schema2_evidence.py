@@ -729,6 +729,87 @@ def test_repeated_endpoint_names_require_one_exact_occurrence_anchor() -> None:
     assert anchored.occurrences[0].span_start == 0
 
 
+def test_a_shifted_endpoint_anchor_is_relocated_not_rejected() -> None:
+    text = "Note. Depot D serves Truck T today."
+
+    outcome = ground_endpoints(
+        source_text=text,
+        span_start=0,
+        span_end=len(text),
+        requests=(
+            EndpointGroundingRequest(
+                endpoint_id="entity:source",
+                role="source",
+                anchor=ProposedOccurrenceAnchor(
+                    span_start=0,
+                    span_end=7,
+                    quote="Depot D",
+                ),
+            ),
+            EndpointGroundingRequest(
+                endpoint_id="entity:target",
+                role="target",
+                terms=("Truck T",),
+            ),
+        ),
+    )
+
+    assert outcome.grounded
+    assert outcome.reason_codes == ("ENDPOINT_ANCHOR_RELOCATED",)
+    source = next(
+        item for item in outcome.occurrences if item.role == "source"
+    )
+    assert text[source.span_start : source.span_end] == "Depot D"
+
+
+def test_an_ambiguous_endpoint_anchor_quote_is_never_guessed() -> None:
+    text = "Pump 1 replaced Pump 1 in Bay 2."
+
+    outcome = ground_endpoints(
+        source_text=text,
+        span_start=0,
+        span_end=len(text),
+        requests=(
+            EndpointGroundingRequest(
+                endpoint_id="entity:a",
+                role="source",
+                anchor=ProposedOccurrenceAnchor(
+                    span_start=40,
+                    span_end=46,
+                    quote="Pump 1",
+                ),
+            ),
+        ),
+    )
+
+    assert not outcome.grounded
+    assert outcome.reason_codes == ("ENDPOINT_EVIDENCE_UNGROUNDED",)
+
+
+def test_an_endpoint_anchor_quote_absent_from_the_span_stays_ungrounded() -> None:
+    text = "Depot D serves Truck T today."
+
+    outcome = ground_endpoints(
+        source_text=text,
+        span_start=0,
+        span_end=len(text),
+        requests=(
+            EndpointGroundingRequest(
+                endpoint_id="entity:a",
+                role="source",
+                anchor=ProposedOccurrenceAnchor(
+                    span_start=0,
+                    span_end=7,
+                    quote="Depot Z",
+                ),
+            ),
+        ),
+    )
+
+    assert not outcome.grounded
+    assert outcome.reason_codes == ("ENDPOINT_EVIDENCE_UNGROUNDED",)
+
+
 def test_one_span_cannot_ground_two_endpoints_to_the_same_occurrence() -> None:
     text = "Pump 1 relates to itself."
 

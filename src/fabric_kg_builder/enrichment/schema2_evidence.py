@@ -124,6 +124,7 @@ UNRESOLVED_REASONS = frozenset(
 INFORMATIONAL_REASONS = frozenset(
     {
         "DOMAIN_REREVIEW_REQUESTED",
+        "ENDPOINT_ANCHOR_RELOCATED",
         "EVIDENCE_ANCHOR_RELOCATED",
         "MODEL_EVIDENCE_ID_IGNORED",
     }
@@ -468,7 +469,9 @@ class GroundingOutcome:
 
     @property
     def grounded(self) -> bool:
-        return not self.reason_codes
+        # Informational codes record how an occurrence was proven, not whether
+        # it was; only a real failure leaves the endpoints ungrounded.
+        return not (set(self.reason_codes) - INFORMATIONAL_REASONS)
 
 
 def exact_occurrences(text: str, term: str) -> tuple[tuple[int, int], ...]:
@@ -504,11 +507,13 @@ def ground_endpoints(
     occurrences: list[GroundedOccurrence] = []
     for request in sorted(requests, key=lambda item: (item.role, item.endpoint_id)):
         anchor = request.anchor
+        relocated: tuple[int, int] | None = None
         if anchor is not None:
+            anchor_quote = normalize_nfc(anchor.quote)
             inside = span_start <= anchor.span_start < anchor.span_end <= span_end
             if inside and source_text[
                 anchor.span_start : anchor.span_end
-            ] == normalize_nfc(anchor.quote):
+            ] == anchor_quote:
                 occurrences.append(
                     GroundedOccurrence(
                         endpoint_id=request.endpoint_id,
@@ -518,7 +523,22 @@ def ground_endpoints(
                     )
                 )
                 continue
-            reasons.add("ENDPOINT_EVIDENCE_UNGROUNDED")
+            # The proposed endpoint offsets are untrusted arithmetic, exactly as
+            # the extraction anchor is. Re-derive them from the span text and
+            # accept only an unambiguous occurrence rather than failing outright.
+            located = locate_unique_quote(quote, anchor_quote)
+            if located is not None:
+                relocated = (span_start + located[0], span_start + located[1])
+        if relocated is not None:
+            reasons.add("ENDPOINT_ANCHOR_RELOCATED")
+            occurrences.append(
+                GroundedOccurrence(
+                    endpoint_id=request.endpoint_id,
+                    role=request.role,
+                    span_start=relocated[0],
+                    span_end=relocated[1],
+                )
+            )
             continue
         matches: set[tuple[int, int]] = set()
         for term in request.terms:
