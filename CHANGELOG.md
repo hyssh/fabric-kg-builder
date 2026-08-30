@@ -9,3 +9,7 @@
 - Added Python 3.12 external installed-CLI acceptance tooling and release proof
   templates.
 - Kept the 0.2.4 acceptance path local and CLI-only.
+- Hardened long-running schema-2 enrichment: transient Foundry transport
+  failures (connectivity, timeout, throttling, server faults) are retried with
+  bounded backoff instead of aborting a resumable run, while request,
+  authentication, authorization, and validation failures still fail fast.
