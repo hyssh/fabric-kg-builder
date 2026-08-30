@@ -32,3 +32,10 @@
   never deletes or relocates a path the journal names.
 - Extended failure-detail redaction to quoted values, storage/service-bus
   connection keys, URL userinfo, and bare JWTs.
+- Allowed `app deploy-l7` to prove the direct Azure AI Search index path when
+  the Search managed identity lacks its Foundry role, via an explicit
+  `search.agentic_components: "deferred"` opt-in. The preview knowledge source
+  and knowledge base are then reported as deferred components and are never
+  created or claimed as successful; the default remains a capability NO-GO, a
+  release-owned name collision is still a NO-GO, and the index itself can never
+  be deferred.

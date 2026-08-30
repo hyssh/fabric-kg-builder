@@ -194,6 +194,7 @@ class SearchTarget(_StrictModel):
     knowledge_source_name: str
     knowledge_base_name: str
     api_version: str = "2025-11-01-preview"
+    agentic_components: Literal["required", "deferred"] = "required"
     foundry_role_assignment_id: str = ""
     search_managed_identity_principal_id: str = ""
     foundry_role_definition_id: str = ""
@@ -1286,9 +1287,25 @@ class L7Planner:
         )
         for component, resource_id, name, desired_hash, capability in search_resources:
             observed = reads.get(resource_id.casefold())
+            agentic = capability != "search.index"
             if not observation.capabilities.get(capability, False):
-                action = "no-go"
-                reason = "required Search capability or managed-identity role unavailable"
+                if agentic and config.search.agentic_components == "deferred":
+                    # The preview agentic components need the Search service
+                    # managed identity to hold Cognitive Services User on the
+                    # Foundry account. Explicitly deferring them proves the
+                    # direct index path without ever reporting preview success.
+                    action = "deferred"
+                    reason = (
+                        "explicitly deferred; the Search managed identity lacks "
+                        "the required Foundry role, so the preview agentic "
+                        "capability is not deployed or claimed"
+                    )
+                else:
+                    action = "no-go"
+                    reason = (
+                        "required Search capability or managed-identity role "
+                        "unavailable"
+                    )
             elif observed is not None and observed.exists:
                 action = "no-go"
                 reason = "release-owned Search name collision; adoption is forbidden"

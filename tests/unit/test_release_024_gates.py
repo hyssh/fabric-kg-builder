@@ -1819,3 +1819,115 @@ def test_search_authorization_failure_names_the_required_roles(
     assert "HTTP 403" in message
     assert "Search Index Data Contributor" in message
     assert config.search.endpoint in message
+
+
+def _agentic_capability_inputs(
+    tmp_path: Path, *, mode: str | None
+) -> tuple[Path, Path]:
+    """Inputs where the Search managed identity lacks its Foundry role."""
+    config_path, observation_path, _ = _inputs(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    if mode is not None:
+        raw["search"]["agentic_components"] = mode
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    observed = json.loads(observation_path.read_text(encoding="utf-8"))
+    observed["capabilities"]["search.knowledge-source"] = False
+    observed["capabilities"]["search.knowledge-base"] = False
+    observation_path.write_text(json.dumps(observed), encoding="utf-8")
+    return config_path, observation_path
+
+
+def _plan_for(config_path: Path, observation_path: Path, plan_path: Path):
+    result = CliRunner().invoke(
+        cli,
+        [
+            "app",
+            "deploy-l7",
+            "--config",
+            str(config_path),
+            "--observation",
+            str(observation_path),
+            "--plan",
+            str(plan_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return load_plan(plan_path)
+
+
+@pytest.mark.unit
+def test_missing_search_managed_identity_role_is_a_no_go_by_default(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path = _agentic_capability_inputs(
+        tmp_path, mode=None
+    )
+    plan = _plan_for(config_path, observation_path, tmp_path / "plan.json")
+    blocked = {
+        item.component for item in plan.actions if item.action == "no-go"
+    }
+    assert blocked == {"search-knowledge-source", "search-knowledge-base"}
+
+
+@pytest.mark.unit
+def test_explicit_deferral_proves_the_direct_index_without_claiming_preview(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path = _agentic_capability_inputs(
+        tmp_path, mode="deferred"
+    )
+    plan = _plan_for(config_path, observation_path, tmp_path / "plan.json")
+    by_component = {item.component: item for item in plan.actions}
+
+    # The preview components are deferred, never created and never a success.
+    for component in ("search-knowledge-source", "search-knowledge-base"):
+        assert by_component[component].action == "deferred"
+        assert "deferred" in by_component[component].reason
+    assert not [item for item in plan.actions if item.action == "no-go"]
+
+    # The direct index path is still actually deployed and verified.
+    assert by_component["search-index"].action == "create"
+
+
+@pytest.mark.unit
+def test_deferral_never_masks_a_release_owned_search_name_collision(
+    tmp_path: Path,
+) -> None:
+    config_path, observation_path = _agentic_capability_inputs(
+        tmp_path, mode="deferred"
+    )
+    observed = json.loads(observation_path.read_text(encoding="utf-8"))
+    observed["capabilities"]["search.knowledge-source"] = True
+    observed["resources"].append(
+        {
+            "resource_id": (
+                "https://example.search.windows.net/knowledgesources/"
+                "fabric-kg-024-source"
+            ),
+            "exists": True,
+            "resource_type": "SearchKnowledgeSource",
+            "name": "fabric-kg-024-source",
+        }
+    )
+    observation_path.write_text(json.dumps(observed), encoding="utf-8")
+
+    plan = _plan_for(config_path, observation_path, tmp_path / "plan.json")
+    by_component = {item.component: item for item in plan.actions}
+    assert by_component["search-knowledge-source"].action == "no-go"
+    assert "collision" in by_component["search-knowledge-source"].reason
+    # The still-unavailable knowledge base remains deferred, not created.
+    assert by_component["search-knowledge-base"].action == "deferred"
+
+
+@pytest.mark.unit
+def test_search_index_is_never_deferrable(tmp_path: Path) -> None:
+    config_path, observation_path = _agentic_capability_inputs(
+        tmp_path, mode="deferred"
+    )
+    observed = json.loads(observation_path.read_text(encoding="utf-8"))
+    observed["capabilities"]["search.index"] = False
+    observation_path.write_text(json.dumps(observed), encoding="utf-8")
+
+    plan = _plan_for(config_path, observation_path, tmp_path / "plan.json")
+    by_component = {item.component: item for item in plan.actions}
+    assert by_component["search-index"].action == "no-go"
