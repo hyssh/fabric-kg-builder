@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -71,14 +72,18 @@ _TRANSPORT_RETRY_MAX_SECONDS = 30.0
 # together instead of each burning an independent budget.
 _TRANSPORT_OUTAGE_BUDGET_SECONDS = 900.0
 _TRANSPORT_OUTAGE_MAX_SECONDS = 60.0
+# Outage waits are taken in slices so a worker resumes promptly once another
+# worker proves the provider is back, instead of sleeping out a stale backoff.
+_TRANSPORT_OUTAGE_POLL_SECONDS = 5.0
 _TRANSPORT_OUTAGE_BUDGET_ENV = "FABRIC_KG_FOUNDRY_OUTAGE_BUDGET_SECONDS"
 
 
 def _configured_outage_budget_seconds() -> float:
     """Return the outage budget, honouring an explicit environment override.
 
-    An unparseable or negative override is a configuration error and must not
-    be silently coerced into the default.
+    An unparseable, negative, or non-finite override is a configuration error
+    and must not be silently coerced into the default.  An infinite or NaN
+    budget would defeat the bound entirely and retry forever.
     """
     raw = os.environ.get(_TRANSPORT_OUTAGE_BUDGET_ENV)
     if raw is None or not raw.strip():
@@ -90,6 +95,11 @@ def _configured_outage_budget_seconds() -> float:
             f"{_TRANSPORT_OUTAGE_BUDGET_ENV} must be a number of seconds; "
             f"got {raw.strip()!r}"
         ) from exc
+    if not math.isfinite(budget):
+        raise ValueError(
+            f"{_TRANSPORT_OUTAGE_BUDGET_ENV} must be finite so retries stay "
+            f"bounded; got {raw.strip()!r}"
+        )
     if budget < 0.0:
         raise ValueError(
             f"{_TRANSPORT_OUTAGE_BUDGET_ENV} must not be negative; "
@@ -188,20 +198,69 @@ class _TransportOutageBreaker:
         """Hold a worker back while an outage window is already open.
 
         This is what keeps eight concurrent workers from hammering a provider
-        that one of them has already found to be down.
+        that one of them has already found to be down.  The wait is taken in
+        slices so a worker resumes promptly once another worker proves the
+        provider is back.
         """
         while True:
             with self._lock:
-                if self._exhausted:
-                    raise TransportOutageError(
-                        self._elapsed_locked(), self._budget()
-                    )
+                self._raise_if_spent_locked()
                 if self._opened_at is None:
                     return
                 remaining = self._resume_at - self._monotonic()
                 if remaining <= 0.0:
                     return
-            self.sleep(min(remaining, self._max_seconds))
+            self.sleep(
+                min(remaining, self._max_seconds, _TRANSPORT_OUTAGE_POLL_SECONDS)
+            )
+
+    def wait_before_retry(self, seconds: float) -> None:
+        """Sleep *seconds*, abandoning the wait early once the outage closes."""
+        remaining = seconds
+        while remaining > 0.0:
+            slice_seconds = min(remaining, _TRANSPORT_OUTAGE_POLL_SECONDS)
+            self.sleep(slice_seconds)
+            remaining -= slice_seconds
+            with self._lock:
+                if self._opened_at is None or self._exhausted:
+                    return
+
+    def ensure_within_budget(self) -> None:
+        """Refuse to start new work once an open outage has spent its budget.
+
+        The budget bounds the time the breaker will keep *initiating* requests.
+        A request already in flight still runs to the SDK's own timeout.
+        """
+        with self._lock:
+            self._raise_if_spent_locked()
+
+    def remaining_budget(self) -> float:
+        """Seconds left in the open outage window, or infinity when closed."""
+        with self._lock:
+            if self._opened_at is None:
+                return math.inf
+            return max(0.0, self._budget() - self._elapsed_locked())
+
+    def _raise_if_spent_locked(self) -> None:
+        budget = self._budget()
+        if self._exhausted:
+            raise TransportOutageError(self._elapsed_locked(), budget)
+        if self._opened_at is None:
+            return
+        elapsed = self._elapsed_locked()
+        if elapsed < budget:
+            return
+        self._exhausted = True
+        self._longest_outage_seconds = max(
+            self._longest_outage_seconds, elapsed
+        )
+        _LOGGER.error(
+            "foundry transport outage budget exhausted; "
+            "elapsed_seconds=%.1f; budget_seconds=%.1f",
+            elapsed,
+            budget,
+        )
+        raise TransportOutageError(elapsed, budget)
 
     def _elapsed_locked(self) -> float:
         if self._opened_at is None:
@@ -215,10 +274,8 @@ class _TransportOutageBreaker:
         """
         budget = self._budget()
         with self._lock:
-            if self._exhausted:
-                raise TransportOutageError(self._elapsed_locked(), budget)
             now = self._monotonic()
-            if self._opened_at is None:
+            if self._opened_at is None and not self._exhausted:
                 self._opened_at = now
                 self._delay = self._base_seconds
                 self._outages += 1
@@ -227,20 +284,9 @@ class _TransportOutageBreaker:
                     "budget_seconds=%.1f",
                     budget,
                 )
+            self._raise_if_spent_locked()
             elapsed = max(0.0, now - self._opened_at)
             remaining = budget - elapsed
-            if remaining <= 0.0:
-                self._exhausted = True
-                self._longest_outage_seconds = max(
-                    self._longest_outage_seconds, elapsed
-                )
-                _LOGGER.error(
-                    "foundry transport outage budget exhausted; "
-                    "elapsed_seconds=%.1f; budget_seconds=%.1f",
-                    elapsed,
-                    budget,
-                )
-                raise TransportOutageError(elapsed, budget)
             delay = min(self._delay, self._max_seconds, remaining)
             self._delay = min(self._delay * 2.0, self._max_seconds)
             self._resume_at = now + delay
@@ -352,6 +398,8 @@ def _call_with_transport_retry(
         delay = _TRANSPORT_RETRY_BASE_SECONDS
         last_exc: BaseException | None = None
         for attempt in range(1, max_attempts + 1):
+            # Never start new work once an open outage has spent its budget.
+            breaker.ensure_within_budget()
             try:
                 result = operation()
             except Exception as exc:
@@ -360,7 +408,13 @@ def _call_with_transport_retry(
                 last_exc = exc
                 if attempt >= max_attempts:
                     break
-                backoff(min(delay, _TRANSPORT_RETRY_MAX_SECONDS))
+                backoff(
+                    min(
+                        delay,
+                        _TRANSPORT_RETRY_MAX_SECONDS,
+                        breaker.remaining_budget(),
+                    )
+                )
                 delay *= 2
             else:
                 breaker.record_success()
@@ -369,7 +423,7 @@ def _call_with_transport_retry(
             wait = breaker.record_outage()
         except TransportOutageError as exhausted:
             raise exhausted from last_exc
-        backoff(wait)
+        breaker.wait_before_retry(wait)
 
 
 class FoundryClient:

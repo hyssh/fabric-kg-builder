@@ -6,6 +6,7 @@ Uses the mock Foundry client from conftest.py — no live API calls.
 from __future__ import annotations
 
 import json
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -563,8 +564,10 @@ def test_outage_tier_is_bounded_by_its_budget() -> None:
         )
 
     assert excinfo.value.budget_seconds == 120.0
-    # The breaker must never wait meaningfully past its own budget.
-    assert clock.now - 1000.0 <= 120.0 + 30.0
+    # No new request is started once the open window has spent its budget:
+    # the outage itself never exceeds the budget.
+    assert breaker.metrics()["transport_longest_outage_seconds"] <= 120.0
+    assert excinfo.value.elapsed_seconds <= 120.0
     assert breaker.metrics()["transport_outage_budget_exhausted"] is True
 
 
@@ -637,6 +640,87 @@ def test_concurrent_workers_share_one_outage_budget() -> None:
 
     # One shared window, not one per worker.
     assert breaker.metrics()["transport_outages"] == 1
+
+
+def test_real_threads_share_one_window_and_resume_together() -> None:
+    """Eight real workers must share one window and resume after recovery."""
+    import threading
+
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    workers = 8
+    breaker = module._TransportOutageBreaker(
+        budget_seconds=30.0,
+        base_seconds=0.01,
+        max_seconds=0.05,
+        sleep=lambda seconds: time.sleep(min(seconds, 0.02)),
+    )
+    down = threading.Event()
+    down.set()
+    started = threading.Barrier(workers)
+    calls = {"n": 0}
+    counter_lock = threading.Lock()
+    results: list[object] = []
+
+    def operation() -> str:
+        with counter_lock:
+            calls["n"] += 1
+        if down.is_set():
+            raise _FakeConnectionError("Connection error.")
+        return "ok"
+
+    def worker() -> None:
+        started.wait(timeout=10.0)
+        try:
+            results.append(
+                module._call_with_transport_retry(
+                    operation, max_attempts=2, breaker=breaker
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - failure diagnostic
+            results.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    # Let every worker discover the outage, then restore the provider.
+    time.sleep(0.5)
+    outages_during = breaker.metrics()["transport_outages"]
+    down.clear()
+    for thread in threads:
+        thread.join(timeout=20.0)
+
+    assert not any(thread.is_alive() for thread in threads), "worker deadlock"
+    assert results == ["ok"] * workers
+    # One shared window for all eight workers, not one each.
+    assert outages_during == 1
+    assert breaker.metrics()["transport_outages"] == 1
+    assert breaker.metrics()["transport_outage_budget_exhausted"] is False
+
+
+def test_recovery_releases_workers_without_waiting_out_the_backoff() -> None:
+    """A closed window must not leave a worker sleeping out a stale delay."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    clock = _FakeClock()
+    breaker = _breaker(clock, budget_seconds=600.0)
+    breaker.record_outage()
+    # A long wait is abandoned as soon as another worker closes the window.
+    breaker.record_success()
+
+    breaker.wait_before_retry(300.0)
+
+    assert clock.now - 1000.0 <= module._TRANSPORT_OUTAGE_POLL_SECONDS
+
+
+def test_outage_budget_override_rejects_non_finite_values(monkeypatch) -> None:
+    """An infinite or NaN budget would retry forever and is rejected."""
+    from fabric_kg_builder.enrichment import foundry_client as module
+
+    for raw in ("nan", "inf", "-inf", "Infinity"):
+        monkeypatch.setenv(module._TRANSPORT_OUTAGE_BUDGET_ENV, raw)
+        with pytest.raises(ValueError, match="finite"):
+            module._configured_outage_budget_seconds()
 
 
 def test_breaker_metrics_are_sanitized() -> None:
