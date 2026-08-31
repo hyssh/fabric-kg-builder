@@ -1341,6 +1341,28 @@ def relationship_direction_reasons(
     return resolve_direction(proposed_direction)
 
 
+def relationship_orientation_reasons(
+    *,
+    orientation_uniquely_compatible: bool,
+    blocking_reason_codes: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Re-prove direction from the approved hierarchy, not a missing token.
+
+    The frozen L2 carrier does not persist the model-proposed direction token,
+    but it does persist both endpoint ids and their proposed semantic types. When
+    the approved hierarchy admits the proposed orientation and rejects the
+    reversed one, exactly one direction is consistent with the ontology, so the
+    direction is re-proved locally from the sealed carrier rather than assumed.
+
+    When both orientations are admissible the carrier genuinely cannot decide
+    direction, so the relationship stays an explicit validator-capability gap.
+    """
+
+    if orientation_uniquely_compatible:
+        return ()
+    return unprovable_assertion_reasons(blocking_reason_codes)
+
+
 def property_attribution_reasons(
     *,
     owner_attribution_persisted: bool,

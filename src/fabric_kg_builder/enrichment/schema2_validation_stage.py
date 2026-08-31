@@ -82,7 +82,7 @@ from .schema2_evidence import (
     evaluate_inherited_constraints,
     is_minted_contract_id,
     property_attribution_reasons,
-    relationship_direction_reasons,
+    relationship_orientation_reasons,
     require_extraction_evidence,
     resolve_identity_witness,
     resolve_most_specific_classification,
@@ -1421,6 +1421,7 @@ def _validate_leaf(
                 resolved_target,
                 source_path,
                 target_path,
+                orientation_uniquely_compatible,
             ) = _relationship_reasons(
                 record=record,
                 hierarchy=hierarchy,
@@ -1435,11 +1436,12 @@ def _validate_leaf(
             if record.semantic_id in shared.relationship_identity_conflicts:
                 reasons.add("SEMANTIC_ID_MISMATCH")
             # The frozen L2 carrier never persists the model-proposed direction
-            # token, so a relationship is never asserted as direction-proven.
+            # token, but it does persist both endpoints and their proposed
+            # types, so the approved hierarchy re-proves the orientation when it
+            # admits exactly one.
             reasons.update(
-                relationship_direction_reasons(
-                    proposed_direction=None,
-                    direction_persisted=False,
+                relationship_orientation_reasons(
+                    orientation_uniquely_compatible=orientation_uniquely_compatible,
                     blocking_reason_codes=reasons,
                 )
             )
@@ -1608,13 +1610,15 @@ def _relationship_reasons(
     source_unit: SourceUnit,
     anchor: ProposedOccurrenceAnchor | None,
     evidence_span: EvidenceSpanV1_1 | None,
-) -> tuple[tuple[str, ...], str | None, str | None, tuple[str, ...], tuple[str, ...]]:
+) -> tuple[
+    tuple[str, ...], str | None, str | None, tuple[str, ...], tuple[str, ...], bool
+]:
     reasons: set[str] = set()
     if record.approved_semantic_id is None:
-        return sorted_reasons(reasons), None, None, (), ()
+        return sorted_reasons(reasons), None, None, (), (), False
     relationship = hierarchy.relationship_by_id.get(record.approved_semantic_id)
     if relationship is None:
-        return ("HIERARCHY_CONCEPT_MISSING",), None, None, (), ()
+        return ("HIERARCHY_CONCEPT_MISSING",), None, None, (), (), False
 
     source_id, source_type, source_reasons = _resolve_endpoint(
         entity_id=record.proposed_source_entity_id,
@@ -1632,6 +1636,7 @@ def _relationship_reasons(
         reasons.add("ENDPOINT_UNRESOLVED")
     source_path: tuple[str, ...] = ()
     target_path: tuple[str, ...] = ()
+    orientation_uniquely_compatible = False
     if source_type is not None and target_type is not None:
         source_outcome = hierarchy.endpoint_outcome(
             relationship.relationship_type_id,
@@ -1643,18 +1648,19 @@ def _relationship_reasons(
             target_type,
             role="target",
         )
+        swapped_source = hierarchy.endpoint_outcome(
+            relationship.relationship_type_id,
+            target_type,
+            role="source",
+        )
+        swapped_target = hierarchy.endpoint_outcome(
+            relationship.relationship_type_id,
+            source_type,
+            role="target",
+        )
+        reversed_admissible = swapped_source.compatible and swapped_target.compatible
         if not source_outcome.compatible or not target_outcome.compatible:
-            swapped_source = hierarchy.endpoint_outcome(
-                relationship.relationship_type_id,
-                target_type,
-                role="source",
-            )
-            swapped_target = hierarchy.endpoint_outcome(
-                relationship.relationship_type_id,
-                source_type,
-                role="target",
-            )
-            if swapped_source.compatible and swapped_target.compatible:
+            if reversed_admissible:
                 # A reversed proposal is rejected, never silently swapped.
                 reasons.add("DIRECTION_MISMATCH")
             else:
@@ -1663,6 +1669,9 @@ def _relationship_reasons(
         else:
             source_path = source_outcome.inheritance_path
             target_path = target_outcome.inheritance_path
+            # Exactly one admissible orientation re-proves the direction the
+            # carrier never persisted; two admissible orientations do not.
+            orientation_uniquely_compatible = not reversed_admissible
 
     if evidence_span is not None and anchor is not None and source_id and target_id:
         # Ground endpoints inside the *verified* span. The proposed anchor may
@@ -1700,7 +1709,14 @@ def _relationship_reasons(
             ),
         )
         reasons.update(grounding.reason_codes)
-    return sorted_reasons(reasons), source_id, target_id, source_path, target_path
+    return (
+        sorted_reasons(reasons),
+        source_id,
+        target_id,
+        source_path,
+        target_path,
+        orientation_uniquely_compatible,
+    )
 
 
 def _endpoint_terms(

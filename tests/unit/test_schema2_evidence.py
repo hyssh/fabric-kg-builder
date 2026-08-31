@@ -85,6 +85,7 @@ from fabric_kg_builder.enrichment.schema2_evidence import (
     recompute_observation_entity_id,
     recompute_relationship_id,
     relationship_direction_reasons,
+    relationship_orientation_reasons,
     require_extraction_evidence,
     resolve_direction,
     resolve_identity_witness,
@@ -2155,3 +2156,38 @@ def test_endpoint_anchor_containment_uses_the_supplied_span() -> None:
 
     assert _endpoint_anchor(shared, "entity:a", "unit:1", 35, 80) is anchor
     assert _endpoint_anchor(shared, "entity:a", "unit:1", 0, 30) is None
+
+
+def test_unique_admissible_orientation_reproves_direction() -> None:
+    # The carrier never persists a direction token, but when the approved
+    # hierarchy admits the proposed orientation and rejects the reversed one,
+    # exactly one direction is consistent with the ontology, so direction is
+    # re-proved locally instead of being treated as unprovable.
+    proven = relationship_orientation_reasons(
+        orientation_uniquely_compatible=True,
+        blocking_reason_codes=(),
+    )
+    assert proven == ()
+    assert classify_state(proven) is AssertionState.ASSERTED
+
+
+def test_ambiguous_orientation_stays_an_explicit_capability_gap() -> None:
+    # Both orientations admissible means the sealed carrier genuinely cannot
+    # decide direction, so the relationship must not assert.
+    ambiguous = relationship_orientation_reasons(
+        orientation_uniquely_compatible=False,
+        blocking_reason_codes=(),
+    )
+    assert ambiguous == ("EVIDENCE_MODALITY_UNSUPPORTED",)
+    assert classify_state(ambiguous) is AssertionState.UNSUPPORTED
+
+
+def test_orientation_never_overwrites_a_more_precise_blocking_reason() -> None:
+    # A candidate already blocked for a precise reason keeps that reason and its
+    # deterministic state rather than being relabelled a capability gap.
+    blocked = relationship_orientation_reasons(
+        orientation_uniquely_compatible=False,
+        blocking_reason_codes=("ENDPOINT_EVIDENCE_UNGROUNDED",),
+    )
+    assert blocked == ()
+    assert classify_state(("ENDPOINT_EVIDENCE_UNGROUNDED",)) is AssertionState.REJECTED

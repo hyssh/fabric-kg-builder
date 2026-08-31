@@ -458,7 +458,6 @@ def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> No
         AssertionState.DISCOVERY,
         AssertionState.UNRESOLVED,
         AssertionState.REJECTED,
-        AssertionState.UNSUPPORTED,
     }
     assert len(result.rows.audit_candidates) == audit.input_candidate_count
     assert result.serving_projection.included_states == (AssertionState.ASSERTED,)
@@ -469,7 +468,18 @@ def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> No
         and item.current_state == AssertionState.ASSERTED.value
     }
     assert set(result.serving_projection.entity_assertion_ids) == asserted_ids
-    assert not result.serving_projection.relationship_assertion_ids
+    asserted_relationship_ids = {
+        item.semantic_id
+        for item in l3.candidate_results
+        if item.candidate_kind == "relationship"
+        and item.current_state == AssertionState.ASSERTED.value
+    }
+    assert (
+        set(result.serving_projection.relationship_assertion_ids)
+        == asserted_relationship_ids
+    )
+    # Property owner attribution and observed value are still not persisted by
+    # the L2 carrier, so properties remain an explicit capability gap.
     assert not result.serving_projection.property_assertion_ids
     assert all(
         row["entity_id"] in asserted_ids
@@ -1566,22 +1576,12 @@ def test_schema2_source_reconciles_relationship_hierarchy_authority(
         )
         for name in L4_PROJECTION_TABLE_SCHEMAS
     }
-    entities = tables["semantic_asserted_entities"]
-    relationship = {
-        "relationship_id": "relationship:forged",
-        "semantic_relationship_id": "semantic-relationship:forged",
-        "source_entity_id": entities[0]["entity_id"],
-        "target_entity_id": entities[1]["entity_id"],
-        "candidate_ids": ["candidate:forged"],
-        "evidence_span_ids": list(entities[0]["evidence_span_ids"]),
-        "source_inheritance_path": [],
-        "target_inheritance_path": [],
-        "hierarchy_hash": "f" * 64,
-        "domain_contract_hash": result.serving_projection.sealed_domain_contract_hash,
-        "semantic_contract_hash": (
-            result.serving_projection.sealed_semantic_contract_hash
-        ),
-    }
+    # Relationships now assert, so forge the hierarchy authority on a real row
+    # instead of substituting a synthetic edge. Only the hierarchy hash drifts,
+    # which isolates the authority reconciliation from every other invariant.
+    relationship = dict(tables["semantic_asserted_relationships"][0])
+    relationship.pop("row_hash", None)
+    relationship["hierarchy_hash"] = "f" * 64
     relationship["row_hash"] = canonical_sha256(relationship)
     tables["semantic_asserted_relationships"] = (relationship,)
     serving_values = result.serving_projection.model_dump(
@@ -1590,10 +1590,8 @@ def test_schema2_source_reconciles_relationship_hierarchy_authority(
     )
     id_hashes = dict(result.serving_projection.canonical_id_set_hashes)
     row_hashes = dict(result.serving_projection.canonical_row_hashes)
-    id_hashes["relationship"] = canonical_sha256(["relationship:forged"])
     row_hashes["relationship"] = canonical_sha256([relationship])
     serving_values.update({
-        "relationship_assertion_ids": ("relationship:forged",),
         "canonical_id_set_hashes": id_hashes,
         "canonical_row_hashes": row_hashes,
     })
@@ -1956,7 +1954,7 @@ def _l3_with_sealed_manifest(
         else:
             entries.append(entry)
     manifest_payload = (canonical_json(manifest) + "\n").encode("utf-8")
-    entries.append(schema2_validation_stage._artifact_entry(
+    manifest_entry = schema2_validation_stage._artifact_entry(
         artifact_id=manifest.required_member_manifest_id,
         contract_kind="c0.required_member_manifest",
         contract_version="1.1.0",
@@ -1967,7 +1965,13 @@ def _l3_with_sealed_manifest(
         byte_count=len(manifest_payload),
         row_count=len(manifest.members),
         canonical_id_set_hash=manifest.member_set_hash,
-    ))
+    )
+    # L3 already emits this entry whenever a relationship asserts, so replace it
+    # rather than appending a duplicate artifact id.
+    entries = [
+        entry for entry in entries if entry.artifact_id != manifest_entry.artifact_id
+    ]
+    entries.append(manifest_entry)
     entries.sort(key=lambda entry: entry.artifact_id)
     manifest_values = {
         "identity": l3.output_manifest.identity,
