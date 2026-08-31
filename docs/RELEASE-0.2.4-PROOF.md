@@ -161,15 +161,16 @@ which can never succeed because Azure AI Search populates every unset property
 on create; the readback is now projected onto the declared shape, so declared
 values still bind exactly while server defaults are ignored.
 
-### Azure AI Search preview agentic capability (still deferred)
+### Azure AI Search preview agentic capability (role gap since cleared)
 
-The Foundry account managed identity lacks the roles it needs on the Search
-service, so the preview knowledge source and knowledge base cannot be deployed.
-Until then the release must be run with `search.agentic_components: "deferred"`,
-which proves the direct index path and records both components as deferred.
-Preview agentic success is not claimed.
+The Foundry account managed identity initially lacked the roles it needs on the
+Search service, so the preview knowledge source and knowledge base could not be
+deployed. The live run recorded in this document was therefore made with
+`search.agentic_components: "deferred"`, which proves the direct index path and
+records both components as deferred. Preview agentic success is not claimed by
+that run.
 
-Clearing it requires an administrator to assign **`Search Index Data
+Clearing it required an administrator to assign **`Search Index Data
 Contributor`** and **`Search Service Contributor`** to the Foundry account
 system-assigned managed identity
 (`68ba71b4-c94b-42fe-8389-45a4c0755932`) **at the `ks0001-search` scope**.
@@ -178,10 +179,31 @@ An earlier revision of this document stated the grant in the opposite
 direction — the Search identity needing `Cognitive Services User` on the
 Foundry account. That was wrong and is corrected here. The grant flows
 Foundry -> Search, because the Search tool is invoked by the Foundry agent
-using the Foundry account's identity. Live read at 21:01Z confirms the
-direction and the remaining gap: the six assignments on `ks0001-search`
-include exactly one for `68ba71b4`, and it is `Cognitive Services User`, which
-is not sufficient on its own. Both required roles are still absent.
+using the Foundry account's identity.
+
+**The grant has since been made.** A live read at 2026-08-31 22:0xZ shows eight
+role assignments scoped directly to `ks0001-search`, three of which belong to
+`68ba71b4`: `Search Service Contributor`, `Search Index Data Contributor`, and
+`Cognitive Services User`. The earlier read in this document saw six
+assignments with only `Cognitive Services User` for that principal; it was
+accurate when taken and is superseded, not retracted.
+
+One identifier caveat is worth recording, because it caused a false
+contradiction during review. The Azure portal's IAM blade displays a managed
+identity's **application (client) ID**, while ARM role assignments store its
+**object ID**. For this identity those are
+`5cc908c3-fa1a-494c-8b21-8545ac974aa7` and
+`68ba71b4-c94b-42fe-8389-45a4c0755932` respectively — the same principal.
+Confirmed via Microsoft Graph: the service principal with object id `68ba71b4`
+has `appId` `5cc908c3` and `servicePrincipalType` `ManagedIdentity`. Neither
+that appId nor the project's own managed identity
+(`1f6c1296-bd8b-4f60-a29c-727e43b8f886`) appears in the assignment list, which
+is expected.
+
+A second caveat on method: enumerating role assignments at a resource scope
+without a filter returns inherited assignments too — 169 here. The counts above
+("six", "eight") deliberately mean assignments scoped **directly** to
+`ks0001-search`.
 
 The Fabric Data Agent tool is **not** governed by Azure RBAC at all. It does
 not support service principal authentication, only delegated user identity, so
@@ -359,10 +381,10 @@ error, so it must always be polled rather than trusting the 202.
   platform limitation, not a decision left open.
 - The provenance of the 400 documents in the live `fabric-kg-024-surface-index`
   is still unestablished.
-- The Foundry account managed identity still lacks `Search Index Data
-  Contributor` and `Search Service Contributor` on `ks0001-search`, so preview
-  agentic Search remains unproven. It holds only `Cognitive Services User`
-  there, which is not sufficient.
+- Preview agentic Search remains unproven, but no longer for a role reason: the
+  Foundry account managed identity now holds both required roles on
+  `ks0001-search` (see the RBAC section above). What is still unproven is the
+  preview knowledge source and knowledge base deployment itself.
 
 ### Ontology companions cannot be cleaned up
 
