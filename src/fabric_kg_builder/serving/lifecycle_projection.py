@@ -1000,16 +1000,22 @@ def _audit_rows_and_dispositions(
     dispositions: list[CandidateAccountingDisposition] = []
     states: Counter[AssertionState] = Counter()
     reasons: Counter[str] = Counter()
-    seen_inputs: set[str] = set()
+    seen_inputs: set[tuple[str, str]] = set()
     for batch_id in source.inputs.leaf_batch_ids:
         batch = source.inputs.batch_by_id[batch_id]
         for original in batch.candidate_dispositions:
-            if original.input_candidate_id in seen_inputs:
+            # input_candidate_id is minted per batch from the raw candidate hash
+            # and its occurrence within that batch, so two batches that propose
+            # identical raw text legitimately share one. Uniqueness holds at the
+            # scope the id is actually minted at, not globally.
+            input_key = (batch_id, original.input_candidate_id)
+            if input_key in seen_inputs:
                 raise L4ProjectionError(
                     "L4_ACCOUNTING_INCOMPLETE",
-                    f"input candidate {original.input_candidate_id} is duplicated",
+                    f"input candidate {original.input_candidate_id} is duplicated "
+                    f"within batch {batch_id}",
                 )
-            seen_inputs.add(original.input_candidate_id)
+            seen_inputs.add(input_key)
             retained_id = (
                 original.retained_candidate_id
                 if original.disposition == "retained"
