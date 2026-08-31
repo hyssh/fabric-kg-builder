@@ -372,6 +372,9 @@ SEMANTIC_ASSERTED_ENTITIES_SCHEMA = pa.schema([
     pa.field("asserted_type_ids", _LIST_STR, nullable=False),
     pa.field("candidate_ids", _LIST_STR, nullable=False),
     pa.field("evidence_span_ids", _LIST_STR, nullable=False),
+    # A verbatim mention taken from sealed evidence -- one phrase a source
+    # document uses for this entity, not an elected canonical name. Null when
+    # the entity has no span short enough to be a mention rather than prose.
     pa.field("label", _STR, nullable=True),
     pa.field("label_evidence_span_id", _STR, nullable=True),
     pa.field("hierarchy_hash", _STR, nullable=False),

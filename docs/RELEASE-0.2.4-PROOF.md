@@ -696,3 +696,64 @@ does need the L2 work. And it would not make the original failing question work:
 the device label would read `Ultra 5 16GB – 13” EP2-29720`, because the phrase
 "Surface Pro 10" does not appear in this corpus at all. That is a property of the
 source material, not a defect in the pipeline.
+
+### Delivered: labels projected from evidence (PR #109)
+
+The recompile above was carried out. Every asserted entity now carries a `label`
+and a `label_evidence_span_id` that proves where the label came from.
+
+Two corrections to the plan as first sketched, both forced by evidence:
+
+The label is **not** derived from `normalized_business_key`, which was the
+originally approved source. That field is not reachable at L4 —
+`enrichment/schema2_evidence.py:1248` states plainly that "the frozen carrier
+does not persist the normalized business key", and it appears nowhere under
+`serving/`. Using it would have meant reading unsealed L2 working state for a
+value carrying no hash. The label is taken instead from sealed evidence quotes,
+which are hash-verified, better-cased, and higher-coverage.
+
+The two new columns are **nullable**. This follows directly from the guardrail
+that uncovered entities get null rather than a fabricated placeholder: 775 of
+8,756 entities (8.9%) have no span short enough to be a mention rather than
+prose, so a non-nullable column could only be satisfied by inventing values for
+them. Nullability is what makes the no-placeholder rule expressible.
+
+Measured coverage, verified identically at L4 and again in the L5a published
+typed tables — 7,981 of 8,756 entities, **91.1%**:
+
+| type | rows | labelled |
+|---|---|---|
+| device | 726 | 99.9% |
+| tool | 1,500 | 99.5% |
+| component | 2,711 | 99.2% |
+| symptom | 96 | 91.7% |
+| procedure | 1,722 | 88.0% |
+| evidence | 756 | 75.7% |
+| warning | 1,245 | 72.3% |
+
+Terms that previously matched nothing now match: `battery` 493, `surface` 425,
+`display` 311, `kickstand` 93. Entity and relationship counts are unchanged at
+8,756 and 808, so no data drifted.
+
+The 120-character cap was measured rather than chosen. Because selection takes
+the *shortest* qualifying quote, raising the cap can never degrade an entity that
+already has a crisp mention; it only decides the fate of entities whose every
+span is long. Coverage runs 65.1% at cap 40, 77.1% at 60, 91.1% at 120, and 100%
+uncapped, while the median selected label moves only from 20 to 30 characters
+across that whole range. Inspection of both sides of the boundary showed 60–120
+still reads as a mention and beyond 120 is multi-sentence prose.
+
+**What this does not fix.** `semantic_asserted_properties` is still zero, so
+`model_id`, `component_id` and the other property columns remain null — and #108
+records that L5a would write null into them regardless of upstream data. A
+natural-language question must therefore match on `label`, not on those columns.
+And the original failing question still fails: devices label as
+`13-inch Platinum Mexico D0M-00036`, because "Surface Pro 10" is genuinely absent
+from the corpus. The label column is a separate improvement from Path B, not a
+substitute for it.
+
+Note also that the label is a **verbatim mention**, not a canonical name. The
+pipeline elects no canonical name, and this projection does not invent one — the
+value is one phrase a source document happens to use, chosen by a fixed
+deterministic rule. It should be read as "a way this entity is referred to".
+
