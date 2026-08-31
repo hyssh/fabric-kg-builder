@@ -66,6 +66,7 @@ from tests.unit.test_l5a_structured_publication import (
     _FakeClient as _L5aClient,
     _assets,
     _crosswalk,
+    _source_assets,
     _policy,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
@@ -327,15 +328,20 @@ def _inputs(tmp_path: Path):
         "ontology": "target:ontology",
         "graph": "target:graph",
     }
+    all_spans = tuple(
+        span for leaf in l3.leaves for span in leaf.evidence_spans
+    )
     l5a = run_l5a(
         source,
         crosswalks=(crosswalk,),
         access_policy=policy,
-        governed_assets=_assets(
-            source,
-            crosswalk,
-            policy,
-            target_ids,
+        governed_assets=(
+            *_assets(source, crosswalk, policy, target_ids),
+            *_source_assets(
+                _assets(source, crosswalk, policy, target_ids),
+                all_spans,
+                policy,
+            ),
         ),
         target_ids=target_ids,
         client=_L5aClient(),
@@ -381,8 +387,24 @@ def test_l5b_compiles_exact_search_resources_from_sealed_authority(
     }
     assert fields["canonical_entity_ids"]["searchable"] is True
     assert fields["canonical_assertion_ids"]["searchable"] is True
-    assert compiled.documents == ()
-    assert compiled.vector_state_hash == canonical_sha256([])
+    assert compiled.documents != ()
+    for document in compiled.documents:
+        assert document["lifecycle_state"] == "asserted"
+        assert document["source_quote_is_verbatim"] is True
+        assert document["source_quote"] == document["content"]
+        assert document["quote_hash"]
+        assert document["evidence_span_ids"]
+        assert document["canonical_entity_ids"]
+        assert (
+            document["access_policy_hash"]
+            == kwargs["access_policy"].policy_hash
+        )
+    assert compiled.vector_state_hash == canonical_sha256(
+        [
+            (item["id"], item["vector_state"], item["vector"])
+            for item in compiled.documents
+        ]
+    )
     assert L5B_AGENTIC_API_VERSION == "2026-05-01-preview"
 
 
@@ -533,7 +555,11 @@ def test_applicable_evidence_requires_exact_governed_source_asset(
             source_units=kwargs["source_units"],
             source_file_names=kwargs["source_file_names"],
             policy=kwargs["access_policy"],
-            assets=kwargs["governed_assets"],
+            assets=tuple(
+                asset
+                for asset in kwargs["governed_assets"]
+                if asset.asset_kind == "derived"
+            ),
         )
 
 

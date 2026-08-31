@@ -187,8 +187,14 @@ def test_l2_is_not_activated_in_product_cli() -> None:
     result = CliRunner().invoke(cli, ["--help"])
 
     assert result.exit_code == 0
-    assert "schema2" not in result.output.casefold()
-    assert "l2" not in result.output.casefold()
+    # L3/L4 are CLI-activated and name L2 as their *input*, so assert on the
+    # registered command names rather than on prose in the help output.
+    assert not [
+        name
+        for name in cli.commands
+        if "schema2" in name.casefold() or name.casefold().startswith("l2")
+    ]
+    assert "extract-candidates" not in cli.commands
 
 
 def test_l2_foundry_response_schema_requires_candidate_envelope() -> None:

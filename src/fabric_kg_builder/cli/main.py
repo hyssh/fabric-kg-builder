@@ -21,6 +21,10 @@ from fabric_kg_builder.cli.semantic_cmd import (
 from fabric_kg_builder.cli.enrich_cmd import enrich_cmd
 from fabric_kg_builder.cli.densify_cmd import densify_cmd
 from fabric_kg_builder.cli.compile_data_cmd import compile_data_cmd
+from fabric_kg_builder.cli.schema2_stages_cmd import (
+    project_serving_cmd,
+    validate_evidence_cmd,
+)
 from fabric_kg_builder.cli.compile_ontology_cmd import compile_ontology_cmd
 from fabric_kg_builder.cli.compile_search_cmd import compile_search_cmd
 from fabric_kg_builder.cli.package_cmd import package_cmd
@@ -181,6 +185,8 @@ cli.add_command(inspect_source_cmd, name="inspect-source")
 cli.add_command(inspect_ontology_cmd, name="inspect-ontology")
 cli.add_command(compile_semantic_cmd, name="compile-semantic")
 cli.add_command(enrich_cmd, name="enrich")
+cli.add_command(validate_evidence_cmd, name="validate-evidence")  # schema-2 L3
+cli.add_command(project_serving_cmd, name="project-serving")  # schema-2 L4
 cli.add_command(densify_cmd, name="densify")
 cli.add_command(compile_data_cmd, name="compile-data")
 cli.add_command(compile_ontology_cmd, name="compile-ontology")

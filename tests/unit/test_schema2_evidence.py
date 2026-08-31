@@ -85,6 +85,7 @@ from fabric_kg_builder.enrichment.schema2_evidence import (
     recompute_observation_entity_id,
     recompute_relationship_id,
     relationship_direction_reasons,
+    relationship_orientation_reasons,
     require_extraction_evidence,
     resolve_direction,
     resolve_identity_witness,
@@ -412,6 +413,79 @@ def test_invalid_ranges_and_quotes_never_mint(
     assert expected in outcome.reason_codes
 
 
+def test_shifted_anchor_offsets_are_relocated_deterministically() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        # Model reports the right quote at the wrong offsets.
+        anchor=ProposedOccurrenceAnchor(span_start=14, span_end=20, quote="Pump 1"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is not None
+    assert outcome.span.span_start == 20
+    assert outcome.span.span_end == 26
+    assert outcome.span.quote == "Pump 1"
+    assert unit.text[outcome.span.span_start : outcome.span.span_end] == "Pump 1"
+    assert "EVIDENCE_ANCHOR_RELOCATED" in outcome.reason_codes
+
+
+def test_relocation_repairs_inconsistent_model_span_arithmetic() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    # span_end - span_start (9) disagrees with len(quote) (8): unmatchable as-is.
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=1, span_end=10, quote="Facility"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is not None
+    assert (outcome.span.span_start, outcome.span.span_end) == (0, 8)
+    assert "EVIDENCE_ANCHOR_RELOCATED" in outcome.reason_codes
+
+
+def test_ambiguous_quote_is_never_relocated_by_guessing() -> None:
+    unit = _unit("Pump 1 feeds Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=2, span_end=8, quote="Pump 1"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is None
+    assert "EVIDENCE_QUOTE_MISMATCH" in outcome.reason_codes
+    assert "EVIDENCE_ANCHOR_RELOCATED" not in outcome.reason_codes
+
+
+def test_exact_anchor_is_minted_without_a_relocation_reason() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=0, span_end=8, quote="Facility"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is not None
+    assert "EVIDENCE_ANCHOR_RELOCATED" not in outcome.reason_codes
+
+
+def test_quote_absent_from_source_text_is_still_rejected() -> None:
+    unit = _unit("Facility A contains Pump 1.")
+
+    outcome = verify_and_mint_extraction_span(
+        source_unit=unit,
+        anchor=ProposedOccurrenceAnchor(span_start=0, span_end=7, quote="Turbine"),
+        verified_at_utc=_NOW,
+    )
+
+    assert outcome.span is None
+    assert "EVIDENCE_QUOTE_MISMATCH" in outcome.reason_codes
+
+
 def test_missing_anchor_is_unresolved_and_source_drift_is_rejected() -> None:
     unit = _unit("Facility A contains Pump 1.")
 
@@ -654,6 +728,87 @@ def test_repeated_endpoint_names_require_one_exact_occurrence_anchor() -> None:
     assert not ambiguous.grounded
     assert anchored.grounded
     assert anchored.occurrences[0].span_start == 0
+
+
+def test_a_shifted_endpoint_anchor_is_relocated_not_rejected() -> None:
+    text = "Note. Depot D serves Truck T today."
+
+    outcome = ground_endpoints(
+        source_text=text,
+        span_start=0,
+        span_end=len(text),
+        requests=(
+            EndpointGroundingRequest(
+                endpoint_id="entity:source",
+                role="source",
+                anchor=ProposedOccurrenceAnchor(
+                    span_start=0,
+                    span_end=7,
+                    quote="Depot D",
+                ),
+            ),
+            EndpointGroundingRequest(
+                endpoint_id="entity:target",
+                role="target",
+                terms=("Truck T",),
+            ),
+        ),
+    )
+
+    assert outcome.grounded
+    assert outcome.reason_codes == ("ENDPOINT_ANCHOR_RELOCATED",)
+    source = next(
+        item for item in outcome.occurrences if item.role == "source"
+    )
+    assert text[source.span_start : source.span_end] == "Depot D"
+
+
+def test_an_ambiguous_endpoint_anchor_quote_is_never_guessed() -> None:
+    text = "Pump 1 replaced Pump 1 in Bay 2."
+
+    outcome = ground_endpoints(
+        source_text=text,
+        span_start=0,
+        span_end=len(text),
+        requests=(
+            EndpointGroundingRequest(
+                endpoint_id="entity:a",
+                role="source",
+                anchor=ProposedOccurrenceAnchor(
+                    span_start=40,
+                    span_end=46,
+                    quote="Pump 1",
+                ),
+            ),
+        ),
+    )
+
+    assert not outcome.grounded
+    assert outcome.reason_codes == ("ENDPOINT_EVIDENCE_UNGROUNDED",)
+
+
+def test_an_endpoint_anchor_quote_absent_from_the_span_stays_ungrounded() -> None:
+    text = "Depot D serves Truck T today."
+
+    outcome = ground_endpoints(
+        source_text=text,
+        span_start=0,
+        span_end=len(text),
+        requests=(
+            EndpointGroundingRequest(
+                endpoint_id="entity:a",
+                role="source",
+                anchor=ProposedOccurrenceAnchor(
+                    span_start=0,
+                    span_end=7,
+                    quote="Depot Z",
+                ),
+            ),
+        ),
+    )
+
+    assert not outcome.grounded
+    assert outcome.reason_codes == ("ENDPOINT_EVIDENCE_UNGROUNDED",)
 
 
 def test_one_span_cannot_ground_two_endpoints_to_the_same_occurrence() -> None:
@@ -1714,6 +1869,79 @@ def test_identity_witness_recomputes_a_derivable_stable_source_identity() -> Non
     assert outcome.witness_kind not in NON_ASSERTABLE_WITNESS_KINDS
 
 
+def test_identity_witness_recomputes_a_persisted_business_key() -> None:
+    hierarchy = _witness_hierarchy()
+    policy = hierarchy.identity_policy_by_type["semantic-type:x.keyed"]
+    entity_id = recompute_entity_id(
+        project_id="project:l3-tests",
+        policy=policy,
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    outcome = resolve_identity_witness(
+        semantic_id=entity_id,
+        approved_semantic_id="semantic-type:x.keyed",
+        source_unit_id="source-unit:1",
+        local_reference="Keyed-1",
+        hierarchy=hierarchy,
+        project_id="project:l3-tests",
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    assert outcome.recomputed is True
+    assert outcome.witness_kind == "persisted_business_key"
+    assert outcome.reason_codes == ()
+    assert outcome.witness_kind not in NON_ASSERTABLE_WITNESS_KINDS
+
+
+def test_a_business_key_that_does_not_reproduce_the_id_is_rejected() -> None:
+    hierarchy = _witness_hierarchy()
+    policy = hierarchy.identity_policy_by_type["semantic-type:x.keyed"]
+    entity_id = recompute_entity_id(
+        project_id="project:l3-tests",
+        policy=policy,
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    outcome = resolve_identity_witness(
+        semantic_id=entity_id,
+        approved_semantic_id="semantic-type:x.keyed",
+        source_unit_id="source-unit:1",
+        local_reference="Keyed-1",
+        hierarchy=hierarchy,
+        project_id="project:l3-tests",
+        normalized_business_key={"serial": "sn-2"},
+    )
+
+    assert outcome.recomputed is False
+    assert outcome.witness_kind == "opaque_business_key"
+    assert outcome.reason_codes == ("IDENTITY_POLICY_VIOLATION",)
+    assert classify_state(outcome.reason_codes) is not AssertionState.ASSERTED
+
+
+def test_a_business_key_entity_without_a_persisted_key_stays_unresolved() -> None:
+    hierarchy = _witness_hierarchy()
+    policy = hierarchy.identity_policy_by_type["semantic-type:x.keyed"]
+    entity_id = recompute_entity_id(
+        project_id="project:l3-tests",
+        policy=policy,
+        normalized_business_key={"serial": "sn-1"},
+    )
+
+    outcome = resolve_identity_witness(
+        semantic_id=entity_id,
+        approved_semantic_id="semantic-type:x.keyed",
+        source_unit_id="source-unit:1",
+        local_reference="Keyed-1",
+        hierarchy=hierarchy,
+        project_id="project:l3-tests",
+    )
+
+    assert outcome.recomputed is False
+    assert outcome.witness_kind == "business_key_witness_unavailable"
+    assert outcome.reason_codes == ("IDENTITY_WITNESS_UNAVAILABLE",)
+
+
 def test_identity_witness_recomputes_an_unapproved_observation_identity() -> None:
     hierarchy = _witness_hierarchy()
     derived = derived_stable_source_identity(
@@ -1873,3 +2101,93 @@ def test_design_sample_evidence_can_never_prove_an_extraction_count() -> None:
     assert prohibited.completeness_state == "unresolved"
     assert minted_only.reason_codes == ()
     assert minted_only.completeness_state == "complete"
+
+
+def test_endpoints_ground_in_the_relocated_span_not_the_proposed_one() -> None:
+    """A relocated evidence anchor must not strand every endpoint."""
+
+    prefix = "Preamble that shifts every offset. "
+    sentence = "Depot D serves Truck T today."
+    text = prefix + sentence
+    # What the model proposed, before relocation corrected it.
+    stale_start, stale_end = 0, len(sentence)
+    relocated_start, relocated_end = len(prefix), len(text)
+
+    def ground(span_start: int, span_end: int):
+        return ground_endpoints(
+            source_text=text,
+            span_start=span_start,
+            span_end=span_end,
+            requests=(
+                EndpointGroundingRequest(
+                    endpoint_id="entity:source",
+                    role="source",
+                    terms=("Depot D",),
+                ),
+                EndpointGroundingRequest(
+                    endpoint_id="entity:target",
+                    role="target",
+                    terms=("Truck T",),
+                ),
+            ),
+        )
+
+    stale = ground(stale_start, stale_end)
+    assert not stale.grounded
+    assert stale.reason_codes == ("ENDPOINT_EVIDENCE_UNGROUNDED",)
+
+    relocated = ground(relocated_start, relocated_end)
+    assert relocated.grounded, "the verified span grounds both endpoints"
+    source = next(item for item in relocated.occurrences if item.role == "source")
+    assert text[source.span_start : source.span_end] == "Depot D"
+
+
+def test_endpoint_anchor_containment_uses_the_supplied_span() -> None:
+    from fabric_kg_builder.enrichment.schema2_validation_stage import (
+        _endpoint_anchor,
+    )
+
+    anchor = ProposedOccurrenceAnchor(span_start=40, span_end=47, quote="Depot D")
+
+    class _Shared:
+        entity_anchor_by_key = {("entity:a", "unit:1"): anchor}
+
+    shared = _Shared()
+
+    assert _endpoint_anchor(shared, "entity:a", "unit:1", 35, 80) is anchor
+    assert _endpoint_anchor(shared, "entity:a", "unit:1", 0, 30) is None
+
+
+def test_unique_admissible_orientation_reproves_direction() -> None:
+    # The carrier never persists a direction token, but when the approved
+    # hierarchy admits the proposed orientation and rejects the reversed one,
+    # exactly one direction is consistent with the ontology, so direction is
+    # re-proved locally instead of being treated as unprovable.
+    proven = relationship_orientation_reasons(
+        orientation_uniquely_compatible=True,
+        blocking_reason_codes=(),
+    )
+    assert proven == ()
+    assert classify_state(proven) is AssertionState.ASSERTED
+
+
+def test_ambiguous_orientation_stays_an_explicit_capability_gap() -> None:
+    # Both orientations admissible means the sealed carrier genuinely cannot
+    # decide direction, so the relationship must not assert.
+    ambiguous = relationship_orientation_reasons(
+        orientation_uniquely_compatible=False,
+        blocking_reason_codes=(),
+    )
+    assert ambiguous == ("EVIDENCE_MODALITY_UNSUPPORTED",)
+    assert classify_state(ambiguous) is AssertionState.UNSUPPORTED
+
+
+def test_orientation_never_overwrites_a_more_precise_blocking_reason() -> None:
+    # A candidate already blocked for a precise reason keeps that reason and its
+    # deterministic state rather than being relabelled a capability gap.
+    blocked = relationship_orientation_reasons(
+        orientation_uniquely_compatible=False,
+        blocking_reason_codes=("ENDPOINT_EVIDENCE_UNGROUNDED",),
+    )
+    assert blocked == ()
+    assert classify_state(("ENDPOINT_EVIDENCE_UNGROUNDED",)) is AssertionState.REJECTED

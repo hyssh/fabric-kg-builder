@@ -293,11 +293,14 @@ def _create_inputs(
 
 
 @pytest.mark.unit
-def test_release_version_and_36_top_level_commands() -> None:
+def test_release_version_and_38_top_level_commands() -> None:
     assert __version__ == "0.2.4"
-    assert len(cli.commands) == 36
+    assert len(cli.commands) == 38
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
+    # Schema-2 L3 and L4 are CLI-activated in 0.2.4; L5a publication is not.
+    assert "validate-evidence" in cli.commands
+    assert "project-serving" in cli.commands
 
 
 @pytest.mark.unit

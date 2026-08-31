@@ -606,10 +606,10 @@ def test_l3_asserts_grounded_candidates_with_local_1_1_evidence(
     for item in result.candidate_results:
         states_by_kind.setdefault(item.candidate_kind, set()).add(item.current_state)
     # Entity identity is recomputed from the persisted witness, so entities may
-    # assert. Relationship direction is not persisted by the frozen L2 carrier,
-    # so a relationship is never asserted as if its direction were proven.
+    # assert. Relationship direction is re-proved from the approved hierarchy,
+    # which admits exactly one orientation for these endpoints.
     assert states_by_kind["entity"] == {"asserted"}
-    assert states_by_kind["relationship"] == {"unsupported"}
+    assert states_by_kind["relationship"] == {"asserted"}
     assert result.evidence_spans
     for span in result.evidence_spans:
         assert isinstance(span, EvidenceSpanV1_1)
@@ -626,7 +626,9 @@ def test_l3_asserts_grounded_candidates_with_local_1_1_evidence(
         assert item.source_inheritance_path and item.target_inheritance_path
         assert item.ignored_model_evidence_id == "model-evidence-must-not-be-trusted"
         assert "MODEL_EVIDENCE_ID_IGNORED" in item.reason_codes
-        assert "EVIDENCE_MODALITY_UNSUPPORTED" in item.reason_codes
+        # Direction is re-proved from the approved hierarchy, so a well-formed
+        # edge is no longer parked as a validator-capability gap.
+        assert "EVIDENCE_MODALITY_UNSUPPORTED" not in item.reason_codes
     assert not {
         item.ignored_model_evidence_id for item in relationships
     } & {span.evidence_span_id for span in result.evidence_spans}
@@ -741,10 +743,9 @@ def test_l3_rejects_reverse_endpoints_and_unresolved_local_references(
     assert "ENDPOINT_UNRESOLVED" in reasons
     states = {item.current_state for item in relationships}
     # A reversed endpoint signature stays rejected, a dangling local reference
-    # stays unresolved, and a well-formed proposal is still not asserted because
-    # the frozen carrier never persists the direction the model claimed.
-    assert {"unsupported", "rejected", "unresolved"} == states
-    assert all(item.current_state != "asserted" for item in relationships)
+    # stays unresolved, and a well-formed proposal asserts because the approved
+    # hierarchy admits its orientation and rejects the reverse.
+    assert {"asserted", "rejected", "unresolved"} == states
 
 
 def test_l3_emits_no_remote_resource_usage_or_projection(tmp_path: Path) -> None:
@@ -763,12 +764,13 @@ def test_l3_emits_no_remote_resource_usage_or_projection(tmp_path: Path) -> None
     assert not list(state_root.rglob("*projection*"))
 
 
-def test_l3_is_not_activated_in_the_product_cli() -> None:
+def test_l3_is_activated_in_the_product_cli() -> None:
     result = CliRunner().invoke(cli, ["--help"])
 
     assert result.exit_code == 0
-    assert "l3" not in result.output.casefold()
-    assert "validation-stage" not in result.output.casefold()
+    # 0.2.4 wires the schema-2 evidence-validation stage into the product CLI.
+    assert "validate-evidence" in cli.commands
+    assert "validate-evidence" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +862,7 @@ def test_l3_blocks_when_the_domain_authority_drifts(tmp_path: Path) -> None:
         ("logistics", True, True),
     ],
 )
-def test_l3_keeps_generic_collections_unresolved_without_membership_proof(
+def test_l3_seals_generic_collections_when_membership_is_ontology_proven(
     tmp_path: Path,
     domain: str,
     ordered: bool,
@@ -896,24 +898,23 @@ def test_l3_keeps_generic_collections_unresolved_without_membership_proof(
 
     result = _l3(tmp_path, l1_state_root, domain_path)
 
-    # Membership is carried by a relationship candidate, and the frozen L2
-    # carrier cannot prove its direction, so membership never asserts and the
-    # collection stays audit-addressable instead of being sealed as complete.
+    # Membership is carried by a relationship candidate whose orientation the
+    # approved hierarchy admits in exactly one direction, so membership asserts
+    # and the collection seals with a manifest instead of staying unresolved.
     assert len(result.required_member_outcomes) == 1
     record = result.required_member_outcomes[0]
-    assert record.outcome.completeness_state == "unresolved"
-    assert record.manifest is None
-    assert "MEMBERSHIP_EVIDENCE_INVALID" in record.outcome.reason_codes
-    assert record.outcome.verified_member_ids == ()
-    assert not result.required_member_manifests
-    assert not list((result.run_root / "required-member-manifests").glob("*.json"))
+    assert record.outcome.completeness_state == "complete"
+    assert record.manifest is not None
+    assert "MEMBERSHIP_EVIDENCE_INVALID" not in record.outcome.reason_codes
+    assert record.outcome.verified_member_ids
+    assert result.required_member_manifests
+    assert list((result.run_root / "required-member-manifests").glob("*.json"))
     outcome_files = sorted(
         (result.run_root / "required-member-outcomes").glob("*.json")
     )
     assert len(outcome_files) == 1
     payload = json.loads(outcome_files[0].read_text("utf-8"))
-    assert payload["required_member_manifest_id"] is None
-    assert payload["reason_codes"]
+    assert payload["required_member_manifest_id"] is not None
 
 
 def test_l3_seals_a_complete_collection_only_through_the_c0_factory(
@@ -1230,8 +1231,9 @@ def test_l3_resolves_case_folded_local_endpoint_references(tmp_path: Path) -> No
     ]
     assert len(relationships) == 1
     # Case-folded local references still resolve to exactly one retained entity,
-    # but an unprovable direction keeps the edge out of the asserted set.
-    assert relationships[0].current_state == "unsupported"
+    # and the approved hierarchy admits exactly one orientation, so the edge
+    # asserts.
+    assert relationships[0].current_state == "asserted"
     assert relationships[0].resolved_source_entity_id == (
         entity_ids["semantic-type:records.record"]
     )
@@ -1309,18 +1311,16 @@ def test_l3_separates_missing_evidence_from_ungrounded_endpoints(
     ]
     assert len(relationships) == 3
     by_state = {item.current_state: item for item in relationships}
-    assert set(by_state) == {"unsupported", "unresolved", "rejected"}
+    assert set(by_state) == {"asserted", "unresolved", "rejected"}
     # A missing anchor stays unresolved and keeps its precise reason instead of
-    # being masked by the unprovable-direction capability gap.
+    # being masked by a coarser capability gap.
     assert by_state["unresolved"].reason_codes == ("EVIDENCE_MISSING",)
     assert by_state["unresolved"].evidence_span_ids == ()
     assert "ENDPOINT_EVIDENCE_UNGROUNDED" in by_state["rejected"].reason_codes
     assert by_state["rejected"].evidence_span_ids
-    assert by_state["unsupported"].evidence_span_ids
-    assert by_state["unsupported"].reason_codes == (
-        "EVIDENCE_MODALITY_UNSUPPORTED",
-        "MODEL_EVIDENCE_ID_IGNORED",
-    )
+    assert by_state["asserted"].evidence_span_ids
+    # An ignored model evidence id is informational and never blocks assertion.
+    assert by_state["asserted"].reason_codes == ("MODEL_EVIDENCE_ID_IGNORED",)
 
 
 def test_l3_governs_property_observations_against_effective_properties(
@@ -1509,6 +1509,20 @@ def _checkpoint_for(result, candidate_id: str) -> Path:
     raise AssertionError(f"no leaf checkpoint carries {candidate_id}")
 
 
+def _reversed_edge(candidates, work_unit):
+    """Append a relationship the approved hierarchy admits only in reverse.
+
+    Direction is now re-proved from the hierarchy, so a well-formed edge
+    asserts. Tamper tests still need a candidate that legitimately does not
+    assert, and a reversed endpoint signature is exactly that.
+    """
+
+    reversed_edge = dict(candidates[2])
+    reversed_edge["source_local_id"] = "subject-1"
+    reversed_edge["target_local_id"] = "record-1"
+    return candidates + [reversed_edge]
+
+
 def _non_asserted_candidate(result):
     return next(
         item for item in result.candidate_results if item.current_state != "asserted"
@@ -1547,7 +1561,9 @@ def _rewrite_leaf(path: Path, mutate, *, reseal: bool) -> None:
 def test_l3_discards_a_leaf_whose_payload_hash_no_longer_recomputes(
     tmp_path: Path,
 ) -> None:
-    l1_state_root, domain_path, _ = _pipeline(tmp_path, "records")
+    l1_state_root, domain_path, _ = _pipeline(
+        tmp_path, "records", mutate=_reversed_edge
+    )
     first = _l3(tmp_path, l1_state_root, domain_path)
     target = _non_asserted_candidate(first)
     checkpoint = _checkpoint_for(first, target.candidate_id)
@@ -1576,7 +1592,9 @@ def test_l3_discards_a_leaf_whose_payload_hash_no_longer_recomputes(
 def test_l3_rejects_a_structurally_valid_resealed_leaf_tampering(
     tmp_path: Path,
 ) -> None:
-    l1_state_root, domain_path, _ = _pipeline(tmp_path, "records")
+    l1_state_root, domain_path, _ = _pipeline(
+        tmp_path, "records", mutate=_reversed_edge
+    )
     first = _l3(tmp_path, l1_state_root, domain_path)
     tampered_candidate = _non_asserted_candidate(first)
     checkpoint = _checkpoint_for(first, tampered_candidate.candidate_id)
@@ -1607,7 +1625,7 @@ def test_l3_rejects_a_structurally_valid_resealed_leaf_tampering(
     assert "diverges from its sealed transition" in str(divergence.value)
 
 
-def test_l3_never_asserts_a_relationship_without_persisted_direction_proof(
+def test_l3_proves_relationship_direction_from_ontology_admissibility(
     tmp_path: Path,
 ) -> None:
     def mutate(candidates, work_unit):
@@ -1629,23 +1647,27 @@ def test_l3_never_asserts_a_relationship_without_persisted_direction_proof(
         if item.candidate_kind == "relationship"
     ]
     assert len(relationships) == 3
-    # L2 folds the model-proposed direction into the relationship identity seed
-    # without persisting it, so forward, reverse, and unknown proposals are
-    # indistinguishable locally and none of them may assert.
+    # L2 folds the model-proposed direction token into the identity seed without
+    # persisting it, so the "reverse" and "unknown" labels are not evidence and
+    # must not influence the outcome. Direction is instead re-proved from the
+    # approved hierarchy, which admits these endpoints in exactly one
+    # orientation, so all three proposals assert identically.
     for item in relationships:
-        assert item.current_state == "unsupported"
-        assert "EVIDENCE_MODALITY_UNSUPPORTED" in item.reason_codes
+        assert item.current_state == "asserted"
+        assert "EVIDENCE_MODALITY_UNSUPPORTED" not in item.reason_codes
     sealed = {
         record.candidate_id: record
         for leaf in result.leaves
         for record in leaf.lifecycle_records
     }
     for item in relationships:
-        assert sealed[item.candidate_id].to_state is AssertionState.UNSUPPORTED
+        assert sealed[item.candidate_id].to_state is AssertionState.ASSERTED
+    # Properties still carry no persisted owner attribution or observed value,
+    # so they remain an explicit capability gap rather than an assertion.
     assert not any(
         record.current_state == "asserted"
         for record in result.candidate_results
-        if record.candidate_kind in {"relationship", "property"}
+        if record.candidate_kind == "property"
     )
 
 
@@ -2122,15 +2144,18 @@ def _interrupt_run(result) -> None:
 
 
 def test_l3_rejects_a_fully_resealed_relationship_upgrade(tmp_path: Path) -> None:
-    l1_state_root, domain_path, _ = _pipeline(tmp_path, "records")
+    l1_state_root, domain_path, _ = _pipeline(
+        tmp_path, "records", mutate=_reversed_edge
+    )
     first = _l3(tmp_path, l1_state_root, domain_path)
     target = next(
         item
         for item in first.candidate_results
         if item.candidate_kind == "relationship"
+        and item.current_state != "asserted"
     )
-    assert target.current_state == "unsupported"
-    assert _published_state(first, target.candidate_id) == "unsupported"
+    assert target.current_state == "rejected"
+    assert _published_state(first, target.candidate_id) == "rejected"
     checkpoint = _checkpoint_for(first, target.candidate_id)
 
     def forge(raw: dict) -> None:
@@ -2174,7 +2199,7 @@ def test_l3_rejects_a_fully_resealed_relationship_upgrade(tmp_path: Path) -> Non
             for item in recovered.candidate_results
             if item.candidate_id == target.candidate_id
         ).current_state
-        == "unsupported"
+        == "rejected"
     )
 
 
@@ -2459,3 +2484,35 @@ def test_l3_leaf_fingerprint_binds_cross_batch_grounding_context(
         )
         != original_fingerprint
     )
+
+
+def test_l3_does_not_assert_a_relationship_onto_an_unpublished_endpoint(
+    tmp_path: Path,
+) -> None:
+    """L4 publishes asserted entities only, so an edge may not dangle."""
+
+    def mutate(candidates, work_unit):
+        broken = dict(candidates[1])
+        anchor = dict(broken["anchors"][0])
+        anchor["quote"] = "a quote this source unit never contains"
+        broken["anchors"] = [anchor]
+        candidates[1] = broken
+        return candidates
+
+    l1_state_root, domain_path, _ = _pipeline(tmp_path, "records", mutate=mutate)
+
+    result = _l3(tmp_path, l1_state_root, domain_path)
+
+    entity_states = {
+        item.current_state
+        for item in result.candidate_results
+        if item.candidate_kind == "entity"
+    }
+    assert entity_states == {"asserted", "rejected"}
+    relationship = next(
+        item
+        for item in result.candidate_results
+        if item.candidate_kind == "relationship"
+    )
+    assert relationship.current_state != "asserted"
+    assert "ENDPOINT_UNRESOLVED" in relationship.reason_codes

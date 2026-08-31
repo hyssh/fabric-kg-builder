@@ -458,7 +458,6 @@ def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> No
         AssertionState.DISCOVERY,
         AssertionState.UNRESOLVED,
         AssertionState.REJECTED,
-        AssertionState.UNSUPPORTED,
     }
     assert len(result.rows.audit_candidates) == audit.input_candidate_count
     assert result.serving_projection.included_states == (AssertionState.ASSERTED,)
@@ -469,7 +468,18 @@ def test_l4_emits_complete_audit_and_asserted_only_serving(tmp_path: Path) -> No
         and item.current_state == AssertionState.ASSERTED.value
     }
     assert set(result.serving_projection.entity_assertion_ids) == asserted_ids
-    assert not result.serving_projection.relationship_assertion_ids
+    asserted_relationship_ids = {
+        item.semantic_id
+        for item in l3.candidate_results
+        if item.candidate_kind == "relationship"
+        and item.current_state == AssertionState.ASSERTED.value
+    }
+    assert (
+        set(result.serving_projection.relationship_assertion_ids)
+        == asserted_relationship_ids
+    )
+    # Property owner attribution and observed value are still not persisted by
+    # the L2 carrier, so properties remain an explicit capability gap.
     assert not result.serving_projection.property_assertion_ids
     assert all(
         row["entity_id"] in asserted_ids
@@ -1566,22 +1576,12 @@ def test_schema2_source_reconciles_relationship_hierarchy_authority(
         )
         for name in L4_PROJECTION_TABLE_SCHEMAS
     }
-    entities = tables["semantic_asserted_entities"]
-    relationship = {
-        "relationship_id": "relationship:forged",
-        "semantic_relationship_id": "semantic-relationship:forged",
-        "source_entity_id": entities[0]["entity_id"],
-        "target_entity_id": entities[1]["entity_id"],
-        "candidate_ids": ["candidate:forged"],
-        "evidence_span_ids": list(entities[0]["evidence_span_ids"]),
-        "source_inheritance_path": [],
-        "target_inheritance_path": [],
-        "hierarchy_hash": "f" * 64,
-        "domain_contract_hash": result.serving_projection.sealed_domain_contract_hash,
-        "semantic_contract_hash": (
-            result.serving_projection.sealed_semantic_contract_hash
-        ),
-    }
+    # Relationships now assert, so forge the hierarchy authority on a real row
+    # instead of substituting a synthetic edge. Only the hierarchy hash drifts,
+    # which isolates the authority reconciliation from every other invariant.
+    relationship = dict(tables["semantic_asserted_relationships"][0])
+    relationship.pop("row_hash", None)
+    relationship["hierarchy_hash"] = "f" * 64
     relationship["row_hash"] = canonical_sha256(relationship)
     tables["semantic_asserted_relationships"] = (relationship,)
     serving_values = result.serving_projection.model_dump(
@@ -1590,10 +1590,8 @@ def test_schema2_source_reconciles_relationship_hierarchy_authority(
     )
     id_hashes = dict(result.serving_projection.canonical_id_set_hashes)
     row_hashes = dict(result.serving_projection.canonical_row_hashes)
-    id_hashes["relationship"] = canonical_sha256(["relationship:forged"])
     row_hashes["relationship"] = canonical_sha256([relationship])
     serving_values.update({
-        "relationship_assertion_ids": ("relationship:forged",),
         "canonical_id_set_hashes": id_hashes,
         "canonical_row_hashes": row_hashes,
     })
@@ -1956,7 +1954,7 @@ def _l3_with_sealed_manifest(
         else:
             entries.append(entry)
     manifest_payload = (canonical_json(manifest) + "\n").encode("utf-8")
-    entries.append(schema2_validation_stage._artifact_entry(
+    manifest_entry = schema2_validation_stage._artifact_entry(
         artifact_id=manifest.required_member_manifest_id,
         contract_kind="c0.required_member_manifest",
         contract_version="1.1.0",
@@ -1967,7 +1965,13 @@ def _l3_with_sealed_manifest(
         byte_count=len(manifest_payload),
         row_count=len(manifest.members),
         canonical_id_set_hash=manifest.member_set_hash,
-    ))
+    )
+    # L3 already emits this entry whenever a relationship asserts, so replace it
+    # rather than appending a duplicate artifact id.
+    entries = [
+        entry for entry in entries if entry.artifact_id != manifest_entry.artifact_id
+    ]
+    entries.append(manifest_entry)
     entries.sort(key=lambda entry: entry.artifact_id)
     manifest_values = {
         "identity": l3.output_manifest.identity,
@@ -2537,3 +2541,189 @@ def test_required_member_projection_preserves_empty_manifest_authority(
     assert manifest_rows[0]["member_count"] == 0
     assert member_rows == ()
     validate_required_member_projection((manifest,), manifest_rows, member_rows)
+
+
+def test_manifest_invalid_error_names_each_mismatching_field() -> None:
+    """An opaque "differs from its manifest entry" hides what actually differs."""
+
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    error = _manifest_invalid_error(
+        "L2 proposal partition batch-1",
+        {
+            "contract_kind": ("a", "a"),
+            "row_count": (3, 4),
+            "byte_count": (1071, 1102),
+        },
+        producing_stage="L2 enrichment",
+    )
+    message = str(error)
+    assert error.code == "L4_INPUT_MANIFEST_INVALID"
+    assert "row_count (manifest=3 payload=4)" in message
+    assert "byte_count (manifest=1071 payload=1102)" in message
+    assert "contract_kind" not in message
+
+
+def test_manifest_invalid_error_abbreviates_long_hashes() -> None:
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    stored = "06ca950020c9150bd48883240d6e986cc008c9febe3eb796c2ca23ebd95d4e09"
+    message = str(
+        _manifest_invalid_error(
+            "L2 proposal partition batch-1",
+            {"content_hash": (stored, "6edee460abca" + "0" * 52)},
+            producing_stage="L2 enrichment",
+        )
+    )
+    assert "06ca950020c9..." in message
+    assert stored not in message
+
+
+def test_manifest_invalid_error_reports_stale_artifact_remedy() -> None:
+    """Same schema, rows and id set but different bytes means a stale artifact."""
+
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    message = str(
+        _manifest_invalid_error(
+            "L2 proposal partition batch-1",
+            {
+                "contract_kind": ("a", "a"),
+                "contract_version": ("1.0.0", "1.0.0"),
+                "schema_hash": ("s", "s"),
+                "row_count": (1, 1),
+                "canonical_id_set_hash": ("i", "i"),
+                "content_hash": ("x", "y"),
+                "byte_count": (1071, 1102),
+            },
+            producing_stage="L2 enrichment",
+        )
+    )
+    assert "re-run L2 enrichment to regenerate this artifact" in message
+
+
+def test_manifest_invalid_error_omits_remedy_when_identity_also_differs() -> None:
+    """A genuine id-set divergence is not a stale-artifact condition."""
+
+    from fabric_kg_builder.serving.lifecycle_projection import (
+        _manifest_invalid_error,
+    )
+
+    message = str(
+        _manifest_invalid_error(
+            "L2 proposal partition batch-1",
+            {
+                "schema_hash": ("s", "s"),
+                "row_count": (1, 1),
+                "canonical_id_set_hash": ("i", "different"),
+                "content_hash": ("x", "y"),
+            },
+            producing_stage="L2 enrichment",
+        )
+    )
+    assert "re-run" not in message
+    assert "canonical_id_set_hash" in message
+
+
+@pytest.mark.unit
+def test_audit_projection_orders_shared_input_ids_deterministically() -> None:
+    """input_candidate_id is minted per batch, so it is not a total sort order."""
+
+    from fabric_kg_builder.contracts.projection import AuditProjection
+
+    shared = "input-candidate:0655b76b5489e24dff6bda34bf509694"
+    forward = [
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": "entity-candidate:b",
+            "deduplicated_into_candidate_id": None,
+        },
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": "entity-candidate:a",
+            "deduplicated_into_candidate_id": None,
+        },
+    ]
+    ordered = AuditProjection._dispositions(list(forward))
+    reversed_order = AuditProjection._dispositions(list(reversed(forward)))
+
+    assert [row["retained_candidate_id"] for row in ordered] == [
+        "entity-candidate:a",
+        "entity-candidate:b",
+    ]
+    assert ordered == reversed_order, (
+        "ordering must not depend on the order dispositions arrive in, "
+        "because every downstream hash derives from it"
+    )
+
+
+@pytest.mark.unit
+def test_canonical_disposition_order_is_stable_across_shapes() -> None:
+    """Producers hash dicts; the contract re-hashes models. Both must agree."""
+
+    from fabric_kg_builder.contracts.projection import canonical_disposition_order
+
+    shared = "input-candidate:0655b76b5489e24dff6bda34bf509694"
+    rows = [
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": None,
+            "deduplicated_into_candidate_id": "entity-candidate:b",
+        },
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": "entity-candidate:a",
+            "deduplicated_into_candidate_id": None,
+        },
+    ]
+
+    class _Obj:
+        def __init__(self, row: dict[str, object]) -> None:
+            for key, value in row.items():
+                setattr(self, key, value)
+
+    as_dicts = canonical_disposition_order(list(reversed(rows)))
+    as_objects = canonical_disposition_order([_Obj(row) for row in rows])
+
+    expected = [None, "entity-candidate:a"]
+    assert [row["retained_candidate_id"] for row in as_dicts] == expected
+    assert [
+        obj.retained_candidate_id for obj in as_objects
+    ] == expected, "attribute and mapping inputs must sort identically"
+
+
+@pytest.mark.unit
+def test_audit_projection_hash_survives_unsorted_producer_dispositions() -> None:
+    """Reproduces the L4 failure where the producer hashed arrival order."""
+
+    from fabric_kg_builder.contracts.projection import canonical_disposition_order
+
+    from tests.contract.test_c0_core_contracts import audit_projection
+
+    baseline = audit_projection()
+    values = baseline.model_dump(mode="python", exclude={"projection_hash"})
+    arrival_order = tuple(reversed(values["candidate_dispositions"]))
+    assert arrival_order != tuple(values["candidate_dispositions"])
+
+    values["candidate_dispositions"] = canonical_disposition_order(arrival_order)
+    resealed = AuditProjection(
+        **values,
+        projection_hash=canonical_sha256(values),
+    )
+
+    assert resealed.projection_hash == baseline.projection_hash
+
+    unsorted_values = dict(values)
+    unsorted_values["candidate_dispositions"] = arrival_order
+    with pytest.raises(Exception) as excinfo:
+        AuditProjection(
+            **unsorted_values,
+            projection_hash=canonical_sha256(unsorted_values),
+        )
+    assert "projection_hash does not match audit projection" in str(excinfo.value)

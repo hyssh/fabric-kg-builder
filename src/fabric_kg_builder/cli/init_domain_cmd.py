@@ -723,8 +723,12 @@ def _sanitize_failure_detail(exc: BaseException) -> str:
     environment variable, failed sign-in) to act on a failure, but the audit
     record is persisted and shared, so credential material must never reach it.
     """
-    detail = f"{type(exc).__name__}: {exc}".strip()
-    detail = _SECRET_DETAIL_PATTERN.sub("[redacted]", detail)
+    return _sanitize_detail_text(f"{type(exc).__name__}: {exc}")
+
+
+def _sanitize_detail_text(message: str) -> str:
+    """Apply the audit detail redaction and bounds to an already-rendered message."""
+    detail = _SECRET_DETAIL_PATTERN.sub("[redacted]", str(message).strip())
     detail = " ".join(detail.split())
     if len(detail) > _MAX_FAILURE_DETAIL_CHARS:
         detail = detail[:_MAX_FAILURE_DETAIL_CHARS] + "…"
@@ -989,6 +993,11 @@ def _run_schema_2_l1(
                 {
                     "path": safe_path(tuple(path.split("."))),
                     "code": code,
+                    **(
+                        {"detail": _sanitize_detail_text(detail)}
+                        if (detail := exc.validation_details.get((path, code)))
+                        else {}
+                    ),
                 }
                 for path, code in exc.validation_failures
             ]
@@ -1069,6 +1078,15 @@ def _run_schema_2_l1(
                                 tuple(str(failure["path"]).split("."))
                             ),
                             "code": str(failure["code"]),
+                            **(
+                                {
+                                    "detail": _sanitize_detail_text(
+                                        str(failure["detail"])
+                                    )
+                                }
+                                if failure.get("detail")
+                                else {}
+                            ),
                         }
                         for failure in item["failures"]
                     ],

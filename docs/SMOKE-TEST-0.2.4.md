@@ -8,7 +8,7 @@ Run from the candidate checkout:
 
 The script creates a clean `git archive`, builds wheel and sdist outside the
 repository, installs the wheel non-editably into an external Python 3.12 virtual
-environment, unsets `PYTHONPATH`, verifies package origin/version/36 top-level
+environment, unsets `PYTHONPATH`, verifies package origin/version/38 top-level
 commands, and exercises L7 dry-run and live rejection using local generic
 observations. It does not import project modules from the repository.
 

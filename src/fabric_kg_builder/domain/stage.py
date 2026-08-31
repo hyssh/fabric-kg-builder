@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from pydantic import ValidationError
 
@@ -107,10 +107,12 @@ class L1ProposalSchemaRepairError(L1StageError):
         attempt_count: int,
         validation_error_codes: tuple[str, ...] = (),
         validation_failures: tuple[tuple[str, str], ...] = (),
+        validation_details: Mapping[tuple[str, str], str] | None = None,
         candidate_attempts: tuple[dict[str, Any], ...] = (),
     ) -> None:
         self.attempt_count = attempt_count
         self.candidate_attempts = candidate_attempts
+        self.validation_details = dict(validation_details or {})
         self.validation_failures = validation_failures or tuple(
             ("proposal", code) for code in validation_error_codes
         )
@@ -406,16 +408,25 @@ def _validate_proposal_candidate(
         return DomainProposalCandidatesV2.model_validate(values)
     except (ValidationError, ArithmeticError) as error:
         failures = _sanitized_validation_failures(error)
+        entries = tuple(
+            (item["location"] or "proposal.root", item["type"])
+            for item in failures
+        )
+        details: dict[tuple[str, str], str] = {}
+        for entry, item in zip(entries, failures):
+            details.setdefault(entry, item["message"])
         raise L1ProposalSchemaRepairError(
             attempt_count=attempt_count,
-            validation_failures=tuple(
-                (
-                    item["location"] or "proposal.root",
-                    item["type"],
-                )
-                for item in failures
-            ),
+            validation_failures=entries,
+            validation_details=details,
         ) from error
+
+
+def _failure_detail(message: str) -> str:
+    """Render one validation message as a bounded, secret-free diagnostic."""
+    from fabric_kg_builder.release.redact import redact_secret_text
+
+    return redact_secret_text(" ".join(str(message).split()))[:200]
 
 
 def _raw_candidate_diagnostics(
@@ -423,6 +434,7 @@ def _raw_candidate_diagnostics(
     *,
     attempt: int,
     failures: tuple[tuple[str, str], ...],
+    details: Mapping[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
     mapping = raw if isinstance(raw, dict) else {}
     return {
@@ -442,7 +454,15 @@ def _raw_candidate_diagnostics(
             else 0
         ),
         "failures": [
-            {"path": path or "proposal.root", "code": code}
+            {
+                "path": path or "proposal.root",
+                "code": code,
+                **(
+                    {"detail": _failure_detail(detail)}
+                    if (detail := (details or {}).get((path, code)))
+                    else {}
+                ),
+            }
             for path, code in failures
         ],
     }
@@ -1722,12 +1742,14 @@ def prepare_l1_stage(
             raise L1ProposalSchemaRepairError(
                 attempt_count=2,
                 validation_failures=exc.validation_failures,
+                validation_details=exc.validation_details,
                 candidate_attempts=(
                     first_diagnostics,
                     _raw_candidate_diagnostics(
                         second_raw,
                         attempt=2,
                         failures=exc.validation_failures,
+                        details=exc.validation_details,
                     ),
                 ),
             ) from exc
@@ -1763,6 +1785,7 @@ def prepare_l1_stage(
                 first_raw,
                 attempt=1,
                 failures=first_error.validation_failures,
+                details=first_error.validation_details,
             )
             rejected_candidate_diagnostics = first_diagnostics
             retry_feedback = {
@@ -1844,12 +1867,14 @@ def prepare_l1_stage(
                 raise L1ProposalSchemaRepairError(
                     attempt_count=2,
                     validation_failures=second_error.validation_failures,
+                    validation_details=second_error.validation_details,
                     candidate_attempts=(
                         first_diagnostics,
                         _raw_candidate_diagnostics(
                             second_raw,
                             attempt=2,
                             failures=second_error.validation_failures,
+                            details=second_error.validation_details,
                         ),
                     ),
                 ) from second_error
@@ -2009,6 +2034,7 @@ def prepare_l1_stage(
             raise L1ProposalSchemaRepairError(
                 attempt_count=2,
                 validation_failures=exc.validation_failures,
+                validation_details=exc.validation_details,
                 candidate_attempts=(
                     _raw_candidate_diagnostics(
                         candidates.model_dump(mode="json"),
@@ -2019,6 +2045,7 @@ def prepare_l1_stage(
                         second_raw,
                         attempt=2,
                         failures=exc.validation_failures,
+                        details=exc.validation_details,
                     ),
                 ),
             ) from exc
@@ -2120,6 +2147,7 @@ def prepare_l1_stage(
         )
         )
     except (ProposalSelectionError, ValidationError, ArithmeticError) as exc:
+        semantic_details: dict[tuple[str, str], str] = {}
         if isinstance(exc, ProposalSelectionError):
             semantic_failures = (
                 (
@@ -2135,8 +2163,9 @@ def prepare_l1_stage(
                 ),
             )
         else:
-            semantic_failures = tuple(
-                (
+            semantic_failures = ()
+            for item in _sanitized_validation_failures(exc):
+                entry = (
                     "proposal.draft_contract."
                     + (item["location"] or "root"),
                     _stable_semantic_validation_code(
@@ -2144,8 +2173,8 @@ def prepare_l1_stage(
                         item["type"],
                     ),
                 )
-                for item in _sanitized_validation_failures(exc)
-            )
+                semantic_failures += (entry,)
+                semantic_details.setdefault(entry, item["message"])
         if (
             client is not None
             and model_call_count == 1
@@ -2158,6 +2187,7 @@ def prepare_l1_stage(
                 candidates.model_dump(mode="json"),
                 attempt=1,
                 failures=semantic_failures,
+                details=semantic_details,
             )
             feedback = {
                 "reason_code": "provider_candidate_semantic_validation_failed",
@@ -2230,15 +2260,18 @@ def prepare_l1_stage(
                 ) from second_error
             except L1ProposalSchemaRepairError as second_error:
                 second_failures = second_error.validation_failures
+                second_details = second_error.validation_details
                 raise L1ProposalSchemaRepairError(
                     attempt_count=2,
                     validation_failures=second_failures,
+                    validation_details=second_details,
                     candidate_attempts=(
                         first_diagnostics,
                         _raw_candidate_diagnostics(
                             locals().get("second_raw"),
                             attempt=2,
                             failures=second_failures,
+                            details=second_details,
                         ),
                     ),
                 ) from second_error
@@ -2274,6 +2307,7 @@ def prepare_l1_stage(
                             candidates.model_dump(mode="json"),
                             attempt=2 if model_call_count >= 2 else 1,
                             failures=semantic_failures,
+                            details=semantic_details,
                         ),
                     )
                     if item is not None
@@ -2339,8 +2373,10 @@ def prepare_l1_stage(
             identity=design_context.identity,
         )
     except ValidationError as exc:
-        proposal_failures = tuple(
-            (
+        proposal_details: dict[tuple[str, str], str] = {}
+        proposal_failures = ()
+        for item in exc.errors(include_url=False, include_input=False):
+            entry = (
                 "proposal."
                 + (
                     ".".join(
@@ -2354,15 +2390,13 @@ def prepare_l1_stage(
                     str(item["type"]),
                 ),
             )
-            for item in exc.errors(
-                include_url=False,
-                include_input=False,
-            )
-        )
+            proposal_failures += (entry,)
+            proposal_details.setdefault(entry, str(item["msg"]))
         current_diagnostics = _raw_candidate_diagnostics(
             candidates.model_dump(mode="json"),
             attempt=2 if model_call_count >= 2 else 1,
             failures=proposal_failures,
+            details=proposal_details,
         )
         if (
             client is not None
@@ -2431,12 +2465,14 @@ def prepare_l1_stage(
                 raise L1ProposalSchemaRepairError(
                     attempt_count=2,
                     validation_failures=second_error.validation_failures,
+                    validation_details=second_error.validation_details,
                     candidate_attempts=(
                         current_diagnostics,
                         _raw_candidate_diagnostics(
                             locals().get("second_raw"),
                             attempt=2,
                             failures=second_error.validation_failures,
+                            details=second_error.validation_details,
                         ),
                     ),
                 ) from second_error

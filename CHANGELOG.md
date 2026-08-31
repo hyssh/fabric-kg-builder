@@ -2,6 +2,77 @@
 
 ## 0.2.4
 
+- Fixed L1 proposal validation failures reporting no diagnosable cause. When a
+  contract invariant message matched none of the known fragments the failure was
+  recorded as the catch-all `domain_contract_invariant_unclassified`, and the
+  underlying validation message — already sanitized and bounded — was dropped
+  before the audit was written. Operators saw only a path and a catch-all code
+  with nothing to act on. The proposal failure audit now carries a redacted,
+  whitespace-collapsed, 200-character `detail` for every failure whose message is
+  available, alongside the unchanged stable `code`. The message is carried on
+  `L1ProposalSchemaRepairError` itself, so it survives every repair re-raise and
+  reaches both the top-level audit failures and the per-attempt candidate
+  diagnostics.
+- Fixed L3 discarding almost all verifiable evidence. Model-authored anchor
+  offsets were trusted verbatim, so a candidate was rejected whenever the model
+  miscounted code points even though its quoted text appeared verbatim in the
+  SourceUnit. On a 14,947-unit corpus this rejected 40,175 of 46,304 candidates
+  with `EVIDENCE_QUOTE_MISMATCH` and left the accepted set empty. The anchor is
+  now untrusted for arithmetic as well as identity: when the proposed bounds do
+  not already delimit the quote, the bounds are re-derived from the exact NFC
+  source text and accepted only when the quote occurs exactly once, recording
+  the informational `EVIDENCE_ANCHOR_RELOCATED` reason code. Ambiguous quotes
+  and quotes absent from the text stay rejected, and every minted span still
+  satisfies `text[start:end] == quote`, so this strengthens rather than relaxes
+  the evidence contract. The extraction verifier and L3 validator versions move
+  to `1.1.0` accordingly, which also invalidates stale leaf checkpoints.
+- Fixed relationship endpoints being discarded for the same untrusted-offset
+  reason as the extraction anchor above. When a proposed occurrence anchor did
+  not exactly delimit its own quote the endpoint was immediately reported
+  `ENDPOINT_EVIDENCE_UNGROUNDED`, even though the adjacent anchorless path
+  already located endpoints by exact text and would have succeeded. Supplying
+  an anchor was therefore strictly worse than supplying none. A proposed
+  endpoint anchor is now re-derived from the span text when its bounds do not
+  hold, accepted only on a unique occurrence, and recorded with the
+  informational `ENDPOINT_ANCHOR_RELOCATED` reason code; ambiguous and absent
+  quotes stay ungrounded. Informational codes no longer make an otherwise
+  fully grounded outcome report as ungrounded.
+- Fixed L3 being unable to assert any entity whose type uses a `business_key`
+  identity policy. L2 normalized the business key in memory to mint the entity
+  ID and then discarded it, so L3 had no witness with which to reproduce that
+  ID and returned `IDENTITY_WITNESS_UNAVAILABLE` for every such candidate. Any
+  domain whose types all use `business_key` therefore had a structurally empty
+  accepted set: on a 14,947-unit corpus this accounted for 37,579 unresolved
+  candidates, unchanged by the evidence-anchor fix above because the two
+  defects are independent. The normalized key is now persisted on the proposed
+  candidate carrier and re-hashed by L3, which asserts only when it reproduces
+  the recorded ID exactly (`persisted_business_key`), reports
+  `IDENTITY_POLICY_VIOLATION` when it does not, and keeps
+  `IDENTITY_WITNESS_UNAVAILABLE` only for legacy carriers that never recorded
+  a key. The L2 extractor version moves to `1.2.0` because the carrier shape
+  changed. Existing L2 state does not contain the key and cannot be
+  backfilled, so it must be re-run to benefit.
+- Fixed L5b being unable to publish any evidence document. L5a required the
+  sealed governed-asset set to be exactly the four derived target definitions,
+  while L5b required a governed asset for each cited original source file, so
+  `L5B_GOVERNED_SOURCE_ASSET_MISSING` was unavoidable as soon as any evidence
+  became applicable. This was masked while the accepted set was empty. L5a now
+  additionally accepts `original`-kind source assets and validates them against
+  the same sealed identity anchor and access policy as the derived
+  definitions, and rejects unanchored, duplicate, or definition-shadowing
+  entries.
+- Activated the schema-2 L3 and L4 stages in the CLI as `validate-evidence`
+  and `project-serving`. Both were already implemented and tested but had no
+  entry point, so a completed schema-2 L2 handoff could not be carried any
+  further. `validate-evidence` verifies every L2-proposed candidate against its
+  recorded source text and mints evidence spans, reusing leaf checkpoints on
+  re-run; `project-serving` projects a validated result into the canonical
+  audit and asserted-only serving Parquet tables. Both stages are local and
+  make no LLM, Foundry, Document Intelligence, embedding, Search, or Fabric
+  call. Schema-2 keeps its own serving shape rather than being down-converted
+  into the schema-1 `build/enriched`/`compile-data` tables, which cannot
+  represent assertion state, publication authority, or required-member
+  manifests.
 - Added strict `app deploy-l7` planning with dry-run as the default, immutable
   plan hashing, exact live approval, expiry/drift gates, and sanitized rollback
   receipts.
