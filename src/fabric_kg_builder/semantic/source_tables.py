@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,6 +148,29 @@ def _one_artifact(manifest: ArtifactManifest, artifact_id: str):
     if len(matches) != 1:
         raise ValueError(f"L4 manifest does not bind exactly one {artifact_id}")
     return matches[0]
+
+
+def _disposition_key(item: object) -> tuple[str, str, str]:
+    """Canonical uniqueness key for one candidate disposition.
+
+    ``input_candidate_id`` alone is minted per extraction batch and is not a
+    total order, so ``AuditProjection`` and L4 both key on the disposition
+    triple. Persisted audit rows and projected dispositions must be compared
+    through the same key.
+    """
+
+    if isinstance(item, Mapping):
+        def read(name: str) -> object:
+            return item.get(name)
+    else:
+        def read(name: str) -> object:
+            return getattr(item, name, None)
+
+    return (
+        str(read("input_candidate_id") or ""),
+        str(read("retained_candidate_id") or ""),
+        str(read("deduplicated_into_candidate_id") or ""),
+    )
 
 
 def _table_canonical_id_set_hash(
@@ -651,15 +675,21 @@ class SealedL4ServingSource:
                 raise ValueError("serving table contract authority differs")
 
         audit_rows = tables["audit_candidates"]
-        dispositions_by_id = {
-            item.input_candidate_id: item for item in audit.candidate_dispositions
+        # ``input_candidate_id`` is minted per extraction batch, so two batches
+        # that propose identical raw text legitimately share one. L4 enforces
+        # uniqueness at ``(batch_id, input_candidate_id)`` and AuditProjection
+        # keys dispositions on the disposition triple; this gate must use the
+        # same key or it collapses distinct candidates and then rejects the
+        # source for the collapse it just performed.
+        dispositions_by_key = {
+            _disposition_key(item): item
+            for item in audit.candidate_dispositions
         }
-        persisted_input_ids = [
-            str(row["input_candidate_id"]) for row in audit_rows
-        ]
+        persisted_keys = [_disposition_key(row) for row in audit_rows]
         if (
-            len(persisted_input_ids) != len(set(persisted_input_ids))
-            or set(persisted_input_ids) != set(dispositions_by_id)
+            len(dispositions_by_key) != len(audit.candidate_dispositions)
+            or len(persisted_keys) != len(set(persisted_keys))
+            or set(persisted_keys) != set(dispositions_by_key)
         ):
             raise ValueError(
                 "audit rows do not exactly cover candidate dispositions"
@@ -710,7 +740,7 @@ class SealedL4ServingSource:
             "source_manifest_hash",
         )
         for row in audit_rows:
-            disposition = dispositions_by_id.get(str(row["input_candidate_id"]))
+            disposition = dispositions_by_key.get(_disposition_key(row))
             state = (
                 AssertionState(str(row["lifecycle_state"]))
                 if row["lifecycle_state"] is not None
@@ -753,7 +783,7 @@ class SealedL4ServingSource:
                 states[state] += 1
             reasons.update(str(reason) for reason in row["reason_codes"])
         if (
-            len(dispositions_by_id) != len(audit_rows)
+            len(dispositions_by_key) != len(audit_rows)
             or audit.input_candidate_count != len(audit_rows)
             or audit.retained_candidate_count != sum(states.values())
             or audit.deduplicated_input_count

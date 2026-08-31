@@ -2727,3 +2727,55 @@ def test_audit_projection_hash_survives_unsorted_producer_dispositions() -> None
             projection_hash=canonical_sha256(unsorted_values),
         )
     assert "projection_hash does not match audit projection" in str(excinfo.value)
+
+
+def test_disposition_key_separates_candidates_that_share_an_input_id():
+    """``input_candidate_id`` is minted per extraction batch, not globally.
+
+    L4 enforces uniqueness at ``(batch_id, input_candidate_id)`` and
+    ``AuditProjection`` keys dispositions on the disposition triple, so two
+    batches that propose identical raw text legitimately share one input id.
+    The L5a sealed-source gate must use the same key, otherwise it collapses
+    distinct candidates into one and then rejects the source for the collapse
+    it just performed.
+    """
+
+    from fabric_kg_builder.semantic.source_tables import _disposition_key
+
+    first = {
+        "input_candidate_id": "entity-candidate:shared",
+        "retained_candidate_id": "entity-candidate:a",
+        "deduplicated_into_candidate_id": None,
+    }
+    second = {
+        "input_candidate_id": "entity-candidate:shared",
+        "retained_candidate_id": "entity-candidate:b",
+        "deduplicated_into_candidate_id": None,
+    }
+    assert _disposition_key(first) != _disposition_key(second)
+    assert len({_disposition_key(row) for row in (first, second)}) == 2
+
+
+def test_disposition_key_reads_rows_and_contract_objects_identically():
+    """The gate compares persisted parquet rows against contract objects.
+
+    Both sides must resolve to the same key or the cover check compares two
+    different keyings of the same data.
+    """
+
+    from types import SimpleNamespace
+
+    from fabric_kg_builder.semantic.source_tables import _disposition_key
+
+    row = {
+        "input_candidate_id": "entity-candidate:shared",
+        "retained_candidate_id": "entity-candidate:a",
+        "deduplicated_into_candidate_id": None,
+    }
+    disposition = SimpleNamespace(**row)
+    assert _disposition_key(row) == _disposition_key(disposition)
+    assert _disposition_key(row) == (
+        "entity-candidate:shared",
+        "entity-candidate:a",
+        "",
+    )
