@@ -335,9 +335,76 @@ error, so it must always be polled rather than trusting the 202.
   by L2, so the graph carries identifiers and relationships but no attributes.
 - Three orphaned companion items remain from a first ontology create that Fabric
   rolled back (`…_lh_47c0af0a…`, its SQLEndpoint, and `…_graph_47c0af0a…`).
-  They were deliberately **not** deleted, because delete is the documented-unsafe
-  path on an item control plane with no CAS authority.
+  Deleting them was subsequently authorized and **attempted**, and Fabric
+  **refused**. See "Ontology companions cannot be cleaned up" below: this is a
+  platform limitation, not a decision left open.
 - The provenance of the 400 documents in the live `fabric-kg-024-surface-index`
   is still unestablished.
 - The Search managed identity still has no visible `Cognitive Services User`
   grant on the Foundry account, so preview agentic Search remains unproven.
+
+### Ontology companions cannot be cleaned up
+
+Removing the three orphans left behind by the rolled-back first ontology create
+was explicitly authorized, attempted, and **refused by Fabric**. The attempt and
+its result are recorded here because the outcome strengthens the fenced path's
+NO-GO rather than weakening it.
+
+Before attempting anything, the orphans were confirmed to be orphans. All three
+carry the display-name suffix `47c0af0a…`, the id of the ontology Fabric deleted;
+`GET` on that ontology returns 404. Every live definition was decoded and scanned
+for references to them — ontology (30 parts), semantic model (25 parts) and data
+agent (7 parts) all reference **none** of the three. The orphaned lakehouse holds
+**0 tables**. There was no live state to protect.
+
+| target | endpoint | result |
+| --- | --- | --- |
+| GraphModel `06d6cff6…` | `DELETE /items/{id}` | `400 UnknownError`, `isRetriable: false` |
+| GraphModel `06d6cff6…` | `DELETE /graphmodels/{id}` | `400 UnknownError` |
+| Lakehouse `e66e58cc…` | `DELETE /items/{id}` | `400 UnknownError`, `isRetriable: false` |
+| Lakehouse `e66e58cc…` | `DELETE /lakehouses/{id}` | `400 UnknownError` |
+| SQLEndpoint `8828ed8c…` | `DELETE /sqlEndpoints/{id}` | `400 OperationNotSupportedForItem` |
+
+The failure is not a broken delete verb. A control probe in the same workspace,
+with the same identity and the same endpoint, created an ordinary lakehouse and
+deleted it: `201` → `200` → readback `404`, and the workspace returned to exactly
+63 items with the probe's own auto-provisioned SQLEndpoint removed with it. So
+`DELETE` works; these specific items are system-managed children of an ontology,
+and once that parent is gone they are unreachable through the REST surface. The
+item payload exposes no flag distinguishing them — only the naming convention
+does.
+
+The consequence is the important part. **A failed Fabric ontology create is not
+rollback-able.** It leaves up to three permanent items that no API can remove.
+This is independent of the CAS problem recorded above and compounds it: the
+control plane offers neither conditional mutation nor cleanup after a partial
+failure. `agent/l7_release.py` therefore continues to report
+`fabric.<item>.create` as NO-GO, and that verdict now rests on two proven
+platform limitations rather than one.
+
+### Two behaviours that require manual verification in the Fabric portal
+
+Neither of the following is claimed as verified. Both are reachable only through
+the portal UI, so the check a reviewer should perform is written out here rather
+than left silently unconfirmed.
+
+**The Data Agent has never been asked a question.** Its configuration is proven
+by definition readback — exactly one datasource of `type: "ontology"`, all eight
+entity types selected, zero lakehouse and zero Search datasources — but its
+*behaviour* is untested. No public v1 REST chat endpoint exists;
+`/aiskills/{id}/aiassistant/openai` and `/dataAgents/{id}/publish` both return
+404. To verify manually: open `fabric_kg_024_data_agent` in the workspace and ask
+a question answerable only from the graph, for example "which components does the
+Surface Laptop device relate to?". A correct result cites ontology entity types
+by name and traverses a relationship. The check that matters is the **negative**
+one: the answer must not cite a Lakehouse table or a Search document, because no
+such source is configured. If it does, the scoping guarantee is wrong.
+
+**The GraphModel is not known to materialize rows.** Fabric accepted the
+definition and auto-provisioned `fabric_kg_024_ontology_graph_07615fe9…`, but
+accepting a definition is not the same as populating a graph from its bindings.
+To verify manually: open that GraphModel and confirm it reports a non-zero node
+count consistent with the 8,756 published entities, and a non-zero edge count
+consistent with the 808 published relationships. If node and edge counts are
+zero, the bindings resolved but no data was ingested, and the graph target should
+be treated as structurally deployed but empty.
