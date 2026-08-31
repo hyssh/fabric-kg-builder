@@ -20,9 +20,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
-from fabric_kg_builder.agent.deployer import deploy_agent
+from fabric_kg_builder.agent.deployer import (
+    _ALLOWED_QUERY_TYPES,
+    DeploymentError,
+    deploy_agent,
+)
 from fabric_kg_builder.agent.foundry_agent_client import FakeAgentTransport
 
 
@@ -96,6 +101,7 @@ def _write_metadata(
             }
         },
     }
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "agent-metadata.yaml"
     path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
     return path
@@ -196,3 +202,61 @@ def test_query_type_defensive_default_without_probe_support(tmp_path: Path) -> N
 
     spec = _search_tool_spec(_create_calls(transport))
     assert spec["query_type"] == "semantic"
+
+
+def test_invalid_query_type_override_is_rejected(tmp_path: Path) -> None:
+    """A typo in knowledge.searchQueryType is rejected up front rather than
+    being forwarded to the service as an opaque tool spec value."""
+    md_path = _write_metadata(tmp_path, search_query_type_override="vector_hybrid")
+    transport = FakeAgentTransport()
+    client = _ProbeClient(transport=transport, vectorizer_probe_result=True)
+
+    with pytest.raises(DeploymentError) as excinfo:
+        deploy_agent(environment="dev", metadata_path=md_path, _client=client)
+
+    assert "searchQueryType" in str(excinfo.value)
+    assert "vector_hybrid" in str(excinfo.value)
+    # Rejected before anything was created.
+    assert _create_calls(transport) == []
+
+
+def test_invalid_query_type_override_is_rejected_in_dry_run(tmp_path: Path) -> None:
+    """The same typo is caught by --dry-run, so it never reaches a live run."""
+    md_path = _write_metadata(tmp_path, search_query_type_override="semantic-hybrid")
+
+    with pytest.raises(DeploymentError):
+        deploy_agent(environment="dev", metadata_path=md_path, dry_run=True)
+
+
+def test_every_allowed_query_type_override_is_accepted(tmp_path: Path) -> None:
+    """The allowed set is the contract; each member must deploy unchanged."""
+    for query_type in sorted(_ALLOWED_QUERY_TYPES):
+        md_path = _write_metadata(
+            tmp_path / query_type, search_query_type_override=query_type
+        )
+        transport = FakeAgentTransport()
+        client = _ProbeClient(transport=transport, vectorizer_probe_result=True)
+
+        deploy_agent(environment="dev", metadata_path=md_path, _client=client)
+
+        assert _search_tool_spec(_create_calls(transport))["query_type"] == query_type
+
+
+def test_relationship_types_reach_the_deployed_system_prompt(tmp_path: Path) -> None:
+    """deploy_agent must forward relationship_types into the instructions, or
+    the injection point exists but no deployment path can ever use it."""
+    md_path = _write_metadata(tmp_path)
+    transport = FakeAgentTransport()
+    client = _ProbeClient(transport=transport, vectorizer_probe_result=False)
+
+    deploy_agent(
+        environment="dev",
+        metadata_path=md_path,
+        _client=client,
+        entity_types=["surface_device"],
+        relationship_types=["device_has_component"],
+    )
+
+    prompt = _create_calls(transport)[-1]["definition"]["system_prompt"]
+    assert "`device_has_component`" in prompt
+    assert "`surface_device`" in prompt

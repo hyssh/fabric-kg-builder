@@ -28,6 +28,15 @@ from fabric_kg_builder.agent.instructions import build_routing_instructions, INS
 from fabric_kg_builder.agent.metadata import AgentMetadata, load_agent_metadata
 
 _METADATA_PATH = Path(".foundry") / "agent-metadata.yaml"
+
+# Azure AI Search query modes accepted for the grounding tool. The modes in
+# _VECTOR_QUERY_TYPES need an integrated vectorizer on the index; when no
+# override is given they are selected only after a live probe confirms one
+# (issue #121). The allowed set exists so that a typo in an explicit override
+# is rejected up front instead of reaching the service.
+_VECTOR_QUERY_TYPES = frozenset({"vector", "vector_simple_hybrid", "vector_semantic_hybrid"})
+_ALLOWED_QUERY_TYPES = frozenset({"simple", "full", "semantic"}) | _VECTOR_QUERY_TYPES
+_DEFAULT_QUERY_TYPE = "semantic"
 _SMOKE_PROMPT = (
     "Hello, are you available? "
     "Reply with route_type: search and confirm you are ready."
@@ -130,6 +139,7 @@ def deploy_agent(
     _client: Any | None = None,
     metadata_path: str | Path | None = None,
     entity_types: list[str] | None = None,
+    relationship_types: list[str] | None = None,
     domain_context: str | None = None,
     dry_run: bool = False,
     smoke_timeout_s: int = 60,
@@ -160,6 +170,8 @@ def deploy_agent(
                         client. When None (live mode), built from metadata.
         metadata_path:  Override path to agent-metadata.yaml.
         entity_types:   Optional entity types for instruction grounding.
+        relationship_types: Optional relationship types for instruction
+            grounding, so the agent traverses real edge names.
         dry_run:        Validate and plan only; do not deploy or persist.
         smoke_timeout_s: Seconds to wait for smoke run.
 
@@ -195,6 +207,12 @@ def deploy_agent(
     search_query_type_override = str(
         env_cfg.knowledge.get("searchQueryType", "")
     ).strip()
+    if search_query_type_override and search_query_type_override not in _ALLOWED_QUERY_TYPES:
+        raise DeploymentError(
+            "environments.<env>.knowledge.searchQueryType is "
+            f"{search_query_type_override!r}. Allowed: "
+            f"{', '.join(sorted(_ALLOWED_QUERY_TYPES))}."
+        )
 
     tool_specs: list[dict[str, Any]] = []
     if search_connection_id and search_index_name:
@@ -202,7 +220,7 @@ def deploy_agent(
             "type": "azure_ai_search",
             "project_connection_id": search_connection_id,
             "index_name": search_index_name,
-            "query_type": search_query_type_override or "semantic",
+            "query_type": search_query_type_override or _DEFAULT_QUERY_TYPE,
             "top_k": 5,
         })
     if fabric_connection_id:
@@ -244,6 +262,7 @@ def deploy_agent(
     instructions = build_routing_instructions(
         version=INSTRUCTIONS_VERSION,
         entity_types=entity_types,
+        relationship_types=relationship_types,
         domain_context=domain_context,
     )
     instructions_hash = _hash_instructions(instructions)
@@ -313,7 +332,7 @@ def deploy_agent(
     if not search_query_type_override and search_connection_id and search_index_name:
         probe = getattr(client, "index_has_integrated_vectorizer", None)
         detected = probe(search_connection_id, search_index_name) if callable(probe) else None
-        resolved_query_type = "vector_semantic_hybrid" if detected else "semantic"
+        resolved_query_type = "vector_semantic_hybrid" if detected else _DEFAULT_QUERY_TYPE
         for spec in tool_specs:
             if spec.get("type") == "azure_ai_search":
                 spec["query_type"] = resolved_query_type

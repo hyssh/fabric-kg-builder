@@ -16,7 +16,7 @@ Preview features (2026-05-01-preview, additive):
 
 Capability discovery
 --------------------
-Calls ``GET {endpoint}/servicestatistics?api-version=<candidate>`` for each
+Calls ``GET {endpoint}/servicestats?api-version=<candidate>`` for each
 candidate version in order.  **GA is always probed first.**  Preview is only
 probed when the caller explicitly opts in with both ``prefer_preview=True``
 and ``preview_acknowledged=True``.  A 2xx response indicates that version is
@@ -366,7 +366,7 @@ def discover_capabilities(
     probe_order = _PREVIEW_PROBE_ORDER if (prefer_preview and preview_acknowledged) else _GA_PROBE_ORDER
 
     for version in probe_order:
-        url = f"{ep}/servicestatistics?api-version={version}"
+        url = f"{ep}/servicestats?api-version={version}"
         req = HttpRequest(
             method="GET",
             url=url,
