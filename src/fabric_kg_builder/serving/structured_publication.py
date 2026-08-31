@@ -32,9 +32,10 @@ from fabric_kg_builder.contracts.identity import (
 from fabric_kg_builder.contracts.publication import (
     AccessPolicy,
     GovernedAssetReference,
-    ProjectionEquivalence,
+    ProjectionEquivalenceIdentityV1_1,
+    ProjectionEquivalenceV1_1,
     ProjectionEvidence,
-    PublicationCrosswalkV1_1,
+    PublicationCrosswalkV1_2,
     StorageReference,
 )
 from fabric_kg_builder.contracts.receipts import (
@@ -323,10 +324,19 @@ class L5aTableSnapshot:
 
 @dataclass(frozen=True)
 class L5aRequiredMemberSnapshot:
-    required_member_manifest_id: str
-    required_member_manifest_schema_hash: str
-    required_member_manifest_hash: str
-    authoritative_collection_hash: str
+    """Evidence for one sealed collection, or for the absence of collections.
+
+    A source whose domain contract declares no ``structured_fact_set``
+    completeness requirement seals no manifests at all. That case is carried
+    explicitly by the unanchored snapshot (manifest fields ``None``, empty
+    canonical ID set) rather than by omitting the evidence entirely, so the
+    equivalence proof still covers every target.
+    """
+
+    required_member_manifest_id: str | None
+    required_member_manifest_schema_hash: str | None
+    required_member_manifest_hash: str | None
+    authoritative_collection_hash: str | None
     source_artifact_manifest_id: str
     source_artifact_manifest_hash: str
     canonical_ids: tuple[str, ...]
@@ -451,7 +461,7 @@ class L5aTargetClient(Protocol):
 class L5aCompiledPublication:
     source: SealedL4ServingSource
     fingerprint: str
-    crosswalks: tuple[PublicationCrosswalkV1_1, ...]
+    crosswalks: tuple[PublicationCrosswalkV1_2, ...]
     access_policy: AccessPolicy
     governed_assets: tuple[GovernedAssetReference, ...]
     target_ids: Mapping[L5ATargetKind, str]
@@ -466,7 +476,7 @@ class L5aCompiledPublication:
 @dataclass(frozen=True)
 class L5aStageResult:
     compiled: L5aCompiledPublication
-    projection_equivalences: tuple[ProjectionEquivalence, ...]
+    projection_equivalences: tuple[ProjectionEquivalenceV1_1, ...]
     output_manifest: ArtifactManifest
     metrics: StageResourceMetrics
     receipt: StageReceipt
@@ -902,7 +912,7 @@ def _publication_authority(
 def _validate_publish_authority(
     source: SealedL4ServingSource,
     tables: Mapping[str, pa.Table],
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
     access_policy: AccessPolicy,
 ) -> DomainContractV2:
     contract, authority_row = _publication_authority(tables)
@@ -917,11 +927,6 @@ def _validate_publish_authority(
             "sealed publication authority differs from the L4 projection",
         )
     manifest_rows = tables["semantic_required_member_manifests"].to_pylist()
-    if not manifest_rows:
-        raise L5aPublicationError(
-            "L5A_REQUIRED_MEMBER_AUTHORITY_MISSING",
-            "L5a requires at least one sealed RequiredMemberManifestV1_1",
-        )
     manifest_by_id = {
         str(row["required_member_manifest_id"]): row for row in manifest_rows
     }
@@ -930,16 +935,34 @@ def _validate_publish_authority(
             "L5A_REQUIRED_MEMBER_AUTHORITY_DUPLICATE",
             "required-member manifest IDs are not unique",
         )
-    crosswalk_by_manifest = {
-        item.authority.required_member_manifest_id: item for item in crosswalks
-    }
-    if (
-        len(crosswalk_by_manifest) != len(crosswalks)
-        or set(crosswalk_by_manifest) != set(manifest_by_id)
-    ):
+    anchored = [
+        item for item in crosswalks
+        if item.authority.anchors_required_member_manifest
+    ]
+    if manifest_rows:
+        crosswalk_by_manifest = {
+            item.authority.required_member_manifest_id: item for item in anchored
+        }
+        if (
+            len(anchored) != len(crosswalks)
+            or len(crosswalk_by_manifest) != len(crosswalks)
+            or set(crosswalk_by_manifest) != set(manifest_by_id)
+        ):
+            raise L5aPublicationError(
+                "L5A_PUBLICATION_CROSSWALK_SET_MISMATCH",
+                "crosswalk authorities must exactly cover sealed required-member "
+                "manifests",
+            )
+    elif anchored or len(crosswalks) != 1:
+        # A domain that declares no structured_fact_set completeness requirement
+        # seals no required-member manifest, so the only admissible anchor is the
+        # source artifact manifest. Exactly one unanchored crosswalk may stand in
+        # for the empty cover; an anchored crosswalk here would reference a
+        # manifest this L4 source does not carry.
         raise L5aPublicationError(
             "L5A_PUBLICATION_CROSSWALK_SET_MISMATCH",
-            "crosswalk authorities must exactly cover sealed required-member manifests",
+            "a source without sealed required-member manifests requires exactly "
+            "one crosswalk with no required-member authority",
         )
 
     source_entries = {
@@ -998,31 +1021,40 @@ def _validate_publish_authority(
     expected_lineage = _identity_lineage(source.receipt.identity)
     expected_crosswalk_lineage = {
         **expected_lineage,
-        "contract_version": "1.1.0",
+        "contract_version": "1.2.0",
     }
     for crosswalk in crosswalks:
         authority = crosswalk.authority
-        manifest_row = manifest_by_id[authority.required_member_manifest_id]
-        entry = source_entries[authority.required_member_manifest_id]
         if (
-            authority.required_member_manifest_contract_version != "1.1.0"
-            or authority.required_member_manifest_schema_hash != schema_hash
-            or authority.required_member_manifest_hash != manifest_row["manifest_hash"]
-            or authority.authoritative_collection_hash
-            != manifest_row["authoritative_collection_hash"]
-            or authority.source_artifact_manifest_id
+            authority.source_artifact_manifest_id
             != source.input_manifest.artifact_manifest_id
             or authority.source_artifact_manifest_hash
             != source.input_manifest.manifest_hash
-            or entry.contract_version != "1.1.0"
-            or entry.schema_hash != schema_hash
-            or entry.content_hash != manifest_row["manifest_hash"]
-            or entry.canonical_id_set_hash != manifest_row["member_set_hash"]
         ):
             raise L5aPublicationError(
                 "L5A_PUBLICATION_AUTHORITY_MISMATCH",
-                f"authority tuple differs for {authority.required_member_manifest_id}",
+                "crosswalk source artifact manifest anchor differs from L4",
             )
+        if authority.anchors_required_member_manifest:
+            manifest_row = manifest_by_id[authority.required_member_manifest_id]
+            entry = source_entries[authority.required_member_manifest_id]
+            if (
+                authority.required_member_manifest_contract_version != "1.1.0"
+                or authority.required_member_manifest_schema_hash != schema_hash
+                or authority.required_member_manifest_hash
+                != manifest_row["manifest_hash"]
+                or authority.authoritative_collection_hash
+                != manifest_row["authoritative_collection_hash"]
+                or entry.contract_version != "1.1.0"
+                or entry.schema_hash != schema_hash
+                or entry.content_hash != manifest_row["manifest_hash"]
+                or entry.canonical_id_set_hash != manifest_row["member_set_hash"]
+            ):
+                raise L5aPublicationError(
+                    "L5A_PUBLICATION_AUTHORITY_MISMATCH",
+                    "authority tuple differs for "
+                    f"{authority.required_member_manifest_id}",
+                )
         if (
             crosswalk.source_projection_id != source.projection.projection_id
             or crosswalk.source_projection_hash != source.projection.projection_hash
@@ -1295,8 +1327,8 @@ def _validate_publish_authority(
 
 
 def _canonical_crosswalk(
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
-) -> PublicationCrosswalkV1_1:
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
+) -> PublicationCrosswalkV1_2:
     first = crosswalks[0]
     for item in crosswalks[1:]:
         if (
@@ -1321,7 +1353,7 @@ def _canonical_crosswalk(
 
 def _entity_tables(
     source_tables: Mapping[str, pa.Table],
-    crosswalk: PublicationCrosswalkV1_1,
+    crosswalk: PublicationCrosswalkV1_2,
 ) -> dict[str, pa.Table]:
     entities = {
         str(row["entity_id"]): row
@@ -1377,7 +1409,7 @@ def _entity_tables(
 
 def _relationship_tables(
     source_tables: Mapping[str, pa.Table],
-    crosswalk: PublicationCrosswalkV1_1,
+    crosswalk: PublicationCrosswalkV1_2,
 ) -> dict[str, pa.Table]:
     rows_by_type: dict[str, list[dict[str, Any]]] = {}
     for row in source_tables["semantic_asserted_relationships"].to_pylist():
@@ -1444,7 +1476,7 @@ def _relationship_tables(
 
 def _all_tables(
     source_tables: Mapping[str, pa.Table],
-    crosswalk: PublicationCrosswalkV1_1,
+    crosswalk: PublicationCrosswalkV1_2,
 ) -> dict[str, pa.Table]:
     typed = {
         **_entity_tables(source_tables, crosswalk),
@@ -1466,12 +1498,46 @@ def _required_member_snapshots(
     source: SealedL4ServingSource,
     tables: Mapping[str, pa.Table],
 ) -> tuple[L5aRequiredMemberSnapshot, ...]:
-    manifest_table = tables["l4_semantic_required_member_manifests"]
-    member_table = tables["l4_semantic_required_members"]
+    manifest_rows = tables["l4_semantic_required_member_manifests"].to_pylist()
+    member_rows = tables["l4_semantic_required_members"].to_pylist()
+    if not manifest_rows:
+        # The unanchored cover is still one snapshot so that every downstream
+        # equality site keeps exactly one required-member proof per crosswalk.
+        return (
+            _unanchored_required_member_snapshot(
+                source,
+                manifest_rows,
+                member_rows,
+            ),
+        )
     return _required_member_snapshots_from_rows(
         source,
-        manifest_table.to_pylist(),
-        member_table.to_pylist(),
+        manifest_rows,
+        member_rows,
+    )
+
+
+def _unanchored_required_member_snapshot(
+    source: SealedL4ServingSource,
+    manifest_rows: Sequence[Mapping[str, Any]],
+    member_rows: Sequence[Mapping[str, Any]],
+) -> L5aRequiredMemberSnapshot:
+    """Evidence that this source carries no sealed generic collections."""
+
+    if manifest_rows or member_rows:
+        raise L5aPublicationError(
+            "L5A_REQUIRED_MEMBER_EQUIVALENCE_FAILED",
+            "an unanchored crosswalk cannot coexist with required-member rows",
+        )
+    return L5aRequiredMemberSnapshot(
+        required_member_manifest_id=None,
+        required_member_manifest_schema_hash=None,
+        required_member_manifest_hash=None,
+        authoritative_collection_hash=None,
+        source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
+        source_artifact_manifest_hash=source.input_manifest.manifest_hash,
+        canonical_ids=(),
+        row_fingerprint=canonical_sha256({"manifest": None, "members": []}),
     )
 
 
@@ -1573,7 +1639,7 @@ def _ancestor_paths(contract: DomainContractV2) -> dict[str, tuple[str, ...]]:
 def _definitions(
     source: SealedL4ServingSource,
     contract: DomainContractV2,
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
     table_snapshots: Sequence[L5aTableSnapshot],
     required_member_snapshots: Sequence[L5aRequiredMemberSnapshot],
     target_ids: Mapping[L5ATargetKind, str],
@@ -1584,7 +1650,7 @@ def _definitions(
         item.authority.model_dump(mode="json")
         for item in sorted(
             crosswalks,
-            key=lambda item: item.authority.required_member_manifest_id,
+            key=lambda item: item.authority.required_member_manifest_id or "",
         )
     ]
     common = {
@@ -2153,7 +2219,7 @@ def _validate_governed_assets(
 def build_l5a_governed_assets(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
     access_policy: AccessPolicy,
     target_ids: Mapping[L5ATargetKind, str],
     storage_references: Mapping[L5ATargetKind, StorageReference],
@@ -2172,7 +2238,7 @@ def build_l5a_governed_assets(
         )
     ordered_crosswalks = tuple(sorted(
         crosswalks,
-        key=lambda item: item.authority.required_member_manifest_id,
+        key=lambda item: item.authority.required_member_manifest_id or "",
     ))
     source_tables = _load_source_tables(source)
     authority = _validate_publish_authority(
@@ -2247,7 +2313,7 @@ def build_l5a_governed_assets(
 def l5a_input_fingerprint(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
@@ -2273,7 +2339,7 @@ def l5a_input_fingerprint(
 def compile_l5a_publication(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
@@ -2297,7 +2363,7 @@ def compile_l5a_publication(
         )
     ordered_crosswalks = tuple(sorted(
         crosswalks,
-        key=lambda item: item.authority.required_member_manifest_id,
+        key=lambda item: item.authority.required_member_manifest_id or "",
     ))
     ordered_assets = tuple(sorted(
         governed_assets,
@@ -2516,7 +2582,7 @@ def _projection_evidence(
 def _equivalences(
     compiled: L5aCompiledPublication,
     states: Mapping[L5ATargetKind, L5aTargetState],
-) -> tuple[ProjectionEquivalence, ...]:
+) -> tuple[ProjectionEquivalenceV1_1, ...]:
     result = []
     compiled_by_manifest = {
         item.required_member_manifest_id: item
@@ -2524,7 +2590,14 @@ def _equivalences(
     }
     for crosswalk in compiled.crosswalks:
         manifest_id = crosswalk.authority.required_member_manifest_id
-        expected_snapshot = compiled_by_manifest.get(manifest_id)
+        if manifest_id is None:
+            expected_snapshot = _unanchored_required_member_snapshot(
+                compiled.source,
+                compiled.required_member_manifest_rows,
+                compiled.required_member_rows,
+            )
+        else:
+            expected_snapshot = compiled_by_manifest.get(manifest_id)
         if expected_snapshot is None:
             raise L5aPublicationError(
                 "L5A_REQUIRED_MEMBER_EQUIVALENCE_FAILED",
@@ -2554,11 +2627,18 @@ def _equivalences(
                 state.required_member_manifest_rows,
                 state.required_member_rows,
             )
-            state_by_manifest = {
-                item.required_member_manifest_id: item
-                for item in read_back_snapshots
-            }
-            read_back_snapshot = state_by_manifest.get(manifest_id)
+            if manifest_id is None:
+                read_back_snapshot = _unanchored_required_member_snapshot(
+                    compiled.source,
+                    state.required_member_manifest_rows,
+                    state.required_member_rows,
+                )
+            else:
+                state_by_manifest = {
+                    item.required_member_manifest_id: item
+                    for item in read_back_snapshots
+                }
+                read_back_snapshot = state_by_manifest.get(manifest_id)
             if read_back_snapshot is None:
                 raise L5aPublicationError(
                     "L5A_REQUIRED_MEMBER_EQUIVALENCE_FAILED",
@@ -2598,10 +2678,13 @@ def _equivalences(
                     f"missing={missing}, extra={extra}",
                 )
             values = {
-                "identity": _identity(
-                    compiled.source,
-                    contract_kind="c0.projection_equivalence",
-                ),
+                "identity": ProjectionEquivalenceIdentityV1_1.model_validate({
+                    **_identity(
+                        compiled.source,
+                        contract_kind="c0.projection_equivalence",
+                    ).model_dump(mode="python", round_trip=True),
+                    "contract_version": "1.1.0",
+                }),
                 "projection_equivalence_id": deterministic_contract_id(
                     "projection-equivalence",
                     {
@@ -2628,7 +2711,7 @@ def _equivalences(
                 "extra_canonical_ids": (),
                 "equivalent": True,
             }
-            result.append(ProjectionEquivalence(
+            result.append(ProjectionEquivalenceV1_1(
                 **values,
                 equivalence_hash=canonical_sha256(values),
             ))
@@ -2670,7 +2753,7 @@ def _artifact_entry(
 def _output_manifest(
     compiled: L5aCompiledPublication,
     root: Path,
-    equivalences: Sequence[ProjectionEquivalence],
+    equivalences: Sequence[ProjectionEquivalenceV1_1],
     definition_paths: Mapping[L5ATargetKind, Path],
     table_paths: Mapping[str, Path],
 ) -> ArtifactManifest:
@@ -2707,7 +2790,7 @@ def _output_manifest(
             root / "publication-crosswalks.json",
             canonical_sha256({
                 "type": "array",
-                "items": PublicationCrosswalkV1_1.model_json_schema(),
+                "items": PublicationCrosswalkV1_2.model_json_schema(),
             }),
             len(compiled.crosswalks),
             "1.1.0",
@@ -2737,7 +2820,7 @@ def _output_manifest(
             root / "projection-equivalence.json",
             canonical_sha256({
                 "type": "array",
-                "items": ProjectionEquivalence.model_json_schema(),
+                "items": ProjectionEquivalenceV1_1.model_json_schema(),
             }),
             len(equivalences),
             "1.0.0",
@@ -2943,7 +3026,7 @@ def _existing_is_intact(
     ArtifactManifest,
     StageResourceMetrics,
     StageReceipt,
-    tuple[ProjectionEquivalence, ...],
+    tuple[ProjectionEquivalenceV1_1, ...],
 ] | None:
     if not run_root.is_dir():
         return None
@@ -2958,7 +3041,7 @@ def _existing_is_intact(
             (run_root / "stage-receipt.json").read_text("utf-8")
         )
         equivalences = tuple(
-            ProjectionEquivalence.model_validate(item)
+            ProjectionEquivalenceV1_1.model_validate(item)
             for item in json.loads(
                 (run_root / "projection-equivalence.json").read_text("utf-8")
             )
@@ -3154,7 +3237,7 @@ def _receipt_publication_token(receipt: StageReceipt) -> str:
 def run_l5a(
     source: SealedL4ServingSource,
     *,
-    crosswalks: Sequence[PublicationCrosswalkV1_1],
+    crosswalks: Sequence[PublicationCrosswalkV1_2],
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],

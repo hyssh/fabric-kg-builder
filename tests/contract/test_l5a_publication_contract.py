@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from fabric_kg_builder.contracts.publication import ProjectionEquivalence
+from fabric_kg_builder.contracts.publication import ProjectionEquivalenceV1_1
 from fabric_kg_builder.contracts.receipts import ArtifactManifest, StageReceipt
 from fabric_kg_builder.contracts.resources import (
     StageResourceMetrics,
@@ -35,7 +35,7 @@ def test_l5a_persisted_outputs_round_trip_through_c0_contracts(
         (result.run_root / "stage-receipt.json").read_text("utf-8")
     )
     proofs = tuple(
-        ProjectionEquivalence.model_validate(item)
+        ProjectionEquivalenceV1_1.model_validate(item)
         for item in json.loads(
             (result.run_root / "projection-equivalence.json").read_text("utf-8")
         )

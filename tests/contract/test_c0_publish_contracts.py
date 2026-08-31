@@ -414,7 +414,7 @@ def test_four_publish_kinds_retain_1_0_with_additive_crosswalk_successor() -> No
     }
     for kind, model in expected.items():
         assert negotiate_contract(kind, "1.0.0") is model
-        if kind != "c0.publication_crosswalk":
+        if kind not in {"c0.publication_crosswalk", "c0.projection_equivalence"}:
             with pytest.raises(ValueError, match="not registered"):
                 negotiate_contract(kind, "1.1.0")
     assert {

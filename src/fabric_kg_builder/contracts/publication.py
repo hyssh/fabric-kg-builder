@@ -146,6 +146,82 @@ class PublicationAuthorityReferences(ContractModel):
             raise ValueError("source artifact manifest hash mismatch")
 
 
+class PublicationAuthorityReferencesV1_2(ContractModel):
+    """Source-artifact authority with an optional required-member anchor.
+
+    The 1.1.0 predecessor made a sealed ``c0.required_member_manifest``
+    reference mandatory, which silently made publication conditional on the
+    domain contract declaring at least one ``structured_fact_set`` completeness
+    requirement. Generic-collection membership is an optional modelling feature,
+    so that coupling was accidental rather than an invariant. Here the source
+    artifact manifest is the always-present anchor and the required-member
+    reference is carried only when the domain actually sealed one. The five
+    required-member fields remain strictly all-or-nothing so a partially
+    anchored authority is still unrepresentable.
+    """
+
+    required_member_manifest_id: RequiredText | None = None
+    required_member_manifest_contract_version: Literal["1.1.0"] | None = None
+    required_member_manifest_schema_hash: Sha256 | None = None
+    required_member_manifest_hash: Sha256 | None = None
+    authoritative_collection_hash: Sha256 | None = None
+    source_artifact_manifest_id: RequiredText
+    source_artifact_manifest_hash: Sha256
+
+    @model_validator(mode="after")
+    def _all_or_nothing(self) -> "PublicationAuthorityReferencesV1_2":
+        anchored = {
+            self.required_member_manifest_id is not None,
+            self.required_member_manifest_contract_version is not None,
+            self.required_member_manifest_schema_hash is not None,
+            self.required_member_manifest_hash is not None,
+            self.authoritative_collection_hash is not None,
+        }
+        if len(anchored) != 1:
+            raise ValueError(
+                "required-member authority must be wholly present or wholly absent"
+            )
+        return self
+
+    @property
+    def anchors_required_member_manifest(self) -> bool:
+        return self.required_member_manifest_id is not None
+
+    def validate_required_member_manifest(
+        self,
+        manifest: Any,
+        *,
+        schema_hash: str,
+    ) -> None:
+        """Prove exact reference equality without deriving membership."""
+        if not self.anchors_required_member_manifest:
+            raise ValueError("authority does not anchor a required member manifest")
+        if manifest.identity.contract_kind != "c0.required_member_manifest":
+            raise ValueError("referenced artifact is not a required member manifest")
+        if (
+            manifest.identity.contract_version
+            != self.required_member_manifest_contract_version
+        ):
+            raise ValueError("required member manifest contract version mismatch")
+        if schema_hash != self.required_member_manifest_schema_hash:
+            raise ValueError("required member manifest schema hash mismatch")
+        if manifest.required_member_manifest_id != self.required_member_manifest_id:
+            raise ValueError("required member manifest ID mismatch")
+        if manifest.manifest_hash != self.required_member_manifest_hash:
+            raise ValueError("required member manifest hash mismatch")
+        if (
+            manifest.authoritative_collection_hash
+            != self.authoritative_collection_hash
+        ):
+            raise ValueError("authoritative collection hash mismatch")
+
+    def validate_source_artifact_manifest(self, manifest: Any) -> None:
+        if manifest.artifact_manifest_id != self.source_artifact_manifest_id:
+            raise ValueError("source artifact manifest ID mismatch")
+        if manifest.manifest_hash != self.source_artifact_manifest_hash:
+            raise ValueError("source artifact manifest hash mismatch")
+
+
 class PropertyProjectionMapping(ContractModel):
     """One canonical property projected into physical publication namespaces."""
 
@@ -1191,6 +1267,26 @@ class PublicationCrosswalkV1_1(ContractModel):
                 raise ValueError(f"stale {name} hash")
 
 
+class PublicationCrosswalkIdentityV1_2(CanonicalIdentityEnvelope):
+    """Versioned identity for the optional-required-member crosswalk successor."""
+
+    contract_kind: Literal["c0.publication_crosswalk"] = "c0.publication_crosswalk"
+    contract_version: Literal["1.2.0"] = "1.2.0"
+
+
+class PublicationCrosswalkV1_2(PublicationCrosswalkV1_1):
+    """Crosswalk whose required-member authority anchor is optional.
+
+    Every structural, ownership, hierarchy, uniqueness, and hash invariant is
+    inherited unchanged from 1.1.0; the sole difference is that ``authority``
+    may omit the required-member manifest reference when the sealed L4 source
+    carries no generic-collection manifests at all.
+    """
+
+    identity: PublicationCrosswalkIdentityV1_2
+    authority: PublicationAuthorityReferencesV1_2
+
+
 class ProjectionEvidence(ContractModel):
     """One local observation used by a projection equivalence proof."""
 
@@ -1266,6 +1362,40 @@ class ProjectionEquivalence(ContractModel):
         return self
 
     def validate_crosswalk(self, crosswalk: PublicationCrosswalk) -> None:
+        if crosswalk.publication_crosswalk_id != self.publication_crosswalk_id:
+            raise ValueError("publication crosswalk ID mismatch")
+        if crosswalk.crosswalk_hash != self.publication_crosswalk_hash:
+            raise ValueError("publication crosswalk hash mismatch")
+        if crosswalk.authority != self.authority:
+            raise ValueError("publication authority references differ")
+        if crosswalk.source_projection_id != self.source_projection_id:
+            raise ValueError("source projection ID mismatch")
+        if crosswalk.source_projection_hash != self.source_projection_hash:
+            raise ValueError("source projection hash mismatch")
+
+
+class ProjectionEquivalenceIdentityV1_1(CanonicalIdentityEnvelope):
+    """Versioned identity for the optional-required-member equivalence proof."""
+
+    contract_kind: Literal["c0.projection_equivalence"] = "c0.projection_equivalence"
+    contract_version: Literal["1.1.0"] = "1.1.0"
+
+
+class ProjectionEquivalenceV1_1(ProjectionEquivalence):
+    """Equivalence proof carrying an optional required-member authority anchor.
+
+    Structurally identical to 1.0.0 apart from the authority carrier, so that a
+    domain without generic collections can still emit a per-target projection
+    equivalence proof anchored to its source artifact manifest.
+    """
+
+    identity: ProjectionEquivalenceIdentityV1_1
+    authority: PublicationAuthorityReferencesV1_2
+
+    def validate_crosswalk(  # type: ignore[override]
+        self,
+        crosswalk: PublicationCrosswalkV1_2,
+    ) -> None:
         if crosswalk.publication_crosswalk_id != self.publication_crosswalk_id:
             raise ValueError("publication crosswalk ID mismatch")
         if crosswalk.crosswalk_hash != self.publication_crosswalk_hash:

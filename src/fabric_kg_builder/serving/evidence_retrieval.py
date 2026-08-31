@@ -41,7 +41,8 @@ from fabric_kg_builder.contracts.identity import ImmutableSourceLocator
 from fabric_kg_builder.contracts.publication import (
     AccessPolicy,
     GovernedAssetReference,
-    ProjectionEquivalence,
+    ProjectionEquivalenceIdentityV1_1,
+    ProjectionEquivalenceV1_1,
     ProjectionEvidence,
 )
 from fabric_kg_builder.contracts.receipts import ArtifactEntry, ArtifactManifest, StageReceipt
@@ -429,7 +430,7 @@ class L5bCompiledPublication:
 @dataclass(frozen=True)
 class L5bStageResult:
     compiled: L5bCompiledPublication
-    projection_equivalences: tuple[ProjectionEquivalence, ...]
+    projection_equivalences: tuple[ProjectionEquivalenceV1_1, ...]
     output_manifest: ArtifactManifest
     metrics: StageResourceMetrics
     receipt: StageReceipt
@@ -1681,7 +1682,7 @@ def _persist_compiled(
 
 def _projection_equivalences(
     compiled: L5bCompiledPublication,
-) -> tuple[ProjectionEquivalence, ...]:
+) -> tuple[ProjectionEquivalenceV1_1, ...]:
     evidence = ProjectionEvidence(
         count=len(compiled.documents),
         canonical_id_set_hash=canonical_sha256(compiled.document_ids),
@@ -1690,7 +1691,13 @@ def _projection_equivalences(
     proofs = []
     for crosswalk in compiled.l5a_result.compiled.crosswalks:
         values = {
-            "identity": _identity(compiled.source, "c0.projection_equivalence"),
+            "identity": ProjectionEquivalenceIdentityV1_1.model_validate({
+                **_identity(
+                    compiled.source,
+                    "c0.projection_equivalence",
+                ).model_dump(mode="python"),
+                "contract_version": "1.1.0",
+            }),
             "projection_equivalence_id": deterministic_contract_id(
                 "projection-equivalence",
                 {
@@ -1713,7 +1720,7 @@ def _projection_equivalences(
             "extra_canonical_ids": (),
             "equivalent": True,
         }
-        proofs.append(ProjectionEquivalence(
+        proofs.append(ProjectionEquivalenceV1_1(
             **values,
             equivalence_hash=canonical_sha256(values),
         ))
@@ -1722,7 +1729,7 @@ def _projection_equivalences(
 
 def _artifact_manifest(
     compiled: L5bCompiledPublication,
-    proofs: Sequence[ProjectionEquivalence],
+    proofs: Sequence[ProjectionEquivalenceV1_1],
 ) -> ArtifactManifest:
     files = (
         ("index-definition", "l5b.search_index_definition", compiled.index_definition),
@@ -2171,7 +2178,7 @@ def _load_intact(
     signer: _ResolvedCheckpointSigner | None,
 ) -> tuple[
     ArtifactManifest,
-    tuple[ProjectionEquivalence, ...],
+    tuple[ProjectionEquivalenceV1_1, ...],
     StageReceipt,
     StageResourceMetrics,
 ] | None:
@@ -2206,7 +2213,7 @@ def _load_intact(
             else None
         )
         proofs = tuple(
-            ProjectionEquivalence.model_validate(item)
+            ProjectionEquivalenceV1_1.model_validate(item)
             for item in json.loads(
                 (run_root / "projection-equivalence.json").read_text("utf-8")
             )
