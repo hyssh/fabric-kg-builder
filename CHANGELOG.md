@@ -126,3 +126,36 @@
   declared. The service populates every unset property on create, so requiring
   a verbatim echo of the submitted index could never succeed; declared values,
   missing declared keys, and list-length drift are all still rejected.
+- Added `app compile-agent` and `app deploy-agent`, a Foundry Prompt Agent
+  path that wires an Ontology-first, AI-Search-second retrieval loop:
+  instructions (v1.4) explicitly direct the agent to query the Fabric Data
+  Agent (Ontology/graph) first, fall back to Azure AI Search only when the
+  ontology is insufficient, treat Ontology labels as top-level concepts versus
+  Search as the detail/citation source, and avoid three known Fabric GQL
+  pitfalls (label backticks, `FILTER` instead of `WHERE`, aggregate `AS`
+  aliasing — #112). `deploy-agent --dry-run` performs schema-only validation
+  with no network calls; live `deploy-agent` validates against the Foundry
+  project, builds the definition, creates/updates the agent, and persists a
+  `deploymentContext`.
+  **Live status as of the 2026-08-31 dev deploy: the agent was created
+  successfully (`agent_version: 1`), but real queries against it are not yet
+  functional.** Two defects were found by live smoke-testing and are tracked
+  separately rather than papered over:
+  - The AI Search tool hardcoded `query_type=vector_semantic_hybrid`, which
+    fails with a 400 on any index without an integrated vectorizer (`surface-
+    tech-kg-chunks` has none). Fixed in this release: the deploy path now
+    live-probes the index for an integrated vectorizer and only requests
+    hybrid search when one is present, otherwise falls back to `semantic`;
+    an explicit `knowledge.searchQueryType` override still wins over the
+    probe. See #121 (fixed by this change) and the regression tests in
+    `tests/unit/agent/test_deployer_query_type.py`.
+  - The Fabric Data Agent tool fails at invocation time with `ItemNotFound`.
+    Read-only diagnosis (via the Fabric REST API) confirmed the underlying
+    Fabric `DataAgent` item is genuinely published, not stuck in draft, and
+    correctly wired to the expected ontology artifact — so this is not a
+    Fabric authoring/publish defect. The likely cause is a Foundry↔Fabric
+    connection or permission gap (e.g. the Foundry account's managed identity
+    may lack a role on the Fabric workspace), not yet confirmed. Tracked as
+    #122, unresolved; no further live agent changes will be made until it is.
+  Until #122 is resolved and verified, the Foundry Prompt Agent should be
+  considered deployed-but-not-query-ready, not a completed feature.

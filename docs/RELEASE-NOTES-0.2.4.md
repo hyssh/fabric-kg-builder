@@ -27,3 +27,29 @@ item.
 
 The supported acceptance architecture is a base-wheel `fabric-kg` subprocess
 invoked locally by GitHub Copilot with `deploy_builtin_agent=false`.
+
+## Foundry Prompt Agent (`compile-agent` / `deploy-agent`)
+
+0.2.4 also adds an Ontology-first, Azure-AI-Search-second Foundry Prompt Agent
+path (`app compile-agent`, `app deploy-agent --dry-run|--env`). Instructions
+(v1.4) direct the agent to consult the Fabric Data Agent (Ontology/graph)
+first and use Azure AI Search only to fill gaps, treating the ontology as the
+source of top-level concepts and Search as the source of detail and quotable
+citations, while steering around three known Fabric GQL pitfalls (#112).
+
+**This feature is not yet query-ready.** A live dev deploy on 2026-08-31
+created the agent successfully (`agent_version: 1`), but two defects were
+found once real queries were attempted:
+
+- Azure AI Search tool: hardcoded `query_type` broke on indexes without an
+  integrated vectorizer. **Fixed in this release** — the deploy path now
+  auto-detects vectorizer support and falls back to `semantic` search, with an
+  explicit override still available in `agent-metadata.yaml`. (#121)
+- Fabric Data Agent tool: fails with `ItemNotFound` at invocation time. The
+  underlying Fabric item is confirmed published and correctly configured, so
+  this looks like a Foundry↔Fabric connection/permission gap rather than a
+  Fabric authoring problem — **still open, unresolved**. (#122)
+
+No further live agent redeploys are planned until #122 is resolved and
+independently verified. Treat this feature as deployed-but-not-functional for
+0.2.4, not as a completed capability.
