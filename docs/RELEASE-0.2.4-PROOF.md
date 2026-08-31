@@ -497,3 +497,12 @@ parts are byte-identical or differ only in Fabric's own re-serialization.
 Delivery is `updateDefinition` only. The ontology is never deleted and
 recreated: per the finding above, a failed create leaves permanently
 undeletable companion items.
+
+**The semantic model carries the same defect, confirmed rather than assumed.**
+Reading its live definition back shows `schemaName: dbo` in all 20 table parts
+and `sourceLineageTag: [dbo].[…]` alongside it. Unlike the GraphModel there is
+no jobs endpoint to observe a failure through — a semantic model exposes none —
+so this is established from the definition itself, not from an error. It needs
+the same update. Recompiling gives 24 parts, of which 23 change only by
+dropping the schema and lineage qualifiers and one differs by a trailing blank
+line; `.platform` is supplied at deployment time and is not compiler output.
