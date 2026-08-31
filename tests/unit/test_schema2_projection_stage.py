@@ -2657,3 +2657,69 @@ def test_audit_projection_orders_shared_input_ids_deterministically() -> None:
         "ordering must not depend on the order dispositions arrive in, "
         "because every downstream hash derives from it"
     )
+
+
+@pytest.mark.unit
+def test_canonical_disposition_order_is_stable_across_shapes() -> None:
+    """Producers hash dicts; the contract re-hashes models. Both must agree."""
+
+    from fabric_kg_builder.contracts.projection import canonical_disposition_order
+
+    shared = "input-candidate:0655b76b5489e24dff6bda34bf509694"
+    rows = [
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": None,
+            "deduplicated_into_candidate_id": "entity-candidate:b",
+        },
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": "entity-candidate:a",
+            "deduplicated_into_candidate_id": None,
+        },
+    ]
+
+    class _Obj:
+        def __init__(self, row: dict[str, object]) -> None:
+            for key, value in row.items():
+                setattr(self, key, value)
+
+    as_dicts = canonical_disposition_order(list(reversed(rows)))
+    as_objects = canonical_disposition_order([_Obj(row) for row in rows])
+
+    expected = [None, "entity-candidate:a"]
+    assert [row["retained_candidate_id"] for row in as_dicts] == expected
+    assert [
+        obj.retained_candidate_id for obj in as_objects
+    ] == expected, "attribute and mapping inputs must sort identically"
+
+
+@pytest.mark.unit
+def test_audit_projection_hash_survives_unsorted_producer_dispositions() -> None:
+    """Reproduces the L4 failure where the producer hashed arrival order."""
+
+    from fabric_kg_builder.contracts.projection import canonical_disposition_order
+
+    from tests.contract.test_c0_core_contracts import audit_projection
+
+    baseline = audit_projection()
+    values = baseline.model_dump(mode="python", exclude={"projection_hash"})
+    arrival_order = tuple(reversed(values["candidate_dispositions"]))
+    assert arrival_order != tuple(values["candidate_dispositions"])
+
+    values["candidate_dispositions"] = canonical_disposition_order(arrival_order)
+    resealed = AuditProjection(
+        **values,
+        projection_hash=canonical_sha256(values),
+    )
+
+    assert resealed.projection_hash == baseline.projection_hash
+
+    unsorted_values = dict(values)
+    unsorted_values["candidate_dispositions"] = arrival_order
+    with pytest.raises(Exception) as excinfo:
+        AuditProjection(
+            **unsorted_values,
+            projection_hash=canonical_sha256(unsorted_values),
+        )
+    assert "projection_hash does not match audit projection" in str(excinfo.value)

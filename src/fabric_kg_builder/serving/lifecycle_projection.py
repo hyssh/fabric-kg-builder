@@ -40,6 +40,7 @@ from fabric_kg_builder.contracts.lifecycle import (
 from fabric_kg_builder.contracts.projection import (
     AuditProjection,
     SemanticServingProjection,
+    canonical_disposition_order,
     validate_asserted_serving_subset,
 )
 from fabric_kg_builder.contracts.publication import (
@@ -1737,7 +1738,7 @@ def _build_projections(
         "input_candidate_count": input_count,
         "retained_candidate_count": retained_count,
         "deduplicated_input_count": deduplicated_count,
-        "candidate_dispositions": dispositions,
+        "candidate_dispositions": canonical_disposition_order(dispositions),
         "lifecycle_state_counts": {
             state: states.get(state, 0) for state in AssertionState
         },

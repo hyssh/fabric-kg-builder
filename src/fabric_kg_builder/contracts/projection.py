@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
-from typing import Annotated, Any, Literal, Mapping
+from typing import Annotated, Any, Iterable, Literal, Mapping
 
 from pydantic import Field, field_validator, model_validator
 
@@ -27,6 +27,34 @@ def _sorted_ids(value: object, field_name: str) -> object:
     if isinstance(value, (list, tuple)):
         return sorted_unique(value, field_name=field_name)
     return value
+
+
+def canonical_disposition_order(value: Iterable[Any]) -> tuple[Any, ...]:
+    """Order candidate dispositions canonically.
+
+    ``input_candidate_id`` is minted per extraction batch, so two batches that
+    propose identical raw text share one and it is not a total order on its own.
+    The retained and deduplicated candidate ids complete it.
+
+    Producers must order dispositions through this function *before* deriving
+    ``projection_hash``. ``AuditProjection`` re-derives that hash from its own
+    validated - and therefore reordered - fields, so a producer that hashes some
+    other order disagrees with the contract it is about to construct.
+    """
+
+    def key(item: Any) -> tuple[str, str, str]:
+        if isinstance(item, Mapping):
+            get = item.get
+        else:
+            def get(name: str, default: Any = None) -> Any:
+                return getattr(item, name, default)
+        return (
+            str(get("input_candidate_id", "") or ""),
+            str(get("retained_candidate_id", "") or ""),
+            str(get("deduplicated_into_candidate_id", "") or ""),
+        )
+
+    return tuple(sorted(value, key=key))
 
 
 class AuditProjection(ContractModel):
@@ -61,27 +89,8 @@ class AuditProjection(ContractModel):
     @field_validator("candidate_dispositions", mode="before")
     @classmethod
     def _dispositions(cls, value: object) -> object:
-        # input_candidate_id alone is not a total order: it is minted per
-        # extraction batch, so batches proposing identical raw text share one.
-        # Sort on the candidate ids too, otherwise ordering - and every hash
-        # derived from it - depends on input order.
-        def _key(item: object) -> tuple[str, str, str]:
-            if isinstance(item, CandidateAccountingDisposition):
-                return (
-                    item.input_candidate_id,
-                    item.retained_candidate_id or "",
-                    item.deduplicated_into_candidate_id or "",
-                )
-            return (
-                str(item.get("input_candidate_id", "")),  # type: ignore[union-attr]
-                str(item.get("retained_candidate_id", "") or ""),  # type: ignore[union-attr]
-                str(  # type: ignore[union-attr]
-                    item.get("deduplicated_into_candidate_id", "") or ""
-                ),
-            )
-
         if isinstance(value, (list, tuple)):
-            return tuple(sorted(value, key=_key))
+            return canonical_disposition_order(value)
         return value
 
     @field_validator(
