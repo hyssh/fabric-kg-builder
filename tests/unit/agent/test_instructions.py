@@ -17,13 +17,13 @@ from fabric_kg_builder.agent.instructions import (
 )
 
 
-def test_instructions_version_is_v1_5():
-    assert INSTRUCTIONS_VERSION == "v1.5"
+def test_instructions_version_is_v1_6():
+    assert INSTRUCTIONS_VERSION == "v1.6"
 
 
 def test_build_routing_instructions_embeds_version_header():
     doc = build_routing_instructions()
-    assert "instructions version v1.5" in doc
+    assert "instructions version v1.6" in doc
 
 
 def test_entity_id_handoff_section_present():
@@ -83,4 +83,75 @@ def test_custom_version_override_renders_in_header_not_module_constant():
     (used by the deployer for hashing/audit) is unaffected."""
     doc = build_routing_instructions(version="v9.9-test")
     assert "instructions version v9.9-test" in doc
-    assert INSTRUCTIONS_VERSION == "v1.5"
+    assert INSTRUCTIONS_VERSION == "v1.6"
+
+
+def test_label_is_documented_as_a_reserved_keyword_needing_backticks():
+    """issue #112: `label` is reserved in Fabric GQL and every entity carries a
+    `label` property, so the prompt must show the back-ticked form. Unquoted
+    n.label is a hard syntax error that surfaces as a false 'no data found'."""
+    prompt = build_routing_instructions()
+    assert "reserved keyword" in prompt.lower()
+    assert "n.`label`" in prompt
+    # The wrong form must be shown as wrong, so the model can recognise it.
+    assert "WRONG:   RETURN n.label" in prompt
+
+
+def test_filter_not_where_uses_backticked_label_in_its_example():
+    """The FILTER example must itself model the back-ticking rule; an example
+    that says FILTER n.name would teach the unquoted habit back."""
+    prompt = build_routing_instructions()
+    assert "FILTER n.`label`" in prompt
+    assert "FILTER n.name" not in prompt
+
+
+def test_entity_label_property_is_described_as_populated():
+    """The label deployment made entity names readable from the graph alone.
+    The prompt must not still claim entity properties are unpopulated, or the
+    agent will pointlessly fall back to Search for naming questions."""
+    prompt = build_routing_instructions()
+    assert "not populated in this release" not in prompt
+    assert "human-readable `label`" in prompt
+
+
+def test_verbatim_quotation_is_required_for_evidence_questions():
+    prompt = build_routing_instructions()
+    assert "VERBATIM" in prompt
+    assert "paraphrase is not evidence" in prompt
+
+
+def test_both_grounding_tools_are_named_explicitly():
+    """The model selects by tool name, so the prompt must map each tool name
+    to its role rather than describing them only abstractly."""
+    prompt = build_routing_instructions()
+    assert "Fabric Data Agent tool" in prompt
+    assert "Azure AI Search tool" in prompt
+
+
+def test_relationship_types_are_injected_and_constrained():
+    prompt = build_routing_instructions(
+        relationship_types=["device_has_component", "procedure_requires_tool"]
+    )
+    assert "`device_has_component`" in prompt
+    assert "`procedure_requires_tool`" in prompt
+    assert "inventing an edge name" in prompt
+
+
+def test_relationship_types_absent_when_not_supplied():
+    prompt = build_routing_instructions()
+    assert "VALID RELATIONSHIP TYPES" not in prompt
+
+
+def test_entity_and_relationship_types_coexist():
+    prompt = build_routing_instructions(
+        entity_types=["surface_device"], relationship_types=["device_has_component"]
+    )
+    assert "VALID ENTITY TYPES" in prompt
+    assert "VALID RELATIONSHIP TYPES" in prompt
+
+
+def test_absence_claims_require_a_successful_query():
+    """#105/#112: never report a subject absent on the strength of a failed query."""
+    prompt = build_routing_instructions()
+    assert "returned zero rows" in prompt
+    assert "say which query you ran" in prompt
