@@ -28,6 +28,15 @@ _COGNITIVE_SERVICES_USER_ROLE_ID = "a97b65f3-24c7-4388-baec-2e87135dc908"
 _FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
 _FABRIC_ORIGIN = "https://api.fabric.microsoft.com"
 _ARM_ORIGIN = "https://management.azure.com"
+_POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+_POWERBI_BASE = "https://api.powerbi.com/v1.0/myorg"
+_POWERBI_ORIGIN = "https://api.powerbi.com"
+# A DirectLake semantic model exposes no tables until it has been framed once,
+# so framing is part of a successful deployment rather than a later repair.
+_FRAMING_PENDING_STATES = frozenset({"unknown", "inprogress", "notstarted"})
+_FRAMING_SUCCESS_STATE = "completed"
+_FRAMING_POLL_SECONDS = 5.0
+_FRAMING_TIMEOUT_SECONDS = 900.0
 
 
 def _search_scope(endpoint: str) -> str:
@@ -2503,6 +2512,8 @@ class AzureL7Backend:
             raise L7ReleaseError(
                 f"{target.item_type} create readback mismatch"
             )
+        if target.item_type == "SemanticModel":
+            self._frame_semantic_model(config, item_id)
         return ResourceReadback(
             resource_id=action.resource_id,
             stable_id=item_id,
@@ -2512,6 +2523,82 @@ class AzureL7Backend:
             etag=observed.etag,
             definition_hash=observed.definition_hash,
         )
+
+    def _frame_semantic_model(
+        self, config: L7ReleaseConfig, item_id: str
+    ) -> None:
+        """Frame a DirectLake semantic model so that its tables resolve.
+
+        Publishing a definition is not sufficient: until the model has been
+        refreshed once it loads but exposes no tables, and querying it fails
+        with an error that blames a Lakehouse column mapping. Framing here
+        makes that failure surface at deployment instead of much later.
+        """
+        import time
+
+        token = self._token(_POWERBI_SCOPE)
+        refreshes_url = (
+            f"{_POWERBI_BASE}/groups/{config.fabric_workspace_id}/"
+            f"datasets/{item_id}/refreshes"
+        )
+        response = self._request(
+            "POST",
+            refreshes_url,
+            token=token,
+            body={"type": "full", "notifyOption": "NoNotification"},
+            expected_origin=_POWERBI_ORIGIN,
+        )
+        if response.status_code != 202:
+            raise L7ReleaseError(
+                "SemanticModel framing was refused with HTTP "
+                f"{response.status_code}"
+            )
+        headers = response.headers
+        request_id = str(
+            headers.get("RequestId")
+            or headers.get("requestid")
+            or headers.get("x-ms-request-id")
+            or ""
+        )
+        if not request_id:
+            # The Location header points at a per-cluster host, so only its
+            # trailing identifier is reused and the polling URL is rebuilt
+            # against the origin already validated above.
+            location = str(headers.get("Location") or "")
+            request_id = location.rsplit("/", 1)[-1].strip() if location else ""
+        if not request_id:
+            raise L7ReleaseError(
+                "SemanticModel framing returned no refresh identifier"
+            )
+        status_url = f"{refreshes_url}/{request_id}"
+        deadline = time.monotonic() + _FRAMING_TIMEOUT_SECONDS
+        while True:
+            poll = self._request(
+                "GET",
+                status_url,
+                token=token,
+                expected_origin=_POWERBI_ORIGIN,
+            )
+            if poll.status_code != 200:
+                raise L7ReleaseError(
+                    "SemanticModel framing status read failed with HTTP "
+                    f"{poll.status_code}"
+                )
+            body = self._json(poll, "SemanticModel framing status")
+            status = str(body.get("status") or "").strip()
+            folded = status.casefold()
+            if folded == _FRAMING_SUCCESS_STATE:
+                return
+            if folded and folded not in _FRAMING_PENDING_STATES:
+                raise L7ReleaseError(
+                    f"SemanticModel framing did not complete: status {status}"
+                )
+            if time.monotonic() >= deadline:
+                raise L7ReleaseError(
+                    "SemanticModel framing did not reach a terminal state "
+                    "before the timeout"
+                )
+            time.sleep(_FRAMING_POLL_SECONDS)
 
     def _reconcile_fabric_create(
         self,
@@ -2746,6 +2833,8 @@ class AzureL7Backend:
                     f"{target.item_type} getDefinition hash mismatch"
                 )
             self._created_etags[action.resource_id.casefold()] = observed.etag
+            if target.item_type == "SemanticModel":
+                self._frame_semantic_model(config, target.item_id)
             return observed
         if action.component.startswith("search-"):
             return self._search_create(config, action)
