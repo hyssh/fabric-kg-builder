@@ -1398,6 +1398,13 @@ def _run_offline_evaluation(cases: list[EvalCase]) -> list[dict]:
     show_default=True,
     type=click.Path(dir_okay=False, path_type=Path),
 )
+@click.option(
+    "--materialize",
+    "materialize_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Write the compiled tables and target definitions to this directory.",
+)
 def publish_structured_cmd(
     l4_run: Path,
     l3_root: Path,
@@ -1406,6 +1413,7 @@ def publish_structured_cmd(
     dry_run: bool,
     approve_live: str | None,
     plan_path: Path,
+    materialize_dir: Path | None,
 ) -> None:
     """Compile and plan the L5a structured publication of a sealed L4 run.
 
@@ -1506,6 +1514,26 @@ def publish_structured_cmd(
         "blocked_capabilities": blocked,
         "live_publication_supported": not blocked,
     }
+    if materialize_dir is not None:
+        import pyarrow.parquet as pq
+
+        for table_id, table in sorted(compiled.tables.items()):
+            path = materialize_dir / "tables" / f"{table_id}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, path, compression="snappy", version="2.6")
+            if pq.read_table(path).num_rows != table.num_rows:
+                raise click.ClickException(
+                    f"materialized Parquet row count drifted for {table_id}"
+                )
+        for kind in sorted(compiled.definitions):
+            path = materialize_dir / "definitions" / f"{kind}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                canonical_json(compiled.definitions[kind]) + "\n",
+                encoding="utf-8",
+            )
+        click.echo(f"materialized={materialize_dir}")
+
     plan["plan_hash"] = canonical_sha256(plan)
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(canonical_json(plan) + "\n", encoding="utf-8")

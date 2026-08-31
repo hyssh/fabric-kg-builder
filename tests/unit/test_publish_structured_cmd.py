@@ -122,3 +122,69 @@ def test_plan_hash_is_stable_across_repeated_compilation(sealed_run, tmp_path):
     first = (tmp_path / "plan.json").read_text("utf-8")
     assert _invoke(sealed_run, tmp_path).exit_code == 0
     assert (tmp_path / "plan.json").read_text("utf-8") == first
+
+
+@pytest.mark.unit
+def test_materialize_writes_every_table_and_definition(sealed_run, tmp_path):
+    """``--materialize`` is what feeds OneLake, so it must emit the whole set.
+
+    A partial materialization would upload a subset of the publication while the
+    plan still claimed the full one, so assert the written files agree exactly
+    with the tables and definitions the plan names.
+    """
+
+    out = tmp_path / "materialized"
+    result = _invoke(sealed_run, tmp_path, "--materialize", str(out))
+    assert result.exit_code == 0, result.output
+    assert f"materialized={out}" in result.output
+
+    plan = json.loads((tmp_path / "plan.json").read_text())
+    planned_tables = {
+        table["table_id"] for table in plan["tables"]
+    }
+    written_tables = {p.stem for p in (out / "tables").glob("*.parquet")}
+    assert written_tables == planned_tables
+
+    written_definitions = {p.stem for p in (out / "definitions").glob("*.json")}
+    assert written_definitions
+    for name in written_definitions:
+        json.loads((out / "definitions" / f"{name}.json").read_text())
+
+
+@pytest.mark.unit
+def test_materialize_does_not_change_the_plan_hash(sealed_run, tmp_path):
+    """Materializing is a side effect, not an input.
+
+    If writing files perturbed the hash, an operator could not materialize the
+    artifacts for a plan they had already approved by hash.
+    """
+
+    plain = _invoke(sealed_run, tmp_path)
+    assert plain.exit_code == 0, plain.output
+    without = json.loads((tmp_path / "plan.json").read_text())["plan_hash"]
+
+    materialized = _invoke(
+        sealed_run, tmp_path, "--materialize", str(tmp_path / "m")
+    )
+    assert materialized.exit_code == 0, materialized.output
+    with_materialize = json.loads((tmp_path / "plan.json").read_text())["plan_hash"]
+
+    assert without == with_materialize
+
+
+@pytest.mark.unit
+def test_materialized_parquet_round_trips_the_compiled_row_counts(
+    sealed_run, tmp_path
+):
+    """The written Parquet is what lands in the Lakehouse; row counts must hold."""
+
+    import pyarrow.parquet as pq
+
+    out = tmp_path / "materialized"
+    result = _invoke(sealed_run, tmp_path, "--materialize", str(out))
+    assert result.exit_code == 0, result.output
+
+    plan = json.loads((tmp_path / "plan.json").read_text())
+    by_id = {t["table_id"]: t for t in plan["tables"]}
+    for path in sorted((out / "tables").glob("*.parquet")):
+        assert pq.read_table(path).num_rows == by_id[path.stem]["row_count"]
