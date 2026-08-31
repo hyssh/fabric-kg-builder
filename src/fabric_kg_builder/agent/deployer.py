@@ -188,13 +188,21 @@ def deploy_agent(
         env_cfg.knowledge.get("knowledgeBaseMcpEndpoint", "")
     )
 
+    # query_type is resolved after the live client is available (see Step 2.5
+    # below) so it can be auto-detected against the real index schema; the
+    # placeholder here is only used if that resolution step never runs
+    # (e.g. dry-run short-circuit).
+    search_query_type_override = str(
+        env_cfg.knowledge.get("searchQueryType", "")
+    ).strip()
+
     tool_specs: list[dict[str, Any]] = []
     if search_connection_id and search_index_name:
         tool_specs.append({
             "type": "azure_ai_search",
             "project_connection_id": search_connection_id,
             "index_name": search_index_name,
-            "query_type": "vector_semantic_hybrid",
+            "query_type": search_query_type_override or "semantic",
             "top_k": 5,
         })
     if fabric_connection_id:
@@ -294,6 +302,21 @@ def deploy_agent(
             agent_version_id="",
             image_tag=image_tag,
         )
+
+    # -- Step 3.5: resolve AI Search query_type (auto-detect vs override) ------
+    # vector_semantic_hybrid/vector_simple_hybrid require an integrated
+    # vectorizer on the index; without one they fail at invocation time with
+    # a 400 error even though deployment succeeds (issue #121). Precedence:
+    #   1. explicit env_cfg.knowledge.searchQueryType override
+    #   2. live probe of the actual index schema (best-effort)
+    #   3. safe default "semantic" (works without a vectorizer)
+    if not search_query_type_override and search_connection_id and search_index_name:
+        probe = getattr(client, "index_has_integrated_vectorizer", None)
+        detected = probe(search_connection_id, search_index_name) if callable(probe) else None
+        resolved_query_type = "vector_semantic_hybrid" if detected else "semantic"
+        for spec in tool_specs:
+            if spec.get("type") == "azure_ai_search":
+                spec["query_type"] = resolved_query_type
 
     # -- Step 4: agent definition ----------------------------------------------
     agent_definition = {

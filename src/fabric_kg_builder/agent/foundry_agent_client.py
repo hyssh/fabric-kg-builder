@@ -167,11 +167,61 @@ class SDKAgentTransport:
                 "azure-ai-projects>=2.3.0 is required for live agent deployment.\n"
                 "Install: pip install 'azure-ai-projects>=2.3.0' azure-identity"
             )
+        self._credential = credential
         self._project = AIProjectClient(
             endpoint=project_endpoint,
             credential=credential,
             allow_preview=True,
         )
+
+    # ── index_has_integrated_vectorizer ─────────────────────────────────────
+
+    def index_has_integrated_vectorizer(
+        self, connection_id: str, index_name: str
+    ) -> bool | None:
+        """Best-effort live probe: does ``index_name`` have an integrated vectorizer?
+
+        Resolves the Azure AI Search connection's data-plane endpoint via the
+        Foundry project, then queries the Search index schema directly.
+        ``vector_semantic_hybrid``/``vector_simple_hybrid`` query types require
+        an integrated vectorizer on the index's vector field(s); without one
+        those query types fail at invocation time with a 400 error even though
+        deployment itself succeeds.
+
+        Returns:
+            True  — an integrated vectorizer was found.
+            False — the index schema was read and no vectorizer was found.
+            None  — undeterminable (connection/schema unreachable); callers
+                    should fall back to a safe default rather than assume.
+        """
+        import requests  # local import: avoid hard dep for offline paths
+
+        try:
+            connection = self._project.connections.get(connection_id)
+            target = str(getattr(connection, "target", "") or "").rstrip("/")
+            if not target:
+                return None
+            token = self._credential.get_token(
+                "https://search.azure.com/.default"
+            ).token
+            resp = requests.get(
+                f"{target}/indexes/{index_name}",
+                params={"api-version": "2024-07-01"},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return None
+            schema = resp.json()
+            vector_search = schema.get("vectorSearch") or {}
+            if vector_search.get("vectorizers"):
+                return True
+            for profile in vector_search.get("profiles") or []:
+                if profile.get("vectorizer"):
+                    return True
+            return False
+        except Exception:
+            return None
 
     # ── get_agent ────────────────────────────────────────────────────────────
 
@@ -225,7 +275,14 @@ class SDKAgentTransport:
                                         index_name=tool_spec["index_name"],
                                         query_type=tool_spec.get(
                                             "query_type",
-                                            "vector_semantic_hybrid",
+                                            # Safe default: "semantic" works on any
+                                            # semantically-configured index and does
+                                            # NOT require an integrated vectorizer,
+                                            # unlike vector_semantic_hybrid. See
+                                            # issue #121. deployer.py normally sets
+                                            # this explicitly; this default is only
+                                            # a defensive fallback.
+                                            "semantic",
                                         ),
                                         top_k=int(tool_spec.get("top_k", 5)),
                                     )
@@ -487,6 +544,20 @@ class FoundryAgentClient:
         Returns dict with ``answer`` (= ``output_text``) and ``status``.
         """
         return self._transport.invoke_agent(agent_name, prompt, self._smoke_timeout)
+
+    def index_has_integrated_vectorizer(
+        self, connection_id: str, index_name: str
+    ) -> bool | None:
+        """Passthrough to the transport's live vectorizer probe, if it has one.
+
+        ``FakeAgentTransport`` (used in tests / dry-run) has no such method, so
+        this always returns ``None`` there — callers must treat ``None`` as
+        "undeterminable" and fall back to a safe default, never as "False".
+        """
+        probe = getattr(self._transport, "index_has_integrated_vectorizer", None)
+        if not callable(probe):
+            return None
+        return probe(connection_id, index_name)
 
 
 # ---------------------------------------------------------------------------
