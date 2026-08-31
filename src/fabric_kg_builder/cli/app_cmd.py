@@ -505,7 +505,7 @@ No secrets are accepted on the command line.
 @click.option("--domain-contract", default=None, type=click.Path(exists=True),
               help="Approved domain.yaml context for the deployed prompt agent.")
 @click.option("--entity-types-file", default=None, type=click.Path(exists=True),
-              help="multitype-plan.json used to ground valid entity types.")
+              help="multitype-plan.json used to ground valid entity and relationship types.")
 @click.pass_context
 def deploy_agent_cmd(
     ctx: click.Context,
@@ -534,6 +534,7 @@ def deploy_agent_cmd(
     )
 
     entity_types: list[str] | None = None
+    relationship_types: list[str] | None = None
     if entity_types_file:
         plan = json.loads(Path(entity_types_file).read_text(encoding="utf-8"))
         entity_types = [
@@ -541,6 +542,11 @@ def deploy_agent_cmd(
             for item in plan.get("entity_types", [])
             if isinstance(item, dict) and item.get("type_name")
         ]
+        relationship_types = [
+            str(item["name"])
+            for item in plan.get("relationship_pairs", [])
+            if isinstance(item, dict) and item.get("name")
+        ] or None
     domain_context: str | None = None
     if domain_contract:
         from fabric_kg_builder.domain import require_ready_domain_contract
@@ -562,6 +568,7 @@ def deploy_agent_cmd(
             _client=None,
             metadata_path=md_path,
             entity_types=entity_types,
+            relationship_types=relationship_types,
             domain_context=domain_context,
             dry_run=dry_run,
             require_grounding_tools=True,

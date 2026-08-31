@@ -139,6 +139,7 @@ def deploy_agent(
     _client: Any | None = None,
     metadata_path: str | Path | None = None,
     entity_types: list[str] | None = None,
+    relationship_types: list[str] | None = None,
     domain_context: str | None = None,
     dry_run: bool = False,
     smoke_timeout_s: int = 60,
@@ -169,6 +170,8 @@ def deploy_agent(
                         client. When None (live mode), built from metadata.
         metadata_path:  Override path to agent-metadata.yaml.
         entity_types:   Optional entity types for instruction grounding.
+        relationship_types: Optional relationship types for instruction
+            grounding, so the agent traverses real edge names.
         dry_run:        Validate and plan only; do not deploy or persist.
         smoke_timeout_s: Seconds to wait for smoke run.
 
@@ -259,6 +262,7 @@ def deploy_agent(
     instructions = build_routing_instructions(
         version=INSTRUCTIONS_VERSION,
         entity_types=entity_types,
+        relationship_types=relationship_types,
         domain_context=domain_context,
     )
     instructions_hash = _hash_instructions(instructions)

@@ -240,3 +240,23 @@ def test_every_allowed_query_type_override_is_accepted(tmp_path: Path) -> None:
         deploy_agent(environment="dev", metadata_path=md_path, _client=client)
 
         assert _search_tool_spec(_create_calls(transport))["query_type"] == query_type
+
+
+def test_relationship_types_reach_the_deployed_system_prompt(tmp_path: Path) -> None:
+    """deploy_agent must forward relationship_types into the instructions, or
+    the injection point exists but no deployment path can ever use it."""
+    md_path = _write_metadata(tmp_path)
+    transport = FakeAgentTransport()
+    client = _ProbeClient(transport=transport, vectorizer_probe_result=False)
+
+    deploy_agent(
+        environment="dev",
+        metadata_path=md_path,
+        _client=client,
+        entity_types=["surface_device"],
+        relationship_types=["device_has_component"],
+    )
+
+    prompt = _create_calls(transport)[-1]["definition"]["system_prompt"]
+    assert "`device_has_component`" in prompt
+    assert "`surface_device`" in prompt
