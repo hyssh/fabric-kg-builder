@@ -31,6 +31,11 @@ BASE_ENTITY_TYPE_NAME = "surface_entity"
 BASE_IDENTITY_PROPERTY_ID = "2000000"
 BASE_ENTITY_TABLE = "l4_semantic_asserted_entities"
 BASE_ENTITY_IDENTITY_COLUMN = "entity_id"
+BASE_LABEL_PROPERTY_ID = "3000000"
+BASE_ENTITY_LABEL_COLUMN = "label"
+LABEL_PROPERTY_NAME = "label"
+# Typed publication tables carry the derived mention as a structural column.
+TYPED_LABEL_COLUMN = "__label"
 
 _NAMESPACE = "usertypes"
 _SCHEMA_ROOT = "https://developer.microsoft.com/json-schemas/fabric/item/ontology"
@@ -88,6 +93,7 @@ def _entity_type_payload(
     entity_type: dict[str, Any],
     *,
     identity_property_id: str,
+    label_property_id: str | None = None,
 ) -> dict[str, Any]:
     properties = [
         {
@@ -98,6 +104,14 @@ def _entity_type_payload(
             "valueType": "String",
         }
     ]
+    if label_property_id is not None:
+        properties.append({
+            "id": label_property_id,
+            "name": LABEL_PROPERTY_NAME,
+            "redefines": None,
+            "baseTypeNamespaceType": None,
+            "valueType": "String",
+        })
     properties.extend(
         _property_payload(prop) for prop in entity_type.get("properties", ())
     )
@@ -131,6 +145,8 @@ def _data_binding_payload(
     lakehouse_schema: str | None,
     table_name: str,
     identity_column: str,
+    label_property_id: str | None = None,
+    label_column: str | None = None,
 ) -> dict[str, Any]:
     bindings = [
         {
@@ -138,6 +154,11 @@ def _data_binding_payload(
             "targetPropertyId": identity_property_id,
         }
     ]
+    if label_property_id is not None and label_column is not None:
+        bindings.append({
+            "sourceColumnName": label_column,
+            "targetPropertyId": label_property_id,
+        })
     for prop in entity_type.get("properties", ()):
         bindings.append(
             {
@@ -205,7 +226,14 @@ def compile_fabric_ontology_definition(
                 "redefines": None,
                 "baseTypeNamespaceType": None,
                 "valueType": "String",
-            }
+            },
+            {
+                "id": BASE_LABEL_PROPERTY_ID,
+                "name": LABEL_PROPERTY_NAME,
+                "redefines": None,
+                "baseTypeNamespaceType": None,
+                "valueType": "String",
+            },
         ],
         "timeseriesProperties": [],
         "semanticEnrichment": {
@@ -230,6 +258,8 @@ def compile_fabric_ontology_definition(
                 lakehouse_schema=lakehouse_schema,
                 table_name=BASE_ENTITY_TABLE,
                 identity_column=BASE_ENTITY_IDENTITY_COLUMN,
+                label_property_id=BASE_LABEL_PROPERTY_ID,
+                label_column=BASE_ENTITY_LABEL_COLUMN,
             ),
         )
     )
@@ -237,6 +267,7 @@ def compile_fabric_ontology_definition(
     for entity_type in entity_types:
         type_id = str(entity_type["id"])
         identity_property_id = f"9{type_id}"
+        label_property_id = f"8{type_id}"
         identity_by_type[type_id] = identity_property_id
         parts.append(
             _part(
@@ -244,6 +275,7 @@ def compile_fabric_ontology_definition(
                 _entity_type_payload(
                     entity_type,
                     identity_property_id=identity_property_id,
+                    label_property_id=label_property_id,
                 ),
             )
         )
@@ -261,6 +293,8 @@ def compile_fabric_ontology_definition(
                     identity_column=str(
                         entity_type["physical_identity_column"]
                     ),
+                    label_property_id=label_property_id,
+                    label_column=TYPED_LABEL_COLUMN,
                 ),
             )
         )
