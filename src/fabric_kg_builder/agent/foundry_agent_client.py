@@ -225,7 +225,7 @@ class SDKAgentTransport:
                                         index_name=tool_spec["index_name"],
                                         query_type=tool_spec.get(
                                             "query_type",
-                                            "vector_semantic_hybrid",
+                                            "semantic",
                                         ),
                                         top_k=int(tool_spec.get("top_k", 5)),
                                     )

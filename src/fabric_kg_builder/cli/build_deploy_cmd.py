@@ -760,7 +760,7 @@ def _update_grounding_metadata(
     knowledge["searchIndexName"] = search_index_name
     knowledge["knowledgeBaseName"] = knowledge_base_name
     knowledge.pop("knowledgeBaseMcpEndpoint", None)
-    knowledge.setdefault("queryType", "vector_semantic_hybrid")
+    knowledge.setdefault("queryType", "semantic")
     knowledge.setdefault("topK", 5)
     metadata_path.write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),

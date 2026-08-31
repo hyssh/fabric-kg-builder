@@ -28,6 +28,14 @@ from fabric_kg_builder.agent.instructions import build_routing_instructions, INS
 from fabric_kg_builder.agent.metadata import AgentMetadata, load_agent_metadata
 
 _METADATA_PATH = Path(".foundry") / "agent-metadata.yaml"
+
+# Azure AI Search query modes accepted for the grounding tool. The modes in
+# _VECTOR_QUERY_TYPES require the target index to expose a vector field; the
+# L5b publication does not create one, so `semantic` is the default that
+# matches what this product actually publishes.
+_VECTOR_QUERY_TYPES = frozenset({"vector", "vector_simple_hybrid", "vector_semantic_hybrid"})
+_ALLOWED_QUERY_TYPES = frozenset({"simple", "full", "semantic"}) | _VECTOR_QUERY_TYPES
+_DEFAULT_QUERY_TYPE = "semantic"
 _SMOKE_PROMPT = (
     "Hello, are you available? "
     "Reply with route_type: search and confirm you are ready."
@@ -36,6 +44,80 @@ _SMOKE_PROMPT = (
 
 class DeploymentError(Exception):
     """Raised when agent deployment fails at any step."""
+
+
+def _assert_index_supports_query_type(
+    index_name: str,
+    query_type: str,
+    env_cfg: Any,
+    inspector: Any | None = None,
+) -> None:
+    """Fail before any mutation when the index cannot serve the query type.
+
+    Vector query modes need the target index to expose a vector field. The
+    L5b publication does not create one, so requesting a vector mode against
+    a published index would otherwise only fail at the smoke prompt - after
+    the agent has already been created.
+
+    Verification is skipped when the query type needs no vector field, or
+    when neither an inspector nor a ``knowledge.searchEndpoint`` is
+    configured, since there is then no way to read the index definition.
+    """
+    if query_type not in _VECTOR_QUERY_TYPES:
+        return
+
+    fetch = inspector
+    if fetch is None:
+        endpoint = str(env_cfg.knowledge.get("searchEndpoint", "") or "")
+        if not endpoint:
+            return
+        fetch = _default_index_inspector(endpoint)
+
+    try:
+        definition = fetch(index_name)
+    except DeploymentError:
+        raise
+    except Exception as exc:
+        raise DeploymentError(
+            f"Cannot verify that Azure AI Search index {index_name!r} "
+            f"supports queryType {query_type!r}: {exc}"
+        ) from exc
+
+    fields = (definition or {}).get("fields") or []
+    has_vector_field = any(
+        isinstance(field, dict) and field.get("dimensions")
+        for field in fields
+    )
+    if not has_vector_field:
+        raise DeploymentError(
+            f"environments.<env>.knowledge.queryType is {query_type!r}, which "
+            f"requires a vector field, but Azure AI Search index "
+            f"{index_name!r} declares none. Set queryType to "
+            f"'{_DEFAULT_QUERY_TYPE}' or publish an index with vector fields."
+        )
+
+
+def _default_index_inspector(endpoint: str) -> Any:
+    """Return a callable that reads an index definition using Entra auth."""
+    def _fetch(index_name: str) -> dict[str, Any]:
+        import urllib.request
+
+        from azure.identity import DefaultAzureCredential
+
+        token = DefaultAzureCredential().get_token(
+            "https://search.azure.com/.default"
+        ).token
+        url = (
+            f"{endpoint.rstrip('/')}/indexes/{index_name}"
+            "?api-version=2024-07-01"
+        )
+        request = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    return _fetch
 
 
 class DeploymentContext:
@@ -134,6 +216,7 @@ def deploy_agent(
     dry_run: bool = False,
     smoke_timeout_s: int = 60,
     require_grounding_tools: bool = False,
+    _index_inspector: Any | None = None,
 ) -> DeploymentContext:
     """Deploy the Foundry prompt-agent for the given environment.
 
@@ -187,15 +270,30 @@ def deploy_agent(
     knowledge_mcp_endpoint = str(
         env_cfg.knowledge.get("knowledgeBaseMcpEndpoint", "")
     )
+    search_query_type = str(
+        env_cfg.knowledge.get("queryType", "") or _DEFAULT_QUERY_TYPE
+    )
+    if search_query_type not in _ALLOWED_QUERY_TYPES:
+        raise DeploymentError(
+            f"Unsupported environments.{env}.knowledge.queryType "
+            f"{search_query_type!r}. Allowed: "
+            f"{', '.join(sorted(_ALLOWED_QUERY_TYPES))}."
+        )
 
     tool_specs: list[dict[str, Any]] = []
     if search_connection_id and search_index_name:
+        _assert_index_supports_query_type(
+            search_index_name,
+            search_query_type,
+            env_cfg,
+            _index_inspector,
+        )
         tool_specs.append({
             "type": "azure_ai_search",
             "project_connection_id": search_connection_id,
             "index_name": search_index_name,
-            "query_type": "vector_semantic_hybrid",
-            "top_k": 5,
+            "query_type": search_query_type,
+            "top_k": int(env_cfg.knowledge.get("topK", 5) or 5),
         })
     if fabric_connection_id:
         tool_specs.append({
