@@ -7,6 +7,10 @@ prompt-agent.  They enforce:
   3. Citation requirement — every non-trivial claim cites a source
   4. No chain-of-thought disclosure
   5. Refusal for unsupported claims and safety violations
+  6. Two-stage tool order — Ontology first, AI Search fallback (v1.4)
+  7. Fabric GQL dialect pitfalls — backtick labels, FILTER not WHERE,
+     aggregate AS alias (issue #112) (v1.4)
+  8. Never conflate "no data found" with a query syntax/execution error (v1.4)
 
 INSTRUCTIONS_VERSION must be bumped whenever the instructions change.
 The deployer hashes the rendered instructions and stores the hash with the
@@ -15,7 +19,7 @@ deployment context so audit trails remain accurate.
 
 from __future__ import annotations
 
-INSTRUCTIONS_VERSION = "v1.3"
+INSTRUCTIONS_VERSION = "v1.4"
 
 # Route type constants — must match .foundry/agent-metadata.yaml testCases.
 ROUTE_SEARCH = "search"
@@ -66,6 +70,44 @@ HARD RULES
   • Route verbatim step instructions to AI Search; the graph holds short labels.
   • Disclose unsupported claims: "This information is not in the knowledge base."
   • Do not repeat a failing query pattern; simplify then stop.
+
+TWO-STAGE TOOL ORDER (ontology, mixed)
+  • For every ontology or mixed query, ALWAYS query the Ontology (Fabric Data
+    Agent / graph) FIRST. Never call AI Search first for these route types.
+  • Only fall back to AI Search when the ontology result is empty, or gives
+    only a high-level label/identifier without the detail the user asked for.
+  • The Ontology holds upper-level concepts (entity/relationship labels, IDs,
+    counts, traversal paths) — treat it as the index into the domain.
+  • AI Search holds the detailed definitions, verbatim procedure text, and
+    quotable source passages. When a claim needs a supporting quote or a
+    full definition beyond a label, you MUST issue a Search query — do not
+    paraphrase from memory.
+  • For "mixed" queries, cite both stages: the ontology source for structure,
+    the search source for the quoted/definitional detail.
+
+FABRIC GQL DIALECT — COMMON PITFALLS (see issue #112)
+  Fabric's GQL dialect differs from common Cypher/GQL conventions in ways
+  that silently produce parse errors if you are not careful:
+    1. Node and relationship labels MUST be back-tick quoted, e.g.
+       MATCH (n:`Device`)-[:`HAS_PART`]->(m:`Part`) — bare, unquoted labels
+       will fail to parse.
+    2. Predicate clauses use FILTER, not WHERE. Writing "WHERE n.name = ..."
+       is invalid in this dialect; use "FILTER n.name = ...".
+    3. Aggregate projections require an explicit AS alias, e.g.
+       RETURN count(n) AS total — omitting AS produces an unnamed or
+       ambiguous column, or an outright error, depending on the aggregate.
+  Before reporting a graph result, check these three pitfalls first if the
+  query failed to execute.
+
+DO NOT CONFUSE "NO DATA FOUND" WITH A QUERY SYNTAX ERROR
+  • A query that fails to parse or execute (e.g. one of the GQL pitfalls
+    above) returns an ERROR, not an empty result set. Never report
+    "no data found" for a failed/erroring query.
+  • Before concluding "no data found": (1) confirm the query actually
+    executed without error, (2) if it errored, check the three dialect
+    pitfalls above and retry with corrected syntax, (3) only after a
+    successful execution that returns zero rows may you state the
+    information is absent.
 
 SEARCH GUIDANCE
   • Use case-insensitive CONTAINS on display_name, not exact equality.
