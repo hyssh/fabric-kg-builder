@@ -1129,7 +1129,13 @@ def _derive_label(
     evidence_ids: tuple[str, ...],
     evidence: Mapping[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Select one verbatim mention to act as a human-readable label.
+    """Select one verbatim mention to stand in as a readable label.
+
+    This is a *verbatim mention*, not a canonical name. The pipeline elects no
+    canonical name for an entity, and this does not invent one: the value is
+    simply one of the phrases a source document uses, chosen by a fixed rule.
+    Callers should read it as "a way this entity is referred to", never as an
+    authoritative title.
 
     The quote is carried through unchanged apart from whitespace normalisation,
     so a label is always literal source text with a span that proves it. When no
@@ -1813,6 +1819,10 @@ def _build_projections(
             "semantic-serving-projection",
             {"fingerprint": fingerprint},
         ),
+        # Stays 1.0: this versions the projection *header* contract, whose field
+        # shape is unchanged. The added entity columns are already carried by
+        # canonical_row_hashes and projection_hash, which differ from any prior
+        # run, so the change is signalled without misdescribing the header.
         "projection_version": "1.0",
         "audit_projection_id": audit.projection_id,
         "source_manifest_hash": source.output_manifest.manifest_hash,
