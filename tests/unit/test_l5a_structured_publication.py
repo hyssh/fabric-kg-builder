@@ -23,9 +23,9 @@ from fabric_kg_builder.contracts.publication import (
     InheritedPropertyReferenceV1_1,
     PhysicalPropertyBindingV1_1,
     PrincipalScope,
-    PublicationAuthorityReferences,
-    PublicationCrosswalkIdentityV1_1,
-    PublicationCrosswalkV1_1,
+    PublicationAuthorityReferencesV1_2,
+    PublicationCrosswalkIdentityV1_2,
+    PublicationCrosswalkV1_2,
     RelationshipProjectionMappingV1_1,
     SemanticPropertyOwnershipMappingV1_1,
     SemanticTypeProjectionMappingV1_1,
@@ -58,6 +58,7 @@ from fabric_kg_builder.serving.structured_publication import (
     _table_snapshot,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
+from tests.unit.test_schema2_validation_stage import _l3, _pipeline
 from tests.unit.test_schema2_validation_stage import _subtypes
 
 
@@ -371,10 +372,8 @@ def _source_assets(derived_assets, spans, policy):
     return tuple(by_file[key] for key in sorted(by_file))
 
 
-def _crosswalk(source) -> PublicationCrosswalkV1_1:
-    manifest = pq.read_table(
-        source.resolve("semantic_required_member_manifests")
-    ).to_pylist()[0]
+def _crosswalk_body(source) -> dict:
+    """Every crosswalk field except ``authority``, which varies by anchoring."""
     authority_row = pq.read_table(
         source.resolve("semantic_publication_authority")
     ).to_pylist()[0]
@@ -501,29 +500,15 @@ def _crosswalk(source) -> PublicationCrosswalkV1_1:
         ),
         search_index_field=None,
     )
-    entry = next(
-        item for item in source.input_manifest.entries
-        if item.artifact_id == manifest["required_member_manifest_id"]
-    )
-    authority = PublicationAuthorityReferences(
-        required_member_manifest_id=manifest["required_member_manifest_id"],
-        required_member_manifest_contract_version="1.1.0",
-        required_member_manifest_schema_hash=entry.schema_hash,
-        required_member_manifest_hash=manifest["manifest_hash"],
-        authoritative_collection_hash=manifest["authoritative_collection_hash"],
-        source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
-        source_artifact_manifest_hash=source.input_manifest.manifest_hash,
-    )
-    values = {
-        "identity": PublicationCrosswalkIdentityV1_1.model_validate({
+    return {
+        "identity": PublicationCrosswalkIdentityV1_2.model_validate({
             **_identity(
                 source,
                 "c0.publication_crosswalk",
             ).model_dump(mode="python"),
-            "contract_version": "1.1.0",
+            "contract_version": "1.2.0",
         }),
         "publication_crosswalk_id": "publication-crosswalk:l5a",
-        "authority": authority,
         "semantic_contract_hash": source.projection.sealed_semantic_contract_hash,
         "stable_id_lock_id": "stable-id-lock:l5a",
         "stable_id_lock_hash": "b" * 64,
@@ -541,7 +526,27 @@ def _crosswalk(source) -> PublicationCrosswalkV1_1:
         )),
         "relationship_mappings": (relationship,),
     }
-    return PublicationCrosswalkV1_1(
+
+
+def _crosswalk(source) -> PublicationCrosswalkV1_2:
+    manifest = pq.read_table(
+        source.resolve("semantic_required_member_manifests")
+    ).to_pylist()[0]
+    entry = next(
+        item for item in source.input_manifest.entries
+        if item.artifact_id == manifest["required_member_manifest_id"]
+    )
+    authority = PublicationAuthorityReferencesV1_2(
+        required_member_manifest_id=manifest["required_member_manifest_id"],
+        required_member_manifest_contract_version="1.1.0",
+        required_member_manifest_schema_hash=entry.schema_hash,
+        required_member_manifest_hash=manifest["manifest_hash"],
+        authoritative_collection_hash=manifest["authoritative_collection_hash"],
+        source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
+        source_artifact_manifest_hash=source.input_manifest.manifest_hash,
+    )
+    values = {**_crosswalk_body(source), "authority": authority}
+    return PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1096,7 +1101,7 @@ def test_l5a_rejects_nonexact_canonical_property_ownership(
         record["physical_property_bindings"],
         key=lambda item: item["canonical_property_id"],
     )
-    forged = PublicationCrosswalkV1_1(
+    forged = PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1129,7 +1134,7 @@ def test_crosswalk_rejects_duplicate_inherited_physical_property_owner(
     ]
 
     with pytest.raises(ValueError, match="both local and inherited"):
-        PublicationCrosswalkV1_1(
+        PublicationCrosswalkV1_2(
             **values,
             crosswalk_hash=canonical_sha256(values),
         )
@@ -1162,7 +1167,7 @@ def test_l5a_rejects_arbitrary_descendant_semantic_instance_key(
         "canonical_property_id": "property:record-a:detail",
         "physical_column_id": "target_1",
     }]
-    forged = PublicationCrosswalkV1_1(
+    forged = PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1202,7 +1207,7 @@ def test_l5a_rejects_physical_relationship_representative_outside_authority(
         ][0],
         "physical_column_id": "source_id",
     }]
-    forged = PublicationCrosswalkV1_1(
+    forged = PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -1294,13 +1299,13 @@ def test_l5a_multi_manifest_proofs_are_unique_and_manifest_specific(
         ),
         "source_artifact_manifest_hash": first.source.input_manifest.manifest_hash,
     })
-    second_crosswalk_values["authority"] = PublicationAuthorityReferences(
+    second_crosswalk_values["authority"] = PublicationAuthorityReferencesV1_2(
         **authority_values
     )
     second_crosswalk_values["publication_crosswalk_id"] = (
         "publication-crosswalk:l5a:second"
     )
-    second_crosswalk = PublicationCrosswalkV1_1(
+    second_crosswalk = PublicationCrosswalkV1_2(
         **second_crosswalk_values,
         crosswalk_hash=canonical_sha256(second_crosswalk_values),
     )
@@ -1497,7 +1502,7 @@ def test_l5a_rejects_authority_and_policy_drift(tmp_path: Path) -> None:
         exclude={"crosswalk_hash"},
     )
     stale_values["hierarchy_hash"] = "f" * 64
-    stale = PublicationCrosswalkV1_1(
+    stale = PublicationCrosswalkV1_2(
         **stale_values,
         crosswalk_hash=canonical_sha256(stale_values),
     )
@@ -2273,7 +2278,7 @@ def test_l5a_rejects_reserved_physical_column_collision(tmp_path: Path) -> None:
     first_type["physical_property_bindings"][0][
         "physical_column_id"
     ] = "__canonical_id"
-    changed = PublicationCrosswalkV1_1(
+    changed = PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -2304,7 +2309,7 @@ def test_l5a_rejects_forged_parent_with_coordinated_caller_reseals(
         crosswalk.semantic_type_mappings[0],
         forged_child,
     )
-    forged = PublicationCrosswalkV1_1(
+    forged = PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -2330,7 +2335,7 @@ def test_l5a_rejects_physical_name_shadow_of_carried_authority(
     values["semantic_type_mappings"][0]["physical_table_id"] = (
         "l4_semantic_publication_authority"
     )
-    changed = PublicationCrosswalkV1_1(
+    changed = PublicationCrosswalkV1_2(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -2393,3 +2398,189 @@ def test_l5a_schema1_and_later_layers_remain_inactive(tmp_path: Path) -> None:
     assert "search_calls" in source
     assert "search_documents_written" in source
     assert '"search"' not in source.split("L5A_TARGET_ORDER =", 1)[1].splitlines()[0]
+
+
+# ---------------------------------------------------------------------------
+# Required-member authority is optional only when the corpus sealed none
+# ---------------------------------------------------------------------------
+
+
+def _l3_without_manifest(tmp_path: Path):
+    """Run L1->L3 on a domain whose completeness requirements seal no manifest."""
+
+    def mutate(candidates, _work_unit):
+        values = [dict(candidate) for candidate in candidates]
+        for index, candidate in enumerate(values):
+            if candidate["candidate_kind"] != "entity":
+                continue
+            candidate = dict(candidate)
+            suffix = (
+                "record"
+                if candidate["local_id"].startswith("record")
+                else "subject"
+            )
+            candidate["identity_key"] = {
+                f"property:{suffix}:canonical-id": candidate["local_id"]
+            }
+            values[index] = candidate
+        return values
+
+    l1_state_root, domain_path, l2 = _pipeline(
+        tmp_path,
+        "manufacturing",
+        fact_set=None,
+        mutate=mutate,
+        type_properties={
+            "semantic-type:manufacturing.record": ({
+                "property_id": "property:record:canonical-id",
+                "display_name": "Record ID",
+                "value_type": "string",
+                "required": True,
+            },),
+            "semantic-type:manufacturing.subject": ({
+                "property_id": "property:subject:canonical-id",
+                "display_name": "Subject ID",
+                "value_type": "string",
+                "required": True,
+            },),
+        },
+        identity_business_keys={
+            "semantic-type:manufacturing.record": (
+                "property:record:canonical-id",
+            ),
+            "semantic-type:manufacturing.subject": (
+                "property:subject:canonical-id",
+            ),
+        },
+    )
+    assert not l2.required_member_sets
+    return _l3(tmp_path, l1_state_root, domain_path)
+
+
+def _unanchored_inputs(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    l4 = run_l4(
+        _l3_without_manifest(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    source = l4.sealed_source()
+    assert not pq.read_table(
+        source.resolve("semantic_required_member_manifests")
+    ).to_pylist()
+    policy = _policy(source)
+    crosswalk = _unanchored_crosswalk(source)
+    target_ids = {
+        "parquet": "target:lakehouse",
+        "semantic_model": "target:semantic-model",
+        "ontology": "target:ontology",
+        "graph": "target:graph",
+    }
+    return {
+        "source": source,
+        "crosswalks": (crosswalk,),
+        "access_policy": policy,
+        "governed_assets": _assets(source, crosswalk, policy, target_ids),
+        "target_ids": target_ids,
+    }
+
+
+def _unanchored_crosswalk(source) -> PublicationCrosswalkV1_2:
+    anchored = _crosswalk_body(source)
+    authority = PublicationAuthorityReferencesV1_2(
+        source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
+        source_artifact_manifest_hash=source.input_manifest.manifest_hash,
+    )
+    values = {**anchored, "authority": authority}
+    return PublicationCrosswalkV1_2(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+
+@pytest.mark.unit
+def test_l5a_accepts_one_unanchored_crosswalk_when_no_manifest_was_sealed(
+    tmp_path: Path,
+) -> None:
+    inputs = _unanchored_inputs(tmp_path / "case")
+
+    compiled = compile_l5a_publication(**inputs)
+
+    crosswalk = compiled.crosswalks[0]
+    assert not crosswalk.authority.anchors_required_member_manifest
+    assert crosswalk.authority.required_member_manifest_id is None
+    assert compiled.required_member_manifest_rows == ()
+    assert compiled.required_member_rows == ()
+    snapshots = compiled.required_member_snapshots
+    assert [snapshot.required_member_manifest_id for snapshot in snapshots] == [
+        None
+    ]
+    assert snapshots[0].canonical_ids == ()
+    for kind in L5A_TARGET_ORDER:
+        state = _expected_state(compiled, kind, publication_token="token:l5a")
+        assert state.required_member_manifest_rows == ()
+        assert state.required_member_rows == ()
+
+    result = run_l5a(
+        **inputs,
+        client=_FakeClient(),
+        state_root=tmp_path / ".fkg" / "l5a",
+    )
+
+    assert result.receipt.status == "succeeded"
+    assert {proof.projection_kind for proof in result.projection_equivalences} == set(
+        L5A_TARGET_ORDER
+    )
+    assert all(
+        proof.expected == proof.read_back
+        for proof in result.projection_equivalences
+    )
+    assert all(
+        proof.authority.required_member_manifest_id is None
+        for proof in result.projection_equivalences
+    )
+
+
+@pytest.mark.unit
+def test_l5a_rejects_an_unanchored_crosswalk_when_manifests_exist(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path / "case")
+    anchored = inputs["crosswalks"][0]
+    stripped = PublicationAuthorityReferencesV1_2(
+        source_artifact_manifest_id=(
+            anchored.authority.source_artifact_manifest_id
+        ),
+        source_artifact_manifest_hash=(
+            anchored.authority.source_artifact_manifest_hash
+        ),
+    )
+    values = {
+        key: getattr(anchored, key)
+        for key in PublicationCrosswalkV1_2.model_fields
+        if key != "crosswalk_hash"
+    }
+    values["authority"] = stripped
+    unanchored = PublicationCrosswalkV1_2(
+        **values,
+        crosswalk_hash=canonical_sha256(values),
+    )
+
+    with pytest.raises(L5aPublicationError) as excinfo:
+        compile_l5a_publication(**{**inputs, "crosswalks": (unanchored,)})
+
+    assert excinfo.value.code == "L5A_PUBLICATION_CROSSWALK_SET_MISMATCH"
+
+
+@pytest.mark.unit
+def test_l5a_rejects_more_than_one_crosswalk_when_no_manifest_was_sealed(
+    tmp_path: Path,
+) -> None:
+    inputs = _unanchored_inputs(tmp_path / "case")
+    crosswalk = inputs["crosswalks"][0]
+
+    with pytest.raises(L5aPublicationError) as excinfo:
+        compile_l5a_publication(
+            **{**inputs, "crosswalks": (crosswalk, crosswalk)}
+        )
+
+    assert excinfo.value.code == "L5A_PUBLICATION_CROSSWALK_SET_MISMATCH"

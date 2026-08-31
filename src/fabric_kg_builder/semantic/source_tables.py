@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -149,6 +150,29 @@ def _one_artifact(manifest: ArtifactManifest, artifact_id: str):
     return matches[0]
 
 
+def _disposition_key(item: object) -> tuple[str, str, str]:
+    """Canonical uniqueness key for one candidate disposition.
+
+    ``input_candidate_id`` alone is minted per extraction batch and is not a
+    total order, so ``AuditProjection`` and L4 both key on the disposition
+    triple. Persisted audit rows and projected dispositions must be compared
+    through the same key.
+    """
+
+    if isinstance(item, Mapping):
+        def read(name: str) -> object:
+            return item.get(name)
+    else:
+        def read(name: str) -> object:
+            return getattr(item, name, None)
+
+    return (
+        str(read("input_candidate_id") or ""),
+        str(read("retained_candidate_id") or ""),
+        str(read("deduplicated_into_candidate_id") or ""),
+    )
+
+
 def _table_canonical_id_set_hash(
     table_name: str,
     rows: tuple[dict[str, object], ...],
@@ -201,6 +225,51 @@ class SealedL4ServingSource:
     receipt: StageReceipt
     manifest: ArtifactManifest
     input_manifest: ArtifactManifest
+
+    @classmethod
+    def from_run(
+        cls,
+        run_root: Path,
+        *,
+        input_manifest_search_roots: Sequence[Path],
+    ) -> SealedL4ServingSource:
+        """Open a persisted L4 run as a sealed serving source.
+
+        The L4 receipt names its input manifest by id but not by path, so the
+        producing L3 run has to be searched for the manifest carrying that
+        exact id. Binding by id rather than by directory layout keeps the
+        source sealed even when runs are relocated.
+        """
+
+        receipt = StageReceipt.model_validate_json(
+            (run_root / "stage-receipt.json").read_text("utf-8")
+        )
+        manifest = ArtifactManifest.model_validate_json(
+            (run_root / "output-manifest.json").read_text("utf-8")
+        )
+        projection = SemanticServingProjection.model_validate_json(
+            (run_root / "semantic-serving-projection.json").read_text("utf-8")
+        )
+        for search_root in input_manifest_search_roots:
+            for path in sorted(Path(search_root).rglob("output-manifest.json")):
+                try:
+                    candidate = ArtifactManifest.model_validate_json(
+                        path.read_text("utf-8")
+                    )
+                except ValueError:
+                    continue
+                if candidate.artifact_manifest_id == receipt.input_manifest_id:
+                    return cls(
+                        root=run_root,
+                        projection=projection,
+                        receipt=receipt,
+                        manifest=manifest,
+                        input_manifest=candidate,
+                    )
+        raise ValueError(
+            "no artifact manifest under the search roots carries input "
+            f"manifest id {receipt.input_manifest_id!r}"
+        )
 
     def __post_init__(self) -> None:
         try:
@@ -651,15 +720,21 @@ class SealedL4ServingSource:
                 raise ValueError("serving table contract authority differs")
 
         audit_rows = tables["audit_candidates"]
-        dispositions_by_id = {
-            item.input_candidate_id: item for item in audit.candidate_dispositions
+        # ``input_candidate_id`` is minted per extraction batch, so two batches
+        # that propose identical raw text legitimately share one. L4 enforces
+        # uniqueness at ``(batch_id, input_candidate_id)`` and AuditProjection
+        # keys dispositions on the disposition triple; this gate must use the
+        # same key or it collapses distinct candidates and then rejects the
+        # source for the collapse it just performed.
+        dispositions_by_key = {
+            _disposition_key(item): item
+            for item in audit.candidate_dispositions
         }
-        persisted_input_ids = [
-            str(row["input_candidate_id"]) for row in audit_rows
-        ]
+        persisted_keys = [_disposition_key(row) for row in audit_rows]
         if (
-            len(persisted_input_ids) != len(set(persisted_input_ids))
-            or set(persisted_input_ids) != set(dispositions_by_id)
+            len(dispositions_by_key) != len(audit.candidate_dispositions)
+            or len(persisted_keys) != len(set(persisted_keys))
+            or set(persisted_keys) != set(dispositions_by_key)
         ):
             raise ValueError(
                 "audit rows do not exactly cover candidate dispositions"
@@ -710,7 +785,7 @@ class SealedL4ServingSource:
             "source_manifest_hash",
         )
         for row in audit_rows:
-            disposition = dispositions_by_id.get(str(row["input_candidate_id"]))
+            disposition = dispositions_by_key.get(_disposition_key(row))
             state = (
                 AssertionState(str(row["lifecycle_state"]))
                 if row["lifecycle_state"] is not None
@@ -753,7 +828,7 @@ class SealedL4ServingSource:
                 states[state] += 1
             reasons.update(str(reason) for reason in row["reason_codes"])
         if (
-            len(dispositions_by_id) != len(audit_rows)
+            len(dispositions_by_key) != len(audit_rows)
             or audit.input_candidate_count != len(audit_rows)
             or audit.retained_candidate_count != sum(states.values())
             or audit.deduplicated_input_count

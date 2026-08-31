@@ -700,4 +700,4 @@ def test_schema_generation_adds_only_1_1_and_preserves_every_existing_byte(
         for item in registry["schemas"]
         if item["contract_kind"] == "c0.publication_crosswalk"
     }
-    assert versions == {"1.0.0", "1.1.0"}
+    assert versions == {"1.0.0", "1.1.0", "1.2.0"}

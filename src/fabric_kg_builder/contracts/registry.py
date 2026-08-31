@@ -39,6 +39,8 @@ from .publication import (
     ProjectionEquivalence,
     PublicationCrosswalk,
     PublicationCrosswalkV1_1,
+    PublicationCrosswalkV1_2,
+    ProjectionEquivalenceV1_1,
 )
 from .receipts import ArtifactManifest, StageReceipt
 from .rdf import (
@@ -102,7 +104,8 @@ SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
 SUPPORTED_VERSIONS["c0.evidence_span"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.required_member_set_proposal"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.required_member_manifest"] = ("1.0.0", "1.1.0")
-SUPPORTED_VERSIONS["c0.publication_crosswalk"] = ("1.0.0", "1.1.0")
+SUPPORTED_VERSIONS["c0.publication_crosswalk"] = ("1.0.0", "1.1.0", "1.2.0")
+SUPPORTED_VERSIONS["c0.projection_equivalence"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.query_budget"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.agentic_retrieval_request_context"] = ("1.0.0", "1.1.0")
 SUPPORTED_VERSIONS["c0.agentic_retrieval_coverage_receipt"] = ("1.0.0", "1.1.0")
@@ -120,6 +123,12 @@ REGISTERED_CONTRACT_VERSIONS[
 REGISTERED_CONTRACT_VERSIONS[
     ("c0.publication_crosswalk", "1.1.0")
 ] = PublicationCrosswalkV1_1
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.publication_crosswalk", "1.2.0")
+] = PublicationCrosswalkV1_2
+REGISTERED_CONTRACT_VERSIONS[
+    ("c0.projection_equivalence", "1.1.0")
+] = ProjectionEquivalenceV1_1
 REGISTERED_CONTRACT_VERSIONS[("c0.query_budget", "1.1.0")] = QueryBudgetV1_1
 REGISTERED_CONTRACT_VERSIONS[
     ("c0.agentic_retrieval_request_context", "1.1.0")
@@ -182,6 +191,8 @@ def schema_catalog() -> dict[tuple[str, str], dict[str, Any]]:
                     "RequiredMemberManifestIdentityV1_1",
                     "RequiredMemberSetProposalIdentityV1_1",
                     "PublicationCrosswalkIdentityV1_1",
+                    "PublicationCrosswalkIdentityV1_2",
+                    "ProjectionEquivalenceIdentityV1_1",
                     "QueryBudgetIdentityV1_1",
                     "AgenticRetrievalRequestContextIdentityV1_1",
                     "AgenticRetrievalCoverageReceiptIdentityV1_1",
@@ -217,7 +228,7 @@ def write_registered_schemas(output_dir: Path) -> dict[str, str]:
         if version == CONTRACT_VERSION:
             hashes[kind] = hashes[f"{kind}@{version}"]
     index = {
-        "registry_version": "1.7.0",
+        "registry_version": "1.8.0",
         "schemas": [
             {
                 "contract_kind": kind,

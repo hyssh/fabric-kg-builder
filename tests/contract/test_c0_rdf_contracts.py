@@ -2179,6 +2179,8 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         "c0-rdf_projection_manifest-1.0.0.schema.json",
         "c0-rdf_serialization_artifact-1.0.0.schema.json",
         "c0-rdf_validation_receipt-1.0.0.schema.json",
+        "c0-projection_equivalence-1.1.0.schema.json",
+        "c0-publication_crosswalk-1.2.0.schema.json",
     }
     assert new_paths.issubset({path.name for path in tmp_path.glob("*.schema.json")})
 
@@ -2195,7 +2197,7 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         baseline=PRE_RDF_BASELINE,
     )
     assert PRE_RDF_BASELINE["registry_version"] == "1.6.0"
-    assert current_registry["registry_version"] == "1.7.0"
+    assert current_registry["registry_version"] == "1.8.0"
     baseline_keys = {
         (entry["contract_kind"], entry["contract_version"])
         for entry in PRE_RDF_BASELINE["registry_entries"]
@@ -2209,10 +2211,12 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         ("c0.rdf_projection_manifest", "1.0.0"),
         ("c0.rdf_serialization_artifact", "1.0.0"),
         ("c0.rdf_validation_receipt", "1.0.0"),
+        ("c0.projection_equivalence", "1.1.0"),
+        ("c0.publication_crosswalk", "1.2.0"),
     }
     assert len(current_registry["schemas"]) == len(
         PRE_RDF_BASELINE["registry_entries"]
-    ) + 4
+    ) + 6
 
 
 @pytest.mark.contract
