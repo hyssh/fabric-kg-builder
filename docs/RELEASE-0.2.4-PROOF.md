@@ -817,3 +817,29 @@ quote the identifier fails *loudly*, with a syntax error, which is a different
 symptom from the empty results that motivated this work and should not be read as
 a regression in the data. Whether the generator quotes it is not yet known.
 Tracked in #112.
+
+A third rule surfaced alongside it: aggregates require an alias. `RETURN
+COUNT(n)` is rejected with the same `42000` class of error, while `RETURN
+COUNT(n) AS c` succeeds. Case is irrelevant; the alias is the only difference.
+So a generated query must satisfy three constraints — backtick `label`, use
+`FILTER` rather than `WHERE`, and alias every aggregate — and each one fails
+audibly rather than returning an empty table, which is what makes them
+separable from a genuine zero-row answer.
+
+#### The rollback anchor was verified, not assumed
+
+Version 0 of every rewritten table was retained, but "retained" is a claim about
+the log rather than about readability, so it was read back after the deployment
+had already succeeded:
+
+| version | rows | columns | `__label` |
+| --- | --- | --- | --- |
+| 0 | 2,711 | 5 | absent |
+| 1 | 2,711 | 6 | present |
+
+Both commits survive in the history, and `DeltaTable.restore` is available in the
+pinned `deltalake` version, so a restore is a genuine option rather than a
+hypothetical one. Restore is itself a new commit, which makes it safe to attempt
+and idempotent to repeat. It was never needed — every step verified clean on the
+first attempt — but an untested rollback path is indistinguishable from an absent
+one, so it is recorded here as measured.
