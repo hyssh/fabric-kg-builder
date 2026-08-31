@@ -86,14 +86,38 @@ def _l5a_ontology() -> dict[str, object]:
     }
 
 
-def _compile():
+def _compile(lakehouse=None):
     return compile_fabric_ontology_definition(
         _l5a_ontology(),
         workspace_id=WORKSPACE_ID,
         lakehouse_id=LAKEHOUSE_ID,
         display_name="fabric_kg_024_ontology",
         description="test",
+        lakehouse=lakehouse,
     )
+
+
+def _table_references(parts) -> list[dict]:
+    """Every lakehouse-table reference the ontology emits, of either shape.
+
+    Entity bindings nest the reference under ``dataBindingConfiguration.
+    sourceTableProperties``; relationship contextualizations put it at
+    ``dataBindingTable``.  Both address the same physical tables and so must
+    agree about the schema, but they are built by separate code paths.
+    """
+
+    references = []
+    for part in parts:
+        if not part["path"].endswith(".json"):
+            continue
+        payload = json.loads(base64.b64decode(part["payload"]))
+        configuration = payload.get("dataBindingConfiguration") or {}
+        reference = configuration.get("sourceTableProperties")
+        if reference is None:
+            reference = payload.get("dataBindingTable")
+        if isinstance(reference, dict) and "sourceTableName" in reference:
+            references.append(reference)
+    return references
 
 
 def _payload(parts, path: str) -> dict:
@@ -244,6 +268,7 @@ def test_semantic_model_excludes_complex_columns_and_reports_them(
         tables_root=tmp_path,
         workspace_id=WORKSPACE_ID,
         lakehouse_id=LAKEHOUSE_ID,
+        lakehouse="dbo",
     )
     assert [
         (e.table_name, e.column_name) for e in result.excluded_columns
@@ -263,6 +288,7 @@ def test_semantic_model_emits_direct_lake_partitions_for_every_table(
         tables_root=tmp_path,
         workspace_id=WORKSPACE_ID,
         lakehouse_id=LAKEHOUSE_ID,
+        lakehouse="dbo",
     )
     assert sorted(result.table_names) == [
         "l4_semantic_asserted_entities",
@@ -287,6 +313,7 @@ def test_semantic_model_maps_scalar_arrow_types_to_tmdl_types(tmp_path: Path) ->
         tables_root=tmp_path,
         workspace_id=WORKSPACE_ID,
         lakehouse_id=LAKEHOUSE_ID,
+        lakehouse="dbo",
     )
     tmdl = _raw_payload(
         result.parts, "definition/tables/l4_semantic_asserted_entities.tmdl"
@@ -310,6 +337,7 @@ def test_semantic_model_emits_underscore_prefixed_columns_as_bare_identifiers(
         tables_root=tmp_path,
         workspace_id=WORKSPACE_ID,
         lakehouse_id=LAKEHOUSE_ID,
+        lakehouse="dbo",
     )
     tmdl = _raw_payload(
         result.parts,
@@ -326,4 +354,110 @@ def test_semantic_model_refuses_an_empty_tables_root(tmp_path: Path) -> None:
             tables_root=tmp_path,
             workspace_id=WORKSPACE_ID,
             lakehouse_id=LAKEHOUSE_ID,
+            lakehouse="dbo",
         )
+
+
+# ---------------------------------------------------------------------------
+# Lakehouse schema resolution
+#
+# A Lakehouse created without schemas stores its Delta tables at
+# ``Tables/<name>``; a schema-enabled one stores them at ``Tables/dbo/<name>``.
+# Naming the wrong one produces a definition that validates, imports, and reads
+# back cleanly while binding to a path that does not exist -- the failure only
+# appears later, as an unrefreshable and permanently empty graph.  These tests
+# pin both directions so the two ontology sites and the semantic model cannot
+# drift back to a hardcoded schema.
+# ---------------------------------------------------------------------------
+
+
+def test_ontology_omits_source_schema_for_a_lakehouse_without_schemas() -> None:
+    references = _table_references(_compile(lakehouse=None).parts)
+
+    assert references, "expected at least one lakehouse table reference"
+    for reference in references:
+        assert "sourceSchema" not in reference, (
+            "a Lakehouse without schemas stores tables at Tables/<name>, so "
+            "naming a schema binds the ontology to a nonexistent OneLake path"
+        )
+
+
+def test_ontology_emits_source_schema_for_a_schema_enabled_lakehouse() -> None:
+    lakehouse = {"properties": {"defaultSchema": "dbo"}}
+
+    references = _table_references(_compile(lakehouse=lakehouse).parts)
+
+    assert references
+    assert {reference["sourceSchema"] for reference in references} == {"dbo"}
+
+
+def test_ontology_binding_and_contextualization_schemas_always_agree() -> None:
+    """The two reference shapes are built by separate code paths.
+
+    They address the same physical tables, so a schema present on one and
+    absent from the other is always a bug -- and is exactly how the original
+    hardcoding survived review.
+    """
+
+    for lakehouse in (None, "dbo", {"properties": {"defaultSchema": "dbo"}}):
+        references = _table_references(_compile(lakehouse=lakehouse).parts)
+        schemas = {reference.get("sourceSchema") for reference in references}
+        assert len(schemas) == 1, (
+            f"lakehouse={lakehouse!r} produced disagreeing schemas: {schemas}"
+        )
+
+
+def test_source_type_stays_first_key_when_the_schema_is_omitted() -> None:
+    """Omitting the schema must not disturb the polymorphic discriminator."""
+
+    for part in _compile(lakehouse=None).parts:
+        if "DataBinding" not in part["path"]:
+            continue
+        raw = base64.b64decode(part["payload"]).decode()
+        marker = '"sourceTableProperties": {'
+        rest = raw[raw.index(marker) + len(marker) :]
+        assert rest.lstrip().startswith('"sourceType"')
+
+
+def test_semantic_model_omits_schema_name_for_a_lakehouse_without_schemas(
+    tmp_path: Path,
+) -> None:
+    _write_tables(tmp_path)
+
+    compilation = compile_fabric_semantic_model_definition(
+        tables_root=tmp_path,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
+        lakehouse=None,
+    )
+
+    tables = [p for p in compilation.parts if p["path"].endswith(".tmdl")]
+    partitions = [
+        base64.b64decode(p["payload"]).decode()
+        for p in tables
+        if "partition" in base64.b64decode(p["payload"]).decode()
+    ]
+    assert partitions
+    for tmdl in partitions:
+        assert "schemaName:" not in tmdl
+        assert "entityName:" in tmdl
+
+
+def test_semantic_model_emits_schema_name_for_a_schema_enabled_lakehouse(
+    tmp_path: Path,
+) -> None:
+    _write_tables(tmp_path)
+
+    compilation = compile_fabric_semantic_model_definition(
+        tables_root=tmp_path,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
+        lakehouse={"properties": {"defaultSchema": "dbo"}},
+    )
+
+    partitions = [
+        base64.b64decode(p["payload"]).decode()
+        for p in compilation.parts
+        if p["path"].endswith(".tmdl")
+    ]
+    assert any("schemaName: dbo" in tmdl for tmdl in partitions)

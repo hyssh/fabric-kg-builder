@@ -24,6 +24,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .lakehouse_schema import apply_source_schema, resolve_lakehouse_schema
+
 BASE_ENTITY_TYPE_ID = "1000000"
 BASE_ENTITY_TYPE_NAME = "surface_entity"
 BASE_IDENTITY_PROPERTY_ID = "2000000"
@@ -126,6 +128,7 @@ def _data_binding_payload(
     identity_property_id: str,
     workspace_id: str,
     lakehouse_id: str,
+    lakehouse_schema: str | None,
     table_name: str,
     identity_column: str,
 ) -> dict[str, Any]:
@@ -148,13 +151,15 @@ def _data_binding_payload(
         "dataBindingConfiguration": {
             "dataBindingType": "NonTimeSeries",
             "propertyBindings": bindings,
-            "sourceTableProperties": {
-                "sourceType": "LakehouseTable",
-                "workspaceId": workspace_id,
-                "itemId": lakehouse_id,
-                "sourceTableName": table_name,
-                "sourceSchema": "dbo",
-            },
+            "sourceTableProperties": apply_source_schema(
+                {
+                    "sourceType": "LakehouseTable",
+                    "workspaceId": workspace_id,
+                    "itemId": lakehouse_id,
+                    "sourceTableName": table_name,
+                },
+                lakehouse_schema,
+            ),
         },
     }
 
@@ -166,9 +171,19 @@ def compile_fabric_ontology_definition(
     lakehouse_id: str,
     display_name: str,
     description: str,
+    lakehouse: Any,
 ) -> FabricOntologyCompilation:
-    """Translate the L5a ontology definition into Fabric item parts."""
+    """Translate the L5a ontology definition into Fabric item parts.
 
+    ``lakehouse`` identifies the table schema of the target Lakehouse.  Pass the
+    schema name, the ``GET /lakehouses/{id}`` payload, or ``None`` for a
+    Lakehouse created without schemas.  It is **not** optional in practice: a
+    mismatch produces a definition that imports and reads back cleanly while
+    binding to a OneLake path that does not exist, which surfaces only later as
+    an unrefreshable, empty graph.
+    """
+
+    lakehouse_schema = resolve_lakehouse_schema(lakehouse)
     parts: list[dict[str, str]] = [_part("definition.json", {})]
     entity_types = list(l5a_ontology["entity_types"])
     identity_by_type: dict[str, str] = {}
@@ -212,6 +227,7 @@ def compile_fabric_ontology_definition(
                 identity_property_id=BASE_IDENTITY_PROPERTY_ID,
                 workspace_id=workspace_id,
                 lakehouse_id=lakehouse_id,
+                lakehouse_schema=lakehouse_schema,
                 table_name=BASE_ENTITY_TABLE,
                 identity_column=BASE_ENTITY_IDENTITY_COLUMN,
             ),
@@ -240,6 +256,7 @@ def compile_fabric_ontology_definition(
                     identity_property_id=identity_property_id,
                     workspace_id=workspace_id,
                     lakehouse_id=lakehouse_id,
+                    lakehouse_schema=lakehouse_schema,
                     table_name=str(entity_type["physical_table_id"]),
                     identity_column=str(
                         entity_type["physical_identity_column"]
@@ -303,15 +320,17 @@ def compile_fabric_ontology_definition(
                         f"{_SCHEMA_ROOT}/contextualization/1.0.0/schema.json"
                     ),
                     "id": _stable_guid("ctx", rel_id),
-                    "dataBindingTable": {
-                        "workspaceId": workspace_id,
-                        "itemId": lakehouse_id,
-                        "sourceTableName": str(
-                            relationship["physical_table_id"]
-                        ),
-                        "sourceSchema": "dbo",
-                        "sourceType": "LakehouseTable",
-                    },
+                    "dataBindingTable": apply_source_schema(
+                        {
+                            "workspaceId": workspace_id,
+                            "itemId": lakehouse_id,
+                            "sourceTableName": str(
+                                relationship["physical_table_id"]
+                            ),
+                            "sourceType": "LakehouseTable",
+                        },
+                        lakehouse_schema,
+                    ),
                     "sourceKeyRefBindings": [
                         {
                             "sourceColumnName": str(
