@@ -1364,7 +1364,15 @@ def _validate_leaf(
     observations: list[PropertyObservationRecord] = []
     reason_counter: Counter[str] = Counter()
 
-    for record in sorted(records, key=lambda item: item.candidate_id):
+    # Entities are validated first so a relationship can only be asserted when
+    # both of its endpoints were themselves asserted in this leaf. L4 publishes
+    # asserted entities only, so an edge pointing at a rejected endpoint would
+    # otherwise dangle.
+    asserted_entity_ids: set[str] = set()
+    for record in sorted(
+        records,
+        key=lambda item: (0 if item.candidate_kind == "entity" else 1, item.candidate_id),
+    ):
         reasons: set[str] = set()
         source_unit = index.require(record.source_unit_id)
         if source_unit.unit_kind not in L3_SUPPORTED_EVIDENCE_UNIT_KINDS:
@@ -1445,6 +1453,11 @@ def _validate_leaf(
                     blocking_reason_codes=reasons,
                 )
             )
+            if (
+                resolved_source not in asserted_entity_ids
+                or resolved_target not in asserted_entity_ids
+            ):
+                reasons.add("ENDPOINT_UNRESOLVED")
         else:
             property_reasons = validate_property_observation(
                 hierarchy=hierarchy,
@@ -1470,6 +1483,8 @@ def _validate_leaf(
                 "L3_VALIDATION_RESULT_INCOMPLETE",
                 f"asserted candidate {record.candidate_id} has no verified evidence",
             )
+        if record.candidate_kind == "entity" and state is AssertionState.ASSERTED:
+            asserted_entity_ids.add(record.semantic_id)
         prior = lifecycle_by_candidate.get(record.candidate_id)
         if prior is None:
             raise L3StageError(
@@ -1552,7 +1567,7 @@ def _validate_leaf(
         lifecycle_records=tuple(
             sorted(lifecycle_records, key=lambda item: item.lifecycle_record_id)
         ),
-        candidate_results=tuple(results),
+        candidate_results=tuple(sorted(results, key=lambda item: item.candidate_id)),
         classifications=tuple(classifications),
         property_observations=tuple(observations),
         reason_counts=tuple(sorted(reason_counter.items())),

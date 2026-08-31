@@ -2484,3 +2484,35 @@ def test_l3_leaf_fingerprint_binds_cross_batch_grounding_context(
         )
         != original_fingerprint
     )
+
+
+def test_l3_does_not_assert_a_relationship_onto_an_unpublished_endpoint(
+    tmp_path: Path,
+) -> None:
+    """L4 publishes asserted entities only, so an edge may not dangle."""
+
+    def mutate(candidates, work_unit):
+        broken = dict(candidates[1])
+        anchor = dict(broken["anchors"][0])
+        anchor["quote"] = "a quote this source unit never contains"
+        broken["anchors"] = [anchor]
+        candidates[1] = broken
+        return candidates
+
+    l1_state_root, domain_path, _ = _pipeline(tmp_path, "records", mutate=mutate)
+
+    result = _l3(tmp_path, l1_state_root, domain_path)
+
+    entity_states = {
+        item.current_state
+        for item in result.candidate_results
+        if item.candidate_kind == "entity"
+    }
+    assert entity_states == {"asserted", "rejected"}
+    relationship = next(
+        item
+        for item in result.candidate_results
+        if item.candidate_kind == "relationship"
+    )
+    assert relationship.current_state != "asserted"
+    assert "ENDPOINT_UNRESOLVED" in relationship.reason_codes
