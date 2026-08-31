@@ -402,19 +402,49 @@ by name and traverses a relationship. The check that matters is the **negative**
 one: the answer must not cite a Lakehouse table or a Search document, because no
 such source is configured. If it does, the scoping guarantee is wrong.
 
-**The GraphModel is not known to materialize rows.** Fabric accepted the
-definition and auto-provisioned `fabric_kg_024_ontology_graph_07615fe9…`, but
+**The GraphModel materializes rows — measured, not assumed.** This was carried
+as unverified for most of the release, on the correct reasoning that Fabric
 accepting a definition is not the same as populating a graph from its bindings.
-To verify manually: open that GraphModel and confirm it reports a non-zero node
-count consistent with the 8,756 published entities, and a non-zero edge count
-consistent with the 808 published relationships. If node and edge counts are
-zero, the bindings resolved but no data was ingested, and the graph target should
-be treated as structurally deployed but empty.
+It has since been measured directly through the documented `executeQuery` beta
+API, and the graph ingested everything:
+
+| relationship | live | L5a expected | |
+| --- | --- | --- | --- |
+| `procedure_repairs_component` | 415 | 415 | match |
+| `assertion_supported_by_evidence` | 203 | 203 | match |
+| `procedure_requires_tool` | 122 | 122 | match |
+| `device_has_component` | 44 | 44 | match |
+| `procedure_has_warning` | 15 | 15 | match |
+| `symptom_has_cause_resolution` | 9 | 9 | match |
+
+Node counts agree the same way: device 726, component 2,711, symptom 96,
+procedure 1,722, tool 1,500, warning 1,245, evidence 756 — **8,756 typed nodes,
+exactly the published entity count**. The remaining 8,756 of the 17,512 total
+are base-label duplicates, which is #102 measured rather than inferred.
+
+Multi-hop traversal was confirmed with a control probe rather than assumed:
+
+```
+MATCH (d:surface_device)-[:device_has_component]->(c:surface_component)
+      <-[:procedure_repairs_component]-(p:surface_procedure)
+   -> 81
+```
+
+The control matters because a *different* two-hop chain
+(symptom → procedure → warning) returns zero, which looks alarming until the
+arithmetic is done: 9 procedures carry a cause-resolution edge and 15 carry a
+warning, drawn from 1,722 procedures. Expected overlap is 0.078 procedures, so
+**zero is the ~92% likely outcome**. Finding a match would have been the
+surprise. An empty result from a sparse join is not evidence of an empty graph,
+and the control probe is what distinguishes the two.
+
+This retires the earlier caution that a `Completed` refresh proved structure but
+not population. It proved both.
 
 ### The deployed graph was empty: a hardcoded `dbo` schema (fixed)
 
-The two behaviours flagged above as unverified were verified by the operator in
-the portal, and both **failed**. The query *"list complete steps to replace
+Both behaviours were verified by the operator in the portal at the time, and both
+**failed**. The query *"list complete steps to replace
 battery for surface 10 pro"* returned no answer: the Data Agent's
 `analyze_ontology` call reported *"The Graph Model is not ready. Please try
 again later."*, and the agent then declined to answer rather than inventing
@@ -626,3 +656,43 @@ exactly this, stated this failure verbatim as its example, and was closed as
 completed — while no such gate ran in the 0.2.4 publication path. Also confirmed
 here: #102's base-type duplication is real and measurable, 8,756 base plus 8,756
 typed nodes making up the 17,512 total.
+
+### Labels are recoverable downstream, without re-running extraction
+
+Scoping only; no code changed in 0.2.4. Recorded because it determines whether
+#105 is expensive or cheap to close, and the answer is not obvious.
+
+The verbatim source text survives all the way into **sealed L3 output**. Each
+run directory carries an `evidence-spans/` store, and every span holds a `quote`:
+
+```
+'speaker meshes'          'Display Module'
+'bonding frame tool'      'PSA strips'
+'Ultra 5 16GB – 13” EP2-29720'
+'Anti-static wrist strap (1 MOhm resistance)'
+```
+
+Across 3,245 sampled spans, **100%** carry a non-empty quote, the median length
+is 28 characters, and 79% are 60 characters or fewer — these are mention spans,
+not paragraphs. Term coverage on the corpus: `battery` 210, `kickstand` 38.
+
+L4 already holds them. `_verified_evidence` indexes every span by ID, quote
+included, and `_serving_rows` already resolves each entity's spans through
+`_require_evidence` — which **raises** when an asserted candidate lacks verified
+evidence. Full label coverage therefore is not a hope; it follows from an
+invariant the pipeline already enforces. The text is loaded, hash-verified, and
+indexed per entity, and then simply never written to a column.
+
+So a label property is recoverable by an L4 recompile alone — no L2 re-run, no
+L3 re-run. The cost is a schema change: adding a column to
+`l4_semantic_asserted_entities` changes its `row_hash` and requires a registry
+version bump. That is a real cost, but a legitimate one, since the semantics
+genuinely change.
+
+Two things this would **not** do, stated so the scope is not overread. It would
+not make `semantic_asserted_properties` non-zero — property *candidates* are
+about 1% of extraction and none assert, which is the separate half of #105 and
+does need the L2 work. And it would not make the original failing question work:
+the device label would read `Ultra 5 16GB – 13” EP2-29720`, because the phrase
+"Surface Pro 10" does not appear in this corpus at all. That is a property of the
+source material, not a defect in the pipeline.
