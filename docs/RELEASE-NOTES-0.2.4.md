@@ -32,24 +32,48 @@ invoked locally by GitHub Copilot with `deploy_builtin_agent=false`.
 
 0.2.4 also adds an Ontology-first, Azure-AI-Search-second Foundry Prompt Agent
 path (`app compile-agent`, `app deploy-agent --dry-run|--env`). Instructions
-(v1.4) direct the agent to consult the Fabric Data Agent (Ontology/graph)
+(v1.5) direct the agent to consult the Fabric Data Agent (Ontology/graph)
 first and use Azure AI Search only to fill gaps, treating the ontology as the
 source of top-level concepts and Search as the source of detail and quotable
 citations, while steering around three known Fabric GQL pitfalls (#112).
+Instructions v1.5 additionally requires an explicit entity-id handoff: when
+the Ontology tool resolves one or more entity ids for a query, those ids must
+be passed to Azure AI Search as an `entity_ids` filter rather than re-derived
+from free text, so the two tools stay grounded in the same entities.
 
-**This feature is not yet query-ready.** A live dev deploy on 2026-08-31
-created the agent successfully (`agent_version: 1`), but two defects were
-found once real queries were attempted:
+**This feature is now query-ready.** A first live dev deploy on 2026-08-31
+created the agent successfully (`agent_version: 1`) but surfaced two defects
+once real queries were attempted (hardcoded Azure AI Search `query_type`,
+and a Fabric Data Agent `ItemNotFound` at invocation time). Both were
+diagnosed, fixed, and the agent was **live-redeployed and independently
+re-verified on the same day**:
 
-- Azure AI Search tool: hardcoded `query_type` broke on indexes without an
-  integrated vectorizer. **Fixed in this release** — the deploy path now
-  auto-detects vectorizer support and falls back to `semantic` search, with an
-  explicit override still available in `agent-metadata.yaml`. (#121)
-- Fabric Data Agent tool: fails with `ItemNotFound` at invocation time. The
-  underlying Fabric item is confirmed published and correctly configured, so
-  this looks like a Foundry↔Fabric connection/permission gap rather than a
-  Fabric authoring problem — **still open, unresolved**. (#122)
+- Azure AI Search `query_type` hardcoding (#121, closed): the deploy path now
+  auto-detects live vectorizer support on the target index and falls back to
+  `semantic` search when none is present, with an explicit override still
+  available in `agent-metadata.yaml`. **Verified live** — `agent_version: 2`
+  answered 3 different test queries against the no-vectorizer
+  `surface-tech-kg-chunks` index with no vectorizer errors, returning cited
+  service-manual text.
+- Fabric Data Agent `ItemNotFound` (#122, closed): root cause was a tool
+  declaration typo, corrected directly in Fabric. Diagnosing this also
+  surfaced a design gap — the agent had no explicit instruction to carry an
+  Ontology-resolved entity id forward into the Search call — which is what
+  instructions v1.5 (entity-id handoff, above) now closes.
 
-No further live agent redeploys are planned until #122 is resolved and
-independently verified. Treat this feature as deployed-but-not-functional for
-0.2.4, not as a completed capability.
+Live verification evidence for `agent_version: 2` (instructions v1.5,
+hash `081a17dd1e78d242`): a query for the `surface_component` labeled
+"Motherboard Module" caused the Fabric Data Agent tool to resolve three
+matching entity ids, and the subsequent Azure AI Search tool call carried
+those exact ids as its `entity_ids` filter argument
+(`entity:7808d3df822de53c0a2886bb42abeddf`, `entity:4a7ddb96f7387e3eecf2d7084ef0c742`,
+`entity:1dc2bbefe326a5bcfe9b175afe168409`), with the final answer citing both
+the ontology and search sources. This was confirmed by inspecting the live
+tool-call argument trace, not just the final answer text.
+
+Known limitation carried into 0.2.4: most `surface_device`/`surface_component`
+properties beyond `id`/`label` (e.g. `model_id`) are not populated in this
+release's dataset, so natural-language questions that depend on those
+properties (e.g. "Surface Pro 10") may correctly resolve to "no data found"
+rather than a hallucinated answer — this is a data-population gap, not a
+routing or handoff defect.
