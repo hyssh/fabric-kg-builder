@@ -757,3 +757,63 @@ pipeline elects no canonical name, and this projection does not invent one — t
 value is one phrase a source document happens to use, chosen by a fixed
 deterministic rule. It should be read as "a way this entity is referred to".
 
+
+### Deployed live: labels reach the graph
+
+The label projection above was applied to the live estate, in the order the
+Delta log proved necessary — tables first, then the definitions that bind them.
+Binding a column before it exists produces an item that reads back cleanly and a
+graph that cannot refresh, so the ordering is a correctness requirement rather
+than a preference.
+
+**Lakehouse — additive evolution, not a rebuild.** Eight of the twenty published
+tables gained a column; the other twelve were byte-identical and were left
+untouched. Whether an overwrite *evolves* a table or silently replaces it is not
+visible from a row count, so it was checked directly: each table's Delta
+`metadata.id` was recorded before the write and compared after. A drop-and-create
+mints a new identifier; an overwrite preserves it.
+
+| check | result |
+| --- | --- |
+| tables written | 8 of 20 |
+| `metadata.id` preserved | 8 of 8 |
+| Delta version | 0 → 1, version 0 retained |
+| columns removed | 0 |
+| row-count drift | 0 |
+| untouched tables still at version 0 | 12 of 12 |
+
+**Ontology.** `updateDefinition` changed exactly the 16 parts predicted — eight
+entity types, each contributing a definition and a data binding — and the
+readback matched the intended compilation exactly. Every binding's
+`sourceColumnName` was then resolved against the live Delta schema of the table
+it binds, which is what rules out the failure mode above by measurement instead
+of by argument.
+
+**Graph.** The ontology update triggered a refresh that reached `Completed`.
+That is structural evidence only, so the graph was queried directly: labels come
+back as readable text, and node and edge counts are unchanged at 17,512 and 808.
+
+**Semantic model.** `updateDefinition` changed exactly the 8 predicted parts.
+The live TMDL declares every column explicitly, so DirectLake does not discover a
+new column on its own — this step is required, not optional. The workspace item
+count was 63 before and after.
+
+#### `label` is a reserved word in Fabric GQL
+
+Reading the property requires backticks. Unquoted, it is a syntax error rather
+than an empty result:
+
+```
+MATCH (n:`surface_component`) RETURN n.label LIMIT 5
+-> 42000  Reserved keyword 'label' cannot be used as an unquoted identifier.
+
+MATCH (n:`surface_component`) RETURN n.`label` LIMIT 5
+-> "plastic guide", "USB ports", "P/N: 13N4-1EN0R01", ...
+```
+
+The same dialect expects `FILTER` where earlier observed agent output used
+`WHERE`. This matters for interpreting the Data Agent: a generator that does not
+quote the identifier fails *loudly*, with a syntax error, which is a different
+symptom from the empty results that motivated this work and should not be read as
+a regression in the data. Whether the generator quotes it is not yet known.
+Tracked in #112.
