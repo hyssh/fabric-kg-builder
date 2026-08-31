@@ -1354,6 +1354,177 @@ def _run_offline_evaluation(cases: list[EvalCase]) -> list[dict]:
     return responses
 
 
+@app_cmd.command("publish-structured")
+@click.option(
+    "--l4-run",
+    "l4_run",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Sealed L4 run directory holding the projection tables and receipt.",
+)
+@click.option(
+    "--l3-root",
+    "l3_root",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="L3 state root searched for the manifest the L4 receipt names.",
+)
+@click.option(
+    "--workspace-id",
+    required=True,
+    help="Fabric workspace GUID that hosts the four L5a targets.",
+)
+@click.option(
+    "--name-prefix",
+    default="fabric-kg-024",
+    show_default=True,
+    help="Release-owned item name prefix; existing items are never adopted.",
+)
+@click.option(
+    "--dry-run/--live",
+    default=True,
+    show_default=True,
+    help="Compile a plan by default; live requires exact plan-hash approval.",
+)
+@click.option(
+    "--approve-live",
+    default=None,
+    help="Exact plan hash authorising live publication.",
+)
+@click.option(
+    "--plan",
+    "plan_path",
+    default="build/release/l5a-0.2.4-plan.json",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def publish_structured_cmd(
+    l4_run: Path,
+    l3_root: Path,
+    workspace_id: str,
+    name_prefix: str,
+    dry_run: bool,
+    approve_live: str | None,
+    plan_path: Path,
+) -> None:
+    """Compile and plan the L5a structured publication of a sealed L4 run.
+
+    Live publication of the four Fabric targets is a capability NO-GO on the
+    0.2.4 line: Fabric's item control plane returns an empty ETag and ignores
+    ``If-Match`` on delete, so creating or rolling back a release-owned item
+    cannot be fenced by compare-and-swap. The plan records that verdict
+    explicitly rather than attempting an unfenced mutation.
+    """
+
+    from fabric_kg_builder.contracts.base import (
+        canonical_json,
+        canonical_sha256,
+    )
+    from fabric_kg_builder.version import RELEASE_VERSION as _rv
+    from fabric_kg_builder.deploy.fabric_l5a_targets import (
+        FabricL5aTargetClient,
+    )
+    from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
+    from fabric_kg_builder.serving.l5a_crosswalk import (
+        compile_access_policy,
+        compile_governed_assets,
+        compile_publication_crosswalk,
+    )
+    from fabric_kg_builder.serving.structured_publication import (
+        compile_l5a_publication,
+    )
+
+    source = SealedL4ServingSource.from_run(
+        l4_run,
+        input_manifest_search_roots=(l3_root,),
+    )
+    target_ids = {
+        "parquet": f"target:{name_prefix}-lakehouse",
+        "semantic_model": f"target:{name_prefix}-semantic-model",
+        "ontology": f"target:{name_prefix}-ontology",
+        "graph": f"target:{name_prefix}-graph",
+    }
+    crosswalk = compile_publication_crosswalk(source)
+    policy = compile_access_policy(
+        source,
+        access_policy_id=f"access-policy:{name_prefix}",
+        principal_id=f"principal:{name_prefix}-publisher",
+        resource_scope_id=f"resource:fabric-workspace:{workspace_id}",
+        authorization_resource_id=f"authorization-resource:{name_prefix}",
+    )
+    assets = compile_governed_assets(
+        source,
+        crosswalks=(crosswalk,),
+        access_policy=policy,
+        target_ids=target_ids,
+        workspace_id=workspace_id,
+    )
+    compiled = compile_l5a_publication(
+        source,
+        crosswalks=(crosswalk,),
+        access_policy=policy,
+        governed_assets=assets,
+        target_ids=target_ids,
+    )
+    capabilities = FabricL5aTargetClient(
+        workspace_id=workspace_id,
+        token="",
+    ).capability_report()
+    blocked = sorted(
+        name
+        for name, value in capabilities.items()
+        if name.endswith(".create") and value is False
+    )
+    plan: dict[str, Any] = {
+        "plan_version": "1.0.0",
+        "release_version": _rv,
+        "workspace_id": workspace_id,
+        "source_projection_id": compiled.definitions["parquet"][
+            "source_projection_id"
+        ],
+        "source_projection_hash": compiled.definitions["parquet"][
+            "source_projection_hash"
+        ],
+        "crosswalk_hash": crosswalk.crosswalk_hash,
+        "stable_id_lock_hash": crosswalk.stable_id_lock_hash,
+        "access_policy_hash": policy.policy_hash,
+        "target_ids": dict(sorted(target_ids.items())),
+        "definition_hashes": {
+            kind: canonical_sha256(compiled.definitions[kind])
+            for kind in sorted(compiled.definitions)
+        },
+        "tables": [
+            {
+                "table_id": snapshot.table_id,
+                "row_count": snapshot.row_count,
+                "schema_hash": snapshot.schema_hash,
+                "row_fingerprint": snapshot.row_fingerprint,
+            }
+            for snapshot in compiled.table_snapshots
+        ],
+        "capabilities": capabilities,
+        "blocked_capabilities": blocked,
+        "live_publication_supported": not blocked,
+    }
+    plan["plan_hash"] = canonical_sha256(plan)
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(canonical_json(plan) + "\n", encoding="utf-8")
+    click.echo(f"plan_hash={plan['plan_hash']}")
+    click.echo(f"plan={plan_path}")
+    click.echo(f"tables={len(plan['tables'])}")
+    if dry_run:
+        click.echo("mode=dry-run")
+        return
+    if approve_live != plan["plan_hash"]:
+        raise click.ClickException(
+            "--live requires --approve-live with the exact plan hash"
+        )
+    raise click.ClickException(
+        "live L5a publication is a capability NO-GO on this release line: "
+        + str(capabilities["fabric.capability_reason"])
+    )
+
+
 # ---------------------------------------------------------------------------
 # Standalone entry-point (also usable without main.py registration)
 # ---------------------------------------------------------------------------

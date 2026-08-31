@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -225,6 +225,51 @@ class SealedL4ServingSource:
     receipt: StageReceipt
     manifest: ArtifactManifest
     input_manifest: ArtifactManifest
+
+    @classmethod
+    def from_run(
+        cls,
+        run_root: Path,
+        *,
+        input_manifest_search_roots: Sequence[Path],
+    ) -> SealedL4ServingSource:
+        """Open a persisted L4 run as a sealed serving source.
+
+        The L4 receipt names its input manifest by id but not by path, so the
+        producing L3 run has to be searched for the manifest carrying that
+        exact id. Binding by id rather than by directory layout keeps the
+        source sealed even when runs are relocated.
+        """
+
+        receipt = StageReceipt.model_validate_json(
+            (run_root / "stage-receipt.json").read_text("utf-8")
+        )
+        manifest = ArtifactManifest.model_validate_json(
+            (run_root / "output-manifest.json").read_text("utf-8")
+        )
+        projection = SemanticServingProjection.model_validate_json(
+            (run_root / "semantic-serving-projection.json").read_text("utf-8")
+        )
+        for search_root in input_manifest_search_roots:
+            for path in sorted(Path(search_root).rglob("output-manifest.json")):
+                try:
+                    candidate = ArtifactManifest.model_validate_json(
+                        path.read_text("utf-8")
+                    )
+                except ValueError:
+                    continue
+                if candidate.artifact_manifest_id == receipt.input_manifest_id:
+                    return cls(
+                        root=run_root,
+                        projection=projection,
+                        receipt=receipt,
+                        manifest=manifest,
+                        input_manifest=candidate,
+                    )
+        raise ValueError(
+            "no artifact manifest under the search roots carries input "
+            f"manifest id {receipt.input_manifest_id!r}"
+        )
 
     def __post_init__(self) -> None:
         try:

@@ -171,6 +171,53 @@ run with `search.agentic_components: "deferred"`, which proves the direct index
 path and records both components as deferred. Preview agentic success is not
 claimed.
 
+## L5a structured publication: compile proven, live mutation NO-GO
+
+`fabric-kg app publish-structured` compiles a sealed L4 run into the four L5a
+Fabric target definitions (`parquet`, `semantic_model`, `ontology`, `graph`),
+seals an immutable plan JSON, and defaults to dry-run. It is the only shipped
+path that derives a publication crosswalk; before 0.2.4 a crosswalk existed
+only as a hand-built test fixture, so nothing in the wheel could produce one.
+
+Compiled against the real 14,947-unit Surface corpus (sealed L4 receipt
+`stage-receipt:771cbbd993624cbd401a726228285175`):
+
+- 20 publication tables
+- 8,756 entities across 7 semantic types
+- 808 relationships across 6 relationship types
+- 0 asserted properties — a real, documented gap, not an omission. Property
+  owner and value are not persisted by the L2 candidate schema exercised on
+  this corpus, so L3 cannot ground them without a full re-enrichment.
+- 0 required-member manifests — this corpus seals none, which is a valid
+  modelling outcome on a `required_role_set` domain contract.
+
+**Live publication of these four targets is a capability NO-GO on the 0.2.4
+line.** This verdict is empirical, not inferred from documentation:
+
+| layer | ETag observed | `If-Match` honored | CAS fenceable |
+| --- | --- | --- | --- |
+| Fabric item control plane | `""` (empty string) on `GET` | no — `DELETE` with a bogus `If-Match` answers **404 ItemNotFound**, not 412 Precondition Failed | **no** |
+| OneLake data plane (ADLS Gen2) | real, e.g. `"0x8DEFA188A771F90"` | standard ADLS semantics | yes |
+
+None of the four `fabric-kg-024-*` items exist in the target workspace, so all
+four require first-create. `run_l5a` routes any target whose prior state is
+absent to `cleanup()` — a delete — on rollback. Create is therefore blocked
+*and* its rollback would itself be unfenced. The OneLake data plane is
+fenceable, but it inherits the item gate because the lakehouse must be created
+first.
+
+The plan records this in-band rather than only in prose: it carries a full
+`capabilities` map, a sorted `blocked_capabilities` list, and
+`live_publication_supported: false`. `--live` with the exact `--approve-live`
+plan hash is still refused with the capability reason; a correct approval is
+never mistaken for a capability.
+
+Reinterpreting `cleanup()` as restore-to-captured-prior-definition would make
+first-create fenceable, but the target-client protocol documents `cleanup` as
+"atomically delete only when the persisted token still matches". Changing that
+is a named contract change and is explicitly tracked as separate future work,
+not folded into 0.2.4.
+
 ## Environment and Administrative Blockers
 
 Record exact capability NO-GO results, including missing Search managed-identity

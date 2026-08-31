@@ -298,7 +298,10 @@ def test_release_version_and_38_top_level_commands() -> None:
     assert len(cli.commands) == 38
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
-    # Schema-2 L3 and L4 are CLI-activated in 0.2.4; L5a publication is not.
+    # L5a publication is CLI-activated in 0.2.4 for compile and dry-run
+    # planning only; live Fabric mutation remains a capability NO-GO.
+    assert "publish-structured" in cli.commands["app"].commands
+    # Schema-2 L3 and L4 are CLI-activated in 0.2.4.
     assert "validate-evidence" in cli.commands
     assert "project-serving" in cli.commands
 
