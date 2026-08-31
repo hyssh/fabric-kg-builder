@@ -333,6 +333,8 @@ error, so it must always be polled rather than trusting the 202.
 
 - Entity **properties are 0** in this corpus. Owner and value are not persisted
   by L2, so the graph carries identifiers and relationships but no attributes.
+  **This is not a minor omission: it makes the deployed Data Agent unable to
+  answer any natural-language question.** See below.
 - Three orphaned companion items remain from a first ontology create that Fabric
   rolled back (`…_lh_47c0af0a…`, its SQLEndpoint, and `…_graph_47c0af0a…`).
   Deleting them was subsequently authorized and **attempted**, and Fabric
@@ -560,3 +562,67 @@ node and edge counts the graph actually materialized, and the Data Agent
 answering the battery question while citing only ontology and graph. A
 completed refresh job is strong evidence the graph has valid content, but it is
 not the same as counting rows.
+
+### The graph is real, and the Data Agent still cannot answer
+
+The user tested the deployed agent in the portal. Scoping held: its only
+datasource is the ontology, and no answer cited the Lakehouse or Search. But all
+six questions failed with `No data found after query execution`.
+
+Measured directly against the live GraphModel through the documented
+`executeQuery` beta API — read-only, no mutation:
+
+| measure | value |
+| --- | --- |
+| nodes | 17,512 |
+| edges | 808 |
+
+Edges resolve per type: `procedure_repairs_component` 415,
+`assertion_supported_by_evidence` 203, `procedure_requires_tool` 122,
+`device_has_component` 44, `procedure_has_warning` 15,
+`symptom_has_cause_resolution` 9. The 808 matches the L4 figure exactly, and the
+structure is traversable. The `dbo` fix worked.
+
+Every declared property, however, is empty. `MATCH (n:<label>) WHERE n.<prop> IS
+NOT NULL RETURN COUNT(n)` returns **0** for all seven labels — device,
+component, symptom, procedure, tool, warning, evidence. The only populated field
+is the identity column, an opaque content hash:
+
+```
+{"id":"entity:4cbef1a4ec12aa5b031f5252f552531f","model_id":null}
+```
+
+The agent's own failing predicate, replayed directly, returns zero, and no
+identifier anywhere in the graph contains readable text:
+
+```
+MATCH (n:`surface_device`) WHERE LOWER(n.`model_id`) = LOWER("Surface Pro 10")
+  RETURN COUNT(n)                                            -> 0
+MATCH (n) WHERE n.`id` CONTAINS "battery" RETURN COUNT(n)    -> 0
+```
+
+Nothing in the agent is broken. It is correctly scoped, it generated valid GQL,
+it executed that GQL successfully against a live graph, and it then correctly
+refused to invent an answer. A graph with 17,512 nodes, 808 edges and a
+`Completed` refresh is indistinguishable from a working one until you ask
+whether any property holds a value.
+
+That is the third artifact in this release that validates, imports, reads back
+byte-identical, and is unusable. The first pointed at a path that did not exist;
+this one has nodes that cannot be named. Structural validity and semantic
+usability are different things, and only the first was ever checked.
+
+It is worth being precise about what this does and does not mean. The agent is
+deliberately ontology-only — Search and the Lakehouse were excluded on purpose,
+with a separate orchestrator planned — so some vocabulary limitation was
+expected by design. But this is not thin descriptions. **No entity can be
+identified at all**, and that wall does not move when Search is added: an
+orchestrator must still resolve a mention like "Surface Pro 10" to a starting
+node before it can expand. With every property null there is no entry point from
+language into the graph, only traversal between opaque hashes.
+
+Tracked as #105, which also records that #14 specified a blocking gate for
+exactly this, stated this failure verbatim as its example, and was closed as
+completed — while no such gate ran in the 0.2.4 publication path. Also confirmed
+here: #102's base-type duplication is real and measurable, 8,756 base plus 8,756
+typed nodes making up the 17,512 total.
