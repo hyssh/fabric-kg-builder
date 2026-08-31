@@ -1427,7 +1427,7 @@ def _validate_leaf(
                 shared=shared,
                 source_unit=source_unit,
                 anchor=anchor,
-                evidence_verified=outcome.span is not None,
+                evidence_span=outcome.span,
             )
             reasons.update(relationship_reasons)
             if not is_minted_contract_id(record.semantic_id, "relationship"):
@@ -1607,7 +1607,7 @@ def _relationship_reasons(
     shared: _SharedContext,
     source_unit: SourceUnit,
     anchor: ProposedOccurrenceAnchor | None,
-    evidence_verified: bool,
+    evidence_span: EvidenceSpanV1_1 | None,
 ) -> tuple[tuple[str, ...], str | None, str | None, tuple[str, ...], tuple[str, ...]]:
     reasons: set[str] = set()
     if record.approved_semantic_id is None:
@@ -1664,11 +1664,14 @@ def _relationship_reasons(
             source_path = source_outcome.inheritance_path
             target_path = target_outcome.inheritance_path
 
-    if evidence_verified and anchor is not None and source_id and target_id:
+    if evidence_span is not None and anchor is not None and source_id and target_id:
+        # Ground endpoints inside the *verified* span. The proposed anchor may
+        # have been relocated while minting evidence, and searching the stale
+        # window reports every relocated relationship as ungrounded.
         grounding = ground_endpoints(
             source_text=source_unit.text,
-            span_start=anchor.span_start,
-            span_end=anchor.span_end,
+            span_start=evidence_span.span_start,
+            span_end=evidence_span.span_end,
             requests=(
                 EndpointGroundingRequest(
                     endpoint_id=source_id,
@@ -1678,7 +1681,8 @@ def _relationship_reasons(
                         shared,
                         source_id,
                         record.source_unit_id,
-                        anchor,
+                        evidence_span.span_start,
+                        evidence_span.span_end,
                     ),
                 ),
                 EndpointGroundingRequest(
@@ -1689,7 +1693,8 @@ def _relationship_reasons(
                         shared,
                         target_id,
                         record.source_unit_id,
-                        anchor,
+                        evidence_span.span_start,
+                        evidence_span.span_end,
                     ),
                 ),
             ),
@@ -1711,17 +1716,13 @@ def _endpoint_anchor(
     shared: _SharedContext,
     entity_id: str,
     source_unit_id: str,
-    relationship_anchor: ProposedOccurrenceAnchor,
+    span_start: int,
+    span_end: int,
 ) -> ProposedOccurrenceAnchor | None:
     anchor = shared.entity_anchor_by_key.get((entity_id, source_unit_id))
     if anchor is None:
         return None
-    inside = (
-        relationship_anchor.span_start
-        <= anchor.span_start
-        < anchor.span_end
-        <= relationship_anchor.span_end
-    )
+    inside = span_start <= anchor.span_start < anchor.span_end <= span_end
     return anchor if inside else None
 
 

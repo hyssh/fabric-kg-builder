@@ -2100,3 +2100,58 @@ def test_design_sample_evidence_can_never_prove_an_extraction_count() -> None:
     assert prohibited.completeness_state == "unresolved"
     assert minted_only.reason_codes == ()
     assert minted_only.completeness_state == "complete"
+
+
+def test_endpoints_ground_in_the_relocated_span_not_the_proposed_one() -> None:
+    """A relocated evidence anchor must not strand every endpoint."""
+
+    prefix = "Preamble that shifts every offset. "
+    sentence = "Depot D serves Truck T today."
+    text = prefix + sentence
+    # What the model proposed, before relocation corrected it.
+    stale_start, stale_end = 0, len(sentence)
+    relocated_start, relocated_end = len(prefix), len(text)
+
+    def ground(span_start: int, span_end: int):
+        return ground_endpoints(
+            source_text=text,
+            span_start=span_start,
+            span_end=span_end,
+            requests=(
+                EndpointGroundingRequest(
+                    endpoint_id="entity:source",
+                    role="source",
+                    terms=("Depot D",),
+                ),
+                EndpointGroundingRequest(
+                    endpoint_id="entity:target",
+                    role="target",
+                    terms=("Truck T",),
+                ),
+            ),
+        )
+
+    stale = ground(stale_start, stale_end)
+    assert not stale.grounded
+    assert stale.reason_codes == ("ENDPOINT_EVIDENCE_UNGROUNDED",)
+
+    relocated = ground(relocated_start, relocated_end)
+    assert relocated.grounded, "the verified span grounds both endpoints"
+    source = next(item for item in relocated.occurrences if item.role == "source")
+    assert text[source.span_start : source.span_end] == "Depot D"
+
+
+def test_endpoint_anchor_containment_uses_the_supplied_span() -> None:
+    from fabric_kg_builder.enrichment.schema2_validation_stage import (
+        _endpoint_anchor,
+    )
+
+    anchor = ProposedOccurrenceAnchor(span_start=40, span_end=47, quote="Depot D")
+
+    class _Shared:
+        entity_anchor_by_key = {("entity:a", "unit:1"): anchor}
+
+    shared = _Shared()
+
+    assert _endpoint_anchor(shared, "entity:a", "unit:1", 35, 80) is anchor
+    assert _endpoint_anchor(shared, "entity:a", "unit:1", 0, 30) is None
