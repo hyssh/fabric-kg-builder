@@ -408,3 +408,101 @@ count consistent with the 8,756 published entities, and a non-zero edge count
 consistent with the 808 published relationships. If node and edge counts are
 zero, the bindings resolved but no data was ingested, and the graph target should
 be treated as structurally deployed but empty.
+
+### The deployed graph was empty: a hardcoded `dbo` schema (fixed)
+
+The two behaviours flagged above as unverified were verified by the operator in
+the portal, and both **failed**. The query *"list complete steps to replace
+battery for surface 10 pro"* returned no answer: the Data Agent's
+`analyze_ontology` call reported *"The Graph Model is not ready. Please try
+again later."*, and the agent then declined to answer rather than inventing
+one — the anti-hallucination behaviour working exactly as intended, on top of a
+graph that was genuinely empty.
+
+**Root cause.** A Fabric Lakehouse is schema-enabled or it is not, and the
+choice is fixed at creation. It decides where Delta tables physically live:
+
+| Lakehouse | `defaultSchema` | OneLake path |
+| --- | --- | --- |
+| schema-enabled | `dbo` | `Tables/dbo/<table>` |
+| not schema-enabled | `null` | `Tables/<table>` |
+
+`fabric_kg_024_lakehouse` (`76c658f3`) was created with a plain
+`POST /items {"type":"Lakehouse"}` and **no** `creationPayload.enableSchemas`,
+so its `defaultSchema` is `null` and its 20 tables live at `Tables/<table>`.
+Both 0.2.4 definition compilers, written independently, hardcoded the schema
+anyway — `sourceSchema: "dbo"` at two sites in the ontology compiler (entity
+data bindings and relationship contextualizations) and `schemaName: dbo` in the
+semantic model's DirectLake partitions.
+
+Fabric propagated that into the auto-provisioned GraphModel's data sources as
+`abfss://…/Tables/dbo/<table>`. That path does not exist — a OneLake listing of
+`Tables/dbo` returns `PathNotFound` — so the graph's refresh job failed:
+
+```
+GET /v1/workspaces/{ws}/items/{graphModelId}/jobs/instances
+  jobType: Refresh   status: Failed   isRetriable: false
+  errorCode: GraphNotRefreshable
+  "Graph doesn't have valid content and cannot be refreshed."
+```
+
+One wrong path segment, three visible symptoms: the ontology failed to open in
+the portal, the graph stayed empty, and the Data Agent could not ground an
+answer.
+
+**Why it is insidious.** The definition was structurally valid, passed schema
+validation, imported without error, and read back byte-identical. Every check
+the deployment performs passed. Nothing distinguishes a binding to a table that
+does not exist from one that does until something tries to read it.
+
+**Two plausible explanations that the evidence ruled out.** Both are recorded
+because each looked more likely than the real cause at the outset.
+
+- *The `ARRAY` column errors.* The SQL analytics endpoint reports five
+  unsupported-type errors covering twelve `list<string>` columns across five
+  tables. These are real, but they are not this. They are non-fatal warnings —
+  a `refreshMetadata` call reports `lastSuccessfulSyncDateTime` for all 20
+  tables and zero failures, so the columns are dropped and the tables stay
+  exposed. More decisively, the GraphModel reads Delta **directly over
+  OneLake** and never touches the SQL endpoint. Tracked separately; not a
+  blocker for the graph.
+- *Excluding arrays from the ontology bindings.* This would have been a no-op.
+  Ontology bindings only ever reference the identity column and declared
+  entity properties, all scalar; no array column was ever bound. Verified
+  against the live definition.
+
+**Fix.** `deploy/lakehouse_schema.py` resolves the segment once, from the
+lakehouse's actual `properties.defaultSchema`, and every consumer asks it
+rather than assuming. `sourceSchema` is optional in the published data-binding
+schema (`required: [sourceType, workspaceId, itemId, sourceTableName]`), so for
+a lakehouse without schemas the key is **omitted** rather than set to null,
+matching what Fabric itself emits.
+
+The `lakehouse` argument is **required** on both compilers. Defaulting it would
+have replaced one silent wrong assumption with another in the opposite
+direction; the target lakehouse is something a caller always knows and should
+have to state.
+
+Recurrence is pinned by tests that fail against the original code, including
+one asserting the two ontology sites can never disagree — they are separate
+code paths over the same physical tables, which is how the original hardcoding
+survived review.
+
+**Change surface.** Recompiling against the live L5a definition and diffing
+part-by-part against the deployed item: 30 parts, paths identical, and exactly
+**14** parts change — the 8 entity data bindings and 6 relationship
+contextualizations — each solely by removing `sourceSchema`. The remaining
+parts are byte-identical or differ only in Fabric's own re-serialization.
+
+Delivery is `updateDefinition` only. The ontology is never deleted and
+recreated: per the finding above, a failed create leaves permanently
+undeletable companion items.
+
+**The semantic model carries the same defect, confirmed rather than assumed.**
+Reading its live definition back shows `schemaName: dbo` in all 20 table parts
+and `sourceLineageTag: [dbo].[…]` alongside it. Unlike the GraphModel there is
+no jobs endpoint to observe a failure through — a semantic model exposes none —
+so this is established from the definition itself, not from an error. It needs
+the same update. Recompiling gives 24 parts, of which 23 change only by
+dropping the schema and lineage qualifiers and one differs by a trailing blank
+line; `.platform` is supplied at deployment time and is not compiler output.

@@ -18,8 +18,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
+
+from .lakehouse_schema import resolve_lakehouse_schema
 
 _SEMANTIC_MODEL_NAMESPACE = uuid.UUID("6f1c6d9e-6d0f-5f2b-9a1d-2f7c4b8e51aa")
 
@@ -93,12 +96,20 @@ def _table_tmdl(
     table_name: str,
     columns: Sequence[tuple[str, str]],
     expression_name: str,
+    lakehouse_schema: str | None = None,
 ) -> str:
     quoted_table = _tmdl_identifier(table_name)
+    # The lineage tag names the source object as the SQL endpoint exposes it,
+    # which is unqualified when the Lakehouse has no schemas.
+    source_lineage = (
+        f"[{lakehouse_schema}].[{table_name}]"
+        if lakehouse_schema
+        else f"[{table_name}]"
+    )
     lines = [
         f"table {quoted_table}",
         f"\tlineageTag: {_stable_guid('table', table_name)}",
-        f"\tsourceLineageTag: [dbo].[{table_name}]",
+        f"\tsourceLineageTag: {source_lineage}",
         "",
     ]
     for column_name, data_type in columns:
@@ -118,7 +129,13 @@ def _table_tmdl(
         "\t\tmode: directLake",
         "\t\tsource",
         f"\t\t\tentityName: {table_name}",
-        "\t\t\tschemaName: dbo",
+    ]
+    # Only a schema-enabled Lakehouse stores tables under Tables/<schema>/.
+    # Naming a schema that does not exist yields a partition that validates but
+    # resolves to nothing.
+    if lakehouse_schema:
+        lines.append(f"\t\t\tschemaName: {lakehouse_schema}")
+    lines += [
         f"\t\t\texpressionSource: {_tmdl_identifier(expression_name)}",
         "",
     ]
@@ -167,6 +184,7 @@ def compile_fabric_semantic_model_definition(
     tables_root: Path,
     workspace_id: str,
     lakehouse_id: str,
+    lakehouse: Any,
     expression_name: str = "DirectLake - fabric_kg_024",
 ) -> FabricSemanticModelCompilation:
     """Compile the DirectLake TMDL parts for every materialized L5a table.
@@ -176,6 +194,8 @@ def compile_fabric_semantic_model_definition(
     schema is the authority for the Delta table schema, so the model can never
     claim a column the registered Delta table does not carry.
     """
+
+    lakehouse_schema = resolve_lakehouse_schema(lakehouse)
     parquet_files = sorted(tables_root.glob("*.parquet"))
     if not parquet_files:
         raise ValueError(f"no materialized tables found under {tables_root}")
@@ -213,7 +233,9 @@ def compile_fabric_semantic_model_definition(
         parts.append(
             _part(
                 f"definition/tables/{table_name}.tmdl",
-                _table_tmdl(table_name, columns, expression_name),
+                _table_tmdl(
+                    table_name, columns, expression_name, lakehouse_schema
+                ),
             )
         )
 
