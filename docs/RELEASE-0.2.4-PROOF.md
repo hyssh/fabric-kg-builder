@@ -163,13 +163,30 @@ values still bind exactly while server defaults are ignored.
 
 ### Azure AI Search preview agentic capability (still deferred)
 
-The Search service managed identity holds no role on the Foundry account, so
-the preview knowledge source and knowledge base cannot be deployed. Clearing it
-requires an administrator to assign `Cognitive Services User` to the Search
-service managed identity on the Foundry account. Until then the release must be
-run with `search.agentic_components: "deferred"`, which proves the direct index
-path and records both components as deferred. Preview agentic success is not
-claimed.
+The Foundry account managed identity lacks the roles it needs on the Search
+service, so the preview knowledge source and knowledge base cannot be deployed.
+Until then the release must be run with `search.agentic_components: "deferred"`,
+which proves the direct index path and records both components as deferred.
+Preview agentic success is not claimed.
+
+Clearing it requires an administrator to assign **`Search Index Data
+Contributor`** and **`Search Service Contributor`** to the Foundry account
+system-assigned managed identity
+(`68ba71b4-c94b-42fe-8389-45a4c0755932`) **at the `ks0001-search` scope**.
+
+An earlier revision of this document stated the grant in the opposite
+direction — the Search identity needing `Cognitive Services User` on the
+Foundry account. That was wrong and is corrected here. The grant flows
+Foundry -> Search, because the Search tool is invoked by the Foundry agent
+using the Foundry account's identity. Live read at 21:01Z confirms the
+direction and the remaining gap: the six assignments on `ks0001-search`
+include exactly one for `68ba71b4`, and it is `Cognitive Services User`, which
+is not sufficient on its own. Both required roles are still absent.
+
+The Fabric Data Agent tool is **not** governed by Azure RBAC at all. It does
+not support service principal authentication, only delegated user identity, so
+it needs the Data Agent item plus its Lakehouse and Ontology shared with Read
+in the Fabric workspace rather than any role assignment.
 
 ## L5a structured publication: compile proven, live mutation NO-GO
 
@@ -342,8 +359,10 @@ error, so it must always be polled rather than trusting the 202.
   platform limitation, not a decision left open.
 - The provenance of the 400 documents in the live `fabric-kg-024-surface-index`
   is still unestablished.
-- The Search managed identity still has no visible `Cognitive Services User`
-  grant on the Foundry account, so preview agentic Search remains unproven.
+- The Foundry account managed identity still lacks `Search Index Data
+  Contributor` and `Search Service Contributor` on `ks0001-search`, so preview
+  agentic Search remains unproven. It holds only `Cognitive Services User`
+  there, which is not sufficient.
 
 ### Ontology companions cannot be cleaned up
 
@@ -843,3 +862,48 @@ hypothetical one. Restore is itself a new commit, which makes it safe to attempt
 and idempotent to repeat. It was never needed — every step verified clean on the
 first attempt — but an untested rollback path is indistinguishable from an absent
 one, so it is recorded here as measured.
+
+### The semantic model was deployed but never framed
+
+Portal use after the label deployment surfaced a failure that looked like a
+regression from it:
+
+```
+BadRequest: The query is invalid. Reason: The mapped Lakehouse column does not
+exist. Please verify the column name and try again.
+```
+
+It was not a regression, and it was not a column problem. Every TMDL
+`sourceColumn` in the live definition was diffed against the live Delta schema:
+190 references across all 20 tables, none missing, and the `table` headers were
+byte-identical to the pre-deployment capture. The decisive discriminator is
+which tables failed: the 12 tables that the label deployment never touched
+failed exactly like the 8 it changed. No column-mapping defect can produce that.
+
+The model had simply never been framed. `GET /datasets/{id}/refreshes` returned
+zero entries, and an unframed DirectLake model loads while exposing no tables —
+`EVALUATE ROW("x",1)` succeeded while every table failed to resolve.
+
+One refresh cleared it: `type=Full`, `commitMode=Transactional`, completed in 26
+seconds with all 20 objects `Completed` on the first attempt. Afterwards all 20
+tables query successfully, and their row counts agree exactly with the Delta
+tables and with the graph — 8756 entities, 2711 components, and relationship
+counts 415/203/122/44/15/9. The label column that the portal error appeared to
+blame reads back through DAX (`105 Belgium AZERTY`, `lid locations`, `Hinge
+Rubber R`) at 2689/2711 coverage, matching the figure measured locally and in
+the graph.
+
+The framing step is not a data or definition change, so it has no rollback
+target; it cannot leave the model worse than an unqueryable one.
+
+This is a product defect, not a one-off operational miss: the deploy path
+contains no refresh-trigger code at all, so every fresh deployment produces a
+semantic model that appears successfully deployed — correct definition, correct
+table registration, healthy SQL endpoint — yet is unqueryable, and reports an
+error that sends diagnosis toward column mappings. Filed as #116.
+
+One diagnostic trap is worth recording, because it nearly produced a false
+failure report here: `COUNTROWS` returns BLANK on an empty table, which renders
+as `[{}]` and reads like an error. `l4_semantic_asserted_properties` is
+legitimately empty (#105), and `COALESCE(COUNTROWS(t),0)` distinguishes the two
+cases.
