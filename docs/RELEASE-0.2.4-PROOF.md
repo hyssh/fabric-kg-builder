@@ -506,3 +506,57 @@ so this is established from the definition itself, not from an error. It needs
 the same update. Recompiling gives 24 parts, of which 23 change only by
 dropping the schema and lineage qualifiers and one differs by a trailing blank
 line; `.platform` is supplied at deployment time and is not compiler output.
+
+### The fix applied live, and the graph refreshed
+
+Applied to the two live items on 2026-08-31 under operator authorization, by
+`updateDefinition` only. Neither item was deleted or recreated.
+
+Pre-flight, against the live target:
+
+| check | result |
+| --- | --- |
+| `fabric_kg_024_lakehouse.properties.defaultSchema` | `null` |
+| OneLake `…/Tables` | HTTP 200 |
+| OneLake `…/Tables/dbo` | HTTP 404 |
+| workspace items | 63 |
+
+**Ontology** (`07615fe9`) — `POST updateDefinition` returned 200 synchronously.
+All 14 table references moved from `"dbo"` to `null`.
+
+A note on how that was verified, because the obvious check gives the wrong
+answer. Fabric normalizes an *omitted* key into an explicit
+`"sourceSchema": null`, so grepping the readback for `sourceSchema` still finds
+it in all 14 parts and looks like the update silently failed. Only comparing
+the **values** shows the change landed. A substring check would have concluded
+the opposite, in either direction.
+
+**Fabric regenerated the companion GraphModel's data sources on its own**, from
+`abfss://…/Tables/dbo/<table>` to `abfss://…/Tables/<table>`, all 14 of them,
+and auto-triggered a refresh seconds after the update. A refresh cannot be
+triggered by hand — `POST jobs/instances?jobType=Refresh` returns
+`InvalidJobType` — so this is the only path to one.
+
+```
+13:42:35  Refresh  Failed     GraphNotRefreshable
+16:09:03  Refresh  Completed  -
+```
+
+That transition is the proof. The definition edit alone proves nothing: this
+entire defect consisted of a definition that validated, imported, and read back
+byte-identical while pointing nowhere.
+
+**Semantic model** (`85ec4072`) — `updateDefinition` returned 202; the
+operation reached `Succeeded`. Polling mattered: an invalid definition also
+returns 202, after which Fabric deletes the item outright. Readback confirms
+the item alive with zero `schemaName` qualifiers, zero `[dbo]` lineage tags,
+and all 20 DirectLake partitions intact.
+
+**Blast radius: none.** The workspace holds 63 items, unchanged. No item was
+created, deleted, or otherwise modified.
+
+Two behaviours still need a human in the portal, and are not claimed here: the
+node and edge counts the graph actually materialized, and the Data Agent
+answering the battery question while citing only ontology and graph. A
+completed refresh job is strong evidence the graph has valid content, but it is
+not the same as counting rows.
