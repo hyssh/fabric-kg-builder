@@ -6,8 +6,10 @@ import base64
 import hashlib
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,6 +33,7 @@ from fabric_kg_builder.agent.l7_release import (
     ObservationBackend,
     ResourceReadback,
     _ReceiptReservation,
+    _POWERBI_SCOPE,
     _search_document_batches,
     _search_scope,
     _validated_service_url,
@@ -1995,3 +1998,158 @@ def test_readback_ignores_service_defaults_but_not_declared_drift() -> None:
     truncated = json.loads(json.dumps(observed))
     truncated["fields"] = truncated["fields"][:1]
     assert _declared_projection(declared, truncated) != declared
+
+
+def _framing_backend() -> AzureL7Backend:
+    backend = object.__new__(AzureL7Backend)
+    backend.credential = _ScopedCredential()
+    return backend
+
+
+def _framing_config() -> Any:
+    return SimpleNamespace(fabric_workspace_id="workspace-id")
+
+
+def _accepted_refresh(request_id: str = "refresh-1") -> _Response:
+    response = _Response(202)
+    response.headers["RequestId"] = request_id
+    return response
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_polls_until_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    calls: list[tuple[str, str]] = []
+    statuses = iter(["Unknown", "InProgress", "Completed"])
+
+    def transport(
+        method: str, url: str, **kwargs: Any
+    ) -> _Response:
+        calls.append((method, url))
+        if method == "POST":
+            return _accepted_refresh()
+        return _Response(200, {"status": next(statuses)})
+
+    monkeypatch.setattr(requests, "request", transport)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    _framing_backend()._frame_semantic_model(_framing_config(), "model-id")
+
+    assert calls[0] == (
+        "POST",
+        "https://api.powerbi.com/v1.0/myorg/groups/workspace-id/"
+        "datasets/model-id/refreshes",
+    )
+    # Non-terminal states must be polled through rather than accepted.
+    assert [method for method, _ in calls] == ["POST", "GET", "GET", "GET"]
+    assert calls[1][1].endswith("/refreshes/refresh-1")
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_fails_the_deployment_when_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    def transport(method: str, url: str, **kwargs: Any) -> _Response:
+        if method == "POST":
+            return _accepted_refresh()
+        return _Response(200, {"status": "Failed"})
+
+    monkeypatch.setattr(requests, "request", transport)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(L7ReleaseError, match="framing did not complete: status Failed"):
+        _framing_backend()._frame_semantic_model(_framing_config(), "model-id")
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_times_out_instead_of_polling_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    def transport(method: str, url: str, **kwargs: Any) -> _Response:
+        if method == "POST":
+            return _accepted_refresh()
+        return _Response(200, {"status": "InProgress"})
+
+    clock = iter([0.0, 10.0, 10_000.0])
+    monkeypatch.setattr(requests, "request", transport)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(L7ReleaseError, match="terminal state"):
+        _framing_backend()._frame_semantic_model(_framing_config(), "model-id")
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_rejects_a_refused_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    monkeypatch.setattr(
+        requests, "request", lambda method, url, **kwargs: _Response(400)
+    )
+
+    with pytest.raises(L7ReleaseError, match="framing was refused with HTTP 400"):
+        _framing_backend()._frame_semantic_model(_framing_config(), "model-id")
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_requires_a_refresh_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    monkeypatch.setattr(
+        requests, "request", lambda method, url, **kwargs: _Response(202)
+    )
+
+    with pytest.raises(L7ReleaseError, match="no refresh identifier"):
+        _framing_backend()._frame_semantic_model(_framing_config(), "model-id")
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_polls_its_own_origin_not_the_location_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh Location points at a per-cluster host, which must not be called."""
+    import requests
+
+    polled: list[str] = []
+
+    def transport(method: str, url: str, **kwargs: Any) -> _Response:
+        if method == "POST":
+            response = _Response(202)
+            response.headers["Location"] = (
+                "https://wabi-us-north-central-h-primary-redirect."
+                "analysis.windows.net/v1.0/myorg/groups/workspace-id/"
+                "datasets/model-id/refreshes/refresh-9"
+            )
+            return response
+        polled.append(url)
+        return _Response(200, {"status": "Completed"})
+
+    monkeypatch.setattr(requests, "request", transport)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    _framing_backend()._frame_semantic_model(_framing_config(), "model-id")
+
+    assert polled == [
+        "https://api.powerbi.com/v1.0/myorg/groups/workspace-id/"
+        "datasets/model-id/refreshes/refresh-9"
+    ]
+
+
+@pytest.mark.unit
+def test_semantic_model_framing_uses_the_power_bi_scope() -> None:
+    backend = _framing_backend()
+    backend._token(_POWERBI_SCOPE)
+    assert backend.credential.scopes == [
+        "https://analysis.windows.net/powerbi/api/.default"
+    ]
