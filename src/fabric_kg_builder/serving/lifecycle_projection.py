@@ -1089,7 +1089,11 @@ def _audit_rows_and_dispositions(
             "did not reconcile",
         )
     return (
-        tuple(sorted(rows, key=lambda item: item["input_candidate_id"])),
+        tuple(sorted(rows, key=lambda item: (
+            item["input_candidate_id"],
+            item["retained_candidate_id"] or "",
+            item["deduplicated_into_candidate_id"] or "",
+        ))),
         tuple(dispositions),
         states,
         reasons,

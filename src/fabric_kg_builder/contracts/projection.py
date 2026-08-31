@@ -61,17 +61,27 @@ class AuditProjection(ContractModel):
     @field_validator("candidate_dispositions", mode="before")
     @classmethod
     def _dispositions(cls, value: object) -> object:
-        if isinstance(value, (list, tuple)):
-            return tuple(
-                sorted(
-                    value,
-                    key=lambda item: (
-                        item.input_candidate_id
-                        if isinstance(item, CandidateAccountingDisposition)
-                        else str(item.get("input_candidate_id", ""))
-                    ),
+        # input_candidate_id alone is not a total order: it is minted per
+        # extraction batch, so batches proposing identical raw text share one.
+        # Sort on the candidate ids too, otherwise ordering - and every hash
+        # derived from it - depends on input order.
+        def _key(item: object) -> tuple[str, str, str]:
+            if isinstance(item, CandidateAccountingDisposition):
+                return (
+                    item.input_candidate_id,
+                    item.retained_candidate_id or "",
+                    item.deduplicated_into_candidate_id or "",
                 )
+            return (
+                str(item.get("input_candidate_id", "")),  # type: ignore[union-attr]
+                str(item.get("retained_candidate_id", "") or ""),  # type: ignore[union-attr]
+                str(  # type: ignore[union-attr]
+                    item.get("deduplicated_into_candidate_id", "") or ""
+                ),
             )
+
+        if isinstance(value, (list, tuple)):
+            return tuple(sorted(value, key=_key))
         return value
 
     @field_validator(
@@ -95,7 +105,14 @@ class AuditProjection(ContractModel):
             raise ValueError("candidate accounting partition does not reconcile")
         if len(self.candidate_dispositions) != self.input_candidate_count:
             raise ValueError("every input candidate requires exactly one disposition")
-        input_ids = [item.input_candidate_id for item in self.candidate_dispositions]
+        input_ids = [
+            (
+                item.input_candidate_id,
+                item.retained_candidate_id,
+                item.deduplicated_into_candidate_id,
+            )
+            for item in self.candidate_dispositions
+        ]
         if len(set(input_ids)) != len(input_ids):
             raise ValueError("input candidate dispositions must be unique")
         retained = [

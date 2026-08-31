@@ -2625,3 +2625,35 @@ def test_manifest_invalid_error_omits_remedy_when_identity_also_differs() -> Non
     )
     assert "re-run" not in message
     assert "canonical_id_set_hash" in message
+
+
+@pytest.mark.unit
+def test_audit_projection_orders_shared_input_ids_deterministically() -> None:
+    """input_candidate_id is minted per batch, so it is not a total sort order."""
+
+    from fabric_kg_builder.contracts.projection import AuditProjection
+
+    shared = "input-candidate:0655b76b5489e24dff6bda34bf509694"
+    forward = [
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": "entity-candidate:b",
+            "deduplicated_into_candidate_id": None,
+        },
+        {
+            "input_candidate_id": shared,
+            "retained_candidate_id": "entity-candidate:a",
+            "deduplicated_into_candidate_id": None,
+        },
+    ]
+    ordered = AuditProjection._dispositions(list(forward))
+    reversed_order = AuditProjection._dispositions(list(reversed(forward)))
+
+    assert [row["retained_candidate_id"] for row in ordered] == [
+        "entity-candidate:a",
+        "entity-candidate:b",
+    ]
+    assert ordered == reversed_order, (
+        "ordering must not depend on the order dispositions arrive in, "
+        "because every downstream hash derives from it"
+    )
