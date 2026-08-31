@@ -1369,6 +1369,7 @@ def _entity_tables(
             pa.field("__semantic_type_id", pa.string(), nullable=False),
             pa.field("__most_specific_type_id", pa.string(), nullable=False),
             pa.field("__hierarchy_depth", pa.int32(), nullable=False),
+            pa.field("__label", pa.string(), nullable=True),
         ]
         for prop in mapping.physical_property_bindings:
             fields.append(pa.field(
@@ -1393,8 +1394,11 @@ def _entity_tables(
                 "__semantic_type_id": mapping.canonical_semantic_type_id,
                 "__most_specific_type_id": entity["most_specific_type_id"],
                 "__hierarchy_depth": assertion["hierarchy_depth"],
+                "__label": entity.get("label"),
             }
             for prop in mapping.physical_property_bindings:
+                # Property values still come from semantic_asserted_properties,
+                # which is empty upstream; see the null-stub note in #105.
                 row[prop.physical_column_id] = _canonical_typed_value(
                     prop.data_type,
                     None,
