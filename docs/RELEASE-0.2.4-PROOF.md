@@ -260,3 +260,84 @@ For a reproducible product defect, preserve the sanitized JSONL/receipt, analyze
 the failing causal stage and rollback status, and open a GitHub issue with the
 installed CLI version, candidate SHA, stable resource types, hashes, HTTP status
 classes, and reproduction command. Never attach credentials or source content.
+
+## Operator-authorized live Fabric deployment (outside the fenced product path)
+
+The product's fenced deploy path still reports `fabric.<item>.create` as NO-GO,
+for the reasons proven above, and that verdict is unchanged by this section. The
+deployment recorded here was performed as an explicitly authorized operator
+action using direct Fabric REST calls, accepting the documented rollback risk.
+It is recorded because the release must describe what actually exists in the
+target workspace, not only what the fenced path is willing to do.
+
+Workspace `570d838d-88ff-437f-93cd-a639908b397f`. Source publication is the
+sealed L4 v3 run compiled by `fabric-kg app publish-structured`, plan hash
+`dcf03606b18f6ac30fc771eb516451e4bd7fd6e99ae74b2c9d4e45d88dc937e5`, 20 tables.
+
+| item | type | id | readback |
+| --- | --- | --- | --- |
+| `fabric_kg_024_lakehouse` | Lakehouse | `76c658f3-c066-43db-a63b-d5c2f3778708` | 20/20 Managed delta tables |
+| `fabric_kg_024_ontology` | Ontology | `07615fe9-fe1f-47ad-8ae2-ed6c0896e917` | 30 parts, 8 entity types, 6 relationship types |
+| `fabric_kg_024_ontology_graph_07615fe9…` | GraphModel | `93631e64-57f6-41a2-b699-38004db2491a` | auto-provisioned by the Ontology |
+| `fabric_kg_024_semantic_model` | SemanticModel | `85ec4072-326e-4cd1-b536-70a5591e7e3b` | 20/20 DirectLake tables |
+| `fabric_kg_024_data_agent` | DataAgent | `e3faa373-dc55-45ae-bfbe-97e80c3b5e52` | 1 datasource, type `ontology` |
+
+A pre-deployment item listing was captured as a baseline. Diffing it against the
+post-deployment listing shows zero removed and zero modified items; every added
+item is `fabric_kg_024_*`. No pre-existing item was touched.
+
+### The graph target needs no separate creation
+
+Creating a Fabric Ontology auto-provisions a companion Lakehouse, SQLEndpoint and
+GraphModel named after the ontology's id. The L5a `graph` target is therefore
+satisfied by the Ontology's own GraphModel rather than by an independent item.
+
+### Data Agent scope
+
+The Data Agent is deliberately narrow: exactly one datasource of type `ontology`
+pointing at `fabric_kg_024_ontology`, with all eight entity types selected. It
+has **no** Lakehouse datasource and **no** Azure AI Search datasource, and the
+readback above is the evidence. Its instructions state that restriction to the
+model so it reports a gap rather than substituting general knowledge. A separate
+orchestrator agent spanning ontology and Search is explicitly out of scope here.
+
+### Definitions are compiled by reviewable product code, not hand-built
+
+`deploy/fabric_ontology_definition.py` and
+`deploy/fabric_semantic_model_definition.py` translate the L5a target definitions
+into Fabric's item formats. Recompiling the semantic model and diffing against
+the live `getDefinition` readback yields 24/24 parts matching with zero semantic
+difference, so the committed code provably reproduces the deployed item.
+
+Two Fabric contract details cost a failed create and are pinned by regression
+tests. First, `sourceTableProperties` is deserialized polymorphically and its
+`sourceType` discriminator must be the object's first key; sorting keys causes
+`ALMOperationImportFailed`. Second, an invalid definition does not fail
+synchronously — the create returns 202, the item briefly appears, then Fabric
+deletes it. Only the long-running-operation status endpoint reports the real
+error, so it must always be polled rather than trusting the 202.
+
+### Narrowings applied, stated rather than hidden
+
+- One relationship type, `assertion-supported-by-evidence`, admits five source
+  types where Fabric permits one. Its source is **widened** to an abstract base
+  entity type bound to the all-entities table. Narrowing to a single physical
+  type would have falsely claimed only components carry evidence. The compiler
+  returns the widening so it is reported, never silent.
+- Twelve array-typed columns on the seven `l4_*` base tables are excluded from
+  the DirectLake semantic model because DirectLake cannot project complex types.
+  The seven `l5a_type_*` and six `l5a_rel_*` tables are fully scalar and are
+  projected complete. The compiler returns every exclusion.
+
+### Honest gaps that remain
+
+- Entity **properties are 0** in this corpus. Owner and value are not persisted
+  by L2, so the graph carries identifiers and relationships but no attributes.
+- Three orphaned companion items remain from a first ontology create that Fabric
+  rolled back (`…_lh_47c0af0a…`, its SQLEndpoint, and `…_graph_47c0af0a…`).
+  They were deliberately **not** deleted, because delete is the documented-unsafe
+  path on an item control plane with no CAS authority.
+- The provenance of the 400 documents in the live `fabric-kg-024-surface-index`
+  is still unestablished.
+- The Search managed identity still has no visible `Cognitive Services User`
+  grant on the Foundry account, so preview agentic Search remains unproven.
