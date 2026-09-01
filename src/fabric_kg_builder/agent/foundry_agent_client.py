@@ -264,8 +264,23 @@ class SDKAgentTransport:
             for tool_spec in definition.get("tools", []):
                 tool_type = tool_spec.get("type")
                 if tool_type == "azure_ai_search":
+                    # v1.8 note: the live Foundry service currently rejects
+                    # more than one entry in a single
+                    # AzureAISearchToolResource.indexes list ("Array length 2
+                    # exceeds maximum 1"). A second index (e.g. a
+                    # visual-assets/image index alongside the primary
+                    # evidence index) MUST be modeled as its own
+                    # azure_ai_search tool_spec/tool object — see
+                    # deployer.py, which appends one tool_spec per index.
+                    # Each such tool object also needs a UNIQUE `name`
+                    # (deprecated field, but still the tool-call argument
+                    # name used at invocation time) — without it, two
+                    # azure_ai_search tools both default to the same name
+                    # and invocation fails with "Duplicate tool argument
+                    # name: 'azure_ai_search'".
                     tools.append(
                         AzureAISearchTool(
+                            name=tool_spec.get("tool_name", "azure_ai_search"),
                             azure_ai_search=AzureAISearchToolResource(
                                 indexes=[
                                     AISearchIndexResource(
@@ -377,7 +392,31 @@ class SDKAgentTransport:
                 raise FoundryClientError(
                     "response.output_text is empty — agent may not be responding."
                 )
-            return {"answer": output_text, "output_text": output_text, "status": "completed"}
+            # Best-effort tool-call trace (issue #138 regression battery):
+            # records the .type of every response.output item (e.g.
+            # "fabric_dataagent_preview_call", "mcp_call", "message") so
+            # callers can verify which tools actually fired, not just the
+            # final answer text. Never fails the invoke on trace extraction
+            # errors — the smoke/answer check above is the load-bearing one.
+            tool_types: list[str] = []
+            try:
+                output_items = getattr(response, "output", None)
+                if output_items is None and isinstance(response, dict):
+                    output_items = response.get("output")
+                for item in output_items or []:
+                    item_type = getattr(item, "type", None)
+                    if item_type is None and isinstance(item, dict):
+                        item_type = item.get("type")
+                    if item_type:
+                        tool_types.append(str(item_type))
+            except Exception:
+                tool_types = []
+            return {
+                "answer": output_text,
+                "output_text": output_text,
+                "status": "completed",
+                "tool_types": tool_types,
+            }
         except FoundryClientError:
             raise
         except Exception as exc:

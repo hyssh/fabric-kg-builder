@@ -7,9 +7,14 @@ Mandatory lifecycle contracts:
   4. Create/update the prompt-agent definition; persist the returned agent_id.
   5. Verify agent readiness (check_ready).
   6. Run smoke prompt; raise on failure.
+  6.5. Run the declared testCases regression battery N times each and gate
+       on required cases (issue #138) — see agent/regression_battery.py.
+       A single successful run is not sound evidence for this agent's
+       multi-step tool-invocation behavior; only a repeat-N pass counts.
   7. Persist deploymentContext ONLY on live success — merge selected env,
      never overwrite other envs or testCases.
-  8. Dry-run: validate only, NEVER persist deploymentContext.
+  8. Dry-run: validate only, NEVER persist deploymentContext (also skips the
+     regression battery, since dry-run never reaches a live client).
 
 No real cloud calls during tests — inject a FakeAgentTransport.
 """
@@ -26,6 +31,13 @@ import yaml
 
 from fabric_kg_builder.agent.instructions import build_routing_instructions, INSTRUCTIONS_VERSION
 from fabric_kg_builder.agent.metadata import AgentMetadata, load_agent_metadata
+from fabric_kg_builder.agent.regression_battery import (
+    DEFAULT_REPEAT,
+    RegressionBatteryError,
+    TestCaseBatteryResult,
+    enforce_battery_gate,
+    run_test_case_battery,
+)
 
 _METADATA_PATH = Path(".foundry") / "agent-metadata.yaml"
 
@@ -65,6 +77,7 @@ class DeploymentContext:
         agent_version_id: str = "",
         agent_version: str = "",
         image_tag: str = "",
+        test_battery: list[TestCaseBatteryResult] | None = None,
     ) -> None:
         self.environment = environment
         self.agent_name = agent_name
@@ -78,6 +91,10 @@ class DeploymentContext:
         self.agent_version_id = agent_version_id
         self.agent_version = agent_version
         self.image_tag = image_tag
+        # Regression-battery results (issue #138) — reported via CLI but
+        # intentionally NOT included in to_dict()/persisted YAML, so the
+        # deploymentContext schema on disk is unchanged by this feature.
+        self.test_battery: list[TestCaseBatteryResult] = test_battery or []
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +161,8 @@ def deploy_agent(
     dry_run: bool = False,
     smoke_timeout_s: int = 60,
     require_grounding_tools: bool = False,
+    regression_repeat: int = DEFAULT_REPEAT,
+    skip_regression_battery: bool = False,
 ) -> DeploymentContext:
     """Deploy the Foundry prompt-agent for the given environment.
 
@@ -174,6 +193,13 @@ def deploy_agent(
             grounding, so the agent traverses real edge names.
         dry_run:        Validate and plan only; do not deploy or persist.
         smoke_timeout_s: Seconds to wait for smoke run.
+        regression_repeat: Times to repeat EACH declared testCase (issue
+            #138 — a single run is not sound evidence; default 3). A
+            testCase's own ``repeat`` field, if set, overrides this.
+        skip_regression_battery: Skip the testCase battery entirely (e.g.
+            for fast local iteration). Never set true for a real live
+            deploy — this is the gate that catches known-regression classes
+            like the unsupported-gate routing bug before they ship.
 
     Returns:
         DeploymentContext (non-empty agent_version_id only after live success).
@@ -195,6 +221,12 @@ def deploy_agent(
     fabric_connection_id = env_cfg.connections.get("fabricDataAgent", "")
     knowledge_connection_id = env_cfg.connections.get("knowledgeBase", "")
     search_index_name = str(env_cfg.knowledge.get("searchIndexName", ""))
+    # v1.8: an optional second Azure AI Search index on the SAME connection,
+    # e.g. an image/visual-assets index searched alongside the primary
+    # evidence index so the agent can surface image citations.
+    visual_assets_index_name = str(
+        env_cfg.knowledge.get("visualAssetsIndexName", "")
+    ).strip()
     knowledge_base_name = str(env_cfg.knowledge.get("knowledgeBaseName", ""))
     knowledge_mcp_endpoint = str(
         env_cfg.knowledge.get("knowledgeBaseMcpEndpoint", "")
@@ -218,8 +250,27 @@ def deploy_agent(
     if search_connection_id and search_index_name:
         tool_specs.append({
             "type": "azure_ai_search",
+            "tool_name": "azure_ai_search_evidence",
             "project_connection_id": search_connection_id,
             "index_name": search_index_name,
+            "query_type": search_query_type_override or _DEFAULT_QUERY_TYPE,
+            "top_k": 5,
+        })
+    if search_connection_id and visual_assets_index_name:
+        # v1.8: a second, independent azure_ai_search tool for the
+        # visual-assets (image) index. The live Foundry service rejects more
+        # than one entry in a single AzureAISearchToolResource.indexes list
+        # ("Array length 2 exceeds maximum 1"), so this MUST be a separate
+        # tool_spec/tool object rather than a second index under the primary
+        # search tool. Each azure_ai_search tool object must also have a
+        # UNIQUE tool_name — without it, both tools default to the same
+        # underlying "azure_ai_search" tool-call argument name and the model
+        # invocation fails with "Duplicate tool argument name: 'azure_ai_search'".
+        tool_specs.append({
+            "type": "azure_ai_search",
+            "tool_name": "azure_ai_search_visual_assets",
+            "project_connection_id": search_connection_id,
+            "index_name": visual_assets_index_name,
             "query_type": search_query_type_override or _DEFAULT_QUERY_TYPE,
             "top_k": 5,
         })
@@ -243,10 +294,22 @@ def deploy_agent(
         })
     if require_grounding_tools:
         missing: list[str] = []
-        if not search_connection_id or not search_index_name:
+        # A search/knowledge grounding leg is required, but it may be
+        # satisfied by EITHER the plain azure_ai_search tool (connections.search
+        # + knowledge.searchIndexName) OR the Foundry IQ Knowledge Base MCP
+        # tool (connections.knowledgeBase + knowledge.knowledgeBaseName +
+        # knowledge.knowledgeBaseMcpEndpoint), which supersedes it — the KB
+        # tool spans multiple indexes (evidence + visual-assets) via agentic
+        # retrieval, so it is not a downgrade from the single-index tool.
+        has_plain_search = bool(search_connection_id and search_index_name)
+        has_knowledge_base = bool(
+            knowledge_connection_id and knowledge_base_name and knowledge_mcp_endpoint
+        )
+        if not has_plain_search and not has_knowledge_base:
             missing.append(
-                "environments.<env>.connections.search and "
-                "knowledge.searchIndexName"
+                "either (environments.<env>.connections.search and "
+                "knowledge.searchIndexName) or (connections.knowledgeBase and "
+                "knowledge.knowledgeBaseName and knowledge.knowledgeBaseMcpEndpoint)"
             )
         if not fabric_connection_id:
             missing.append(
@@ -329,13 +392,26 @@ def deploy_agent(
     #   1. explicit env_cfg.knowledge.searchQueryType override
     #   2. live probe of the actual index schema (best-effort)
     #   3. safe default "semantic" (works without a vectorizer)
-    if not search_query_type_override and search_connection_id and search_index_name:
+    # v1.8: there may be MORE THAN ONE azure_ai_search tool_spec (the primary
+    # evidence index plus an optional visual-assets index) — each is probed
+    # and resolved independently by its own index_name, since a different
+    # index on the same connection may or may not have its own integrated
+    # vectorizer; one index's probe result must never be assumed for another.
+    if not search_query_type_override and search_connection_id:
         probe = getattr(client, "index_has_integrated_vectorizer", None)
-        detected = probe(search_connection_id, search_index_name) if callable(probe) else None
-        resolved_query_type = "vector_semantic_hybrid" if detected else _DEFAULT_QUERY_TYPE
         for spec in tool_specs:
-            if spec.get("type") == "azure_ai_search":
-                spec["query_type"] = resolved_query_type
+            if spec.get("type") != "azure_ai_search":
+                continue
+            spec_conn = spec.get("project_connection_id", search_connection_id)
+            spec_index_name = spec.get("index_name", "")
+            if not spec_index_name:
+                continue
+            detected = (
+                probe(spec_conn, spec_index_name) if callable(probe) else None
+            )
+            spec["query_type"] = (
+                "vector_semantic_hybrid" if detected else _DEFAULT_QUERY_TYPE
+            )
 
     # -- Step 4: agent definition ----------------------------------------------
     agent_definition = {
@@ -402,6 +478,26 @@ def deploy_agent(
     except Exception as exc:
         raise DeploymentError(f"Smoke prompt failed: {exc}") from exc
 
+    # -- Step 7.5: regression battery (issue #138) ─────────────────────────────
+    # Runs every declared testCase `regression_repeat` times (default 3) and
+    # classifies pass/fail/flaky. A required test case that is not N/N
+    # aborts the deploy — this is the gate that would have caught the
+    # unsupported-gate routing regression before it shipped, since a single
+    # lucky run is not sound evidence of correct behavior (see issue #138:
+    # one query observed a 1/5 pass rate across identical reruns).
+    test_battery: list[TestCaseBatteryResult] = []
+    if metadata.testCases and not skip_regression_battery:
+        test_battery = run_test_case_battery(
+            client,
+            metadata.agentName,
+            metadata.testCases,
+            default_repeat=regression_repeat,
+        )
+        try:
+            enforce_battery_gate(test_battery)
+        except RegressionBatteryError as exc:
+            raise DeploymentError(f"Regression battery gate failed: {exc}") from exc
+
     ctx = DeploymentContext(
         environment=env,
         agent_name=metadata.agentName,
@@ -415,6 +511,7 @@ def deploy_agent(
         agent_version_id=agent_version_id,
         agent_version=agent_version,
         image_tag=image_tag,
+        test_battery=test_battery,
     )
 
     # -- Step 8: persist (MERGE, never overwrite) ------------------------------

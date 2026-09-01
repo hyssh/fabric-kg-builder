@@ -68,6 +68,17 @@ class TestCase(BaseModel):
     expectedRouteType: str = ""
     requiredCitationFields: list[str] = Field(default_factory=list)
     requiredRefusal: bool = False
+    # Regression-battery fields (issue #138): a single run of a test case is
+    # NOT sound evidence of correctness for this agent's multi-step
+    # tool-invocation behavior — manual testing found a query with a 1/5
+    # pass rate across identical reruns. Every test case is therefore run
+    # `repeat` times (default set by the battery runner) and classified as
+    # pass (N/N) / fail (0/N) / flaky (neither). `required=True` (default)
+    # means the case MUST classify as "pass" or the deploy is blocked;
+    # `required=False` marks a known-flaky canary that is recorded and
+    # reported but never blocks the deploy on its own.
+    required: bool = True
+    repeat: int | None = None
 
 
 class AgentMetadata(BaseModel):
