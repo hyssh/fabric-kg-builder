@@ -270,3 +270,85 @@ def test_small_anchor_plus_table_that_fits_budget_keeps_anchor(
 
     assert len(execution.leaf_results) == 1, "small input should not split"
     assert execution.leaf_results[0]["has_anchor"]
+
+
+@pytest.mark.parametrize(
+    ("row_count", "overflow_threshold"),
+    [
+        (20, 250),
+        (20, 600),
+        (60, 250),
+        (60, 600),
+        (60, 1200),
+        (120, 600),
+        (120, 1200),
+        (120, 2500),
+    ],
+)
+def test_defect_reproduces_across_table_size_and_budget_configurations(
+    tmp_path: Path, row_count: int, overflow_threshold: int
+) -> None:
+    """Sweep table size x relation-budget threshold to rule out the obvious
+    objection: "just raise the budget". A larger overflow threshold delays
+    when splitting starts, but any fixed threshold is eventually exceeded by
+    a big enough table -- so the defect should reproduce (at least one
+    split occurs and loses the anchor) across every configuration where a
+    split is actually triggered, not just the one scenario picked above.
+    """
+
+    source_text = _build_anchor_plus_table_text(row_count=row_count)
+
+    class _ParametrizedOverflowService:
+        def __init__(self, threshold: int) -> None:
+            self.threshold = threshold
+            self.calls = 0
+
+        def complete(self, *, prompt: str, work_unit) -> dict:
+            self.calls += 1
+            over_budget = work_unit.coverage > self.threshold
+            relation_count = 5 if over_budget else 1
+            return {
+                "candidates": [
+                    {"candidate_kind": "relationship", "index": index}
+                    for index in range(relation_count)
+                ]
+            }
+
+    root = root_work_unit(
+        _source_unit(source_text),
+        pass_name="candidate-extraction",
+        authority_fingerprint="a" * 64,
+    )
+    service = _ParametrizedOverflowService(overflow_threshold)
+    execution = execute_work_unit(
+        root,
+        service=service,
+        prompt_builder=lambda work_unit: work_unit.text,
+        processor=_anchor_aware_processor,
+        checkpoint=WorkUnitCheckpoint(
+            tmp_path / "checkpoint.json",
+            tmp_path / "leaves",
+        ),
+        max_relations_per_work_unit=2,
+    )
+
+    if len(execution.leaf_results) == 1:
+        # Table was small enough relative to this threshold that no split
+        # was triggered at all -- not a case this sweep is testing.
+        pytest.skip("no split triggered at this row_count/threshold combination")
+
+    anchored = [r for r in execution.leaf_results if r["has_anchor"]]
+    orphaned = [r for r in execution.leaf_results if not r["has_anchor"]]
+
+    # Matches the independently-run repro's finding: exactly one leaf ever
+    # carries the anchor, regardless of how many times the table had to
+    # split, because split_work_unit's overlap is purely positional.
+    assert len(anchored) == 1, (
+        f"row_count={row_count} threshold={overflow_threshold}: expected "
+        f"exactly one leaf to retain the anchor, found {len(anchored)} of "
+        f"{len(execution.leaf_results)}"
+    )
+    assert orphaned, (
+        f"row_count={row_count} threshold={overflow_threshold}: expected at "
+        "least one orphaned leaf once a split is triggered"
+    )
