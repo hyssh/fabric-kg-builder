@@ -285,15 +285,23 @@ def test_small_anchor_plus_table_that_fits_budget_keeps_anchor(
         (120, 2500),
     ],
 )
-def test_defect_reproduces_across_table_size_and_budget_configurations(
+def test_every_leaf_retains_its_anchor_across_table_size_and_budget_configurations(
     tmp_path: Path, row_count: int, overflow_threshold: int
 ) -> None:
-    """Sweep table size x relation-budget threshold to rule out the obvious
-    objection: "just raise the budget". A larger overflow threshold delays
-    when splitting starts, but any fixed threshold is eventually exceeded by
-    a big enough table -- so the defect should reproduce (at least one
-    split occurs and loses the anchor) across every configuration where a
-    split is actually triggered, not just the one scenario picked above.
+    """Sweep table size x relation-budget threshold to assert the desired
+    INVARIANT (every leaf keeps its governing anchor), not the current buggy
+    behavior. This also rules out the obvious objection to the invariant
+    itself: "just raise the budget so it never splits". A larger overflow
+    threshold only delays when splitting starts -- any fixed threshold is
+    eventually exceeded by a big enough table -- so the invariant must hold
+    once a split is triggered, across every table size in the sweep, not
+    just avoid the problem by raising the budget in one scenario.
+
+    IMPORTANT: this asserts the invariant we want, not the defect we have.
+    On current (unfixed) code every case in this sweep that reaches a split
+    is expected to FAIL. Do not "fix" a failure here by asserting the
+    opposite (e.g. asserting exactly one anchored leaf) -- that would pin
+    the defect as a permanent regression contract and punish a correct fix.
     """
 
     source_text = _build_anchor_plus_table_text(row_count=row_count)
@@ -340,15 +348,12 @@ def test_defect_reproduces_across_table_size_and_budget_configurations(
     anchored = [r for r in execution.leaf_results if r["has_anchor"]]
     orphaned = [r for r in execution.leaf_results if not r["has_anchor"]]
 
-    # Matches the independently-run repro's finding: exactly one leaf ever
-    # carries the anchor, regardless of how many times the table had to
-    # split, because split_work_unit's overlap is purely positional.
-    assert len(anchored) == 1, (
-        f"row_count={row_count} threshold={overflow_threshold}: expected "
-        f"exactly one leaf to retain the anchor, found {len(anchored)} of "
-        f"{len(execution.leaf_results)}"
-    )
-    assert orphaned, (
-        f"row_count={row_count} threshold={overflow_threshold}: expected at "
-        "least one orphaned leaf once a split is triggered"
+    # Desired invariant: every leaf produced from a split must retain access
+    # to its governing anchor. Currently false (see module docstring) --
+    # expected to fail until the fix lands, then must stay green.
+    assert not orphaned, (
+        f"row_count={row_count} threshold={overflow_threshold}: "
+        f"{len(orphaned)} of {len(execution.leaf_results)} leaves lost "
+        f"their governing anchor after a split was triggered "
+        f"(anchored={len(anchored)})"
     )
