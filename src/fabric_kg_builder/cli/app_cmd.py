@@ -589,6 +589,27 @@ def deploy_agent_cmd(
         click.echo(f"  agent_version      : {deployment_ctx.agent_version}")
     if verbose:
         click.echo(f"  image_tag          : {deployment_ctx.image_tag}")
+    test_battery = getattr(deployment_ctx, "test_battery", None) or []
+    if test_battery:
+        click.echo("  regression battery (issue #138 repeat-N gate):")
+        for result in test_battery:
+            marker = {
+                "pass": "OK",
+                "fail": "FAIL",
+                "flaky": "FLAKY",
+                "skipped": "SKIP",
+            }.get(result.classification, result.classification.upper())
+            required_tag = "required" if result.required else "known-flaky/optional"
+            click.echo(
+                f"    [{marker}] {result.test_case_id} "
+                f"({result.pass_count}/{len(result.attempts)} passed, {required_tag})"
+            )
+            if result.classification == "flaky":
+                click.echo(
+                    "      ^ FLAKY — non-deterministic per issue #138; "
+                    "do not treat a single successful run as proof this case is fixed.",
+                    err=True,
+                )
 
     if not dry_run:
         # Only record lineage after live success (smoke_passed + agent_version_id set)
