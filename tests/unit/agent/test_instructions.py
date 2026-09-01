@@ -7,6 +7,12 @@ entity, its exact `entity:<hash>` id must be passed to AI Search as an
 This closes a gap found via live smoke-testing where the agent stopped at a
 natural-language "no data found" answer instead of using the resolved entity
 id to look up detail via Search.
+
+Also covers v1.7's named-entity routing floor: a query naming a specific
+entity must be classified at least `mixed` so the Ontology is consulted even
+when the primary content need is textual/verbatim — closes a gap found via
+live testing where a device-named "warnings" query was classified pure
+`search` and skipped the graph entirely.
 """
 
 from __future__ import annotations
@@ -17,13 +23,13 @@ from fabric_kg_builder.agent.instructions import (
 )
 
 
-def test_instructions_version_is_v1_6():
-    assert INSTRUCTIONS_VERSION == "v1.6"
+def test_instructions_version_is_v1_7():
+    assert INSTRUCTIONS_VERSION == "v1.7"
 
 
 def test_build_routing_instructions_embeds_version_header():
     doc = build_routing_instructions()
-    assert "instructions version v1.6" in doc
+    assert "instructions version v1.7" in doc
 
 
 def test_entity_id_handoff_section_present():
@@ -83,7 +89,26 @@ def test_custom_version_override_renders_in_header_not_module_constant():
     (used by the deployer for hashing/audit) is unaffected."""
     doc = build_routing_instructions(version="v9.9-test")
     assert "instructions version v9.9-test" in doc
-    assert INSTRUCTIONS_VERSION == "v1.6"
+    assert INSTRUCTIONS_VERSION == "v1.7"
+
+
+def test_named_entity_routing_floor_present_v1_7():
+    """v1.7: any query naming a specific entity must be classified at least
+    `mixed`, so the Ontology is always consulted even for content/verbatim
+    needs (closes the gap where device-named "warnings"/verbatim questions
+    were classified pure `search` and skipped the graph entirely)."""
+    doc = build_routing_instructions()
+    assert "NAMED-ENTITY ROUTING FLOOR" in doc
+    assert "AT\n    LEAST `mixed`" in doc
+    assert "Reserve pure `search` for entity-agnostic content questions" in doc
+
+
+def test_named_entity_routing_floor_preserves_unsupported_semantics_v1_7():
+    """The routing floor must not force a `mixed` answer when neither source
+    actually has the named entity/content — unsupported must remain valid."""
+    doc = build_routing_instructions()
+    assert "still report" in doc
+    assert "unsupported" in doc
 
 
 def test_label_is_documented_as_a_reserved_keyword_needing_backticks():
