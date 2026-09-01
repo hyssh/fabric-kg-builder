@@ -689,7 +689,7 @@ def run_l2(
             vocabulary,
             source_unit_id=work_unit.source_unit_id,
             source_text_hash=work_unit.source_text_hash,
-            source_text=work_unit.text,
+            source_text=work_unit.anchored_text,
             slice_start=work_unit.slice_start,
             slice_end=work_unit.slice_end,
         )

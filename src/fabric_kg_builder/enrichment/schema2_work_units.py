@@ -16,7 +16,9 @@ from fabric_kg_builder.contracts.evidence import SourceUnit
 
 from .schema2_sources import L2StageError
 
-L2_SPLIT_POLICY_VERSION = "paragraph-sentence-token/1.0.0"
+L2_SPLIT_POLICY_VERSION = "anchor-propagating-paragraph-sentence-token/1.1.0"
+
+ANCHOR_SEPARATOR = "\n\n"
 
 
 @dataclass(frozen=True)
@@ -31,10 +33,24 @@ class L2WorkUnit:
     pass_name: str
     authority_fingerprint: str
     split_policy_version: str = L2_SPLIT_POLICY_VERSION
+    anchor_text: str = ""
 
     @property
     def text(self) -> str:
         return self.source_text[self.slice_start : self.slice_end]
+
+    @property
+    def anchored_text(self) -> str:
+        """Slice text prefixed with the governing anchor inherited from splits.
+
+        A slice is contiguous, so a split can carry an element away from the
+        heading that gives it meaning. ``anchor_text`` restores that context
+        explicitly instead of relying on it happening to fall inside the slice.
+        """
+
+        if not self.anchor_text:
+            return self.text
+        return f"{self.anchor_text}{ANCHOR_SEPARATOR}{self.text}"
 
     @property
     def coverage(self) -> int:
@@ -63,6 +79,7 @@ def _work_unit_id(
     pass_name: str,
     authority_fingerprint: str,
     split_policy_version: str,
+    anchor_text: str = "",
 ) -> str:
     return deterministic_contract_id(
         "l2-work-unit",
@@ -74,6 +91,7 @@ def _work_unit_id(
             "slice_text_hash": canonical_sha256(
                 source_unit.text[slice_start:slice_end]
             ),
+            "anchor_text_hash": canonical_sha256(anchor_text),
             "pass_name": pass_name,
             "authority_fingerprint": authority_fingerprint,
             "split_policy_version": split_policy_version,
@@ -133,8 +151,27 @@ def _candidate_boundaries(text: str, start: int, end: int) -> list[int]:
     ]
 
 
+def _leading_block(text: str, start: int, end: int) -> str:
+    """Return the first structural block of a span.
+
+    Purely structural: the leading block of a span is what governs the rest of
+    that span. No content matching, no domain vocabulary, no length heuristic.
+    """
+
+    match = re.search(r"\n[ \t]*\n+", text[start:end])
+    if match is None:
+        return ""
+    return text[start : start + match.start()].strip()
+
+
 def split_work_unit(parent: L2WorkUnit) -> tuple[L2WorkUnit, L2WorkUnit] | None:
-    """Split at the nearest structural boundary with deterministic overlap."""
+    """Split at the nearest structural boundary with deterministic overlap.
+
+    The right-hand child begins partway through the parent span, so whatever
+    context governed the parent may no longer fall inside its slice. The
+    governing anchor is therefore propagated explicitly to both children rather
+    than being left to survive by position alone.
+    """
 
     boundaries = _candidate_boundaries(
         parent.source_text,
@@ -160,12 +197,22 @@ def split_work_unit(parent: L2WorkUnit) -> tuple[L2WorkUnit, L2WorkUnit] | None:
     ):
         return None
 
+    # An inherited anchor already identifies the governing context; only derive
+    # one from the span itself when the parent has none to hand down.
+    inherited_anchor = parent.anchor_text or _leading_block(
+        parent.source_text, parent.slice_start, parent.slice_end
+    )
+
     source_unit = _source_unit_view(parent)
     children: list[L2WorkUnit] = []
     for child_start, child_end in (
         (left_start, left_end),
         (right_start, right_end),
     ):
+        child_anchor = inherited_anchor
+        if child_anchor and child_anchor in parent.source_text[child_start:child_end]:
+            # Already present in the slice; prefixing it would only duplicate it.
+            child_anchor = ""
         child_id = _work_unit_id(
             source_unit=source_unit,
             slice_start=child_start,
@@ -173,6 +220,7 @@ def split_work_unit(parent: L2WorkUnit) -> tuple[L2WorkUnit, L2WorkUnit] | None:
             pass_name=parent.pass_name,
             authority_fingerprint=parent.authority_fingerprint,
             split_policy_version=parent.split_policy_version,
+            anchor_text=child_anchor,
         )
         children.append(
             L2WorkUnit(
@@ -186,6 +234,7 @@ def split_work_unit(parent: L2WorkUnit) -> tuple[L2WorkUnit, L2WorkUnit] | None:
                 pass_name=parent.pass_name,
                 authority_fingerprint=parent.authority_fingerprint,
                 split_policy_version=parent.split_policy_version,
+                anchor_text=child_anchor,
             )
         )
     return children[0], children[1]
