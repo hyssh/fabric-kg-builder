@@ -46,6 +46,20 @@ class L2WorkUnit:
         A slice is contiguous, so a split can carry an element away from the
         heading that gives it meaning. ``anchor_text`` restores that context
         explicitly instead of relying on it happening to fall inside the slice.
+
+        The prefix means model-reported offsets no longer index ``source_text``
+        directly. That is safe by existing design: ``verify_and_mint_extraction_span``
+        treats reported bounds as untrusted and re-derives them from the real
+        source via a unique-quote search, recording the informational,
+        non-blocking ``EVIDENCE_ANCHOR_RELOCATED``. Anchored leaves simply take
+        that path more often.
+
+        The one genuinely new mode is a quote spanning the junction between the
+        anchor and the slice: no such contiguous text exists in the source, so it
+        cannot be relocated and is rejected as ``EVIDENCE_QUOTE_MISMATCH``. It
+        fails closed and leaves a reason code, so it is measurable rather than
+        silent -- which is why the separator is a paragraph break, the boundary
+        models are least likely to quote across.
         """
 
         if not self.anchor_text:
