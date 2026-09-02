@@ -2,6 +2,29 @@
 
 ## 0.2.4
 
+- Removed the Surface corpus's vocabulary from shipped code. The tool is
+  presented as domain-general, but one corpus had leaked into it: an entity-type
+  allowlist named `SURFACE_SUPPORT_TYPES` compiled into
+  `ontology/multitype_plan.py` and re-exported as `DEFAULT_CORE_TYPES`, a
+  `--type-profile` flag on `deploy-ontology` whose `click.Choice` accepted
+  exactly one value (`surface-support`), and a fully populated Surface ontology
+  committed at `ontology/model.yaml` — the path a *user's own project* owns and
+  that runtime code path-searches (`validate/suite.py`,
+  `agent/tools/fabric_data.py`). The practical consequence was that a second
+  domain had nowhere to live. Type profiles are now project data resolved from
+  `ontology/type-profiles.yaml` (or a path passed directly), no profile is built
+  in, and the absence of a registry is a normal state meaning "derive types from
+  the observed data". The Surface ontology, its ID lock, and its type profile
+  move to `examples/domains/surface-support/` as a worked example. A guard test
+  fails if the markers reappear in `src/`; it was verified to flag 10
+  occurrences in the pre-change code and none after.
+
+  This is a scope-limited cleanup, not generalization. It removes a specific
+  corpus from the shipped artifact; it does not make the pipeline domain-general.
+  The inferred domain contract (`domain.yaml`) is still not consumed by
+  `compile-ontology`, so a new domain's ontology must still be authored by hand
+  — which is why an example is needed at all.
+
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a
   contract invariant message matched none of the known fragments the failure was
   recorded as the catch-all `domain_contract_invariant_unclassified`, and the

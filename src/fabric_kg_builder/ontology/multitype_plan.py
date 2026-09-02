@@ -37,37 +37,105 @@ from fabric_kg_builder.semantic.source_tables import (
     resolve_semantic_source_parquet,
 )
 
-SURFACE_SUPPORT_TYPES: tuple[str, ...] = (
-    "Device",
-    "DeviceModel",
-    "Component",
-    "Part",
-    "PartNumber",
-    "Procedure",
-    "Step",
-    "Tool",
-    "Symptom",
-    "Cause",
-    "Resolution",
-    "Section",
-)
-
-TYPE_PROFILES: dict[str, tuple[str, ...]] = {
-    "surface-support": SURFACE_SUPPORT_TYPES,
-}
-
-# Backward-compatible export only. build_plan() never applies this implicitly.
-DEFAULT_CORE_TYPES: list[str] = list(SURFACE_SUPPORT_TYPES)
+#: Default location of the per-project type-profile registry, relative to the
+#: project root.  The file is *optional*: when it is absent, every observed
+#: entity type is a candidate and no allowlist is applied.
+DEFAULT_TYPE_PROFILES_PATH = Path("ontology") / "type-profiles.yaml"
 
 
-def get_type_profile(name: str) -> list[str]:
-    """Return the explicit type allowlist registered as *name*."""
-    try:
-        return list(TYPE_PROFILES[name])
-    except KeyError as exc:
-        available = ", ".join(sorted(TYPE_PROFILES))
+def load_type_profiles(path: str | Path | None = None) -> dict[str, list[str]]:
+    """Load the named entity-type allowlists declared for this project.
+
+    The registry is project data, not library data: profiles describe one
+    domain's vocabulary and therefore must never be compiled into the tool.
+    Returns an empty mapping when no registry file exists.
+
+    Expected shape::
+
+        profiles:
+          <profile-name>: [TypeA, TypeB, ...]
+    """
+    import yaml  # noqa: PLC0415 — optional dependency at call time only
+
+    resolved = Path(path) if path is not None else DEFAULT_TYPE_PROFILES_PATH
+    if not resolved.is_file():
+        return {}
+    raw = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
         raise ValueError(
-            f"Unknown ontology type profile {name!r}. Available profiles: {available}"
+            f"{resolved}: type-profile registry must be a YAML mapping, "
+            f"got {type(raw).__name__}"
+        )
+    profiles = raw.get("profiles", raw)
+    if not isinstance(profiles, dict):
+        raise ValueError(f"{resolved}: 'profiles' must be a mapping of name -> type list")
+    out: dict[str, list[str]] = {}
+    for name, types in profiles.items():
+        if not isinstance(types, list) or not all(isinstance(t, str) for t in types):
+            raise ValueError(
+                f"{resolved}: profile {name!r} must be a list of type-name strings"
+            )
+        out[str(name)] = list(types)
+    return out
+
+
+def get_type_profile(
+    name_or_path: str, *, profiles_path: str | Path | None = None
+) -> list[str]:
+    """Resolve an explicit entity-type allowlist.
+
+    *name_or_path* is one of:
+
+    * a path to a YAML file holding a bare list of type names, or a mapping
+      with an ``entity_types`` list;
+    * a path to a profile registry (a mapping with ``profiles``) that declares
+      exactly one profile — the unambiguous case;
+    * the name of a profile declared in the project's registry
+      (``ontology/type-profiles.yaml`` by default).
+
+    No profile is built in.  A tool that ships one domain's type vocabulary
+    silently privileges that domain, so the vocabulary lives in project data
+    and this function only resolves it.
+    """
+    import yaml  # noqa: PLC0415
+
+    candidate = Path(name_or_path)
+    if candidate.is_file():
+        raw = yaml.safe_load(candidate.read_text(encoding="utf-8")) or []
+        if isinstance(raw, dict) and "profiles" in raw:
+            declared = load_type_profiles(candidate)
+            if len(declared) == 1:
+                return next(iter(declared.values()))
+            names = ", ".join(sorted(declared)) or "(none)"
+            raise ValueError(
+                f"{candidate} declares {len(declared)} profiles ({names}); a path "
+                "alone is ambiguous. Place the registry at "
+                f"{DEFAULT_TYPE_PROFILES_PATH} and pass the profile name instead."
+            )
+        types = raw.get("entity_types", raw) if isinstance(raw, dict) else raw
+        if not isinstance(types, list) or not all(isinstance(t, str) for t in types):
+            raise ValueError(
+                f"{candidate}: expected a YAML list of type names, a mapping with an "
+                "'entity_types' list, or a registry with a single 'profiles' entry"
+            )
+        return list(types)
+
+    profiles = load_type_profiles(profiles_path)
+    try:
+        return list(profiles[name_or_path])
+    except KeyError as exc:
+        registry = Path(profiles_path) if profiles_path else DEFAULT_TYPE_PROFILES_PATH
+        if not profiles:
+            raise ValueError(
+                f"Unknown ontology type profile {name_or_path!r}: no profile registry "
+                f"found at {registry} and no such file on disk. Declare profiles there, "
+                "pass a path to a type-list YAML, or omit --type-profile to derive "
+                "types from the observed data."
+            ) from exc
+        available = ", ".join(sorted(profiles))
+        raise ValueError(
+            f"Unknown ontology type profile {name_or_path!r}. "
+            f"Declared in {registry}: {available}"
         ) from exc
 
 

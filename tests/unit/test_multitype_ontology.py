@@ -35,7 +35,7 @@ def parquet_dir(tmp_path: Path) -> Path:
                 "Procedure",
                 "Step",
                 "Step",
-                "Obscure",  # not in DEFAULT_CORE_TYPES → dropped
+                "Obscure",  # excluded when a caller passes an explicit core_types allowlist
             ],
             "display_name": ["Battery", "Screen", "Replace", "Unscrew", "Lift", "Z"],
             "canonical_key": ["component:battery", "component:screen", "procedure:replace",

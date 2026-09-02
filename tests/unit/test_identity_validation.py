@@ -149,7 +149,7 @@ def _make_model(
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-MODEL_YAML_PATH = REPO_ROOT / "ontology" / "model.yaml"
+MODEL_YAML_PATH = REPO_ROOT / "examples" / "domains" / "surface-support" / "model.yaml"
 
 
 @pytest.fixture(scope="module")
