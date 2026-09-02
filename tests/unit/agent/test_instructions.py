@@ -2,17 +2,23 @@
 grounded-answer system prompt injected into the Foundry Prompt Agent.
 
 Covers v1.5's entity-id handoff requirement: when the Ontology resolves an
-entity, its exact `entity:<hash>` id must be passed to AI Search as an
-`entity_ids` filter rather than re-derived from the user's free-text phrase.
-This closes a gap found via live smoke-testing where the agent stopped at a
-natural-language "no data found" answer instead of using the resolved entity
-id to look up detail via Search.
+entity, its resolved label/id must anchor the follow-up Knowledge Base query
+rather than the query being re-derived purely from the user's free-text
+phrase. This closes a gap found via live smoke-testing where the agent
+stopped at a natural-language "no data found" answer instead of using the
+resolved entity to look up detail via the Knowledge Base.
 
 Also covers v1.7's named-entity routing floor: a query naming a specific
 entity must be classified at least `mixed` so the Ontology is consulted even
 when the primary content need is textual/verbatim — closes a gap found via
 live testing where a device-named "warnings" query was classified pure
 `search` and skipped the graph entirely.
+
+Also covers v1.8's migration from the single-index `azure_ai_search` tool to
+the Foundry IQ Knowledge Base MCP tool (`knowledge_base_retrieve`), and the
+no-substitution rule closing a live-found hallucination gap where the model
+would copy a hardcoded example entity id, or fabricate a smoother-looking
+answer, when real tool output looked messy or incomplete.
 """
 
 from __future__ import annotations
@@ -23,45 +29,136 @@ from fabric_kg_builder.agent.instructions import (
 )
 
 
-def test_instructions_version_is_v1_7():
-    assert INSTRUCTIONS_VERSION == "v1.7"
+def test_instructions_version_is_v1_11():
+    assert INSTRUCTIONS_VERSION == "v1.11"
 
 
 def test_build_routing_instructions_embeds_version_header():
     doc = build_routing_instructions()
-    assert "instructions version v1.7" in doc
+    assert "instructions version v1.11" in doc
 
 
 def test_entity_id_handoff_section_present():
-    """v1.5 must explicitly require passing resolved entity ids to Search."""
+    """v1.5/v1.8 must explicitly require anchoring the Knowledge Base query
+    to a resolved Ontology entity."""
     doc = build_routing_instructions()
     assert "ENTITY-ID HANDOFF" in doc
-    assert "entity_ids" in doc
     assert "entity:<hash>" in doc
 
 
 def test_entity_id_handoff_forbids_pure_free_text_fallback():
-    """The instruction must tell the model not to re-derive from free text
-    once an entity id has been resolved by the Ontology."""
+    """The instruction must tell the model not to rely on the user's original
+    phrase alone once an entity has been resolved by the Ontology."""
     doc = build_routing_instructions()
-    assert "Do NOT re-derive the Search query purely from the user's original phrase" in doc
+    assert (
+        "do not rely\n    on the user's original phrasing alone once the Ontology has already\n"
+        "    resolved a more specific name." in doc
+    )
 
 
 def test_entity_id_handoff_defines_genuine_data_gap_condition():
-    """Only a resolved-entity-with-no-search-chunks case is a genuine gap."""
+    """Only a resolved-entity-with-no-knowledge-base-results case is a genuine gap."""
     doc = build_routing_instructions()
     assert "genuine data gap" in doc
 
 
+def test_entity_id_handoff_does_not_use_odata_filter_syntax_v1_8():
+    """v1.8: the Knowledge Base tool takes natural language, not a raw OData
+    filter string — the old entity_ids/any(...) syntax must not be taught."""
+    doc = build_routing_instructions()
+    assert "entity_ids/any(" not in doc
+    assert "does not accept one" in doc
+
+
+def test_no_hardcoded_example_entity_id_leaks_into_prompt_v1_8():
+    """P0 regression: instructions.py must never contain a concrete-looking
+    example entity id that the model could copy verbatim into unrelated
+    answers. Live testing found the model reusing a literal example id
+    (entity:6d22b714699d237f96eb43c291b4abdd) as a fabricated citation across
+    multiple unrelated conversations."""
+    doc = build_routing_instructions()
+    assert "6d22b714699d237f96eb43c291b4abdd" not in doc
+
+
+def test_no_real_format_hex_ids_anywhere_in_prompt_v1_10():
+    """P0 regression, broadened per orchestrator request: scan the ENTIRE
+    rendered prompt for any long hex string that could be mistaken for a
+    real `entity:<hash>`-style id copied from an example. Only the generic
+    `<hash>` placeholder token (non-hex) is allowed."""
+    import re
+
+    doc = build_routing_instructions()
+    hex_like = re.findall(r"[0-9a-f]{8,}", doc)
+    assert hex_like == [], f"found real-format hex ids in prompt: {hex_like}"
+
+
+def test_no_domain_specific_example_terms_that_could_be_mistaken_for_real_data_v1_10():
+    """P0 regression: illustrative examples must use an obviously-synthetic
+    placeholder term, not a real domain word (e.g. 'kickstand', a real
+    Surface component name) that the model could pattern-match and reuse as
+    if it were retrieved data."""
+    doc = build_routing_instructions()
+    assert "kickstand" not in doc
+    assert "example-part-x9" in doc
+
+
+def test_no_substitution_rule_present_v1_8():
+    """P0: the model must never substitute a cleaner-looking value for a
+    tool's actual (possibly messy/incomplete) returned data, and must never
+    state a fact/id not literally present in the current turn's tool output."""
+    doc = build_routing_instructions()
+    assert "NEVER SUBSTITUTE" in doc
+    assert "illustrative ONLY" in doc
+
+
 def test_two_stage_tool_order_still_present_v1_4():
-    """v1.4's ontology-first / search-fallback ordering must survive the v1.5 bump."""
+    """v1.4's ontology-first / knowledge-base-fallback ordering must survive
+    the v1.8 bump."""
     doc = build_routing_instructions()
     assert "TWO-STAGE TOOL ORDER" in doc
     assert "ALWAYS query the Ontology" in doc
 
 
+def test_unsupported_gate_checklist_present_v1_10():
+    """P0 routing regression fix: a mandatory, ordered pre-condition
+    checklist must exist and must be phrased as a hard gate — closes the bug
+    where the model reported "unsupported" immediately after the Ontology
+    returned zero rows/a confused response on a named-entity question,
+    without ever calling the Knowledge Base as a fallback."""
+    doc = build_routing_instructions()
+    assert "UNSUPPORTED-GATE CHECKLIST" in doc
+    assert "hard gate, not optional guidance" in doc
+    assert "Was `knowledge_base_retrieve` ALSO called THIS turn?" in doc
+
+
+def test_unsupported_gate_checklist_allows_entity_agnostic_shortcut_v1_10():
+    """A purely conceptual/definitional question with no named entity may
+    still answer from the Knowledge Base alone and skip the rest of the
+    checklist — this exception must remain intact."""
+    doc = build_routing_instructions()
+    assert "this is a purely conceptual/definitional question" in doc
+
+
+def test_unsupported_gate_checklist_allows_complete_graph_only_shortcut_v1_10():
+    """A pure label/existence/count/connection lookup that the Ontology fully
+    answers may stop there without an extra Knowledge Base call — this
+    exception must remain intact so the model doesn't over-call the KB on
+    already-answered graph-only questions."""
+    doc = build_routing_instructions()
+    assert "you may stop at the Ontology alone; cite it and answer" in doc
+
+
+def test_unsupported_gate_checklist_forbids_graph_only_unsupported_v1_10():
+    """The core fix: a graph-only attempt (zero rows or a confused response)
+    must never, by itself, be treated as sufficient grounds to report
+    "unsupported" on a named-entity question."""
+    doc = build_routing_instructions()
+    assert "never, by itself, sufficient grounds to stop" in doc
+    assert "is a defect" in doc
+
+
 def test_gql_dialect_pitfalls_still_present_v1_4():
-    """v1.4's Fabric GQL dialect pitfall guidance must survive the v1.5 bump."""
+    """v1.4's Fabric GQL dialect pitfall guidance must survive the v1.8 bump."""
     doc = build_routing_instructions()
     assert "FABRIC GQL DIALECT" in doc
     assert "back-tick quoted" in doc
@@ -89,7 +186,7 @@ def test_custom_version_override_renders_in_header_not_module_constant():
     (used by the deployer for hashing/audit) is unaffected."""
     doc = build_routing_instructions(version="v9.9-test")
     assert "instructions version v9.9-test" in doc
-    assert INSTRUCTIONS_VERSION == "v1.7"
+    assert INSTRUCTIONS_VERSION == "v1.11"
 
 
 def test_named_entity_routing_floor_present_v1_7():
@@ -150,7 +247,18 @@ def test_both_grounding_tools_are_named_explicitly():
     to its role rather than describing them only abstractly."""
     prompt = build_routing_instructions()
     assert "Fabric Data Agent tool" in prompt
-    assert "Azure AI Search tool" in prompt
+    assert "Knowledge Base tool" in prompt
+    assert "knowledge_base_retrieve" in prompt
+
+
+def test_image_citation_guidance_present_v1_8():
+    """v1.8: when the Knowledge Base returns a visual asset, its link must be
+    surfaced as an additional citation — but never fabricated or reused
+    across unrelated questions."""
+    prompt = build_routing_instructions()
+    assert "IMAGE CITATIONS" in prompt
+    assert "visual_asset" in prompt
+    assert "Never fabricate, guess, or reuse an image" in prompt
 
 
 def test_relationship_types_are_injected_and_constrained():
@@ -180,3 +288,51 @@ def test_absence_claims_require_a_successful_query():
     prompt = build_routing_instructions()
     assert "returned zero rows" in prompt
     assert "say which query you ran" in prompt
+
+
+# ---------------------------------------------------------------------------
+# v1.11 — CITATION-SOURCE BINDING
+#
+# Motivated by two observed defects, each reproduced under more than one model
+# (so neither is a model-selection problem):
+#   * a structured component list was invented and attributed to
+#     source_type=ontology for an entity with zero edges in the live graph;
+#   * citations were emitted containing unfilled "<...>" template placeholders
+#     instead of real ids.
+# ---------------------------------------------------------------------------
+
+
+def test_citation_source_binding_section_present_v1_11():
+    prompt = build_routing_instructions()
+    assert "CITATION-SOURCE BINDING" in prompt
+
+
+def test_ontology_citation_requires_ontology_rows_this_turn_v1_11():
+    """A zero-row graph result must forbid ontology-attributed citations."""
+    prompt = build_routing_instructions()
+    assert "returned at least one row THIS turn" in prompt
+    assert "may carry `source_type=ontology`" in prompt
+
+
+def test_graph_shaped_output_does_not_imply_graph_grounding_v1_11():
+    """Component lists look like graph output; that is not evidence of it."""
+    prompt = build_routing_instructions()
+    assert "Structured output does not imply graph grounding" in prompt
+
+
+def test_zero_row_ontology_downgrades_to_search_not_mixed_v1_11():
+    """Knowledge Base content must not be relabelled as ontology-derived."""
+    prompt = build_routing_instructions()
+    assert "that is a `search` answer, not a `mixed` one" in prompt
+
+
+def test_placeholder_citations_are_forbidden_v1_11():
+    """Directly targets the unfilled-citation-template defect."""
+    prompt = build_routing_instructions()
+    assert "unfilled template placeholder" in prompt
+
+
+def test_citation_self_check_is_required_before_sending_v1_11():
+    """The rule must be checkable per-citation, not stated only as intent."""
+    prompt = build_routing_instructions()
+    assert "for EVERY citation line, name the specific tool" in prompt
