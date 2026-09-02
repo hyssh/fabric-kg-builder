@@ -56,19 +56,19 @@ the model which entity types and relationships to create. See README 'Domain
 Template Playbook' for guidance.
 
 \b
-Surface (field-service) template example:
+Examples (no domain is built in — each is equally an example):
+  fabric-kg set-domain --industry healthcare --business-domain clinical \
+    --questions-file q.txt --prompt "Patient care: Patient, Condition, Symptom, \
+Treatment, Medication, Provider."
   fabric-kg set-domain --industry manufacturing --business-domain field-service \
-    --questions-file data\\surface_questions.txt --prompt \
-    "Field-service hardware troubleshooting for Microsoft Surface devices. \
+    --questions-file q.txt --prompt \
+    "Field-service hardware troubleshooting. \
 Entity types: Device, DeviceModel, Component, Part, PartNumber, Procedure, \
 Step, Tool, Symptom, Cause, Resolution. Key relationships: has_component, \
 has_part, has_part_number, has_step, uses_tool, causes, resolved_by, addressed_by."
 
 \b
-Other domains:
-  fabric-kg set-domain --industry healthcare --business-domain clinical \
-    --questions-file q.txt --prompt "Patient care: Patient, Condition, Symptom, \
-Treatment, Medication, Provider."
+More domains:
   fabric-kg set-domain --industry legal --business-domain contracts \
     --domain-file data\\domain_brief.txt --force
 

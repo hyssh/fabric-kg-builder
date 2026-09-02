@@ -34,8 +34,8 @@ from fabric_kg_builder.ontology.compiler import (
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-MODEL_YAML = REPO_ROOT / "ontology" / "model.yaml"
-IDS_LOCK = REPO_ROOT / "ontology" / "ids.lock.json"
+MODEL_YAML = REPO_ROOT / "examples" / "domains" / "surface-support" / "model.yaml"
+IDS_LOCK = REPO_ROOT / "examples" / "domains" / "surface-support" / "ids.lock.json"
 
 
 # ---------------------------------------------------------------------------

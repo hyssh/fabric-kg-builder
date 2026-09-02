@@ -1,0 +1,29 @@
+# Entity-type allowlist for the Surface field-service example domain.
+#
+# This vocabulary used to live in src/fabric_kg_builder/ontology/multitype_plan.py
+# as SURFACE_SUPPORT_TYPES, which made one corpus's vocabulary a built-in of a
+# tool that claims to be domain-general. It is project data, so it lives here.
+#
+# Usage (from a project root that has this file at ontology/type-profiles.yaml):
+#   fabric-kg deploy-ontology --multitype --type-profile surface-support ...
+#
+# Or point at this file directly:
+#   fabric-kg deploy-ontology --multitype \
+#     --type-profile examples/domains/surface-support/type-profiles.yaml ...
+#
+# Omitting --type-profile derives every observed entity type from the data,
+# which is the default and the recommended starting point for a new domain.
+profiles:
+  surface-support:
+    - Device
+    - DeviceModel
+    - Component
+    - Part
+    - PartNumber
+    - Procedure
+    - Step
+    - Tool
+    - Symptom
+    - Cause
+    - Resolution
+    - Section

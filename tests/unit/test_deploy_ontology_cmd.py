@@ -26,8 +26,9 @@ from fabric_kg_builder.cli import cli
 from fabric_kg_builder.deploy.fabric_ontology import create_or_get_ontology_item
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-MODEL_YAML = REPO_ROOT / "ontology" / "model.yaml"
-IDS_LOCK = REPO_ROOT / "ontology" / "ids.lock.json"
+_EXAMPLE_DOMAIN = REPO_ROOT / "examples" / "domains" / "surface-support"
+MODEL_YAML = _EXAMPLE_DOMAIN / "model.yaml"
+IDS_LOCK = _EXAMPLE_DOMAIN / "ids.lock.json"
 
 
 def _compile_to(out: Path) -> int:

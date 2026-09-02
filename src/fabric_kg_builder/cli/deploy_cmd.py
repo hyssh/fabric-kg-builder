@@ -512,14 +512,15 @@ PowerShell examples:
   fabric-kg deploy-ontology --env dev --no-mock
   fabric-kg deploy-ontology --env dev --semantic-dir build\\semantic --parquet-dir build\\parquet --receipt-out build\\release\\ontology-receipt.json --no-mock
   fabric-kg deploy-ontology --env dev --multitype --parquet-dir build\\parquet --no-mock
-  fabric-kg deploy-ontology --env dev --multitype --type-profile surface-support --parquet-dir data\\surface_kg\\parquet --no-mock
+  fabric-kg deploy-ontology --env dev --multitype --type-profile ontology\\type-profiles.yaml --parquet-dir build\\parquet --no-mock
 
 \b
---multitype models one Fabric EntityType per real domain type (Component,
-Procedure, Step, ...) plus typed relationships, instead of a single generic
-KGEntity. By default, types are derived from the data. --type-profile applies
-an explicit named allowlist for a curated sample domain. The command
-materializes per-type Lakehouse tables from --parquet-dir first.
+--multitype models one Fabric EntityType per real domain type plus typed
+relationships, instead of a single generic KGEntity. By default, types are
+derived from the data. --type-profile applies an explicit allowlist supplied
+by the project (a YAML type list, or a name declared in
+ontology/type-profiles.yaml). The command materializes per-type Lakehouse
+tables from --parquet-dir first.
 
 \b
 With --multitype, a Data Agent grounding doc is also written by default
@@ -797,9 +798,11 @@ def _load_compiled_ontology_parts(dist_path: str) -> list[dict]:
 @click.option(
     "--type-profile",
     default=None,
-    type=click.Choice(["surface-support"]),
-    help="[--multitype] Explicit named entity-type allowlist. Omit to derive all "
-         "observed domain types from the canonical data.",
+    type=str,
+    help="[--multitype] Explicit entity-type allowlist: either a path to a YAML "
+         "type list, or the name of a profile declared in "
+         "ontology/type-profiles.yaml. Omit to derive all observed domain types "
+         "from the canonical data.",
 )
 @click.option("--create-data-agent-instruction/--no-create-data-agent-instruction",
               "create_agent_instruction", default=True, show_default=True,
