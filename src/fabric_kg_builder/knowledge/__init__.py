@@ -17,7 +17,16 @@ competency  AGK-008  Competency suite runner.
 
 from __future__ import annotations
 
-from .competency import CompetencyCase, CompetencyResult, CompetencySuiteRunner, summarise_results
+from .competency import (
+    CompetencyCase,
+    CompetencyResult,
+    CompetencySuiteRunner,
+    CoverageSummary,
+    DimensionCoverage,
+    RetrievalCoverage,
+    aggregate_coverage,
+    summarise_results,
+)
 from .data_agent import (
     DataAgentDefinitionError,
     DataAgentSpec,
@@ -171,5 +180,9 @@ __all__ = [
     "CompetencyCase",
     "CompetencyResult",
     "CompetencySuiteRunner",
+    "CoverageSummary",
+    "DimensionCoverage",
+    "RetrievalCoverage",
+    "aggregate_coverage",
     "summarise_results",
 ]

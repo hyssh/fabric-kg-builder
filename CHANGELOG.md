@@ -2,6 +2,22 @@
 
 ## 0.2.4
 
+- Added retrieval coverage measurement to the competency suite. `passed` is a
+  single bit: it reports "found 9 of the 10 things we looked for" and "found 0
+  of them" identically as `False`, so a suite could not say how much of what it
+  searched for it actually found, and no change to the retrieval strategy could
+  be shown to help or hurt. Results now also carry a `RetrievalCoverage` — the
+  numerator, the denominator, and the named misses per expectation dimension —
+  and `aggregate_coverage()` micro-averages it across a suite. Coverage is
+  purely observational and never affects `passed`; every pre-existing test is
+  unchanged. Two properties are pinned deliberately: a case that asserts
+  nothing has recall `None` rather than `1.0`, so assertion-free cases cannot
+  inflate the aggregate, and coverage and the failure list are derived from a
+  single evaluation, so they cannot drift apart about what was retrieved.
+  Micro-averaging rather than averaging per-dimension rates keeps a dimension
+  holding one expectation from outweighing a dimension holding fifty.
+  This measures retrieval; it does not improve it.
+
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a
   contract invariant message matched none of the known fragments the failure was
   recorded as the catch-all `domain_contract_invariant_unclassified`, and the
