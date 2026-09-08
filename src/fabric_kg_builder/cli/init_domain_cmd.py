@@ -1001,6 +1001,12 @@ def _run_schema_2_l1(
                 }
                 for path, code in exc.validation_failures
             ]
+        elif isinstance(getattr(exc, "status_code", None), int):
+            failures = [{
+                "path": "proposal.provider",
+                "code": f"http_{exc.status_code}",
+                "detail": _sanitize_detail_text(str(exc)),
+            }]
         elif isinstance(exc, ValidationError):
             failures = [
                 {
@@ -1043,6 +1049,7 @@ def _run_schema_2_l1(
             ]
         audit = {
             "schema_version": "1.0.0",
+            "exception_type": type(exc).__name__,
             "error_code": failure_error_code(exc),
             "run_id": run_id,
             "project_id": effective_project_id,

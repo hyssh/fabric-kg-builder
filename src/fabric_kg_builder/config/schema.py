@@ -5,7 +5,7 @@ ai_search, document_intelligence, auth.  Secrets are NEVER stored here —
 they live in .env and are resolved via environment variables.
 """
 
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -24,6 +24,10 @@ class FoundryConfig(BaseModel):
     """Azure AI Foundry — LLM + embedding deployment refs (non-secret)."""
 
     endpoint: str = Field(description="Foundry project endpoint URL (from ${AZURE_AI_FOUNDRY_ENDPOINT})")
+    inference_api: Literal["chat_completions", "project_responses"] = Field(
+        default="chat_completions",
+        description="Explicit transport. project_responses uses the project endpoint and Azure CLI identity.",
+    )
     openai_endpoint: str = Field(
         default="",
         description="Azure OpenAI endpoint (e.g. https://<name>.openai.azure.com/). "

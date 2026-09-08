@@ -18,6 +18,30 @@ fabric-kg enrich --help
 `assessment-schema` prints the actual versioned JSON schemas. Package version
 alone is insufficient to identify a prototype build; record the source commit.
 
+## Foundry project inference
+
+The CLI can explicitly use a Foundry project Responses endpoint instead of the
+account-level Chat Completions endpoint:
+
+```yaml
+foundry:
+  endpoint: ${FOUNDRY_PROJECT_ENDPOINT}
+  inference_api: project_responses
+  chat_deployment: gpt-4.1
+  request_timeout_seconds: 300
+```
+
+Use an existing deployment available to that project. This transport requires
+the existing `agent` optional dependency (`azure-ai-projects>=2.3`), authenticates
+with AzureCliCredential, uses `store: false`, and never falls back to API keys or
+another endpoint. It supports JSON generation, not embeddings. The default
+`chat_completions` transport retains its existing configuration.
+
+Model connectivity is separate from a valid ontology proposal. `init-domain`
+still rejects generated candidates that violate evidence, ordering or endpoint
+contracts. HTTP provider failures now retain a bounded, redacted status/detail
+in the CLI failure audit.
+
 ## 1. Propose and inspect
 
 Use `init-domain --input ... --intake ... --non-interactive` to prepare a blocked

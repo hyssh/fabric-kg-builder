@@ -482,6 +482,34 @@ class FoundryClient:
         If ``AZURE_AI_FOUNDRY_API_KEY`` or ``AZURE_OPENAI_API_KEY`` is set,
         ``api_key=`` is used instead of the token provider.
         """
+        if config.inference_api == "project_responses":
+            from urllib.parse import urlsplit
+            from azure.identity import AzureCliCredential
+
+            endpoint = urlsplit(config.endpoint)
+            if (
+                endpoint.scheme != "https"
+                or not endpoint.netloc
+                or "/api/projects/" not in endpoint.path
+                or endpoint.username or endpoint.password
+                or endpoint.query or endpoint.fragment
+            ):
+                raise ValueError("project_responses requires a clean HTTPS Foundry project endpoint")
+            try:
+                from azure.ai.projects import AIProjectClient
+            except ImportError as exc:
+                raise ImportError(
+                    "project_responses requires the existing agent extra: "
+                    "install fabric-kg-builder[agent]"
+                ) from exc
+            project = AIProjectClient(
+                endpoint=config.endpoint.rstrip("/"),
+                credential=AzureCliCredential(),
+                retry_total=0,
+            )
+            return project.get_openai_client(
+                timeout=config.request_timeout_seconds, max_retries=0,
+            )
         try:
             from openai import AzureOpenAI  # type: ignore[import]
         except ImportError as exc:
@@ -523,7 +551,7 @@ class FoundryClient:
 
     def execution_identity(self) -> dict[str, Any]:
         """Return non-secret model and request settings that affect outputs."""
-        return {
+        identity = {
             "provider": "azure_openai",
             "chat_deployment": self._config.chat_deployment,
             "api_version": self._config.api_version,
@@ -536,6 +564,22 @@ class FoundryClient:
             "max_completion_tokens": 4_096,
             "max_attempts": 2,
         }
+        if self._config.inference_api == "project_responses":
+            import hashlib
+            from importlib.metadata import version
+            identity.update({
+                "provider": "azure_ai_projects",
+                "inference_api": "project_responses",
+                "project_transport_version": "1.0.0",
+                "api_version": "project-sdk-default",
+                "project_sdk_version": version("azure-ai-projects"),
+                "project_endpoint_hash": hashlib.sha256(
+                    self._config.endpoint.rstrip("/").encode("utf-8")
+                ).hexdigest(),
+                "store": False,
+            })
+            identity.pop("seed")
+        return identity
 
     # ------------------------------------------------------------------
     # Public API
@@ -576,6 +620,11 @@ class FoundryClient:
         ValueError
             When the model returns content that cannot be parsed as JSON.
         """
+        if self._config.inference_api == "project_responses":
+            return self._complete_project_json(
+                system, user, json_schema,
+                max_completion_tokens=max_completion_tokens, max_attempts=max_attempts,
+            )
         schema_instruction = ""
         if json_schema:
             schema_instruction = (
@@ -679,6 +728,66 @@ class FoundryClient:
             f"attempt(s); line={last_error.lineno}; column={last_error.colno}"
         )
 
+    def _complete_project_json(
+        self, system: str, user: str, json_schema: dict, *,
+        max_completion_tokens: int, max_attempts: int,
+    ) -> dict:
+        if max_completion_tokens < 256 or max_attempts < 1:
+            raise ValueError("project inference requires at least 256 output tokens and one attempt")
+        instructions = system + "\nReturn only a complete JSON object."
+        if json_schema:
+            instructions += "\nRequired JSON schema:\n" + json.dumps(json_schema, sort_keys=True)
+        strict_schema = None
+        if json_schema:
+            try:
+                strict_schema = _azure_strict_schema(json_schema)
+            except ValueError:
+                # The same local validation boundary as the legacy transport.
+                strict_schema = None
+        for attempt in range(max_attempts):
+            format_value = (
+                {
+                    "type": "json_schema", "name": "fabric_kg_structured_response",
+                    "schema": strict_schema, "strict": True,
+                }
+                if strict_schema is not None else {"type": "json_object"}
+            )
+            request = {
+                "model": self._config.chat_deployment,
+                "instructions": instructions + (
+                    "\nPrevious output was incomplete or invalid JSON; return a smaller complete object."
+                    if attempt else ""
+                ),
+                "input": "Return only a valid JSON object for this request.\n" + user,
+                "text": {"format": format_value},
+                "max_output_tokens": max_completion_tokens,
+                "temperature": 0.0, "store": False,
+            }
+            try:
+                response = _call_with_transport_retry(
+                    lambda: self._client.responses.create(**request)
+                )
+            except Exception as exc:
+                if strict_schema is None or getattr(exc, "status_code", None) != 400:
+                    raise
+                strict_schema = None
+                request["text"] = {"format": {"type": "json_object"}}
+                response = _call_with_transport_retry(
+                    lambda: self._client.responses.create(**request)
+                )
+            raw = response.output_text
+            if not raw or not raw.strip():
+                continue
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(result, dict):
+                return result
+        raise ValueError(
+            f"Foundry project returned no complete JSON object after {max_attempts} attempt(s)"
+        )
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* and return one float vector per input string.
 
@@ -700,6 +809,11 @@ class FoundryClient:
         configured dimension (1536).  Changing this value requires a full
         rebuild of the AI Search vector index — see SPEC-004 §9.2.
         """
+        if self._config.inference_api == "project_responses":
+            raise ValueError(
+                "Project Responses transport is generation-only; configure a separately "
+                "authorized embedding transport instead of inferring an account endpoint"
+            )
         response = _call_with_transport_retry(
             lambda: self._client.embeddings.create(
                 model=self._config.embedding_deployment,

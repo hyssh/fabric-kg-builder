@@ -258,6 +258,10 @@ def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
 
     foundry = FoundryConfig(
         endpoint=endpoint,
+        inference_api=(
+            foundry_env.get("inference_api")
+            or foundry_yaml.get("inference_api", "chat_completions")
+        ),
         openai_endpoint=openai_endpoint,
         project=foundry_env.get("project") or foundry_yaml.get("project", "example-project"),
         chat_deployment=(
