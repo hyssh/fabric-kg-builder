@@ -2,6 +2,35 @@
 
 ## 0.2.4
 
+- Added a corpus-scale generalization stage substrate (`graph/generalization.py`)
+  and the fragmentation metrics to evaluate it (`graph/metrics.py`). Extraction
+  runs per work unit and a work unit only ever sees its own slice of text, so
+  nothing in the pipeline observes how the corpus as a whole names and types
+  things; surface-form drift between documents becomes permanent node
+  fragmentation. The document corpus cannot fit in a model context, but the
+  *inventory* of already-extracted labels usually can — it is deduplicated,
+  carries no source text, and grows with the number of distinct things rather
+  than the number of characters. `build_inventory` produces that compact view,
+  `plan_generalization` reports whether it fits a caller-supplied budget, and
+  when it does not, partitions it over co-reference components so that variants
+  of one thing stay in the same batch; a naive chunking would separate
+  `Widget Z100` from `widget z-100` and make the merge impossible regardless of
+  model quality. Components too large to fit alone are reported rather than
+  split silently. Normalization is script-neutral: the existing
+  `graph/blocking.py` normalizer restricts output to ASCII, which maps
+  `"한국어 부품"` and `"株式会社テスト"` to the empty string and maps
+  `"Виджет 7"` and `"Деталь 7"` both to `"7"` — erasing non-Latin entities and
+  colliding unrelated ones on their digits alone. Nothing in the new module
+  carries domain vocabulary; every grouping decision derives from labels
+  supplied at runtime. This is measurement and preparation only: no extraction,
+  identity, or merge behaviour changes, and no model is called.
+  `measure_grouping` and `compare_grouping` report rates rather than a pass/fail
+  bit, and deliberately describe two identity policies as *disagreeing* rather
+  than one improving on the other, because a key loose enough to merge
+  everything scores best on that axis. `b_cubed` supplies the standard
+  coreference metric that can tell a correct merge from an over-merge, and needs
+  labelled data that no held-out domain currently provides.
+
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a
   contract invariant message matched none of the known fragments the failure was
   recorded as the catch-all `domain_contract_invariant_unclassified`, and the
