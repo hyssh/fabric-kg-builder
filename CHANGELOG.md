@@ -31,6 +31,28 @@
   coreference metric that can tell a correct merge from an over-merge, and needs
   labelled data that no held-out domain currently provides.
 
+- Added `fabric-kg measure-fragmentation`, which makes the above reachable
+  instead of leaving it as library code no command can call. It reads an
+  existing extraction artifact (`entities.parquet`, or JSON/NDJSON with
+  configurable field names) and reports how much of the population is the same
+  thing recorded twice. Three groupings are measured over one population: the
+  **baseline** reproduces the live exact-match identity rule; a **candidate**
+  token-set rule merges word-order variants the baseline leaves apart; and a
+  **ceiling** groups everything sharing a token, transitively. The ceiling is
+  reported as an over-merging upper bound, not a proposal — one shared token is
+  enough and sharing chains, so a common word merges everything containing it.
+  Bracketing the answer this way is the honest form of the measurement: the
+  number of genuinely distinct things lies between the baseline and the ceiling,
+  and deciding where requires labelled data. The command applies no threshold
+  and never fails on a rate; it is a report, not a gate. It also answers the
+  budget question directly, printing whether the inventory fits one model
+  context. Recorded limit, found by test rather than asserted: the candidate
+  rule does not merge `"Widget Z100"` with `"widget z-100"`, because the
+  hyphen split leaves a one-character token that falls below the token floor —
+  the ceiling does catch that pair. The top-level command surface is therefore
+  39, updated in the release gate, the smoke-test script, and the smoke-test
+  document together.
+
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a
   contract invariant message matched none of the known fragments the failure was
   recorded as the catch-all `domain_contract_invariant_unclassified`, and the

@@ -53,6 +53,7 @@ __all__ = [
     "InventoryItem",
     "OversizedComponent",
     "build_inventory",
+    "co_reference_components",
     "entity_rows_to_items",
     "estimate_cost",
     "label_tokens",
@@ -363,6 +364,21 @@ def _components(entries: Sequence[InventoryEntry]) -> list[list[InventoryEntry]]
         grouped.setdefault(find(index), []).append(entry)
     # Deterministic order: by the sort key of each component's first entry.
     return [grouped[root] for root in sorted(grouped)]
+
+
+def co_reference_components(
+    inventory: Inventory,
+) -> tuple[tuple[InventoryEntry, ...], ...]:
+    """Entries that share a token, transitively, as an over-merging ceiling.
+
+    This is the loosest grouping the token vocabulary can justify: sharing one
+    token is enough, and sharing chains transitively, so a common word merges
+    everything that contains it.  It is therefore an **upper bound** on what a
+    token-based identity policy could collapse, not a proposal.  Reported next
+    to the live policy it brackets the answer: the number of genuinely distinct
+    things lies between the two, and neither end is the truth.
+    """
+    return tuple(tuple(component) for component in _components(inventory.entries))
 
 
 def plan_generalization(
