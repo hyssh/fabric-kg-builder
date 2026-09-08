@@ -53,6 +53,23 @@
   39, updated in the release gate, the smoke-test script, and the smoke-test
   document together.
 
+- Measured the first fragmentation rate on real extracted output rather than
+  fixtures: 37,604 entity candidates from a completed run collapse to 8,964
+  distinct entries under the live identity rule, so 76.2% of what extraction
+  produces is already the same thing recorded again. Two results from that run
+  changed this code. First, the shared-token ceiling is **degenerate at corpus
+  scale**: generic words appear in hundreds of distinct labels — `battery` in
+  440, `surface` in 368, `cover` in 240 — and chain transitively until a single
+  component holds 93.2% of the population. A bound that covers almost
+  everything is not a bound, and `plan_generalization` cannot split such a
+  component either, so its batching fallback does not work on a real corpus.
+  The report now carries `largest_group_share` and a `degenerate` flag, and the
+  command prints a warning instead of an unusable bracket when one component
+  dominates. Second, the inventory is 389,144 characters, so it does *not* fit
+  a 40,000-character budget; it fits at 400,000. The premise that the inventory
+  fits one context therefore holds only on a long-context model, and stating it
+  unconditionally would have been wrong.
+
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a
   contract invariant message matched none of the known fragments the failure was
   recorded as the catch-all `domain_contract_invariant_unclassified`, and the

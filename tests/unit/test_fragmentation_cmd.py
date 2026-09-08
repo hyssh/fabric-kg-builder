@@ -145,6 +145,60 @@ def test_candidate_does_not_merge_an_internal_hyphen_split() -> None:
     assert report["ceiling"]["group_count"] == 1, "the ceiling does catch it"
 
 
+def test_ceiling_is_flagged_degenerate_when_one_component_swallows_the_population() -> None:
+    # Measured on real output: generic words chained 93% of 37,604 candidates
+    # into one component. A bound that covers everything is not a bound.
+    items = _items(*[(f"Common Thing {i}", "T") for i in range(10)])
+    report = build_report(items, context_budget=100_000)
+    assert report["ceiling"]["degenerate"] is True
+    assert report["ceiling"]["largest_group_share"] == pytest.approx(1.0)
+
+
+def test_ceiling_is_not_degenerate_when_components_stay_separate() -> None:
+    report = build_report(
+        _items(("Alpha One", "T"), ("Beta Two", "T"), ("Gamma Three", "T")),
+        context_budget=100_000,
+    )
+    assert report["ceiling"]["degenerate"] is False
+    assert report["ceiling"]["largest_group_share"] == pytest.approx(1 / 3)
+
+
+def test_a_usable_bound_is_printed_as_a_bracket(tmp_path: Path) -> None:
+    src = _write_ndjson(
+        tmp_path / "e.ndjson",
+        [
+            {"entity_id": "1", "display_name": "Alpha One", "entity_type": "T"},
+            {"entity_id": "2", "display_name": "Beta Two", "entity_type": "T"},
+            {"entity_id": "3", "display_name": "Gamma Three", "entity_type": "T"},
+        ],
+    )
+    result = CliRunner().invoke(
+        measure_fragmentation_cmd, [str(src), "--out", str(tmp_path / "r.json")]
+    )
+    assert result.exit_code == 0, result.output
+    assert "distinct things are between 3 and 3" in result.output
+    assert "WARNING" not in result.output
+
+
+def test_degenerate_ceiling_warns_instead_of_printing_a_useless_bracket(
+    tmp_path: Path,
+) -> None:
+    src = _write_ndjson(
+        tmp_path / "e.ndjson",
+        [
+            {"entity_id": str(i), "display_name": f"Common Thing {i}", "entity_type": "T"}
+            for i in range(10)
+        ],
+    )
+    result = CliRunner().invoke(
+        measure_fragmentation_cmd, [str(src), "--out", str(tmp_path / "r.json")]
+    )
+    assert result.exit_code == 0, result.output
+    assert "WARNING" in result.output
+    assert "uninformative" in result.output
+    assert "distinct things are between" not in result.output
+
+
 def test_ceiling_is_reported_as_a_bound_not_a_proposal() -> None:
     report = build_report(_items(("Alpha", "T")), context_budget=10_000)
     note = report["ceiling"]["note"].lower()
@@ -236,7 +290,10 @@ def test_command_reports_rates_and_writes_the_report(tmp_path: Path) -> None:
     assert report["node_count"] == 3
     assert report["baseline"]["group_count"] == 3
     assert report["ceiling"]["group_count"] == 2
-    assert "distinct things are between 2 and 3" in result.output
+    # 2 of 3 nodes land in one component, so the bound is flagged rather than
+    # printed as a bracket.
+    assert report["ceiling"]["degenerate"] is True
+    assert "WARNING" in result.output
 
 
 def test_command_does_not_fail_on_a_high_rate(tmp_path: Path) -> None:

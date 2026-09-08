@@ -162,6 +162,20 @@ def records_to_items(
     return tuple(unique)
 
 
+def _is_degenerate(report: Any, threshold: float = 0.5) -> bool:
+    """Whether one component holds most of the population.
+
+    Measured on a real corpus, transitive token sharing put 93% of 37,604
+    candidates in a single component: generic words such as "battery" and
+    "cover" appear in hundreds of distinct labels and chain nearly everything
+    together.  When that happens the ceiling is no longer a useful bound, and
+    saying so is more honest than printing the number unqualified.
+    """
+    if report.node_count == 0:
+        return False
+    return report.largest_group_size / report.node_count > threshold
+
+
 def build_report(
     items: Sequence[InventoryItem],
     *,
@@ -227,11 +241,20 @@ def build_report(
             "group_count": ceiling.group_count,
             "fragmentation_rate": ceiling.fragmentation_rate,
             "largest_group_size": ceiling.largest_group_size,
+            "largest_group_share": (
+                None
+                if ceiling.node_count == 0
+                else ceiling.largest_group_size / ceiling.node_count
+            ),
+            "degenerate": _is_degenerate(ceiling),
             "note": (
                 "Upper bound, not a proposal: one shared token is enough and "
                 "sharing chains transitively, so a common word merges everything "
                 "containing it. The number of genuinely distinct things lies "
-                "between the baseline and this ceiling."
+                "between the baseline and this ceiling. When 'degenerate' is "
+                "true a single component holds most of the population, the bound "
+                "is uninformative, and the batching in plan_generalization "
+                "cannot split it."
             ),
         },
         "disagreement": {
@@ -331,10 +354,17 @@ def measure_fragmentation_cmd(
         f"ceiling groups            {ceiling_out['group_count']} "
         f"(fragmentation {_format_rate(ceiling_out['fragmentation_rate'])}, over-merging bound)"
     )
-    click.echo(
-        f"distinct things are between {ceiling_out['group_count']} and "
-        f"{baseline['group_count']}"
-    )
+    if ceiling_out["degenerate"]:
+        click.echo(
+            f"  WARNING: one component holds "
+            f"{_format_rate(ceiling_out['largest_group_share'])} of all nodes -- "
+            f"the ceiling is uninformative here and cannot be batched."
+        )
+    else:
+        click.echo(
+            f"distinct things are between {ceiling_out['group_count']} and "
+            f"{baseline['group_count']}"
+        )
     click.echo(
         f"policies disagree on      {report['disagreement']['additional_merges']} "
         f"nodes ({_format_rate(report['disagreement']['additional_merge_rate'])})"
