@@ -57,7 +57,7 @@ from fabric_kg_builder.semantic.source_tables import (
 
 L5A_STAGE_NAME = "schema2-structured-publication"
 L5A_STAGE_CONTRACT_VERSION = "1.0.0"
-L5A_PUBLICATION_CODE_VERSION = "0.2.4/l5a-3"
+L5A_PUBLICATION_CODE_VERSION = "0.2.4/l5a-4"
 L5A_STATE_DIR = Path(".fkg") / "l5a"
 L5A_TARGET_VERSION = "1.0.0"
 L5A_TARGET_ORDER = ("parquet", "semantic_model", "ontology", "graph")
@@ -1849,7 +1849,7 @@ def _definitions(
                     "data_type": owner.data_type,
                     "physical_table_id": item.physical_table_id,
                     "physical_column_id": prop.physical_column_id,
-                    "materialization": "schema_only",
+                    "materialization": "asserted_properties",
                 }
                 for property_id in (
                     contract.hierarchy_closure.effective_property_ids_by_type[
@@ -1913,7 +1913,7 @@ def _definitions(
                 {
                     "physical_column_id": field.physical_column_id,
                     "semantic_role": "physical_projection_only",
-                    "materialization": "schema_only",
+                    "materialization": "asserted_properties",
                 }
                 for field in item.source_key_bindings
             ],
@@ -1921,7 +1921,7 @@ def _definitions(
                 {
                     "physical_column_id": field.physical_column_id,
                     "semantic_role": "physical_projection_only",
-                    "materialization": "schema_only",
+                    "materialization": "asserted_properties",
                 }
                 for field in item.target_key_bindings
             ],
@@ -1980,7 +1980,7 @@ def _definitions(
                             "data_type": owner.data_type,
                             "physical_table_id": item.physical_table_id,
                             "physical_column_id": prop.physical_column_id,
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for property_id in (
                             contract.hierarchy_closure
@@ -2086,7 +2086,7 @@ def _definitions(
                             "physical_table_id": item.physical_table_id,
                             "graph_property": owner.graph_property,
                             "physical_column_id": prop.physical_column_id,
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for property_id in (
                             contract.hierarchy_closure
@@ -2161,7 +2161,7 @@ def _definitions(
                         {
                             "physical_column_id": field.physical_column_id,
                             "semantic_role": "physical_projection_only",
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for field in item.source_key_bindings
                     ],
@@ -2169,7 +2169,7 @@ def _definitions(
                         {
                             "physical_column_id": field.physical_column_id,
                             "semantic_role": "physical_projection_only",
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for field in item.target_key_bindings
                     ],
