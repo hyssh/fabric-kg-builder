@@ -296,9 +296,9 @@ def _create_inputs(
 
 
 @pytest.mark.unit
-def test_release_version_and_38_top_level_commands() -> None:
+def test_release_version_and_39_top_level_commands() -> None:
     assert __version__ == "0.2.4"
-    assert len(cli.commands) == 38
+    assert len(cli.commands) == 39
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
     # L5a publication is CLI-activated in 0.2.4 for compile and dry-run
@@ -307,6 +307,8 @@ def test_release_version_and_38_top_level_commands() -> None:
     # Schema-2 L3 and L4 are CLI-activated in 0.2.4.
     assert "validate-evidence" in cli.commands
     assert "project-serving" in cli.commands
+    # Read-only measurement command; reports rates and mutates nothing.
+    assert "measure-fragmentation" in cli.commands
 
 
 @pytest.mark.unit

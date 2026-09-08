@@ -326,3 +326,163 @@ FACILITIES_CONTRACT = DomainEvaluationContract(
     min_groundedness=0.7,
     min_coherence=0.5,
 )
+
+
+# ---------------------------------------------------------------------------
+# Fragmentation measurement
+#
+# Node fragmentation is when one real-world thing ends up as several nodes
+# because different documents named it differently and the identity policy only
+# merges exact matches.  Everything below reports *rates*, never a pass/fail
+# bit, so a change to the identity policy can be shown to move a number.
+# ---------------------------------------------------------------------------
+
+from typing import Callable, Hashable, Sequence  # noqa: E402
+
+
+@dataclass(frozen=True)
+class GroupingReport:
+    """Result of grouping node labels under one identity key.
+
+    ``fragmentation_rate`` is the share of nodes that are redundant under this
+    key: ``(node_count - group_count) / node_count``.  0.0 means every node is
+    already its own distinct group; higher means more nodes collapse.
+
+    A *looser* key always reports a higher rate, and a higher rate is not by
+    itself an improvement — a key loose enough to merge everything scores 1.0.
+    Deciding whether the merges are correct requires labelled data; use
+    :func:`b_cubed` for that.
+    """
+
+    node_count: int
+    group_count: int
+    largest_group_size: int
+    fragmentation_rate: Optional[float]
+    groups: dict = field(default_factory=dict)
+
+    @property
+    def redundant_node_count(self) -> int:
+        return self.node_count - self.group_count
+
+    def worst_groups(self, limit: int = 5) -> list[tuple]:
+        """Largest groups first, then by key, for stable reporting."""
+        ranked = sorted(
+            self.groups.items(), key=lambda kv: (-len(kv[1]), str(kv[0]))
+        )
+        return [(key, tuple(members)) for key, members in ranked[:limit]]
+
+
+def measure_grouping(
+    node_ids: Sequence[str],
+    key: Callable[[str], Hashable],
+) -> GroupingReport:
+    """Group ``node_ids`` by ``key`` and report the fragmentation rate.
+
+    ``key`` is supplied by the caller so the baseline (the live exact-match
+    identity policy) and any candidate policy are measured by the same code on
+    the same population.  No key is built in; nothing here is domain-specific.
+    """
+    if len(set(node_ids)) != len(node_ids):
+        raise ValueError("node_ids must be unique")
+    groups: dict[Hashable, list[str]] = {}
+    for node_id in node_ids:
+        groups.setdefault(key(node_id), []).append(node_id)
+    node_count = len(node_ids)
+    group_count = len(groups)
+    rate = None if node_count == 0 else (node_count - group_count) / node_count
+    return GroupingReport(
+        node_count=node_count,
+        group_count=group_count,
+        largest_group_size=max((len(v) for v in groups.values()), default=0),
+        fragmentation_rate=rate,
+        groups={k: tuple(sorted(v)) for k, v in groups.items()},
+    )
+
+
+@dataclass(frozen=True)
+class GroupingComparison:
+    """Baseline identity policy versus a candidate one, on the same nodes."""
+
+    baseline: GroupingReport
+    candidate: GroupingReport
+
+    @property
+    def additional_merges(self) -> int:
+        """Nodes the candidate collapses that the baseline leaves separate."""
+        return self.baseline.group_count - self.candidate.group_count
+
+    @property
+    def additional_merge_rate(self) -> Optional[float]:
+        """``additional_merges`` as a share of all nodes.
+
+        Deliberately not called an improvement rate.  These merges may be
+        correct or may be over-merges; this number only says how much the two
+        policies disagree.
+        """
+        if self.baseline.node_count == 0:
+            return None
+        return self.additional_merges / self.baseline.node_count
+
+
+def compare_grouping(
+    node_ids: Sequence[str],
+    *,
+    baseline_key: Callable[[str], Hashable],
+    candidate_key: Callable[[str], Hashable],
+) -> GroupingComparison:
+    """Measure two identity policies over one node population."""
+    return GroupingComparison(
+        baseline=measure_grouping(node_ids, baseline_key),
+        candidate=measure_grouping(node_ids, candidate_key),
+    )
+
+
+@dataclass(frozen=True)
+class BCubedScore:
+    """B-Cubed clustering scores, the standard coreference-resolution metric."""
+
+    precision: float
+    recall: float
+    f1: float
+
+
+def b_cubed(
+    predicted: dict,
+    gold: dict,
+) -> BCubedScore:
+    """B-Cubed precision/recall/F1 for ``predicted`` against ``gold``.
+
+    Both arguments map an element to its cluster id.  For each element ``e``
+    with predicted cluster ``C(e)`` and gold cluster ``G(e)``, precision is
+    ``|C(e) & G(e)| / |C(e)|`` and recall is ``|C(e) & G(e)| / |G(e)|``; the
+    reported scores are the means over all elements.
+
+    This is the only way to tell a correct merge from an over-merge, and it
+    needs labelled data.  Until a labelled held-out domain exists,
+    :func:`measure_grouping` reports disagreement, not correctness.
+    """
+    if set(predicted) != set(gold):
+        raise ValueError("predicted and gold must cover the same elements")
+    if not predicted:
+        return BCubedScore(precision=0.0, recall=0.0, f1=0.0)
+
+    predicted_members: dict = {}
+    for element, cluster in predicted.items():
+        predicted_members.setdefault(cluster, set()).add(element)
+    gold_members: dict = {}
+    for element, cluster in gold.items():
+        gold_members.setdefault(cluster, set()).add(element)
+
+    precision_total = 0.0
+    recall_total = 0.0
+    for element in predicted:
+        pred_cluster = predicted_members[predicted[element]]
+        gold_cluster = gold_members[gold[element]]
+        overlap = len(pred_cluster & gold_cluster)
+        precision_total += overlap / len(pred_cluster)
+        recall_total += overlap / len(gold_cluster)
+
+    count = len(predicted)
+    precision = precision_total / count
+    recall = recall_total / count
+    return BCubedScore(precision=precision, recall=recall, f1=_f1(precision, recall))

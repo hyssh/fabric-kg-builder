@@ -50,6 +50,7 @@ from fabric_kg_builder.cli.runtime_cmd import (
     validate_deployment_cmd,
 )
 from fabric_kg_builder.cli.diagnostics_cmd import inspect_diagnostics_cmd
+from fabric_kg_builder.cli.fragmentation_cmd import measure_fragmentation_cmd
 from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 
 
@@ -216,6 +217,7 @@ cli.add_command(collect_evidence_cmd, name="collect-evidence")
 cli.add_command(evaluate_cmd, name="evaluate")
 cli.add_command(report_cmd, name="report")
 cli.add_command(inspect_diagnostics_cmd, name="inspect-diagnostics")
+cli.add_command(measure_fragmentation_cmd, name="measure-fragmentation")
 cli.add_command(init_domain_cmd, name="init-domain")
 
 
