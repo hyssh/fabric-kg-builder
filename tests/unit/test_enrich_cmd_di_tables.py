@@ -266,7 +266,9 @@ def test_di_table_chunk_has_content_html(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_di_not_configured_pipeline_still_works(tmp_path: Path) -> None:
+def test_di_not_configured_pipeline_still_works(
+    tmp_path: Path, offline_enrichment_clients,
+) -> None:
     """When di_layout_client is None (DI not configured), enrich exits 0 without crashing."""
     pdf_path = tmp_path / "tiny.pdf"
     pdf_path.write_bytes(_MINIMAL_PDF)

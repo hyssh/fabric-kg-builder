@@ -1,6 +1,6 @@
 # Schema-2 prototype integration contracts
 
-Status: frozen prototype boundary, revision 3. Changes require a new revision and
+Status: frozen prototype boundary, revision 4. Changes require a new revision and
 producer/consumer fixture changes before dependent implementation continues.
 
 This is the implementation contract for the local prototype, not a claim that
@@ -134,7 +134,8 @@ datetime. Reject incompatible JSON encodings and noncanonical representations.
 - L3 validator successor: 1.2.0.
 - L3 property-observation successor: 1.1.0.
 - L4 projection-code successor: 1.1.0.
-- L5a publication-code identity changes when materialization semantics change.
+- L5a publication-code identity: `l5a-publication/1.1.0`, independent of the
+  package release label; it changes when materialization semantics change.
 
 Update producer declarations and matching readers together. Preserve raw field
 presence when validating historical hashes; default-null additions must not

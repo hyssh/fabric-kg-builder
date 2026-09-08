@@ -23,6 +23,8 @@ from fabric_kg_builder.config.schema import FoundryConfig
 from fabric_kg_builder.enrichment.foundry_client import FoundryClient
 from tests.conftest import write_approved_domain_contract
 
+pytestmark = pytest.mark.usefixtures("offline_enrichment_clients")
+
 # ---------------------------------------------------------------------------
 # Minimal valid PDF (one page, "Hello World" text)
 # ---------------------------------------------------------------------------

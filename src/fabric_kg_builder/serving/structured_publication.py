@@ -57,7 +57,7 @@ from fabric_kg_builder.semantic.source_tables import (
 
 L5A_STAGE_NAME = "schema2-structured-publication"
 L5A_STAGE_CONTRACT_VERSION = "1.0.0"
-L5A_PUBLICATION_CODE_VERSION = "0.2.4/l5a-4"
+L5A_PUBLICATION_CODE_VERSION = "l5a-publication/1.1.0"
 L5A_STATE_DIR = Path(".fkg") / "l5a"
 L5A_TARGET_VERSION = "1.0.0"
 L5A_TARGET_ORDER = ("parquet", "semantic_model", "ontology", "graph")

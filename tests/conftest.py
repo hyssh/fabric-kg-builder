@@ -41,6 +41,14 @@ _REPO_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture()
+def offline_enrichment_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not inherit developer DI/Blob resources in mock-model CLI tests."""
+    from fabric_kg_builder.cli import enrich_cmd as command
+    monkeypatch.setattr(command, "_build_di_layout_client", lambda _ctx: None)
+    monkeypatch.setattr(command, "_build_blob_uploader", lambda _ctx: None)
+
+
+@pytest.fixture()
 def isolated_ontology_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a clean CLI project with a non-secret Fabric environment config."""
     env_dir = tmp_path / "ontology" / "environments"

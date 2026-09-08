@@ -209,7 +209,9 @@ class TestUtf8ConsoleReconfiguration:
              patch("sys.stderr", raw):
             _configure_utf8_console()  # must not raise
 
-    def test_enrich_arrow_echo_does_not_crash(self, tmp_path: Path):
+    def test_enrich_arrow_echo_does_not_crash(
+        self, tmp_path: Path, offline_enrichment_clients,
+    ):
         """Enrich success echo containing → must produce exit 0, not exit 4.
 
         On Windows without the UTF-8 fix, click.echo('… → …') raises

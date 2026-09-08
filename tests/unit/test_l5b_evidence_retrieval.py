@@ -317,6 +317,7 @@ def _inputs(tmp_path: Path):
         type_properties=properties,
         identity_business_keys=identity_keys,
         inject_identity_keys=True,
+        assert_property_values=True,
     )
     l4 = run_l4(l3, state_root=tmp_path / ".fkg" / "l4")
     source = l4.sealed_source()
