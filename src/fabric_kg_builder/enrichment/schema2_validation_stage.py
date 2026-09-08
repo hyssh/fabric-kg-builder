@@ -12,7 +12,7 @@ import json
 import os
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -78,10 +78,12 @@ from .schema2_evidence import (
     append_current_transition,
     classify_state,
     compile_hierarchy,
+    decode_property_scalar,
     ground_endpoints,
     evaluate_inherited_constraints,
     is_minted_contract_id,
     property_attribution_reasons,
+    property_scalar_grounding_reasons,
     relationship_orientation_reasons,
     require_extraction_evidence,
     resolve_identity_witness,
@@ -94,6 +96,10 @@ from .schema2_evidence import (
 )
 from .schema2_sources import L2_ACCEPTED_VERSIONS, L2_STAGE_NAME, L2StageError
 from .schema2_sources import load_l2_inputs
+from .schema2_stage import (
+    L2_PROPOSED_CANDIDATE_VERSION,
+    proposed_candidate_schema_hash,
+)
 
 L3_STATE_DIR = Path(".fkg") / "l3"
 #: Mutable per-run stage artifacts are scoped by the exact input fingerprint so
@@ -116,7 +122,7 @@ L3_ACCEPTED_VERSIONS = {
     "domain.contract": "2.0.0",
     "l1.design_sample_manifest": "1.0.0",
     "l1.source_corpus_manifest": "1.0.0",
-    "l2.proposed_candidate_partition": "1.0.0",
+    "l2.proposed_candidate_partition": L2_PROPOSED_CANDIDATE_VERSION,
     "l2.required_member_set_view": "1.1.0",
 }
 _L2_STATUSES = frozenset({"succeeded", "skipped"})
@@ -188,6 +194,10 @@ class ProposedCandidateView(_StrictView):
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
     normalized_business_key: tuple[tuple[str, str], ...] | None = None
+    proposed_owner_entity_id: str | None = None
+    value_json: str | None = None
+    normalized_value_json: str | None = None
+    temporal_key: str | None = None
 
     @field_validator("normalized_business_key", mode="before")
     @classmethod
@@ -199,6 +209,11 @@ class ProposedCandidateView(_StrictView):
         return tuple(
             tuple(pair) if isinstance(pair, list) else pair for pair in value
         )
+
+
+def proposed_candidate_payload(record: ProposedCandidateView) -> dict[str, Any]:
+    """Preserve historical field absence when reconstructing sealed L2 bytes."""
+    return record.model_dump(mode="json", exclude_unset=True)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +267,40 @@ class PropertyObservationRecord:
     constraint_outcome: tuple[str, ...]
     evidence_span_ids: tuple[str, ...]
     reason_codes: tuple[str, ...]
+    entity_id: str | None = None
+    value_json: str | None = None
+    normalized_value_json: str | None = None
+    temporal_key: str | None = None
+
+
+L3_PROPERTY_OBSERVATION_VERSION = "1.1.0"
+
+
+def property_observation_schema_hash(version: str) -> str:
+    descriptor: dict[str, Any] = {
+        "contract_kind": "l3.property_observation",
+        "version": version,
+    }
+    if version == L3_PROPERTY_OBSERVATION_VERSION:
+        descriptor["fields"] = {
+            item.name: str(item.type) for item in fields(PropertyObservationRecord)
+        }
+    elif version != "1.0.0":
+        raise ValueError("Unsupported L3 property observation; re-run evidence validation")
+    return canonical_sha256(descriptor)
+
+
+def property_observation_payload(
+    record: PropertyObservationRecord, *, contract_version: str
+) -> dict[str, Any]:
+    """Serialize the declared format without adding proof to historical records."""
+    property_observation_schema_hash(contract_version)
+    payload = dict(record.__dict__)
+    if contract_version == "1.0.0":
+        for field in ("entity_id", "value_json", "normalized_value_json", "temporal_key"):
+            if payload.pop(field) is not None:
+                raise ValueError("Historical property observations cannot carry successor proof")
+    return payload
 
 
 @dataclass(frozen=True)
@@ -566,7 +615,13 @@ def load_l3_inputs(
             "L3_INPUT_RECEIPT_INVALID",
             "L3 cannot consume an L2 receipt carrying error codes",
         )
-    if dict(receipt.accepted_contract_versions) != dict(L2_ACCEPTED_VERSIONS):
+    if dict(receipt.accepted_contract_versions) not in (
+        dict(L2_ACCEPTED_VERSIONS),
+        {
+            **L2_ACCEPTED_VERSIONS,
+            "l2.proposed_candidate_partition": L2_PROPOSED_CANDIDATE_VERSION,
+        },
+    ):
         raise L3StageError(
             "L3_CONTRACT_VERSION_UNSUPPORTED",
             "L2 did not bind the exact accepted contract versions",
@@ -762,7 +817,15 @@ def _load_candidate_partitions(
         output_manifest,
         "l2.proposed_candidate_partition",
     ):
-        _require_version(entry, "1.0.0")
+        try:
+            expected_schema_hash = proposed_candidate_schema_hash(entry.contract_version)
+        except ValueError as exc:
+            raise L3StageError("L3_CONTRACT_VERSION_UNSUPPORTED", str(exc)) from exc
+        if entry.schema_hash != expected_schema_hash:
+            raise L3StageError(
+                "L3_INPUT_MANIFEST_INVALID",
+                "L2 carrier schema hash differs from its version; re-extract the source",
+            )
         batch_id, _, suffix = entry.artifact_id.rpartition(":")
         if suffix != "proposals" or batch_id not in batches:
             raise L3StageError(
@@ -779,10 +842,19 @@ def _load_candidate_partitions(
                 f"proposal partition {entry.artifact_id} content hash differs",
             )
         try:
+            carrier_fields = {
+                "proposed_owner_entity_id", "value_json",
+                "normalized_value_json", "temporal_key",
+            }
+            if entry.contract_version == L2_PROPOSED_CANDIDATE_VERSION:
+                if any(not carrier_fields <= set(item) for item in raw):
+                    raise ValueError("successor carrier fields are missing; re-extract the source")
+            elif any(carrier_fields & set(item) for item in raw):
+                raise ValueError("historical carrier has successor fields; re-extract the source")
             records = tuple(
                 ProposedCandidateView.model_validate(item) for item in raw
             )
-        except (TypeError, ValidationError) as exc:
+        except (TypeError, ValueError) as exc:
             raise L3StageError(
                 "L3_INPUT_MANIFEST_INVALID",
                 f"proposal partition {entry.artifact_id} is not strictly valid: {exc}",
@@ -1410,6 +1482,7 @@ def _validate_leaf(
         identity_recomputed = False
         witness_kind = "not_applicable"
         property_reasons: tuple[str, ...] = ()
+        property_owner_id: str | None = None
 
         if record.candidate_kind == "entity":
             identity_recomputed, witness_kind, identity_reasons = _identity_witness(
@@ -1459,19 +1532,22 @@ def _validate_leaf(
             ):
                 reasons.add("ENDPOINT_UNRESOLVED")
         else:
-            property_reasons = validate_property_observation(
+            property_reasons, property_owner_id = _property_reasons(
+                record=record,
                 hierarchy=hierarchy,
-                owner_type_id=None,
-                property_id=record.approved_semantic_id,
-                value_available=False,
+                shared=shared,
+                source_unit=source_unit,
+                evidence_span=outcome.span,
+                asserted_entity_ids=asserted_entity_ids,
             )
             reasons.update(property_reasons)
-            # Owner attribution and the observed value are likewise not
-            # persisted, so inheritance and value conformance stay unproven.
             reasons.update(
                 property_attribution_reasons(
-                    owner_attribution_persisted=False,
-                    value_persisted=False,
+                    owner_attribution_persisted=bool(record.proposed_owner_entity_id),
+                    value_persisted=(
+                        record.value_json is not None
+                        and record.normalized_value_json is not None
+                    ),
                     blocking_reason_codes=reasons,
                 )
             )
@@ -1557,6 +1633,10 @@ def _validate_leaf(
                     constraint_outcome=property_reasons,
                     evidence_span_ids=evidence_ids,
                     reason_codes=reason_codes,
+                    entity_id=property_owner_id,
+                    value_json=record.value_json,
+                    normalized_value_json=record.normalized_value_json,
+                    temporal_key=record.temporal_key,
                 )
             )
 
@@ -1586,6 +1666,80 @@ def _mint_evidence(
         verified_at_utc=occurred_at_utc,
         expected_source_text_hash=source_unit.text_content_hash,
     )
+
+
+def _property_reasons(
+    *,
+    record: ProposedCandidateView,
+    hierarchy: CompiledHierarchy,
+    shared: _SharedContext,
+    source_unit: SourceUnit,
+    evidence_span: EvidenceSpanV1_1 | None,
+    asserted_entity_ids: set[str],
+) -> tuple[tuple[str, ...], str | None]:
+    if record.approved_semantic_id is None:
+        return ("UNKNOWN_PROPERTY",), None
+    owner_id, owner_type, owner_reasons = _resolve_endpoint(
+        entity_id=record.proposed_owner_entity_id,
+        source_unit_id=record.source_unit_id,
+        shared=shared,
+    )
+    reasons = set(owner_reasons) if record.proposed_owner_entity_id else set()
+    if record.proposed_owner_entity_id and owner_id not in asserted_entity_ids:
+        reasons.add("ENDPOINT_UNRESOLVED")
+    value: Any = None
+    value_available = False
+    if record.value_json is not None and record.normalized_value_json is not None:
+        try:
+            decode_property_scalar(record.value_json)
+            value = decode_property_scalar(record.normalized_value_json)
+            value_available = True
+        except (TypeError, ValueError):
+            reasons.add("PROPERTY_VALUE_INVALID")
+        if value_available and owner_id is not None:
+            expected_id = deterministic_contract_id(
+                "property-observation",
+                {
+                    "entity_id": owner_id,
+                    "property_id": record.approved_semantic_id,
+                    "normalized_value": value,
+                    "temporal_key": record.temporal_key,
+                },
+            )
+            if expected_id != record.semantic_id:
+                reasons.add("SEMANTIC_ID_MISMATCH")
+        if evidence_span is not None:
+            reasons.update(property_scalar_grounding_reasons(
+                value_json=record.value_json,
+                normalized_value_json=record.normalized_value_json,
+                quote=source_unit.text[evidence_span.span_start:evidence_span.span_end],
+            ))
+        elif record.value_json != record.normalized_value_json:
+            reasons.add("PROPERTY_NORMALIZATION_UNSUPPORTED")
+    reasons.update(validate_property_observation(
+        hierarchy=hierarchy,
+        owner_type_id=owner_type,
+        property_id=record.approved_semantic_id,
+        value=value,
+        value_available=value_available,
+        owner_classification_unresolved=owner_id is not None and owner_type is None,
+    ))
+    if owner_id is not None and evidence_span is not None:
+        reasons.update(ground_endpoints(
+            source_text=source_unit.text,
+            span_start=evidence_span.span_start,
+            span_end=evidence_span.span_end,
+            requests=(EndpointGroundingRequest(
+                endpoint_id=owner_id,
+                role="source",
+                terms=_endpoint_terms(shared, owner_id, record.source_unit_id),
+                anchor=_endpoint_anchor(
+                    shared, owner_id, record.source_unit_id,
+                    evidence_span.span_start, evidence_span.span_end,
+                ),
+            ),),
+        ).reason_codes)
+    return sorted_reasons(reasons), owner_id
 
 
 def _entity_reasons(
@@ -1809,7 +1963,10 @@ def _leaf_to_dict(leaf: L3LeafResult) -> dict[str, Any]:
         "candidate_results": [item.__dict__ for item in leaf.candidate_results],
         "classifications": [item.__dict__ for item in leaf.classifications],
         "property_observations": [
-            item.__dict__ for item in leaf.property_observations
+            property_observation_payload(
+                item, contract_version=L3_PROPERTY_OBSERVATION_VERSION
+            )
+            for item in leaf.property_observations
         ],
         "reason_counts": [list(item) for item in leaf.reason_counts],
     }
@@ -1971,6 +2128,8 @@ def _leaf_fingerprint(
         )
         if record.candidate_kind == "entity":
             entity_ids.add(record.semantic_id)
+        elif record.candidate_kind == "property" and record.proposed_owner_entity_id:
+            entity_ids.add(record.proposed_owner_entity_id)
         elif record.candidate_kind == "relationship":
             relationship_ids.add(record.semantic_id)
             for endpoint in (
@@ -1985,6 +2144,9 @@ def _leaf_fingerprint(
             "candidate_version_ids": sorted(
                 item.candidate_version_id for item in batch.candidates
             ),
+            "proposed_candidate_payload_hash": canonical_sha256([
+                proposed_candidate_payload(item) for item in records
+            ]),
             "source_units": sorted(list(item) for item in source_units),
             "initial_lifecycle_hashes": sorted(
                 record.transition_hash
@@ -2959,7 +3121,12 @@ def _output_artifacts(
                 ),
             )
         )
-        observation_payload = [item.__dict__ for item in leaf.property_observations]
+        observation_payload = [
+            property_observation_payload(
+                item, contract_version=L3_PROPERTY_OBSERVATION_VERSION
+            )
+            for item in leaf.property_observations
+        ]
         payload = _persist_json(
             state_root / "property-observations" / f"{safe}.json",
             observation_payload,
@@ -2968,10 +3135,8 @@ def _output_artifacts(
             _artifact_entry(
                 artifact_id=f"{batch_id}:property-observations",
                 contract_kind="l3.property_observation",
-                contract_version="1.0.0",
-                schema_hash=canonical_sha256(
-                    {"contract_kind": "l3.property_observation", "version": "1.0.0"}
-                ),
+                contract_version=L3_PROPERTY_OBSERVATION_VERSION,
+                schema_hash=property_observation_schema_hash(L3_PROPERTY_OBSERVATION_VERSION),
                 content_hash=canonical_sha256(observation_payload),
                 byte_count=len(payload),
                 row_count=len(leaf.property_observations),

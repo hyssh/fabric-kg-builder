@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from fabric_kg_builder.contracts.base import (
+    canonical_json,
     canonical_sha256,
     deterministic_contract_id,
     normalize_nfc,
@@ -55,7 +56,7 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 from .schema2_sources import L2StageError
 
 L2_PROMPT_VERSION = "l2-schema-constrained/1.1.0"
-L2_EXTRACTOR_VERSION = "1.2.0"
+L2_EXTRACTOR_VERSION = "1.3.0"
 UNKNOWN_SEMANTIC_TYPE = {
     "entity": "unapproved-observation:entity",
     "relationship": "unapproved-observation:relationship",
@@ -105,6 +106,9 @@ class RawRelationshipCandidate(_StrictProposal):
 
 
 class RawPropertyCandidate(_StrictProposal):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, str_strip_whitespace=False, allow_inf_nan=False
+    )
     candidate_kind: Literal["property"]
     owner_local_id: str = Field(min_length=1)
     observed_property: str = Field(min_length=1)
@@ -112,6 +116,12 @@ class RawPropertyCandidate(_StrictProposal):
     normalized_value: str | int | float | bool
     temporal_key: str | None = None
     anchor: ProposedAnchor | None = None
+
+    @field_validator("owner_local_id", "observed_property", "temporal_key", mode="before")
+    @classmethod
+    def _normalize_references(cls, value: object) -> object:
+        # References retain legacy trimming; scalar whitespace is source evidence.
+        return value.strip() if isinstance(value, str) else value
 
 
 RawCandidate = Annotated[
@@ -171,6 +181,10 @@ class ProposedCandidateRecord:
     #: ``business_key`` identity policy. L3 cannot reproduce a business-key
     #: entity ID without it, so the carrier must persist it verbatim.
     normalized_business_key: tuple[tuple[str, str], ...] | None = None
+    proposed_owner_entity_id: str | None = None
+    value_json: str | None = None
+    normalized_value_json: str | None = None
+    temporal_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -666,6 +680,10 @@ def _make_candidate_record(
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
     normalized_business_key: tuple[tuple[str, str], ...] | None = None
+    proposed_owner_entity_id: str | None = None
+    value_json: str | None = None
+    normalized_value_json: str | None = None
+    temporal_key: str | None = None
     identity_policy_mismatch = False
     if isinstance(raw, RawEntityCandidate):
         definition = vocabulary.entities_by_alias.get(raw.observed_type.casefold())
@@ -789,6 +807,10 @@ def _make_candidate_record(
             )
         )
         owner_type_id = owner[1] if owner is not None else None
+        proposed_owner_entity_id = owner_id
+        value_json = canonical_json(raw.value)
+        normalized_value_json = canonical_json(raw.normalized_value)
+        temporal_key = raw.temporal_key
         property_ = (
             vocabulary.properties_by_type_and_alias.get(owner_type_id or "", {}).get(
                 raw.observed_property.casefold()
@@ -827,6 +849,12 @@ def _make_candidate_record(
             "semantic_id": semantic_id,
             "approved_semantic_id": approved_id,
             "raw": raw.model_dump(mode="json"),
+            **({"property_carrier": {
+                "proposed_owner_entity_id": proposed_owner_entity_id,
+                "value_json": value_json,
+                "normalized_value_json": normalized_value_json,
+                "temporal_key": temporal_key,
+            }} if isinstance(raw, RawPropertyCandidate) else {}),
         }
     )
     candidate_version_id = deterministic_contract_id(
@@ -861,6 +889,10 @@ def _make_candidate_record(
         proposed_member_role_id=proposed_member_role_id,
         proposed_member_order=proposed_member_order,
         normalized_business_key=normalized_business_key,
+        proposed_owner_entity_id=proposed_owner_entity_id,
+        value_json=value_json,
+        normalized_value_json=normalized_value_json,
+        temporal_key=temporal_key,
     )
 
 

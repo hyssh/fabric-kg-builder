@@ -50,11 +50,14 @@ from fabric_kg_builder.contracts.resources import (
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.domain.service import compute_contract_hash
 from fabric_kg_builder.platform import process_resource_usage
-from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
+from fabric_kg_builder.semantic.source_tables import (
+    SealedL4ServingSource,
+    decode_property_scalar,
+)
 
 L5A_STAGE_NAME = "schema2-structured-publication"
 L5A_STAGE_CONTRACT_VERSION = "1.0.0"
-L5A_PUBLICATION_CODE_VERSION = "0.2.3/l5a-2"
+L5A_PUBLICATION_CODE_VERSION = "0.2.4/l5a-3"
 L5A_STATE_DIR = Path(".fkg") / "l5a"
 L5A_TARGET_VERSION = "1.0.0"
 L5A_TARGET_ORDER = ("parquet", "semantic_model", "ontology", "graph")
@@ -1011,12 +1014,6 @@ def _validate_publish_authority(
     observed_property_ids = {
         str(row["semantic_property_id"]) for row in property_rows
     }
-    if property_rows:
-        raise L5aPublicationError(
-            "L5A_PROPERTY_MATERIALIZATION_UNSUPPORTED",
-            "sealed L4 property assertions do not carry owner/value fields and "
-            "cannot be materialized without invention",
-        )
 
     expected_lineage = _identity_lineage(source.receipt.identity)
     expected_crosswalk_lineage = {
@@ -1351,9 +1348,79 @@ def _canonical_crosswalk(
     return first
 
 
+def _property_values(
+    source_tables: Mapping[str, pa.Table],
+    contract: DomainContractV2,
+) -> dict[tuple[str, str], Any]:
+    definitions = {
+        prop.property_id: prop
+        for entity in contract.candidate_model.entity_types
+        for prop in entity.declared_properties
+    }
+    entities = {
+        row["entity_id"]: row
+        for row in source_tables["semantic_asserted_entities"].to_pylist()
+    }
+    normalized: dict[tuple[str, str], str] = {}
+    values: dict[tuple[str, str], Any] = {}
+    for row in source_tables["semantic_asserted_properties"].to_pylist():
+        key = (row.get("entity_id"), row["semantic_property_id"])
+        owner = entities.get(key[0])
+        prop = definitions.get(key[1])
+        if (
+            owner is None
+            or prop is None
+            or row["value_type"] != prop.value_type
+            or key[1] not in contract.hierarchy_closure.effective_property_ids_by_type.get(
+                owner["most_specific_type_id"], ()
+            )
+        ):
+            raise L5aPublicationError(
+                "L5A_PROPERTY_AUTHORITY_MISMATCH",
+                f"asserted property {key!r} lacks approved owner/type authority",
+            )
+        value_json = row.get("normalized_value_json")
+        try:
+            value = _canonical_typed_value(
+                prop.value_type,
+                decode_property_scalar(value_json, prop.value_type),
+            )
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise L5aPublicationError(
+                "L5A_PROPERTY_VALUE_INVALID",
+                f"asserted property {key!r} has invalid normalized scalar JSON",
+            ) from exc
+        if key in normalized and normalized[key] != value_json:
+            raise L5aPublicationError(
+                "L5A_PROPERTY_VALUE_CONFLICT",
+                f"multiple normalized values for asserted property {key!r}",
+            )
+        normalized[key] = value_json
+        values[key] = value
+    return values
+
+
+def _property_value(
+    values: Mapping[tuple[str, str], Any],
+    entity_id: str,
+    property_id: str,
+    *,
+    required: bool,
+) -> Any:
+    key = (entity_id, property_id)
+    if required and key not in values:
+        raise L5aPublicationError(
+            "L5A_REQUIRED_PROPERTY_MISSING",
+            f"required property or endpoint key {key!r} has no asserted value",
+        )
+    return values.get(key)
+
+
 def _entity_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
+    values: Mapping[tuple[str, str], Any],
+    required_properties: frozenset[str],
 ) -> dict[str, pa.Table]:
     entities = {
         str(row["entity_id"]): row
@@ -1397,11 +1464,11 @@ def _entity_tables(
                 "__label": entity.get("label"),
             }
             for prop in mapping.physical_property_bindings:
-                # Property values still come from semantic_asserted_properties,
-                # which is empty upstream; see the null-stub note in #105.
-                row[prop.physical_column_id] = _canonical_typed_value(
-                    prop.data_type,
-                    None,
+                row[prop.physical_column_id] = _property_value(
+                    values,
+                    entity_id,
+                    prop.canonical_property_id,
+                    required=prop.canonical_property_id in required_properties,
                 )
             rows.append(row)
         result[mapping.physical_table_id] = pa.Table.from_pylist(
@@ -1414,6 +1481,7 @@ def _entity_tables(
 def _relationship_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
+    values: Mapping[tuple[str, str], Any],
 ) -> dict[str, pa.Table]:
     rows_by_type: dict[str, list[dict[str, Any]]] = {}
     for row in source_tables["semantic_asserted_relationships"].to_pylist():
@@ -1457,16 +1525,20 @@ def _relationship_tables(
                 "__target_entity_id": relationship["target_entity_id"],
             }
             row.update({
-                key.physical_column_id: _canonical_typed_value(
-                    ownership_by_id[key.canonical_property_id].data_type,
-                    None,
+                key.physical_column_id: _property_value(
+                    values,
+                    relationship["source_entity_id"],
+                    key.canonical_property_id,
+                    required=True,
                 )
                 for key in mapping.source_key_bindings
             })
             row.update({
-                key.physical_column_id: _canonical_typed_value(
-                    ownership_by_id[key.canonical_property_id].data_type,
-                    None,
+                key.physical_column_id: _property_value(
+                    values,
+                    relationship["target_entity_id"],
+                    key.canonical_property_id,
+                    required=True,
                 )
                 for key in mapping.target_key_bindings
             })
@@ -1481,10 +1553,18 @@ def _relationship_tables(
 def _all_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
+    contract: DomainContractV2,
 ) -> dict[str, pa.Table]:
+    values = _property_values(source_tables, contract)
+    required_properties = frozenset(
+        prop.property_id
+        for entity in contract.candidate_model.entity_types
+        for prop in entity.declared_properties
+        if prop.required
+    )
     typed = {
-        **_entity_tables(source_tables, crosswalk),
-        **_relationship_tables(source_tables, crosswalk),
+        **_entity_tables(source_tables, crosswalk, values, required_properties),
+        **_relationship_tables(source_tables, crosswalk, values),
     }
     carried = {
         f"l4_{name}": table
@@ -2251,7 +2331,9 @@ def build_l5a_governed_assets(
         ordered_crosswalks,
         access_policy,
     )
-    tables = _all_tables(source_tables, _canonical_crosswalk(ordered_crosswalks))
+    tables = _all_tables(
+        source_tables, _canonical_crosswalk(ordered_crosswalks), authority
+    )
     snapshots = tuple(
         _table_snapshot(table_id, table)
         for table_id, table in sorted(tables.items())
@@ -2381,7 +2463,7 @@ def compile_l5a_publication(
         access_policy,
     )
     crosswalk = _canonical_crosswalk(ordered_crosswalks)
-    tables = _all_tables(source_tables, crosswalk)
+    tables = _all_tables(source_tables, crosswalk, authority)
     snapshots = tuple(
         _table_snapshot(table_id, table)
         for table_id, table in sorted(tables.items())

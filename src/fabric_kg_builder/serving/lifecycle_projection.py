@@ -61,7 +61,7 @@ from fabric_kg_builder.enrichment.schema2_evidence import (
     L3_EXTRACTION_PURPOSE,
     resolve_most_specific_classification,
 )
-from fabric_kg_builder.enrichment.schema2_stage import L2_RESPONSE_SCHEMA_HASH
+from fabric_kg_builder.enrichment.schema2_stage import proposed_candidate_schema_hash
 from fabric_kg_builder.enrichment.schema2_validation_stage import (
     L3_ACCEPTED_VERSIONS,
     L3_EVIDENCE_SPAN_VERSION,
@@ -70,6 +70,9 @@ from fabric_kg_builder.enrichment.schema2_validation_stage import (
     L3LeafResult,
     L3StageResult,
     l3_input_fingerprint,
+    proposed_candidate_payload,
+    property_observation_payload,
+    property_observation_schema_hash,
 )
 from fabric_kg_builder.model.arrow_schemas import L4_PROJECTION_TABLE_SCHEMAS
 from fabric_kg_builder.platform import process_resource_usage
@@ -77,6 +80,7 @@ from fabric_kg_builder.semantic.source_tables import (
     L4_ACCEPTED_VERSIONS,
     L4_PROJECTION_CODE_VERSION,
     SealedL4ServingSource,
+    decode_property_scalar,
 )
 
 L4_STAGE_NAME = "schema2-audit-serving-projection"
@@ -479,7 +483,8 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
     if dict(receipt.accepted_contract_versions) != dict(L3_ACCEPTED_VERSIONS):
         raise L4ProjectionError(
             "L4_CONTRACT_VERSION_UNSUPPORTED",
-            "L3 receipt did not bind the exact accepted contract versions",
+            "L3 receipt did not bind the exact accepted contract versions; "
+            "re-extract and re-run evidence validation for historical artifacts",
         )
     if (
         receipt.output_manifest_id != source.output_manifest.artifact_manifest_id
@@ -589,15 +594,20 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
             code="L4_INPUT_MANIFEST_INVALID",
         )
         proposal_payload = [
-            proposal.model_dump(mode="json") for proposal in proposals
+            proposed_candidate_payload(proposal) for proposal in proposals
         ]
+        try:
+            proposal_schema_hash = proposed_candidate_schema_hash(
+                proposal_entry.contract_version
+            )
+        except ValueError as exc:
+            raise L4ProjectionError("L4_INPUT_MANIFEST_INVALID", str(exc)) from exc
         proposal_checks: dict[str, tuple[Any, Any]] = {
             "contract_kind": (
                 proposal_entry.contract_kind,
                 "l2.proposed_candidate_partition",
             ),
-            "contract_version": (proposal_entry.contract_version, "1.0.0"),
-            "schema_hash": (proposal_entry.schema_hash, L2_RESPONSE_SCHEMA_HASH),
+            "schema_hash": (proposal_entry.schema_hash, proposal_schema_hash),
             "content_hash": (
                 proposal_entry.content_hash,
                 canonical_sha256(proposal_payload),
@@ -837,6 +847,20 @@ def _validate_leaf_manifest(
     leaf: L3LeafResult,
 ) -> None:
     batch_id = leaf.extraction_candidate_batch_id
+    property_entry = _artifact_by_id(
+        manifest,
+        f"{batch_id}:property-observations",
+        code="L4_INPUT_MANIFEST_INVALID",
+    )
+    property_version = property_entry.contract_version
+    try:
+        property_schema_hash = property_observation_schema_hash(property_version)
+        property_payload = [
+            property_observation_payload(item, contract_version=property_version)
+            for item in leaf.property_observations
+        ]
+    except ValueError as exc:
+        raise L4ProjectionError("L4_INPUT_MANIFEST_INVALID", str(exc)) from exc
     payloads = (
         (
             f"{batch_id}:evidence",
@@ -883,12 +907,9 @@ def _validate_leaf_manifest(
         (
             f"{batch_id}:property-observations",
             "l3.property_observation",
-            "1.0.0",
-            canonical_sha256({
-                "contract_kind": "l3.property_observation",
-                "version": "1.0.0",
-            }),
-            [item.__dict__ for item in leaf.property_observations],
+            property_version,
+            property_schema_hash,
+            property_payload,
             len(leaf.property_observations),
             canonical_sha256(
                 sorted(
@@ -1387,17 +1408,57 @@ def _serving_rows(
         ]
         property_ids = {item.effective_property_id for item in observed}
         value_types = {item.value_type for item in observed}
+        owner_ids = {item.entity_id for item in observed}
+        normalized_values = {item.normalized_value_json for item in observed}
         if (
             len(observed) != len(group)
             or len(property_ids) != 1
             or None in property_ids
             or len(value_types) != 1
             or None in value_types
+            or len(owner_ids) != 1
+            or None in owner_ids
+            or len(normalized_values) != 1
+            or None in normalized_values
+            or any(item.value_json != item.normalized_value_json for item in observed)
         ):
             raise L4ProjectionError(
                 "L4_ASSERTED_PROPERTY_INVALID",
                 f"asserted property {property_assertion_id} lacks exact L3 validation",
             )
+        owner_id = next(iter(owner_ids))
+        property_id = next(iter(property_ids))
+        value_type = next(iter(value_types))
+        normalized_json = next(iter(normalized_values))
+        owner_type = entity_type_by_id.get(owner_id)
+        if (
+            owner_type is None
+            or property_id not in hierarchy.effective_property_ids(owner_type)
+            or hierarchy.property_by_id[property_id].value_type != value_type
+        ):
+            raise L4ProjectionError(
+                "L4_ASSERTED_PROPERTY_INVALID",
+                f"asserted property {property_assertion_id} lacks an applicable asserted owner",
+            )
+        try:
+            decode_property_scalar(normalized_json, value_type)
+            for observation in observed:
+                recomputed = deterministic_contract_id(
+                    "property-observation",
+                    {
+                        "entity_id": owner_id,
+                        "property_id": property_id,
+                        "normalized_value": json.loads(normalized_json),
+                        "temporal_key": observation.temporal_key,
+                    },
+                )
+                if recomputed != property_assertion_id:
+                    raise ValueError("property assertion identity differs from proven value")
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise L4ProjectionError(
+                "L4_ASSERTED_PROPERTY_INVALID",
+                f"asserted property {property_assertion_id}: {exc}",
+            ) from exc
         evidence_ids = sorted({
             evidence_id
             for item in group
@@ -1405,9 +1466,11 @@ def _serving_rows(
         })
         property_rows.append(_seal_row({
             "property_assertion_id": property_assertion_id,
-            "semantic_property_id": str(next(iter(property_ids))),
+            "entity_id": owner_id,
+            "semantic_property_id": property_id,
             "candidate_ids": sorted(item.candidate_id for item in group),
-            "value_type": str(next(iter(value_types))),
+            "value_type": value_type,
+            "normalized_value_json": normalized_json,
             "evidence_span_ids": evidence_ids,
             "domain_contract_hash": domain_hash,
             "semantic_contract_hash": domain_hash,

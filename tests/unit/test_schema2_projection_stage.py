@@ -1831,6 +1831,7 @@ def _l3_with_sealed_manifest(
     extra_relationship_targets=False,
     identity_business_keys=None,
     inject_identity_keys=False,
+    assert_property_values=False,
 ):
     fact_set = _fact_set(
         "manufacturing",
@@ -1839,7 +1840,7 @@ def _l3_with_sealed_manifest(
         expected_count=None,
     )
     mutate = None
-    if ordered or roles or member_count > 1 or inject_identity_keys:
+    if ordered or roles or member_count > 1 or inject_identity_keys or assert_property_values:
         def mutate(candidates, _work_unit):
             values = [dict(candidate) for candidate in candidates]
             if inject_identity_keys:
@@ -1878,17 +1879,56 @@ def _l3_with_sealed_manifest(
                     "member_order": 1 if ordered else None,
                 }
                 values.extend((second_member, second_relationship))
+            if assert_property_values:
+                for owner in tuple(values):
+                    if owner["candidate_kind"] != "entity":
+                        continue
+                    suffix = "record" if owner["local_id"].startswith("record") else "subject"
+                    type_id = f"semantic-type:manufacturing.{suffix}"
+                    for prop in (type_properties or {}).get(type_id, ()):
+                        value = {
+                            "string": f"governed {suffix}",
+                            "integer": 0,
+                            "number": 0.5,
+                            "boolean": False,
+                            "date": "2026-08-25",
+                            "datetime": "2026-08-25T14:30:00+02:00",
+                        }[prop["value_type"]]
+                        values.append({
+                            "candidate_kind": "property",
+                            "owner_local_id": owner["local_id"],
+                            "observed_property": prop["display_name"],
+                            "value": value,
+                            "normalized_value": value,
+                            "temporal_key": None,
+                            "anchor": {
+                                "span_start": _work_unit.slice_start,
+                                "span_end": _work_unit.slice_start + len(_work_unit.text.rstrip()),
+                                "quote": _work_unit.text.rstrip(),
+                                "model_authored_evidence_id": None,
+                            },
+                        })
             return values
-    l1_root, domain_path, l2 = _pipeline(
-        tmp_path,
-        "manufacturing",
-        fact_set=fact_set,
-        mutate=mutate,
-        type_properties=type_properties,
-        extra_types=extra_types,
-        extra_relationship_targets=extra_relationship_targets,
-        identity_business_keys=identity_business_keys,
-    )
+    with pytest.MonkeyPatch.context() as patch:
+        if assert_property_values:
+            from tests.unit import test_schema2_validation_stage as fixtures
+
+            patch.setattr(
+                fixtures,
+                "_SENTENCE",
+                fixtures._SENTENCE
+                + " Source values: 0 0.5 false 2026-08-25 2026-08-25T14:30:00+02:00.",
+            )
+        l1_root, domain_path, l2 = _pipeline(
+            tmp_path,
+            "manufacturing",
+            fact_set=fact_set,
+            mutate=mutate,
+            type_properties=type_properties,
+            extra_types=extra_types,
+            extra_relationship_targets=extra_relationship_targets,
+            identity_business_keys=identity_business_keys,
+        )
     l3 = _l3(tmp_path, l1_root, domain_path)
     manifest = schema2_validation_stage._seal_manifest(
         proposal=l2.required_member_sets[0].proposal,
@@ -2779,3 +2819,143 @@ def test_disposition_key_reads_rows_and_contract_objects_identically():
         "entity-candidate:a",
         "",
     )
+
+
+def _l3_with_proven_property_values(tmp_path: Path):
+    return _l3_with_sealed_manifest(
+        tmp_path,
+        type_properties={
+            f"semantic-type:manufacturing.{suffix}": ({
+                "property_id": f"property:{suffix}:canonical-id",
+                "display_name": f"{suffix.title()} ID",
+                "value_type": "string",
+                "required": True,
+            },)
+            for suffix in ("record", "subject")
+        },
+        identity_business_keys={
+            f"semantic-type:manufacturing.{suffix}": (
+                f"property:{suffix}:canonical-id",
+            )
+            for suffix in ("record", "subject")
+        },
+        inject_identity_keys=True,
+        assert_property_values=True,
+    )
+
+
+@pytest.mark.unit
+def test_l4_persists_proven_property_owner_and_normalized_scalar(tmp_path: Path) -> None:
+    result = run_l4(
+        _l3_with_proven_property_values(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    rows = result.rows.semantic_asserted_properties
+    assert len(rows) == 2
+    owners = {row["entity_id"] for row in result.rows.semantic_asserted_entities}
+    assert all(row["entity_id"] in owners for row in rows)
+    assert {row["normalized_value_json"] for row in rows} == {
+        '"governed record"', '"governed subject"',
+    }
+    assert pq.read_table(
+        result.sealed_source().resolve("semantic_asserted_properties")
+    ).to_pylist() == list(rows)
+    assert result.receipt.accepted_contract_versions["l4.projection_code"] == "l4-projection/1.1.0"
+    assert run_l4(
+        result.source, state_root=tmp_path / ".fkg" / "l4"
+    ).reused
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"entity_id": None},
+        {"entity_id": "entity:missing"},
+        {"normalized_value_json": None},
+        {"value_json": '"invented"', "normalized_value_json": '"invented"'},
+        {"temporal_key": "invented-time"},
+        {"value_type": "integer"},
+    ],
+)
+def test_l4_blocks_asserted_property_with_missing_or_conflicting_proof(
+    tmp_path: Path, updates,
+) -> None:
+    source = _l3_with_proven_property_values(tmp_path)
+    results, _lifecycle, classifications, observations = (
+        lifecycle_projection._candidate_indexes(source)
+    )
+    candidate_id = next(iter(observations))
+    observations[candidate_id] = [
+        dataclasses.replace(observations[candidate_id][0], **updates)
+    ]
+    with pytest.raises(L4ProjectionError, match="L4_ASSERTED_PROPERTY_INVALID"):
+        lifecycle_projection._serving_rows(
+            source, results, classifications, observations
+        )
+
+
+@pytest.mark.unit
+def test_l4_rejects_resealed_property_value_tampering(tmp_path: Path) -> None:
+    result = run_l4(
+        _l3_with_proven_property_values(tmp_path),
+        state_root=tmp_path / ".fkg" / "l4",
+    )
+    table_name = "semantic_asserted_properties"
+    path = result.run_root / f"{table_name}.parquet"
+    table = pq.read_table(path)
+    rows = table.to_pylist()
+    rows[0]["normalized_value_json"] = '"invented"'
+    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+    manifest, _metrics, receipt = _rewrite_l4_artifact(
+        result,
+        artifact_id=f"l4-table:{table_name}",
+        file_name=f"{table_name}.parquet",
+        payload=path.read_bytes(),
+    )
+    with pytest.raises(ValueError, match="row hash"):
+        SealedL4ServingSource(
+            root=result.run_root,
+            projection=result.serving_projection,
+            receipt=receipt,
+            manifest=manifest,
+            input_manifest=result.source.output_manifest,
+        )
+
+
+@pytest.mark.unit
+def test_l4_validates_historical_observation_bytes_without_inventing_fields(tmp_path: Path) -> None:
+    source = _l3_with_proven_property_values(tmp_path)
+    leaf = source.leaves[0]
+    historical = dataclasses.replace(
+        leaf,
+        property_observations=tuple(
+            dataclasses.replace(
+                item,
+                observation_state="rejected",
+                entity_id=None,
+                value_json=None,
+                normalized_value_json=None,
+                temporal_key=None,
+            )
+            for item in leaf.property_observations
+        ),
+    )
+    payload = [
+        schema2_validation_stage.property_observation_payload(
+            item, contract_version="1.0.0"
+        )
+        for item in historical.property_observations
+    ]
+    assert payload and all("entity_id" not in row for row in payload)
+    manifest = _replace_manifest_entry(
+        source.output_manifest,
+        f"{leaf.extraction_candidate_batch_id}:property-observations",
+        contract_version="1.0.0",
+        schema_hash=schema2_validation_stage.property_observation_schema_hash("1.0.0"),
+        content_hash=canonical_sha256(payload),
+        byte_count=lifecycle_projection._canonical_json_size(payload),
+    )
+    lifecycle_projection._validate_leaf_manifest(manifest, historical)
+    with pytest.raises(L4ProjectionError, match="cannot carry successor proof"):
+        lifecycle_projection._validate_leaf_manifest(manifest, leaf)

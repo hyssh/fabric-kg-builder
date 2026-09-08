@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,8 @@ from .schema2_extraction import (
     L2_EXTRACTOR_VERSION,
     L2_PROMPT_VERSION,
     ExtractionLeafResult,
+    ProposedCandidateRecord,
+    ProposedAnchor,
     ProposedRequiredMemberSetView,
     build_candidate_batch,
     build_required_member_set_proposals,
@@ -43,6 +45,7 @@ from .schema2_extraction import (
     extraction_leaf_from_dict,
     extraction_leaf_to_dict,
     merge_candidate_batches,
+    raw_candidate_response_schema,
     render_extraction_prompt,
 )
 from .schema2_sources import (
@@ -62,7 +65,7 @@ from .schema2_work_units import (
     plan_work_units,
 )
 
-L2_RESPONSE_SCHEMA_HASH = canonical_sha256(
+L2_LEGACY_RESPONSE_SCHEMA_HASH = canonical_sha256(
     {
         "candidate_kinds": ["entity", "property", "relationship"],
         "proposal_only": True,
@@ -71,6 +74,26 @@ L2_RESPONSE_SCHEMA_HASH = canonical_sha256(
         "required_member_observation_fields": ["member_role_id", "member_order"],
     }
 )
+L2_PROPOSED_CANDIDATE_VERSION = "1.1.0"
+L2_RESPONSE_SCHEMA_HASH = canonical_sha256({
+    "contract_kind": "l2.proposed_candidate_partition",
+    "contract_version": L2_PROPOSED_CANDIDATE_VERSION,
+    "fields": {item.name: str(item.type) for item in fields(ProposedCandidateRecord)},
+    "anchor": ProposedAnchor.model_json_schema(),
+    "raw_response": raw_candidate_response_schema(),
+})
+L2_OUTPUT_ACCEPTED_VERSIONS = {
+    **L2_ACCEPTED_VERSIONS,
+    "l2.proposed_candidate_partition": L2_PROPOSED_CANDIDATE_VERSION,
+}
+
+
+def proposed_candidate_schema_hash(version: str) -> str:
+    if version == "1.0.0":
+        return L2_LEGACY_RESPONSE_SCHEMA_HASH
+    if version == L2_PROPOSED_CANDIDATE_VERSION:
+        return L2_RESPONSE_SCHEMA_HASH
+    raise ValueError("Unsupported L2 property carrier; re-extract with the current extractor")
 
 
 @dataclass(frozen=True)
@@ -415,7 +438,7 @@ def _output_artifacts(
             _artifact_entry(
                 artifact_id=f"{leaf.batch.extraction_candidate_batch_id}:proposals",
                 contract_kind="l2.proposed_candidate_partition",
-                contract_version="1.0.0",
+                contract_version=L2_PROPOSED_CANDIDATE_VERSION,
                 schema_hash=L2_RESPONSE_SCHEMA_HASH,
                 content_hash=proposal_hash,
                 payload=proposal_payload,
@@ -877,7 +900,7 @@ def run_l2(
         "output_manifest_id": output_manifest.artifact_manifest_id,
         "output_manifest_hash": output_manifest.manifest_hash,
         "skip_key": fingerprint,
-        "accepted_contract_versions": L2_ACCEPTED_VERSIONS,
+        "accepted_contract_versions": L2_OUTPUT_ACCEPTED_VERSIONS,
         "resource_metrics_id": metrics.resource_metrics_id,
         "resource_metrics_hash": metrics.metrics_hash,
         "attempt_count": 1,
