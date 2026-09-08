@@ -1,91 +1,94 @@
 ---
 name: fabric-kg-pipeline
-description: Build and deploy a Microsoft Fabric knowledge graph from documents using the fabric-kg CLI. Use when the user wants to turn PDFs/DOCX/HTML/CSV into a Fabric Lakehouse + Ontology + AI Search, run the enrich → densify → compile → deploy pipeline, densify a sparse graph, add RCA paths, or generate Data Agent grounding instructions.
+description: Use the installed fabric-kg CLI to propose an ontology, assess document counterexamples, review revisions, and extract evidence-governed data. Separately authorize model spending, approval and deployment.
 ---
 
-## What this skill does
+## Purpose
 
-`fabric-kg` is an installed Python CLI (entry point `fabric-kg`) that converts
-raw documents and CSVs into a fully deployed Microsoft Fabric knowledge graph:
-canonical Parquet tables in a Fabric Lakehouse, a multi-type Ontology, and Azure
-AI Search indexes for hybrid retrieval, plus grounding instructions for a Fabric
-Data Agent.
+Propose the ontology the business needs, then let documents challenge it.
+Drive the installed CLI; do not implement another pipeline in chat or hand-edit
+receipts, hashes, manifests or asserted data to make a command pass.
 
-Use this skill to help the user run the pipeline. Always invoke the real
-`fabric-kg` CLI via the shell — do not re-implement its behavior.
+## Confirm capabilities and intent first
 
-## Prerequisite check (do this first)
+Run `fabric-kg --version`, then help for the exact commands below. Prototype
+commands may differ between builds with the same version number. If a command
+is unavailable, report that incompatibility; do not silently use legacy commands.
 
-Confirm the CLI is installed before running pipeline steps:
+Classify intent as design-only, prepare, assess, review/revise, extract, deploy,
+or update. A design-only conversation does not authorize creating project files,
+model calls, loading data or deployment. Ask only for missing high-impact inputs.
 
-```bash
-fabric-kg --version
-```
+Collect roles, decisions, domain, competency questions, expected answers, source
+paths and access/retention requirements. Do not default to a sample taxonomy.
 
-If it is not found, tell the user to install it:
+## Supported schema-2 local workflow
 
-```bash
-pip install fabric-kg-builder          # from PyPI when published
-# or, from a clone of https://github.com/hyssh/fabric-kg-builder:
-pip install -e .
-```
+| Operation | Command | Boundary |
+|---|---|---|
+| Propose draft | `fabric-kg init-domain --input ... --intake ... --non-interactive` | Model calls; creates a blocked draft requiring approval. `--dry-run` inventories only |
+| Plan document assessment | `fabric-kg domain assess --file ... --input ...` | Default mode: no model calls or output-file writes |
+| Execute assessment | `fabric-kg domain assess --file ... --input ... --live --max-calls ... --out ...` | Explicit model authorization; inspect complete/partial coverage and findings |
+| Offline assessment | Same command with `--responses ...` instead of `--live` | Fixture/replay mode is not live model validation |
+| Record decisions | `fabric-kg domain review-assessment --file ... --assessment ... --decisions ... --actor ... --out ... --revision-out ...` | Every finding gets accepted/rejected/deferred plus rationale; does not approve an ontology |
+| Regenerate draft | `fabric-kg domain revise --parent-state ... --input ... --assessment ... --review ... --request ... --out-state ... --live --max-calls ...` | New, separate unapproved L1 state; parent remains unchanged. No execution mode means dry-run |
+| Approve exact draft | `fabric-kg domain approve --file ... --state-dir ... --approved-by ... --project-id ... --run-id ... --proposal-hash ...` | Use actual anchors from the draft; obtain explicit user approval |
+| Extract | `fabric-kg enrich --input ... --domain-file ... --l1-state ... --l2-state ...` | Consumes exact approved L1; model calls; `--dry-run` checks the handoff/source without calls or writes |
+| Verify evidence | `fabric-kg validate-evidence --l1-state ... --l2-state ... --state ... --domain ...` | Local L3; inspect unresolved/unsupported outcomes, not just exit status |
+| Materialize serving | `fabric-kg project-serving --l1-state ... --l2-state ... --l3-state ... --state ... --domain ...` | Local L4 asserted/audit tables |
 
-Deploy steps additionally need Azure auth (`az login`) and per-environment
-resource IDs in `ontology/environments/{env}.json` (never commit secrets — a
-`.example` template is provided). Build/compile steps run fully offline.
+Read each command's help before constructing its arguments. Pass a revision's
+separate `--l1-state` and choose a fresh `--l2-state`; `--domain-file` alone does
+not select state. Keep L1/domain/source paths separate from L2 output.
+Do not copy or rewrite sealed artifacts to hide a mismatch. Explicit state roots
+cannot be deleted with `--force`; retain prior runs and use a new output root.
 
-## The pipeline (run in order)
+Use `domain assessment-schema` for machine-readable assessment/review contracts.
+For OCR, `domain analyze-layout` plans by default; `--live` permits one capped
+analysis POST using Azure CLI credentials. It preserves the complete raw response.
+`domain assess --ocr-cache ... --ocr-identity ...` reads exact cached responses
+without DI calls. A cached-layout read is not proof OCR interpreted every fact
+correctly, and incomplete/unsupported OCR provenance must remain visible.
 
-| # | Command | Purpose |
-|---|---------|---------|
-| 1 | `fabric-kg set-domain` | Persist a domain brief so the LLM understands the data. `--industry` and `--business-domain` are REQUIRED; `--questions-file` is the biggest lever on ontology quality. |
-| 2 | `fabric-kg inspect-source` | Profile source files before enrichment. |
-| 3 | `fabric-kg enrich --input <dir>` | LLM extraction → `build/enriched/` canonical JSON. |
-| 4 | `fabric-kg densify` | **RECOMMENDED** — add DeviceModel hub edges, Cause/Symptom/Resolution, Procedure→Step, and RCA paths → `build/enriched_dense/`. Strictly additive. |
-| 5 | `fabric-kg compile-data --input build/enriched_dense` | Enriched JSON → 8 canonical Parquet tables (`build/parquet/`). |
-| 6 | `fabric-kg compile-ontology` | `ontology/model.yaml` → Fabric Ontology definition (`build/ontology/`). |
-| 7 | `fabric-kg compile-search` | Parquet → AI Search schemas + doc batches (`build/search/`). |
-| 8 | `fabric-kg package` | Bundle all build artifacts → `dist/`. |
-| 9 | `fabric-kg deploy-lakehouse --env dev` | Upload Parquet Delta tables to Fabric OneLake. |
-| 10 | `fabric-kg deploy-ontology --env dev --multitype` | Push the Ontology (`--multitype` = rich typed graph in Explorer). |
-| 11 | `fabric-kg deploy-search --env dev` | Push AI Search index schemas and documents. |
-| 12 | `fabric-kg validate` | Run the VAL + BRG gate catalog against build artifacts. |
-| — | `fabric-kg build-deploy` | End-to-end convenience wrapper for all stages. |
+## Review, cost and replay
 
-Global options apply to every subcommand: `--env [dev|test|prod]` (default
-`dev`), `--config PATH` (default `./fabric-kg.yaml`), `-v/--verbose`,
-`-q/--quiet`, and `--dry-run` (show the plan without making changes).
+- `complete` assessment means window/file accounting, not perfect semantic recall.
+- Keep deferred windows, unsupported images, unread documents and remaining
+  questions visible. Do not approve because no findings were returned.
+- Distinguish OCR/extraction failure, source conflict, scope differences and
+  ontology omission. Silence is not a negative fact.
+- Review recommendations are not authority to change a deployed contract.
+- Specify a model-call limit, input bound and output-token bound. Obtain a spend
+  budget; request limits are not exact billing measurements.
+- Retain response cache artifacts; use `--response-cache` or an exact-input
+  `--checkpoint` for assessment replay. Never overwrite an earlier report.
+- A 401/403 is not transient: stop, show the permission category, and do not list
+  keys, switch identities or retry a different resource to evade the denial.
+- Stop on failure. Resume only when recorded input/contract/model identities
+  match; a previous success status alone is insufficient.
 
-Run any subcommand with `--help` to see its options, defaults, and an example
-before executing — e.g. `fabric-kg densify --help`.
+## Deployment is separate and capability-gated
 
-## Key guidance
+`fabric-kg app publish-structured --help` describes the schema-2 L5a planning
+surface. Its concrete live publication is capability NO-GO on the current
+prototype. Do not remove guards, create fake receipts or describe a dry-run as
+deployment. Fabric workspace authority is separate from Azure resource groups.
 
-- **Graph quality depends on a domain-fit model.** Start from a domain template:
-  define entity types (nodes) and relationships (typed edges), supply 3–5 sample
-  questions via `--questions-file`, then iterate.
-- **Always run `densify` between `enrich` and `compile-data`.** A sparse graph
-  causes the Fabric Data Agent to fall back to generic LLM answers. Densify links
-  isolated symptoms, builds Cause→Symptom→Resolution chains, rolls up umbrella
-  procedure steps, and adds `diagnosed_by`/`remediated_by` RCA paths. It is
-  strictly additive — it never removes existing edges.
-- **Use `--multitype` when deploying the ontology** for a rich typed graph in the
-  Fabric Explorer.
-- **Mock vs live:** deploy commands accept `--mock`/`--no-mock` (and the global
-  `--dry-run`) so the user can rehearse safely before hitting live resources.
-- **Multi-type ontology deploys are async** (`202` long-running operation,
-  ~1–2 min). Let the command poll; don't assume instant completion.
+Existing semantic-bundle deployment commands remain compatibility paths; they
+are not an automatic continuation from L4. Obtain the exact supported target,
+resource ownership, readback/recovery plan and explicit deployment approval.
+Do not replace shared resources to work around an integration gap.
 
-## Safety
+Postdeployment fixes are versioned proposals. Preserve the previous release and
+require approval for changed meaning, identity keys, withdrawals and live writes.
+Do not claim estate-wide rollback from Search alias rollback alone.
 
-- Never print or commit secrets, API keys, Azure subscription IDs, resource group
-  names, or workspace/lakehouse GUIDs. These live in `.env` and
-  `ontology/environments/{env}.json`, both gitignored.
-- Prefer `--dry-run` or `--mock` first when the user is unsure about a deploy.
+## Legacy and examples
 
-## Typical request → response
+`set-domain` is deprecated. `densify` consumes legacy canonical JSON and explicit
+schema-1 rules; it is not mandatory or a schema-2 step. The `surface-repro` skill
+is an optional domain-specific historical example, never the default workflow.
 
-When the user says "build the knowledge graph from these docs", confirm the
-input directory, then propose the ordered command sequence (steps 1–8 offline,
-9–12 for deploy), run the prerequisite check, and execute step by step —
-surfacing each command's output and stopping on any non-zero exit.
+Never print or commit credentials. Keep resource-specific configuration and
+customer evidence outside tracked source. Cite actual command outputs and
+artifact paths, distinguishing offline, model-tested and deployed results.

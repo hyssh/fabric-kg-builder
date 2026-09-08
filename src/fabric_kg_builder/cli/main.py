@@ -54,9 +54,20 @@ from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 
 
 _GROUP_EPILOG = """\b
-Recommended production pipeline (run in dependency order):
+Schema-2 local prototype (explicit approval and state bindings):
+  init-domain --input <sources> --intake <intake> --non-interactive
+  -> domain assess -> domain review-assessment -> [domain revise]
+  -> domain approve -> enrich -> validate-evidence -> project-serving
+  Assessment and revision default to no-call/no-write planning. Use their help
+  for live/fixture modes and bounded calls. A revision creates separate L1 state;
+  do not silently replace the parent's artifacts. app publish-structured can
+  compile a deployment plan, but concrete live publication remains gated.
+
+\b
+Legacy semantic-bundle pipeline (not a direct continuation of schema-2 L4):
   1. Author and approve
-     init -> init-domain --input <source-path> -> domain review -> domain approve -> inspect-ontology
+     init -> init-domain --legacy-schema-1 --input <source-path>
+     -> domain review -> domain approve -> inspect-ontology
   2. Extract and compile
      enrich -> [densify] -> compile-data -> compile-semantic
      -> compile-ontology + compile-graph + compile-agent + compile-search
