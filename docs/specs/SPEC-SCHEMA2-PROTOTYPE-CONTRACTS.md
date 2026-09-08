@@ -1,6 +1,6 @@
 # Schema-2 prototype integration contracts
 
-Status: frozen prototype boundary, revision 1. Changes require a new revision and
+Status: frozen prototype boundary, revision 3. Changes require a new revision and
 producer/consumer fixture changes before dependent implementation continues.
 
 This is the implementation contract for the local prototype, not a claim that
@@ -28,6 +28,30 @@ Every corpus entry has an explicit disposition. Every assessed text window has
 a source-file ID, source-unit ID, start/end codepoints, text hash and model-input
 fingerprint. Budget-excluded windows are deferred, not assessed successfully.
 Unsupported/image-only inputs must not be described as successfully OCR-read.
+
+Optional DI cache successor: `contract_version="1.1.0"`, `input_sha256` over the
+original bytes, nonsecret `extractor_identity` (endpoint identity, API, model,
+options), losslessly encoded `analyze_result_json`, its byte `response_hash`, and
+`cache_key=canonical_sha256({input_sha256, extractor_identity})`.
+Encode raw JSON with sorted keys, ASCII escapes, compact separators and finite
+numbers; do not NFC-normalize raw keys/content. Expose decoded `analyze_result`
+to consumers. Canonical SourceUnit normalization happens after original span
+selection. Legacy 1.0 caches require explicit version-aware handling; do not
+silently reseal historical hashes or start a paid reanalysis.
+Loading requires an exact request identity and validates the response hash.
+Writing is create-only; an identical record may be reused, a different record
+at the same key is an error. Never search by filename or use a response from
+another version/options tuple. No automatic cloud reanalysis on cache miss.
+Page text derives from validated raw content spans through the existing DI
+normalizer. Missing page spans may yield full content with page null, never a
+fabricated page number. Preserve complete raw geometry/tables for later replay.
+
+`domain analyze-layout` is a separate explicit producer: default read-only plan,
+`--live` permits one new analysis POST using AzureCliCredential, with whole-file
+page and byte caps. It uses no API-key fallback and never silently selects only
+some pages. Exact cache reuse makes no new analysis POST. Ambiguous interrupted
+analysis leaves a reservation that blocks blind retries; an explicit 401/403
+is surfaced as access denied rather than retried.
 
 Small inputs may fit one context. Larger inputs are bounded into windows with
 explicit coverage. This prototype does not claim semantic completeness or
@@ -148,6 +172,23 @@ nonempty rationale. They bind the exact assessment hash and actor. Unknown or
 duplicate finding IDs are rejected. Deferred findings remain visible.
 A revision request binds parent domain hash, assessment/review hashes and
 accepted findings. It never changes the parent contract or approves the child.
+
+Before revision, rebuild source windows and compare every report window's ID,
+source reference, page, range, text and hash. Revalidate finding references
+against the parent contract. A rehashed locally forged quote is not evidence.
+The revision model receives the parent contract definitions, not only its hash.
+Prototype revisions may not remove existing semantic IDs or silently alter
+identity/hierarchy/property types without a separate breaking-change workflow.
+Emit the actual parent-to-child change summary for review.
+
+Accepted finding locations outside the original bounded sample must be
+reverified against the current corpus and minted as fresh `domain_design`
+evidence. Include those source units/spans in the new L1 manifests/profile/design
+context, with explicit bounded sampling accounting. Assessment finding IDs
+themselves are never promoted to extraction/design authority. At most sixteen
+supplemental findings are permitted; exceeding the cap is explicit, not truncation.
+Revision model responses use the same immutable request-fingerprinted response
+cache pattern before downstream validation so failed attempts remain replayable.
 
 ## B7: CLI and cost boundary
 
