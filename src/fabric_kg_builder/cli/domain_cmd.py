@@ -9,6 +9,11 @@ from pathlib import Path
 import click
 from pydantic import ValidationError
 
+from .domain_assessment_cmd import (
+    domain_assess_cmd, domain_assessment_schema_cmd,
+    domain_review_assessment_cmd, domain_revise_cmd,
+)
+from .layout_cache_cmd import domain_analyze_layout_cmd
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
     DomainContract,
@@ -145,6 +150,13 @@ def _echo_findings(findings) -> None:
 )
 def domain_cmd() -> None:
     """Author, validate, review, approve, and inspect domain.yaml contracts."""
+
+
+domain_cmd.add_command(domain_assess_cmd)
+domain_cmd.add_command(domain_review_assessment_cmd)
+domain_cmd.add_command(domain_revise_cmd)
+domain_cmd.add_command(domain_assessment_schema_cmd)
+domain_cmd.add_command(domain_analyze_layout_cmd)
 
 
 @domain_cmd.command("init")

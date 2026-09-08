@@ -366,6 +366,30 @@ def _resolve_domain_brief(
     )
 
 
+def _schema2_state_roots(
+    *, input_path: str, domain_file: str,
+    l1_state: str | None, l2_state: str | None, force: bool,
+) -> tuple[Path, Path]:
+    l1 = Path(l1_state) if l1_state else Path(".fkg/l1")
+    l2 = Path(l2_state) if l2_state else Path(".fkg/l2")
+    l1_resolved, l2_resolved = l1.resolve(), l2.resolve()
+    source = Path(input_path).resolve()
+    if (
+        l1_resolved == l2_resolved
+        or l1_resolved.is_relative_to(l2_resolved)
+        or l2_resolved.is_relative_to(l1_resolved)
+        or Path(domain_file).resolve().is_relative_to(l2_resolved)
+        or source.is_relative_to(l2_resolved)
+        or l2_resolved.is_relative_to(source)
+    ):
+        raise ValueError("L2 output must not overlap L1 authority, domain or source paths")
+    if force and l2_state is not None:
+        raise ValueError(
+            "--force cannot delete an explicit L2 state root; choose a new empty run directory"
+        )
+    return l1, l2
+
+
 def _run_schema2_enrichment(
     *,
     ctx_obj: dict,
@@ -374,6 +398,8 @@ def _run_schema2_enrichment(
     max_concurrent: int,
     model_override: str | None,
     force: bool,
+    l1_state: str | None = None,
+    l2_state: str | None = None,
 ) -> object:
     import os
     import shutil
@@ -393,12 +419,18 @@ def _run_schema2_enrichment(
     from fabric_kg_builder.model.schemas import AssetRow, AssetVersionRow
 
     domain_path = Path(domain_file)
-    l1_state_root = Path(".fkg") / "l1"
-    l2_state_root = Path(".fkg") / "l2"
-    run_lock = l2_state_root.parent / ".l2-enrichment.lock"
+    l1_state_root, l2_state_root = _schema2_state_roots(
+        input_path=input_path, domain_file=domain_file,
+        l1_state=l1_state, l2_state=l2_state, force=force,
+    )
+    run_lock = l2_state_root.parent / f".{l2_state_root.name}-enrichment.lock"
     inputs = load_l2_inputs(
         l1_state_root=l1_state_root,
         domain_path=domain_path,
+    )
+    from fabric_kg_builder.sources.corpus import validate_corpus_manifest_against_source
+    validate_corpus_manifest_against_source(
+        inputs.corpus_manifest, Path(input_path), identity=inputs.l1_receipt.identity,
     )
     now = datetime.now(timezone.utc)
     assets = []
@@ -496,6 +528,7 @@ def _run_schema2_enrichment(
     )
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_NOFOLLOW", 0)
+    run_lock.parent.mkdir(parents=True, exist_ok=True)
     lock_descriptor = os.open(run_lock, flags, 0o600)
     try:
         try:
@@ -1860,6 +1893,12 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
         "projects without a profile continue to work unchanged)."
     ),
 )
+@click.option("--l1-state", default=None, type=click.Path(),
+              help="Schema-2 approved L1 state directory (default: .fkg/l1).")
+@click.option("--l2-state", default=None, type=click.Path(),
+              help="Schema-2 output state directory (default: .fkg/l2).")
+@click.option("--dry-run", is_flag=True,
+              help="Validate and plan schema-2 extraction without model calls or writes.")
 @click.pass_context
 def enrich_cmd(
     ctx: click.Context,
@@ -1881,6 +1920,9 @@ def enrich_cmd(
     output_path: str,
     drawing_mode: str,
     source_profile_path: str,
+    l1_state: str | None = None,
+    l2_state: str | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Run LLM extraction on source files and produce structured JSON in build/enriched/.
 
@@ -1899,6 +1941,7 @@ def enrich_cmd(
     Exit codes: 0 success · 1 error · 4 partial enrichment (checkpoint saved).
     """
     ctx.ensure_object(dict)
+    planning = dry_run or bool(ctx.obj.get("dry_run"))
 
     try:
         effective_max_concurrent = _resolve_max_concurrent(
@@ -1911,7 +1954,6 @@ def enrich_cmd(
         ) from exc
 
     out_dir = Path(output_path)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     schema2_domain_file = domain_file
     if schema2_domain_file is None:
@@ -1934,6 +1976,32 @@ def enrich_cmd(
             ) from exc
         if isinstance(resolved_contract, DomainContractV2):
             try:
+                if planning:
+                    from dataclasses import asdict
+                    from fabric_kg_builder.enrichment.schema2_stage import dry_run_l2
+                    from fabric_kg_builder.enrichment.schema2_sources import load_l2_inputs
+                    from fabric_kg_builder.sources.corpus import validate_corpus_manifest_against_source
+                    l1_root, l2_root = _schema2_state_roots(
+                        input_path=input_path, domain_file=schema2_domain_file,
+                        l1_state=l1_state, l2_state=l2_state, force=force,
+                    )
+                    inputs = load_l2_inputs(
+                        l1_state_root=l1_root, domain_path=Path(schema2_domain_file),
+                    )
+                    validate_corpus_manifest_against_source(
+                        inputs.corpus_manifest, Path(input_path),
+                        identity=inputs.l1_receipt.identity,
+                    )
+                    plan = dry_run_l2(
+                        l1_state_root=l1_root,
+                        domain_path=Path(schema2_domain_file),
+                    )
+                    click.echo(json.dumps({
+                        "contract_version": "1.0.0", "operation": "enrich",
+                        **asdict(plan),
+                        "l2_state": str(l2_root),
+                    }, sort_keys=True))
+                    return
                 result = _run_schema2_enrichment(
                     ctx_obj=ctx.obj or {},
                     input_path=input_path,
@@ -1941,6 +2009,8 @@ def enrich_cmd(
                     max_concurrent=effective_max_concurrent,
                     model_override=model,
                     force=force,
+                    l1_state=l1_state,
+                    l2_state=l2_state,
                 )
             except Exception as exc:
                 raise click.ClickException(
@@ -1951,6 +2021,12 @@ def enrich_cmd(
                 f"receipt={result.receipt.stage_receipt_id}"
             )
             return
+
+    if planning or l1_state is not None or l2_state is not None:
+        raise click.UsageError(
+            "--dry-run/--l1-state/--l2-state require a schema-2 domain contract"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # --- B1: Load approved source profile (downstream reuse of init-domain output) ---
     # Silently skipped when profile is absent (legacy projects without init-domain).

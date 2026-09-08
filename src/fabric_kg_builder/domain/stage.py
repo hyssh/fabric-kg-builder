@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from fabric_kg_builder.contracts.base import (
     canonical_json,
     canonical_sha256,
     deterministic_contract_id,
+    normalize_nfc,
 )
 from fabric_kg_builder.contracts.evidence import EvidenceSpan, SourceUnit
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
@@ -37,15 +39,22 @@ from fabric_kg_builder.contracts.resources import (
 )
 from fabric_kg_builder.platform import process_resource_usage
 from fabric_kg_builder.sources.corpus import (
+    DesignSampleEntry,
     DesignSampleManifest,
     SourceCorpusManifest,
     build_source_corpus_manifest,
+    build_design_sample_manifest,
+    extract_verified_source_snapshot,
+    open_verified_source_snapshot,
     validate_corpus_manifest_against_source,
 )
 from fabric_kg_builder.sources.inspector import (
     DesignSamplingBudget,
+    _sample_kind,
+    _unit_kind,
     build_l1_design_artifacts,
 )
+from fabric_kg_builder.sources.evidence_verifier import mint_source_unit, mint_verified_span
 
 from .contexts import (
     DomainApprovalContext,
@@ -1622,6 +1631,169 @@ def _evidence_payload(spans: tuple[EvidenceSpan, ...]) -> list[dict[str, Any]]:
     ]
 
 
+@dataclass(frozen=True)
+class SupplementalDesignLocation:
+    source_file_id: str
+    source_ref: str
+    source_text: str
+    page: int | None
+    span_start: int
+    span_end: int
+    quote: str
+    source_text_start: int = 0
+    extraction_ref: str | None = None
+    ocr_cache: Path | None = None
+    ocr_identity: dict[str, Any] | None = None
+
+
+def _supplement_design_artifacts(
+    preflight: L1Preflight,
+    sample_manifest: DesignSampleManifest,
+    profile: DomainSourceProfile,
+    source_units: tuple[SourceUnit, ...],
+    evidence_spans: tuple[EvidenceSpan, ...],
+    locations: tuple[SupplementalDesignLocation, ...],
+    verified_at_utc: datetime,
+) -> tuple[L1Preflight, DesignSampleManifest, DomainSourceProfile, tuple[SourceUnit, ...], tuple[EvidenceSpan, ...]]:
+    if len(locations) > 16:
+        raise L1StageError("supplemental design evidence is capped at 16 findings")
+    units = list(source_units)
+    spans = list(evidence_spans)
+    entries = list(sample_manifest.entries)
+    corpus_by_file = {entry.source_file_id: entry for entry in preflight.corpus.entries}
+    parsed: dict[tuple[str, str | None], list[tuple[str | None, str, int | None]]] = {}
+    for location in locations:
+        entry = corpus_by_file.get(location.source_file_id)
+        if (
+            entry is None or entry.disposition != "eligible"
+            or entry.relative_source_ref != location.source_ref
+        ):
+            raise L1StageError("supplemental design location is outside the trusted corpus")
+        parse_key = (entry.source_file_id, location.extraction_ref)
+        if parse_key not in parsed:
+            path = preflight.source_path if preflight.source_path.is_file() else (
+                preflight.source_path / entry.relative_source_ref
+            )
+            with open_verified_source_snapshot(
+                path, entry=entry, corpus_root_id=preflight.corpus.corpus_root_id,
+            ) as snapshot:
+                if location.extraction_ref is not None:
+                    from fabric_kg_builder.sources.docintel_cache import (
+                        layout_text_pages, load_cached_layout,
+                    )
+                    if location.ocr_cache is None or location.ocr_identity is None:
+                        raise L1StageError("supplemental OCR evidence requires its cache and extractor identity")
+                    cached = load_cached_layout(
+                        location.ocr_cache, input_sha256=entry.original_byte_hash,
+                        extractor_identity=location.ocr_identity,
+                    )
+                    if cached is None or cached.cache_key != location.extraction_ref:
+                        raise L1StageError("supplemental OCR evidence cache does not match its extraction reference")
+                    parsed[parse_key] = [
+                        ("text", normalize_nfc(text.strip()), page)
+                        for page, text in layout_text_pages(cached)
+                    ]
+                else:
+                    result = extract_verified_source_snapshot(snapshot).adapter_result
+                    parsed[parse_key] = [
+                        (
+                            _sample_kind(element.element_type),
+                            normalize_nfc((element.content or element.title or "").strip()),
+                            element.page_number,
+                        )
+                        for element in result.document_elements
+                    ]
+        excerpt_end = location.source_text_start + len(location.source_text)
+        if not (
+            0 <= location.source_text_start <= location.span_start < location.span_end <= excerpt_end
+        ):
+            raise L1StageError("supplemental design span is outside its verified window")
+        matches = [
+            (kind, text) for kind, text, page in parsed[parse_key]
+            if page == location.page
+            and text[location.source_text_start:excerpt_end] == location.source_text
+            and kind in preflight.budget.sample_kinds
+        ]
+        if len(matches) != 1:
+            raise L1StageError("supplemental design source text is missing or ambiguous")
+        kind, source_text = matches[0]
+        assert kind is not None
+        unit = next((
+            item for item in units
+            if item.identity.source_file_id == entry.source_file_id
+            and item.text == source_text and item.locator.page == location.page
+            and item.unit_kind == _unit_kind(kind)
+        ), None)
+        if unit is None:
+            unit = mint_source_unit(
+                base_identity=preflight.base_identity, corpus_entry=entry,
+                source_corpus_manifest_id=preflight.corpus.source_corpus_manifest_id,
+                unit_kind=_unit_kind(kind), text=source_text,
+                ordinal=len(units), page=location.page,
+            )
+            units.append(unit)
+        span = mint_verified_span(
+            source_unit=unit, span_start=location.span_start, span_end=location.span_end,
+            purpose="domain_design", verified_at_utc=verified_at_utc,
+            expected_quote=location.quote,
+        )
+        if any(item.evidence_span_id == span.evidence_span_id for item in spans):
+            continue
+        spans.append(span)
+        existing_index = next((
+            index for index, sample in enumerate(entries)
+            if unit.source_unit_id in sample.source_unit_ids
+        ), None)
+        if existing_index is not None:
+            sample = entries[existing_index]
+            entries[existing_index] = sample.model_copy(update={
+                "evidence_span_ids": (*sample.evidence_span_ids, span.evidence_span_id),
+            })
+        else:
+            entries.append(DesignSampleEntry(
+                source_file_id=entry.source_file_id, source_unit_ids=(unit.source_unit_id,),
+                evidence_span_ids=(span.evidence_span_id,), sample_kind=kind,
+                sample_order=len(entries),
+            ))
+    kind_counts: Counter[str] = Counter()
+    for entry in entries:
+        kind_counts[entry.sample_kind] += len(entry.evidence_span_ids)
+    limits = preflight.budget.model_dump(mode="json", exclude={"budget_snapshot_hash"})
+    limits.update(
+        max_source_files=max(limits["max_source_files"], len({entry.source_file_id for entry in entries})),
+        max_samples_per_kind=max(limits["max_samples_per_kind"], max(kind_counts.values(), default=0)),
+        max_excerpt_codepoints=max(limits["max_excerpt_codepoints"], max((len(span.quote) for span in spans), default=0)),
+    )
+    budget = DesignSamplingBudget.model_validate_json(canonical_json({
+        **limits, "budget_snapshot_hash": canonical_sha256(limits),
+    }))
+    preflight = replace(preflight, budget=budget)
+    sample_manifest = build_design_sample_manifest(
+        corpus=preflight.corpus, entries=tuple(entries),
+        budget_snapshot_hash=budget.budget_snapshot_hash, identity=preflight.base_identity,
+    )
+    values = profile.model_dump(
+        mode="python", exclude={"identity", "domain_source_profile_id", "profile_hash"},
+    )
+    values.update(
+        design_sample_manifest_id=sample_manifest.design_sample_manifest_id,
+        design_sample_manifest_hash=sample_manifest.sample_hash,
+        budget_snapshot_hash=budget.budget_snapshot_hash,
+    )
+    profile_hash = canonical_sha256(values)
+    profile = DomainSourceProfile(
+        identity=preflight.base_identity.model_copy(update={
+            "contract_kind": "l1.domain_source_profile", "content_hash": profile_hash,
+            "parent_artifact_ids": (
+                preflight.corpus.source_corpus_manifest_id, sample_manifest.design_sample_manifest_id,
+            ),
+        }),
+        domain_source_profile_id=deterministic_contract_id("domain-source-profile", {"profile_hash": profile_hash}),
+        **values, profile_hash=profile_hash,
+    )
+    return preflight, sample_manifest, profile, tuple(units), tuple(spans)
+
+
 def prepare_l1_stage(
     preflight: L1Preflight,
     *,
@@ -1630,9 +1802,13 @@ def prepare_l1_stage(
     correction_instruction: str | None = None,
     parent_correction_context_id: str | None = None,
     started_at_utc: datetime | None = None,
+    supplemental_design_locations: tuple[SupplementalDesignLocation, ...] = (),
+    max_prompt_chars: int | None = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
     started = started_at_utc or _utc_now()
+    if len(supplemental_design_locations) > 16:
+        raise L1StageError("supplemental design evidence is capped at 16 findings")
     sample_manifest, profile, source_units, evidence_spans = (
         build_l1_design_artifacts(
             preflight.source_path,
@@ -1642,6 +1818,13 @@ def prepare_l1_stage(
             budget=preflight.budget,
         )
     )
+    if supplemental_design_locations:
+        preflight, sample_manifest, profile, source_units, evidence_spans = (
+            _supplement_design_artifacts(
+                preflight, sample_manifest, profile, source_units, evidence_spans,
+                supplemental_design_locations, started,
+            )
+        )
     model_call_count = 0
     candidate_regeneration_attempted = False
     rejected_candidate_diagnostics: dict[str, Any] | None = None
@@ -1657,6 +1840,13 @@ def prepare_l1_stage(
         verified_design_evidence=_evidence_payload(evidence_spans),
         correction_instruction=correction_instruction,
     )
+    if max_prompt_chars is not None:
+        prompt_chars = (
+            len(DOMAIN_PROPOSAL_SYSTEM_PROMPT) + len(proposal_user_message)
+            + len(canonical_json(domain_proposal_candidates_schema()))
+        )
+        if max_prompt_chars < 256 or prompt_chars > max_prompt_chars:
+            raise L1StageError("revision prompt budget exhausted")
     if candidates is None:
         if client is None:
             raise L1StageError("proposal candidates or a Foundry client are required")
@@ -3148,6 +3338,9 @@ def _artifact_payloads(
         Path("design-sample-manifest.json"): (
             canonical_json(prepared.sample_manifest) + "\n"
         ).encode("utf-8"),
+        Path("design-sampling-budget.json"): (
+            canonical_json(prepared.preflight.budget) + "\n"
+        ).encode("utf-8"),
         Path("source-profile.json"): (
             canonical_json(prepared.source_profile) + "\n"
         ).encode("utf-8"),
@@ -3518,6 +3711,7 @@ def dry_run_l1(
         str(state_root / "domain-intake.json"),
         str(state_root / "source-corpus-manifest.json"),
         str(state_root / "design-sample-manifest.json"),
+        str(state_root / "design-sampling-budget.json"),
         str(state_root / "source-profile.json"),
         str(state_root / "domain-design-context.json"),
         str(state_root / "domain-proposal.json"),
@@ -3741,6 +3935,16 @@ def load_prepared_l1_stage(
         sample_kinds=("heading", "text", "table", "visual_description"),
         budget_snapshot_hash=design.budget_snapshot_hash,
     )
+    budget_path = state_root / "design-sampling-budget.json"
+    if budget_path.exists():
+        budget = _load_json_model(budget_path, DesignSamplingBudget)
+        if (
+            budget.budget_snapshot_hash != design.budget_snapshot_hash
+            or budget.budget_snapshot_hash != canonical_sha256(
+                budget.model_dump(mode="json", exclude={"budget_snapshot_hash"})
+            )
+        ):
+            raise L1StageError("persisted L1 sampling budget snapshot does not match design authority")
     preflight = L1Preflight(
         source_path=source_path,
         run_id=design.identity.run_id,
