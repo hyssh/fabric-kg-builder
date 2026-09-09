@@ -30,7 +30,8 @@ PREPARATION_VERSION = "exact-source-preparation/1.0.0"
 LEGACY_DISCOVERY_PROMPT_VERSION = "open-candidate-discovery/1.1.0"
 DISCOVERY_PROMPT_VERSION = "open-candidate-discovery/1.2.0"
 LEGACY_GROUNDING_VERSION = "discovery-grounding/2.0.0"
-GROUNDING_VERSION = "discovery-grounding/2.1.0"
+STRICT_ENVELOPE_GROUNDING_VERSION = "discovery-grounding/2.1.0"
+GROUNDING_VERSION = "discovery-grounding/2.2.0"
 LEGACY_DISCOVERY_SYSTEM = """Discover open-label candidate entities, relationships and scalar properties
 from EVERY supplied primary source slice. No approved ontology exists. Do not
 invent approved IDs, identity policies, facts or approvals. Use observed_type,
@@ -203,6 +204,15 @@ class CandidateGrounding(ContractModel):
     issue_codes: list[str] = Field(default_factory=list)
 
 
+class EnvelopeAnomaly(ContractModel):
+    observation_id: RequiredText
+    disposition: Literal["quarantined"] = "quarantined"
+    issue_codes: list[Literal["EXTRA_TOP_LEVEL_FIELDS"]]
+    field_names: list[str]
+    extra_fields_hash: Sha256
+    raw_response_hash: Sha256
+
+
 class ChunkObservation(_Hashed):
     chunk: DiscoveryChunk
     request_hash: Sha256
@@ -210,19 +220,23 @@ class ChunkObservation(_Hashed):
     raw_response: dict[str, Any] | None = None
     response: RawCandidateResponse | None = None
     reason: str | None = None
-    verifier_version: Literal["discovery-grounding/2.0.0", "discovery-grounding/2.1.0"] | None = None
+    verifier_version: Literal["discovery-grounding/2.0.0", "discovery-grounding/2.1.0", "discovery-grounding/2.2.0"] | None = None
     request_prompt_version: Literal["open-candidate-discovery/1.1.0", "open-candidate-discovery/1.2.0"] | None = None
     candidate_grounding: list[CandidateGrounding] = Field(default_factory=list)
+    candidate_grounding_scope: Literal["raw_response.candidates"] | None = None
+    envelope_anomalies: list[EnvelopeAnomaly] = Field(default_factory=list)
     origin_artifact_hash: Sha256 | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         values = handler(self)
-        for key in ("verifier_version", "request_prompt_version", "origin_artifact_hash"):
+        for key in ("verifier_version", "request_prompt_version", "origin_artifact_hash", "candidate_grounding_scope"):
             if getattr(self, key) is None:
                 values.pop(key, None)
         if not self.candidate_grounding:
             values.pop("candidate_grounding", None)
+        if not self.envelope_anomalies:
+            values.pop("envelope_anomalies", None)
         return values
 
 
@@ -240,12 +254,21 @@ class DiscoverySummary(_Hashed):
     response: SummaryResponse
 
 
+class FailedDiscoverySummary(_Hashed):
+    level: Literal["document", "corpus"]
+    source_file_id: str | None
+    child_ids: list[str]
+    request_hash: Sha256
+    raw_response: Any = None
+    reason: RequiredText
+
+
 class DiscoveryRun(_Hashed):
     artifact_kind: Literal["domain.discovery_run"] = "domain.discovery_run"
     artifact_version: Literal["1.0.0"] = "1.0.0"
     prepared: PreparedCorpus
     prompt_version: Literal["open-candidate-discovery/1.1.0", "open-candidate-discovery/1.2.0"] = DISCOVERY_PROMPT_VERSION
-    verifier_version: Literal["discovery-grounding/2.0.0", "discovery-grounding/2.1.0"] | None = None
+    verifier_version: Literal["discovery-grounding/2.0.0", "discovery-grounding/2.1.0", "discovery-grounding/2.2.0"] | None = None
     revalidated_from: Sha256 | None = None
     model_version: RequiredText
     model_hash: Sha256
@@ -253,6 +276,7 @@ class DiscoveryRun(_Hashed):
     budget: DiscoveryBudget
     chunks: list[ChunkObservation]
     summaries: list[DiscoverySummary]
+    failed_summaries: list[FailedDiscoverySummary] = Field(default_factory=list)
     document_summaries: dict[str, str]
     corpus_summary_id: str | None
     status: Literal["complete", "partial"]
@@ -269,6 +293,8 @@ class DiscoveryRun(_Hashed):
         for key in ("verifier_version", "revalidated_from"):
             if getattr(self, key) is None:
                 values.pop(key, None)
+        if not self.failed_summaries:
+            values.pop("failed_summaries", None)
         return values
 
     @property
@@ -653,9 +679,38 @@ def _ground_anchor(anchor, original, unit, chunk):
     return None
 
 
-def _ground_response(raw: dict[str, Any], unit: SourceUnit, chunk: DiscoveryChunk, *, casefold_references=True):
-    if not isinstance(raw, dict) or set(raw) != {"candidates"} or not isinstance(raw["candidates"], (list, tuple)):
+def _candidate_array(raw, *, allow_envelope_extras):
+    if not isinstance(raw, dict) or not isinstance(raw.get("candidates"), (list, tuple)):
         raise ValueError("discovery response must contain a candidates array")
+    if not allow_envelope_extras and set(raw) != {"candidates"}:
+        raise ValueError("discovery response contains unexpected top-level fields")
+    return raw["candidates"]
+
+
+def discovery_envelope_anomalies(
+    *, raw_response: dict[str, Any], chunk: DiscoveryChunk,
+) -> list[EnvelopeAnomaly]:
+    """Account for fields outside the candidate array without interpreting them."""
+    _candidate_array(raw_response, allow_envelope_extras=True)
+    extras = {key: value for key, value in raw_response.items() if key != "candidates"}
+    if not extras:
+        return []
+    raw_hash = canonical_sha256(raw_response)
+    extra_hash = canonical_sha256(extras)
+    return [EnvelopeAnomaly(
+        observation_id=deterministic_contract_id("discovery-envelope-anomaly", {
+            "chunk_id": chunk.chunk_id, "raw_response_hash": raw_hash, "extra_fields_hash": extra_hash,
+        }),
+        issue_codes=["EXTRA_TOP_LEVEL_FIELDS"], field_names=sorted(extras),
+        extra_fields_hash=extra_hash, raw_response_hash=raw_hash,
+    )]
+
+
+def _ground_response(
+    raw: dict[str, Any], unit: SourceUnit, chunk: DiscoveryChunk, *,
+    casefold_references=True, allow_envelope_extras=True,
+):
+    _candidate_array(raw, allow_envelope_extras=allow_envelope_extras)
     parsed, issues, ids = {}, {}, Counter()
     def reference_key(value):
         return value.casefold() if casefold_references else value
@@ -718,7 +773,7 @@ def _ground_response(raw: dict[str, Any], unit: SourceUnit, chunk: DiscoveryChun
 def ground_discovery_response(
     *, raw_response: dict[str, Any], source_unit: SourceUnit, chunk: DiscoveryChunk,
 ) -> tuple[RawCandidateResponse, list[CandidateGrounding]]:
-    """Ground a received response without inference, writes or authority promotion."""
+    """Ground only the candidate array; also inspect discovery_envelope_anomalies."""
     source_unit = SourceUnit.model_validate(source_unit.model_dump(mode="python"))
     chunk = DiscoveryChunk.model_validate(chunk.model_dump(mode="python"))
     if (
@@ -733,16 +788,21 @@ def ground_discovery_response(
 
 def _grounded_observation(chunk, key, raw, unit, *, request_prompt_version, origin_artifact_hash=None):
     response, accounting = _ground_response(raw, unit, chunk)
+    anomalies = discovery_envelope_anomalies(raw_response=raw, chunk=chunk)
     return _seal(
         ChunkObservation, chunk=chunk, request_hash=key,
-        status="processed" if accounting else "no_candidates",
+        status="processed" if accounting or anomalies else "no_candidates",
         raw_response=raw, response=response, candidate_grounding=accounting,
+        candidate_grounding_scope="raw_response.candidates", envelope_anomalies=anomalies,
         verifier_version=GROUNDING_VERSION, request_prompt_version=request_prompt_version,
         origin_artifact_hash=origin_artifact_hash,
     )
 
 
 def _check_observation(record, unit):
+    versioned_envelope = record.verifier_version == GROUNDING_VERSION
+    if not versioned_envelope and (record.candidate_grounding_scope is not None or record.envelope_anomalies):
+        raise ValueError("legacy grounding cannot claim versioned envelope accounting")
     if record.verifier_version is None:
         actual = _legacy_verified_response(record.raw_response, unit, record.chunk)
         if record.response != actual or (record.status == "no_candidates") != (not actual.candidates):
@@ -751,10 +811,16 @@ def _check_observation(record, unit):
         actual, accounting = _ground_response(
             record.raw_response, unit, record.chunk,
             casefold_references=record.verifier_version != LEGACY_GROUNDING_VERSION,
+            allow_envelope_extras=versioned_envelope,
         )
+        anomalies = discovery_envelope_anomalies(
+            raw_response=record.raw_response, chunk=record.chunk,
+        ) if versioned_envelope else []
         if (
             record.response != actual or record.candidate_grounding != accounting
-            or record.status != ("processed" if accounting else "no_candidates")
+            or record.status != ("processed" if accounting or anomalies else "no_candidates")
+            or record.envelope_anomalies != anomalies
+            or (versioned_envelope and record.candidate_grounding_scope != "raw_response.candidates")
         ):
             raise ValueError("discovery candidate grounding/accounting mismatch")
 
@@ -772,14 +838,31 @@ def _observation_payload(record):
             "observation_ids": [item.observation_id for item in quarantined],
             "meaning": "Ungrounded raw observations retained in the run; not source facts.",
         }
+    if record.envelope_anomalies:
+        payload.setdefault("grounding_warnings", {})["envelope_anomalies"] = [
+            item.model_dump(mode="json") for item in record.envelope_anomalies
+        ]
     return payload
 
 
-def discovery_grounding_report(run: DiscoveryRun) -> dict[str, Any]:
+def _summary_payload(node, children):
+    payload = {"id": node.node_id, "hash": node.artifact_hash, "summary": node.response.summary}
+    anomalies = {
+        item["observation_id"]: item
+        for key in node.child_ids
+        for item in children[key].get("grounding_warnings", {}).get("envelope_anomalies", [])
+    }
+    if anomalies:
+        payload["grounding_warnings"] = {"envelope_anomalies": list(anomalies.values())}
+    return payload
+
+
+def discovery_grounding_report(run: DiscoveryRun, *, include_ledger_accounting: bool = False) -> dict[str, Any]:
     received = sum(item.raw_response is not None for item in run.chunks)
     accounted = sum(item.status in {"processed", "no_candidates"} for item in run.chunks)
     quarantined = [entry for item in run.chunks for entry in item.candidate_grounding if entry.disposition == "quarantined"]
-    return {
+    envelopes = [entry for item in run.chunks for entry in item.envelope_anomalies]
+    result = {
         "received_chunks": received, "accounted_chunks": accounted, "total_chunks": len(run.chunks),
         "all_chunk_responses_received": received == len(run.chunks),
         "all_chunks_accounted": accounted == len(run.chunks),
@@ -787,13 +870,48 @@ def discovery_grounding_report(run: DiscoveryRun) -> dict[str, Any]:
         "verified_candidate_count": sum(len(item.response.candidates) for item in run.chunks if item.response is not None),
         "quarantined_candidate_count": len(quarantined),
         "grounding_issue_counts": dict(Counter(code for item in quarantined for code in item.issue_codes)),
-        "grounding_quality": "gaps" if quarantined else (
+        "grounding_quality": "gaps" if quarantined or envelopes else (
             "unresolved" if any(item.verifier_version is None or item.response is None for item in run.chunks)
             else "no_reported_gaps"
         ),
         "consolidation_complete": run.status == "complete",
         "semantic_recall": "not_claimed",
     }
+    if run.verifier_version == GROUNDING_VERSION:
+        result.update({
+            "candidate_grounding_scope": "raw_response.candidates",
+            "envelope_anomaly_count": len(envelopes),
+            "envelope_quarantined_field_count": sum(len(item.field_names) for item in envelopes),
+            "envelope_issue_counts": dict(Counter(code for item in envelopes for code in item.issue_codes)),
+            "failed_summary_attempt_count": len(run.failed_summaries),
+            "failed_summary_responses_received": sum(item.raw_response is not None for item in run.failed_summaries),
+            "summary_input_accounting": "tool_owned_child_ids_with_model_echo_consistency_check",
+            "summary_semantic_coverage": "not_verified",
+        })
+    if include_ledger_accounting:
+        array_count = entry_count = pending_arrays = pending_candidates = 0
+        for record in run.chunks:
+            raw = record.raw_response
+            if raw is None or not isinstance(raw.get("candidates"), (list, tuple)):
+                continue
+            array_count += 1
+            size = len(raw["candidates"])
+            completed = record.status in {"processed", "no_candidates"}
+            entries = record.candidate_grounding if completed else []
+            covered = {item.candidate_index for item in entries if 0 <= item.candidate_index < size}
+            entry_count += len(entries)
+            pending_candidates += size - len(covered)
+            pending_arrays += not (completed and len(entries) == size and covered == set(range(size)))
+        result.update({
+            "candidate_ledger_scope": "received_raw_response.candidates_only",
+            "candidate_ledger_entry_count": entry_count,
+            "unaccounted_raw_array_count": pending_arrays,
+            "unaccounted_raw_candidate_count": pending_candidates,
+            "received_array_ledger_complete": pending_arrays == 0,
+            "missing_raw_response_count": len(run.chunks) - received,
+            "invalid_raw_envelope_count": received - array_count,
+        })
+    return result
 
 
 def discovery_observation_cache_path(cache_dir: Path, record: ChunkObservation) -> Path:
@@ -801,9 +919,17 @@ def discovery_observation_cache_path(cache_dir: Path, record: ChunkObservation) 
     if record.status == "failed":
         return root / "failed" / f"{record.request_hash}-{record.artifact_hash}.json"
     if record.verifier_version is not None and record.raw_response is not None:
-        version = "v2" if record.verifier_version == LEGACY_GROUNDING_VERSION else "v2.1"
+        version = {
+            LEGACY_GROUNDING_VERSION: "v2",
+            STRICT_ENVELOPE_GROUNDING_VERSION: "v2.1",
+            GROUNDING_VERSION: "v2.2",
+        }[record.verifier_version]
         return root / "grounded" / version / f"{record.request_hash}-{canonical_sha256(record.raw_response)}.json"
     return root / "chunks" / f"{record.request_hash}.json"
+
+
+def discovery_summary_failure_cache_path(cache_dir: Path, record: FailedDiscoverySummary) -> Path:
+    return Path(cache_dir) / "failed-summaries" / f"{record.request_hash}-{record.artifact_hash}.json"
 
 
 class _BudgetedClient:
@@ -865,7 +991,7 @@ def run_discovery(
         )
         if expected_key != record.request_hash:
             raise ValueError("received raw response has different source/model/request bindings")
-        if record.verifier_version == GROUNDING_VERSION and record.status in {"processed", "no_candidates"}:
+        if record.verifier_version in {STRICT_ENVELOPE_GROUNDING_VERSION, GROUNDING_VERSION} and record.status in {"processed", "no_candidates"}:
             _check_observation(record, units[record.chunk.source_unit_id])
             grounded = record
         else:
@@ -947,7 +1073,7 @@ def run_discovery(
 
     with ThreadPoolExecutor(max_workers=budget.max_concurrency) as pool:
         observations = list(pool.map(observe, plan_discovery_chunks(prepared, budget)))
-    summaries, documents, issues = [], {}, []
+    summaries, failed_summaries, documents, issues = [], [], {}, []
     children = {
         item.chunk.chunk_id: _observation_payload(item)
         for item in observations if item.response is not None
@@ -965,16 +1091,32 @@ def run_discovery(
                 raise ValueError("summary cache input binding mismatch")
             executor.reused += 1
         else:
-            response = SummaryResponse.model_validate(executor.call(request))
-            if len(response.summary) > budget.max_summary_chars or sorted(response.covered_input_ids) != sorted(ids):
-                raise ValueError("summary exceeds bound or drops/invents provenance inputs")
-            node = _seal(
-                DiscoverySummary, node_id=deterministic_contract_id("discovery-summary", {"request_hash": key}),
-                level=level, source_file_id=source_id, child_ids=ids, request_hash=key, response=response,
-            )
-            _write(path, node)
+            raw = None
+            try:
+                raw = executor.call(request)
+                response = SummaryResponse.model_validate(raw)
+                if len(response.summary) > budget.max_summary_chars:
+                    raise ValueError("SUMMARY_LENGTH_EXCEEDED: summary exceeds configured bound")
+                if sorted(response.covered_input_ids) != sorted(ids):
+                    raise ValueError("SUMMARY_INPUT_IDS_MISMATCH: model echo differs from tool-owned input IDs")
+                node = _seal(
+                    DiscoverySummary, node_id=deterministic_contract_id("discovery-summary", {"request_hash": key}),
+                    level=level, source_file_id=source_id, child_ids=ids, request_hash=key, response=response,
+                )
+                _write(path, node)
+            except _Deferred:
+                raise
+            except Exception as exc:
+                failure = _seal(
+                    FailedDiscoverySummary, level=level, source_file_id=source_id,
+                    child_ids=ids, request_hash=key, raw_response=raw,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+                _write(discovery_summary_failure_cache_path(cache_dir, failure), failure)
+                failed_summaries.append(failure)
+                raise
         summaries.append(node)
-        children[node.node_id] = {"id": node.node_id, "hash": node.artifact_hash, "summary": node.response.summary}
+        children[node.node_id] = _summary_payload(node, children)
         return node.node_id
 
     def consolidate(ids, level, source_id):
@@ -1001,6 +1143,7 @@ def run_discovery(
     return _seal(
         DiscoveryRun, prepared=prepared, model_version=model_version, model_hash=model_hash,
         business_context=business_context, budget=budget, chunks=observations, summaries=summaries,
+        failed_summaries=failed_summaries,
         document_summaries=documents, corpus_summary_id=root,
         status="complete" if root is not None else "partial",
         model_call_count=executor.calls, reserved_tokens=executor.tokens,
@@ -1012,8 +1155,11 @@ def run_discovery(
 def _validate_run(run: DiscoveryRun) -> None:
     if run.verifier_version is None and any(item.verifier_version is not None for item in run.chunks):
         raise ValueError("legacy discovery cannot hide versioned candidate grounding")
+    compatible_versions = {run.verifier_version}
+    if run.verifier_version == GROUNDING_VERSION:
+        compatible_versions.add(STRICT_ENVELOPE_GROUNDING_VERSION)
     if run.verifier_version is not None and any(
-        item.verifier_version != run.verifier_version and item.status in {"processed", "no_candidates"}
+        item.verifier_version not in compatible_versions and item.status in {"processed", "no_candidates"}
         for item in run.chunks
     ):
         raise ValueError("versioned discovery requires grounding accounting for every completed chunk")
@@ -1052,10 +1198,32 @@ def _validate_run(run: DiscoveryRun) -> None:
         )
         if key != node.request_hash or node.node_id != deterministic_contract_id("discovery-summary", {"request_hash": key}):
             raise ValueError("summary request/provenance hash mismatch")
-        children[node.node_id] = {"id": node.node_id, "hash": node.artifact_hash, "summary": node.response.summary}
+        children[node.node_id] = _summary_payload(node, children)
         descendants[node.node_id] = set().union(*(descendants[key] for key in node.child_ids))
         ancestry[node.node_id] = set(node.child_ids).union(*(ancestry[key] for key in node.child_ids))
         nodes[node.node_id] = node
+    for failure in run.failed_summaries:
+        if (
+            not set(failure.child_ids) <= set(children)
+            or len(failure.child_ids) != len(set(failure.child_ids))
+            or len(failure.child_ids) > run.budget.fan_in
+            or (failure.level == "document" and failure.source_file_id not in {
+                item.source_file_id for item in run.prepared.sources
+            })
+            or (failure.level == "corpus" and failure.source_file_id is not None)
+        ):
+            raise ValueError("failed summary input provenance mismatch")
+        schema = SummaryResponse.model_json_schema()
+        schema["properties"]["summary"]["maxLength"] = run.budget.max_summary_chars
+        _, key = _request(
+            LEGACY_SUMMARY_SYSTEM if run.prompt_version == LEGACY_DISCOVERY_PROMPT_VERSION else SUMMARY_SYSTEM,
+            {"level": failure.level, "source_file_id": failure.source_file_id,
+             "inputs": [children[key] for key in failure.child_ids]},
+            schema, run.budget, run.model_version, run.model_hash, run.business_context,
+            prompt_version=run.prompt_version,
+        )
+        if failure.request_hash != key:
+            raise ValueError("failed summary request/provenance hash mismatch")
     for source, node_id in run.document_summaries.items():
         if node_id not in nodes or nodes[node_id].source_file_id != source or nodes[node_id].level != "document":
             raise ValueError("document summary authority mismatch")

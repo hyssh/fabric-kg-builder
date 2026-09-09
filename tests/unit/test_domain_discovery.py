@@ -393,7 +393,7 @@ def test_summary_cannot_silently_drop_provenance_inputs(tmp_path):
     run = _run(tmp_path, prepared, DroppingClient())
     assert run.status == "partial"
     assert all(item.status == "processed" for item in run.chunks)
-    assert any("drops/invents provenance" in issue for issue in run.issues)
+    assert any("SUMMARY_INPUT_IDS_MISMATCH" in issue for issue in run.issues)
 
 
 def test_token_budget_defers_every_chunk_without_calls(tmp_path):
@@ -718,7 +718,7 @@ def test_grounding_20_cache_upgrades_without_calls_or_original_identity_loss(tmp
         ]
         assert [entry.disposition for entry in new.candidate_grounding] == ["quarantined", "quarantined", "verified"]
         assert new.response.candidates[0].local_id == "good"
-        assert core.discovery_observation_cache_path(tmp_path / "cache", new).parent.name == "v2.1"
+        assert core.discovery_observation_cache_path(tmp_path / "cache", new).parent.name == "v2.2"
     assert all(path.read_bytes() == data for path, data in originals.items())
 
 

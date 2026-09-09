@@ -13,7 +13,7 @@ from fabric_kg_builder.domain.models import DomainContractV2
 
 from .schema2_extraction import ClosedVocabulary, RawCandidateResponse
 
-REUSE_VERSION = "discovery-approved-replay/1.3.0"
+REUSE_VERSION = "discovery-approved-replay/1.4.0"
 
 
 @dataclass(frozen=True)
@@ -261,7 +261,7 @@ def _original_grounding_dispositions(observation, verified_rows):
     for index, candidate in enumerate(raw):
         grounding = ledger.get(index)
         verified_index = grounding.verified_candidate_index if grounding else (
-            index if observation.response is not None else None
+            index if observation.response is not None and observation.verifier_version is None else None
         )
         verified = verified_rows[verified_index] if verified_index is not None else None
         if verified is not None:
@@ -273,14 +273,18 @@ def _original_grounding_dispositions(observation, verified_rows):
         else:
             codes = grounding.issue_codes if grounding else ["GROUNDING_UNAVAILABLE"]
             row = {
-                "effective_candidate_hash": None, "disposition": "retained_quarantined",
-                "mapping_status": "pending", "pending_reasons": ["grounding_quarantined", *codes],
-                "grounding_disposition": "quarantined", "grounding_issue_codes": list(codes),
+                "effective_candidate_hash": None,
+                "disposition": "retained_quarantined" if grounding else "retained_unaccounted",
+                "mapping_status": "pending",
+                "pending_reasons": ["grounding_quarantined" if grounding else "grounding_unaccounted", *codes],
+                "grounding_disposition": "quarantined" if grounding else "unaccounted",
+                "grounding_issue_codes": list(codes),
             }
         row.update({
             "original_index": index,
             "original_candidate_hash": grounding.raw_candidate_hash if grounding else canonical_sha256(candidate),
             "observation_id": grounding.observation_id if grounding else None,
+            "grounding_ledger_recorded": grounding is not None,
         })
         rows.append(row)
     return rows
@@ -289,7 +293,7 @@ def _original_grounding_dispositions(observation, verified_rows):
 def _ground_targeted_candidates(raw, *, original_response, unit, chunk, request_hash):
     from fabric_kg_builder.domain.discovery import ground_discovery_response
 
-    if not isinstance(raw, dict) or set(raw) != {"candidates"} or not isinstance(raw["candidates"], list):
+    if not isinstance(raw, dict) or not isinstance(raw.get("candidates"), list):
         raise ValueError("Targeted response must contain a candidates array")
     candidates = raw["candidates"]
     declared = {
@@ -316,6 +320,27 @@ def _ground_targeted_candidates(raw, *, original_response, unit, chunk, request_
             "raw_candidate_hash": item.raw_candidate_hash,
         }),
     } for item in targeted_ledger]
+
+
+def _envelope_dispositions(raw, chunk, *, request_hash=None):
+    from fabric_kg_builder.domain.discovery import discovery_envelope_anomalies
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("candidates"), list):
+        return []
+    anomalies = [
+        item.model_dump(mode="json")
+        for item in discovery_envelope_anomalies(raw_response=raw, chunk=chunk)
+    ]
+    if request_hash is not None:
+        for item in anomalies:
+            item["source_envelope_observation_id"] = item["observation_id"]
+            item["observation_id"] = deterministic_contract_id("discovery-targeted-envelope-anomaly", {
+                "request_hash": request_hash,
+                "source_envelope_observation_id": item["source_envelope_observation_id"],
+                "raw_response_hash": item["raw_response_hash"],
+            })
+            item["request_hash"] = request_hash
+    return anomalies
 
 
 class DiscoverySourceReader:
@@ -479,6 +504,8 @@ def run_discovery_reuse(
             raise ValueError("DISCOVERY_REUSE_AUTHORITY_DRIFT: choose a fresh L2 state")
     mapped_chunks, provenance, pending, missing = [], [], [], []
     original_dispositions, targeted_dispositions, targeted_grounding = [], [], []
+    original_envelopes, targeted_envelopes, targeted_response_issues = [], [], []
+    targeted_raw_count, targeted_array_count = 0, 0
     targeted_calls, reused_targeted = 0, 0
     target_client = None
     for observation in run.chunks:
@@ -486,6 +513,10 @@ def run_discovery_reuse(
         response = observation.response.model_dump(mode="json") if observation.response else None
         original_response = response
         quarantined = [item for item in observation.candidate_grounding if item.disposition == "quarantined"]
+        envelope_anomalies = _envelope_dispositions(observation.raw_response, chunk)
+        original_envelopes.extend(envelope_anomalies)
+        raw_array = (observation.raw_response or {}).get("candidates")
+        ledger_incomplete = isinstance(raw_array, list) and len(raw_array) != len(observation.candidate_grounding)
         mapping_error = None
         try:
             mapped = map_discovery_candidates(
@@ -502,10 +533,14 @@ def run_discovery_reuse(
         } for index, item in enumerate(response["candidates"] if response else [])]
         targeted_rows = []
         target_grounding = []
+        target_envelopes = []
         target_grounding_error = None
         targeted_request_hash = None
         targeted_raw_response_hash = None
-        needs_retry = mapped is None or bool(mapped.pending_reasons) or bool(quarantined)
+        needs_retry = (
+            mapped is None or bool(mapped.pending_reasons) or bool(quarantined)
+            or bool(envelope_anomalies) or ledger_incomplete
+        )
         response_origin = observation.artifact_hash
         if needs_retry:
             unit = units[chunk.source_unit_id]
@@ -518,6 +553,8 @@ def run_discovery_reuse(
             prompt_payload["discovery_retry"] = {
                 "original_candidates": (observation.raw_response or {}).get("candidates", []),
                 "candidate_grounding": [item.model_dump(mode="json") for item in observation.candidate_grounding],
+                "candidate_grounding_scope": observation.candidate_grounding_scope,
+                "envelope_anomalies": envelope_anomalies,
                 "pending_reasons": list(mapped.pending_reasons) if mapped else [mapping_error or observation.reason],
                 "reconciliation_rule": (
                     "Omission never deletes or resolves an original observation. For entity corrections preserve "
@@ -526,6 +563,9 @@ def run_discovery_reuse(
                     "Property/relationship alternatives are additions, not proof that original unknown terms "
                     "are synonyms or may be discarded. Quarantined raw observations remain pending; their "
                     "presence here is not evidence or permission to invent facts or reuse invalid anchors."
+                    " Envelope anomalies refer to quarantined root fields outside the candidates array. "
+                    "Their values are not supplied or promoted to candidates; a clean retry does not resolve "
+                    "the original anomaly or authorize discarding it."
                 ),
             }
             prompt = canonical_json(prompt_payload)
@@ -583,6 +623,12 @@ def run_discovery_reuse(
                 response_origin = target["artifact_hash"]
                 targeted_request_hash = target["request_hash"]
                 targeted_raw_response_hash = canonical_sha256(target["response"])
+                target_envelopes = _envelope_dispositions(
+                    target["response"], chunk, request_hash=targeted_request_hash,
+                )
+                raw_candidates = target["response"].get("candidates") if isinstance(target["response"], dict) else None
+                targeted_raw_count += len(raw_candidates) if isinstance(raw_candidates, list) else 0
+                targeted_array_count += int(isinstance(raw_candidates, list))
                 try:
                     grounded_target, target_grounding = _ground_targeted_candidates(
                         target["response"], original_response=original_response, unit=unit, chunk=chunk,
@@ -590,9 +636,10 @@ def run_discovery_reuse(
                     )
                 except ValueError as exc:
                     target_grounding_error = str(exc)
-                    targeted_rows.append({
-                        "targeted_candidate_hash": canonical_sha256(target["response"]),
-                        "disposition": "pending_response", "issue": target_grounding_error,
+                    targeted_response_issues.append({
+                        "chunk_id": chunk.chunk_id, "request_hash": targeted_request_hash,
+                        "raw_response_hash": targeted_raw_response_hash,
+                        "issue": target_grounding_error,
                     })
                 else:
                     mapped, original_rows, targeted_rows = reconcile_discovery_retry(
@@ -622,6 +669,14 @@ def run_discovery_reuse(
         grounding_reasons = {"grounding_quarantined"} if any(
             item["grounding_disposition"] == "quarantined" for item in original_rows
         ) else set()
+        if any(item["grounding_disposition"] == "unaccounted" for item in original_rows):
+            grounding_reasons.add("grounding_unaccounted")
+        if any(not item["grounding_ledger_recorded"] for item in original_rows):
+            grounding_reasons.add("grounding_ledger_incomplete")
+        if envelope_anomalies:
+            grounding_reasons.add("envelope_anomaly_quarantined")
+        if target_envelopes:
+            grounding_reasons.add("targeted_envelope_anomaly_quarantined")
         if target_grounding_error or any(item["disposition"] == "quarantined" for item in target_grounding):
             grounding_reasons.add("targeted_grounding_quarantined")
         if mapped is not None and grounding_reasons:
@@ -629,11 +684,16 @@ def run_discovery_reuse(
         original_dispositions.extend(original_rows)
         targeted_dispositions.extend(targeted_rows)
         targeted_grounding.extend(target_grounding)
-        reasons = mapped.pending_reasons if mapped is not None else (mapping_error or observation.reason or "missing_response",)
+        targeted_envelopes.extend(target_envelopes)
+        reasons = mapped.pending_reasons if mapped is not None else tuple(sorted(
+            {mapping_error or observation.reason or "missing_response"} | grounding_reasons
+        ))
         if reasons:
             pending.append({
                 "chunk_id": chunk.chunk_id, "reasons": list(reasons),
                 "quarantined_observation_ids": [item["observation_id"] for item in original_rows if item["grounding_disposition"] == "quarantined"],
+                "envelope_anomaly_ids": [item["observation_id"] for item in envelope_anomalies],
+                "targeted_envelope_anomaly_ids": [item["observation_id"] for item in target_envelopes],
             })
         if mapped is None:
             missing.append(chunk.chunk_id)
@@ -646,8 +706,14 @@ def run_discovery_reuse(
             "local_reference_bindings": list(mapped.reference_bindings),
             "pending_reasons": list(mapped.pending_reasons),
             "original_candidate_dispositions": original_rows,
+            "original_candidate_grounding_scope": observation.candidate_grounding_scope,
+            "original_envelope_anomalies": envelope_anomalies,
+            "original_envelope_reason": observation.reason,
             "targeted_candidate_dispositions": targeted_rows,
             "targeted_candidate_grounding": target_grounding,
+            "targeted_candidate_grounding_scope": "raw_response.candidates" if targeted_request_hash else None,
+            "targeted_envelope_anomalies": target_envelopes,
+            "targeted_response_issue": target_grounding_error,
             "targeted_request_hash": targeted_request_hash,
             "targeted_raw_response_hash": targeted_raw_response_hash,
         })
@@ -663,17 +729,38 @@ def run_discovery_reuse(
         "mapping_complete_chunks": sum(not mapped.pending_reasons for _, mapped in mapped_chunks),
         "mapping_review_chunks": sum(bool(mapped.pending_reasons) for _, mapped in mapped_chunks),
         "original_raw_candidates": len(original_dispositions),
+        "candidate_accounting_scope": "raw_response.candidates",
+        "original_received_candidate_arrays": sum(
+            isinstance((item.raw_response or {}).get("candidates"), list) for item in run.chunks
+        ),
+        "original_missing_candidate_arrays": sum(
+            not isinstance((item.raw_response or {}).get("candidates"), list) for item in run.chunks
+        ),
         "original_mapped_candidates": sum(row["mapping_status"] == "mapped" for row in original_dispositions),
         "original_pending_candidates": sum(row["mapping_status"] == "pending" for row in original_dispositions),
         "original_retained_candidates": sum(row["disposition"].startswith("retained") for row in original_dispositions),
         "original_corrected_candidates": sum(row["disposition"] == "superseded_by_explicit_correction" for row in original_dispositions),
         "original_verified_candidates": sum(row["grounding_disposition"] == "verified" for row in original_dispositions),
         "original_quarantined_candidates": sum(row["grounding_disposition"] == "quarantined" for row in original_dispositions),
+        "original_candidate_ledger_entries": sum(row["grounding_ledger_recorded"] for row in original_dispositions),
+        "original_unaccounted_candidates": sum(not row["grounding_ledger_recorded"] for row in original_dispositions),
+        "original_candidate_ledger_complete": all(row["grounding_ledger_recorded"] for row in original_dispositions),
+        "original_envelope_anomaly_count": len(original_envelopes),
+        "original_envelope_quarantined_field_count": sum(len(item["field_names"]) for item in original_envelopes),
         "targeted_added_candidates": sum(row["disposition"] == "addition" for row in targeted_dispositions),
         "targeted_review_candidates": sum(row["disposition"].startswith("pending_") for row in targeted_dispositions),
-        "targeted_received_candidates": len(targeted_grounding),
+        "targeted_received_candidates": targeted_raw_count,
+        "targeted_received_candidate_arrays": targeted_array_count,
+        "targeted_missing_candidate_arrays": targeted_calls + reused_targeted - targeted_array_count,
+        "targeted_candidate_ledger_entries": len(targeted_grounding),
+        "targeted_unaccounted_candidates": targeted_raw_count - len(targeted_grounding),
+        "targeted_candidate_ledger_complete": targeted_raw_count == len(targeted_grounding),
         "targeted_verified_candidates": sum(row["disposition"] == "verified" for row in targeted_grounding),
         "targeted_quarantined_candidates": sum(row["disposition"] == "quarantined" for row in targeted_grounding),
+        "targeted_envelope_anomaly_count": len(targeted_envelopes),
+        "targeted_envelope_quarantined_field_count": sum(len(item["field_names"]) for item in targeted_envelopes),
+        "targeted_response_failures": len(targeted_response_issues),
+        "targeted_response_issues": targeted_response_issues,
         "pending_chunks": len(pending), "pending": pending, "missing_chunks": missing,
         "targeted_model_calls": targeted_calls, "reused_targeted_responses": reused_targeted,
         "l2_model_calls": 0, "source_units": len(materialized.source_units),

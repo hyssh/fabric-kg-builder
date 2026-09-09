@@ -34,7 +34,9 @@ def _discovery_core():
 
 
 def _validate_discovery_resume_cache(prior, cache_dir: Path) -> None:
-    from fabric_kg_builder.domain.discovery import discovery_observation_cache_path
+    from fabric_kg_builder.domain.discovery import (
+        discovery_observation_cache_path, discovery_summary_failure_cache_path,
+    )
 
     records = []
     records.extend(
@@ -44,9 +46,26 @@ def _validate_discovery_resume_cache(prior, cache_dir: Path) -> None:
     records.extend(
         (cache_dir / "summaries" / f"{item.request_hash}.json", item) for item in prior.summaries
     )
+    records.extend(
+        (discovery_summary_failure_cache_path(cache_dir, item), item)
+        for item in prior.failed_summaries
+    )
     for path, expected in records:
-        if not path.is_file() or type(expected).model_validate_json(path.read_text(encoding="utf-8")) != expected:
+        try:
+            matches = path.is_file() and type(expected).model_validate_json(
+                path.read_text(encoding="utf-8")
+            ) == expected
+        except ValueError:
+            matches = False
+        if not matches:
             raise ValueError(f"DISCOVERY_RESUME_CACHE_DRIFT: {path}")
+
+
+def _discovery_report(run) -> dict:
+    report = _discovery_core().discovery_grounding_report(run, include_ledger_accounting=True)
+    report["unaccounted_candidate_count"] = report["unaccounted_raw_candidate_count"]
+    report["candidate_ledger_complete"] = report["received_array_ledger_complete"]
+    return report
 
 
 def _discovery_plan_inventory(corpus, source: Path, layout_cache, layout_identity) -> dict:
@@ -339,7 +358,7 @@ def domain_discover_cmd(
                 **_discovery_plan_inventory(preflight.corpus, source, layout_cache, layout_identity),
             }
             if prior is not None:
-                result["prior_grounding"] = core.discovery_grounding_report(prior)
+                result["prior_grounding"] = _discovery_report(prior)
         else:
             from fabric_kg_builder.sources.preparation import indexed_corpus_reader
 
@@ -372,8 +391,9 @@ def domain_discover_cmd(
                 "prepared_sources": sum(item.status in {"processed", "no_candidates"} for item in prepared.sources),
                 "pending_sources": sum(item.status not in {"processed", "no_candidates"} for item in prepared.sources),
                 "full_corpus_design_ready": run.full_corpus_design_ready,
+                "retained_failed_summary_attempts": len(run.failed_summaries),
                 "issues": run.issues, "authority": run.authority,
-                **core.discovery_grounding_report(run),
+                **_discovery_report(run),
             }
     except (APIError, ClientAuthenticationError) as exc:
         raise _model_failure(exc) from exc

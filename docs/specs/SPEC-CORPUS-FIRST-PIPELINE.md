@@ -48,6 +48,14 @@ the same model response. Retain original raw candidates, a verified subset and
 per-candidate quarantine reasons/identities. A nonempty response whose candidates
 are all quarantined is not an honestly empty response.
 
+If a response contains a genuine `candidates` array plus unexpected root fields,
+the array may be grounded without discarding the original envelope. Quarantine
+the extra fields separately with field names, raw-response and extra-field
+hashes; never merge them into an invented candidate. Array-candidate accounting
+and envelope anomalies are distinct. An empty array with quarantined extras is
+not a clean no-candidates outcome. Reuse must preserve these anomalies as pending
+even when the grounded array is usable.
+
 The normal workflow has no per-kind quota that a first file can consume.
 Bounded text windows and request budgets control individual calls, not silent
 exclusion of later files. Preserve document/page/section location, parent context
@@ -101,6 +109,11 @@ Use bounded fan-in consolidation or another explicit bounded representation.
 Do not place the entire corpus in one prompt or silently truncate the input.
 Each summary references its children and their hashes/source observations, so
 coverage can be audited and details retrieved from the retained candidates.
+
+Persist malformed/over-budget summary responses with the actual request and
+child identities before reporting failure. They do not contribute to completed
+coverage. A bounded resume may retry only the missing summary; do not invent
+child-ID coverage or truncate a failed summary to manufacture success.
 
 Keep configuration/revision differences, conflicts, subprocedure references and
 unresolved conditions visible. Do not merge cross-document entities merely

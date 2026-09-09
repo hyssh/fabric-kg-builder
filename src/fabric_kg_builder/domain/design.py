@@ -624,6 +624,15 @@ def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
                     "Completed chunk processing/consolidation is not semantic recall or verified answers."
                 ),
             ))
+        if grounding.get("envelope_anomaly_count", 0):
+            findings.append(DesignFinding(
+                code="discovery_envelope_anomalies",
+                message=(
+                    f"{grounding['envelope_anomaly_count']} response envelopes contain "
+                    f"{grounding['envelope_quarantined_field_count']} quarantined extra fields. "
+                    "Their original raw values remain preserved but are not candidates or source facts."
+                ),
+            ))
     limits: list[DesignFinding] = []
     if all(is_sql_question(item) for item in effective_questions):
         limits.append(DesignFinding(
