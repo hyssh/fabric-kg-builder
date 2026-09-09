@@ -80,6 +80,14 @@ answers to all six technician questions. Full-corpus discovery is currently
 running; completion, approval, deployment and user acceptance must be recorded
 as separate milestones.
 
+User decision at 2026-09-09 15:34: for this prototype, at least 99% processed
+chunk coverage may be accepted explicitly to proceed with design. Retain
+unprocessed/error IDs, grounding quarantine and summary gaps; do not mark the
+original run complete or waive source/fact checks. Record actor, rationale,
+actual numerator/denominator and the exact accepted discovery hash. This avoids
+repeating remaining requests solely to reach 100%, while keeping downstream
+limitations visible. Implementation is in progress.
+
 ## A. Next priority: query-time numeric analysis
 
 Status: local context-flow implementation complete; SQL execution remains separate. See

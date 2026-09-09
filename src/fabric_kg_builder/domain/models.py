@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 from pydantic_core import PydanticCustomError
 
 from .question_routing import QuestionRouting, is_sql_question
+from .discovery_acceptance import DiscoveryAcceptanceBinding
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -967,13 +968,22 @@ class DomainContractV2(V2StrictModel):
 
     schema_version: Literal[DOMAIN_SCHEMA_V2_VERSION]
     discovery_run_hash: Sha256Text | None = None
+    discovery_acceptance: DiscoveryAcceptanceBinding | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         values = handler(self)
         if self.discovery_run_hash is None:
             values.pop("discovery_run_hash", None)
+        if self.discovery_acceptance is None:
+            values.pop("discovery_acceptance", None)
         return values
+
+    @model_validator(mode="after")
+    def _discovery_acceptance_binding(self):
+        if self.discovery_acceptance is not None and self.discovery_acceptance.discovery_run_hash != self.discovery_run_hash:
+            raise ValueError("partial acceptance differs from contract discovery binding")
+        return self
 
     domain: DomainSectionV2
     business: BusinessSectionV2

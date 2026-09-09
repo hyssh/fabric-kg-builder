@@ -71,6 +71,33 @@ complete discovery. The design command must not silently treat a partial run as
 full-corpus understanding. Resume or explicitly use the labelled sample-only
 compatibility workflow instead.
 
+### Explicit prototype coverage acceptance
+
+The user may explicitly accept a partial discovery for design when at least
+99% of all planned chunks have valid processed/no-candidates responses.
+This is an admission policy, not a declaration of complete discovery or verified
+facts. Compare exact counts against the threshold without rounding percentages.
+Malformed response envelopes without usable typed results, failed and deferred
+chunks do not count as processed. The denominator must not exclude failed files
+or unprepared content to inflate apparent coverage.
+
+Record acceptance separately with the exact discovery/corpus identities,
+threshold, actual counts, actor and rationale. Preserve the original partial run
+and enumerate missing chunks/files, quarantine/envelope issues and missing or
+failed summaries. Default admission remains strict without that acceptance.
+
+Partial design context must represent all documents through a bounded,
+nonoverlapping frontier of valid summaries and grounded observations, with
+explicit gaps. Do not use an invalid summary, invent summary text, silently
+omit documents whose root summary is unavailable, or claim semantic completeness.
+
+The acceptance and its limitations follow the draft, evaluation, compiled
+approval and reuse handoff. Missing observations stay pending; reuse does not
+implicitly re-extract them. Acceptance does not waive source integrity, evidence
+grounding, identity safety, final schema approval or truthful answer limitations.
+In particular, an overall percentage cannot establish that a specific repair's
+safety instructions or required parts are complete.
+
 ## Discovery persistence and resume
 
 Persist raw responses and validated observation records per chunk using

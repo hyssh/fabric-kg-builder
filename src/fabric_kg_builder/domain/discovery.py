@@ -1504,7 +1504,7 @@ def load_discovery(path: Path) -> DiscoveryRun:
     return DiscoveryRun.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def discovery_design_artifacts(run: DiscoveryRun, *, preflight, verified_at_utc):
+def discovery_design_artifacts(run: DiscoveryRun, *, preflight, verified_at_utc, acceptance=None):
     """Legacy L1 evidence carriers over prepared units, not a second sampling pass.
 
 The legacy carrier still disclaims extraction authority. Full-corpus scope and
@@ -1514,7 +1514,10 @@ the complete consolidation tree are separately bound by DiscoveryRun.
     from fabric_kg_builder.sources.corpus import DesignSampleEntry, build_design_sample_manifest
     from fabric_kg_builder.sources.evidence_verifier import mint_verified_span
 
-    if not run.full_corpus_design_ready or (
+    if acceptance is not None:
+        from .discovery_acceptance import validate_discovery_acceptance
+        validate_discovery_acceptance(acceptance, run)
+    if (not run.full_corpus_design_ready and acceptance is None) or (
         run.prepared.corpus.corpus_hash != preflight.corpus.corpus_hash
         or run.prepared.base_identity.project_id != preflight.base_identity.project_id
     ):

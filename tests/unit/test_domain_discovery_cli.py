@@ -101,12 +101,14 @@ def _paths(tmp_path, count=3):
     return source, intake_path, output, cache, args
 
 
-def _approved(tmp_path, source, intake_path, discovery, model):
+def _approved(tmp_path, source, intake_path, discovery, model, *, discovery_acceptance=None):
     draft, evaluation = tmp_path / "draft.json", tmp_path / "evaluation.json"
     design_mode = ["--sample-only"] if discovery is None else [
         "--discovery", str(discovery),
         "--discovery-node", next(iter(load_discovery(discovery).document_summaries.values())),
     ]
+    if discovery_acceptance is not None:
+        design_mode = ["--discovery", str(discovery), "--discovery-acceptance", str(discovery_acceptance)]
     _invoke([
         "domain", "design", "--input", str(source), "--intake", str(intake_path),
         *design_mode, "--out", str(draft), "--live",

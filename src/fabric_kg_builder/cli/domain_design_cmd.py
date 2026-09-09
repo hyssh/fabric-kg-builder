@@ -265,6 +265,9 @@ def domain_question_context_cmd(
                     "business_context": draft.inputs.intake.model_dump(mode="json"),
                     "problem_context": {"additional_design_description": draft.inputs.description},
                 }
+                acceptance = getattr(draft, "discovery_acceptance", None)
+                if acceptance is not None:
+                    acceptance = acceptance.binding
             else:
                 contract = load_cli_domain_contract(source_file)
                 if not isinstance(contract, DomainContractV2):
@@ -278,6 +281,12 @@ def domain_question_context_cmd(
                     "business_context": contract.business.model_dump(mode="json"),
                     "problem_context": contract.problem.model_dump(mode="json"),
                 }
+                acceptance = getattr(contract, "discovery_acceptance", None)
+            if acceptance is not None:
+                from fabric_kg_builder.serving.structured_publication import discovery_coverage_context
+
+                values["discovery_acceptance"] = acceptance.model_dump(mode="json")
+                values["discovery_coverage"] = discovery_coverage_context(acceptance)
             routed = {item["question_id"] for item in context["questions"]} if context else set()
             values.update({
                 "artifact_kind": "domain.question_context", "artifact_version": "1.0.0",
@@ -439,6 +448,50 @@ def domain_discover_cmd(
     click.echo(canonical_json(result))
 
 
+@click.command("accept-discovery-partial")
+@click.option("--file", "discovery_file", required=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--out", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--min-chunk-coverage", "--min-coverage", default="0.99", show_default=True,
+              type=str,
+              help="Exact threshold from 0.99 to 1: typed-response chunks / ALL planned chunks, not candidate counts.")
+@click.option("--actor", required=True, help="Reviewer accepting the explicitly reported coverage gaps.")
+@click.option("--rationale", required=True, help="Why this partial coverage is sufficient for the reviewed prototype.")
+@click.option("--accept", is_flag=True, help="Write the reviewed local acceptance artifact; otherwise plan only.")
+@click.option("--dry-run", is_flag=True, help="Read-only review; no model calls or artifact writes.")
+@click.pass_context
+def domain_accept_discovery_partial_cmd(
+    ctx, discovery_file, out, min_chunk_coverage, actor, rationale, accept, dry_run,
+) -> None:
+    """Review partial discovery without marking it complete or approving an ontology."""
+    planning = dry_run or bool(_root_options(ctx).get("dry_run")) or not accept
+    if accept and planning:
+        raise click.UsageError("--dry-run cannot be combined with --accept")
+    try:
+        from fabric_kg_builder.domain.discovery_acceptance import (
+            accept_discovery_partial, save_discovery_acceptance,
+        )
+
+        run = _discovery_core().load_discovery(discovery_file)
+        acceptance = accept_discovery_partial(
+            run, min_chunk_coverage=min_chunk_coverage, actor=actor, rationale=rationale,
+        )
+        if not planning:
+            save_discovery_acceptance(out, acceptance)
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(canonical_json({
+        "operation": "domain.accept-discovery-partial",
+        "status": "planned" if planning else "partial_accepted",
+        "artifact": None if planning else str(out),
+        "model_calls": 0, "writes": 0 if planning else 1,
+        "discovery_status": run.status,
+        "full_corpus_design_ready": run.full_corpus_design_ready,
+        "ontology_approved": False, "evidence_approved": False,
+        "result": _payload(acceptance),
+    }))
+
+
 @click.command("design")
 @click.option("--input", "source", required=True,
               type=click.Path(exists=True, path_type=Path))
@@ -449,9 +502,12 @@ def domain_discover_cmd(
               help="Full safe YAML reference context, including generic sketches; never evidence or approval.")
 @click.option("--description", help="Additional design context; does not replace the full seed.")
 @click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="Complete immutable full-corpus discovery; the default design workflow.")
+              help="Immutable discovery; complete by default, or explicitly reviewed partial coverage.")
+@click.option("--discovery-acceptance", "--coverage-acceptance", "discovery_acceptance_file",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Exact reviewed partial-coverage acceptance; requires --discovery and never approves the draft.")
 @click.option("--discovery-node", "discovery_nodes", multiple=True,
-              help="Additional exact document/corpus summary node ID; repeat for bounded detail beside the corpus root.")
+              help="Additional exact summary node ID, or acceptance context_nodes ID for partial discovery.")
 @click.option("--sample-only", is_flag=True,
               help="Explicit legacy bounded-sample compatibility, NOT full-corpus discovery.")
 @click.option("--project-id", help="Stable project identity (default: project:<source name>).")
@@ -468,8 +524,9 @@ def domain_design_cmd(
     live: bool, dry_run: bool, max_calls: int,
     proposal_trace_dir: Path | None,
     discovery_file: Path | None, sample_only: bool, discovery_nodes: tuple[str, ...],
+    discovery_acceptance_file: Path | None,
 ) -> None:
-    """Design an unapproved ontology from intent, seed and complete corpus discovery.
+    """Design an unapproved ontology from intent, seed and reviewed corpus discovery.
 
     Saving a draft does not require complete question coverage. Reference examples
     are suggestions, never verified facts. Use evaluate-design for local structural
@@ -483,6 +540,8 @@ def domain_design_cmd(
         )
     if discovery_nodes and discovery_file is None:
         raise click.UsageError("--discovery-node requires --discovery")
+    if discovery_acceptance_file is not None and discovery_file is None:
+        raise click.UsageError("--discovery-acceptance requires --discovery")
     if live and planning:
         raise click.UsageError("--dry-run cannot be combined with --live")
     if project_id is not None and not project_id.strip():
@@ -493,13 +552,25 @@ def domain_design_cmd(
         intake_raw = load_domain_intake(intake)
         core = _design_core()
         discovery = _discovery_core().load_discovery(discovery_file) if discovery_file else None
+        acceptance = None
+        if discovery_acceptance_file is not None:
+            from fabric_kg_builder.domain.discovery_acceptance import (
+                discovery_partial_design_context, load_discovery_acceptance,
+                validate_discovery_acceptance,
+            )
+
+            acceptance = load_discovery_acceptance(discovery_acceptance_file)
+            validate_discovery_acceptance(acceptance, discovery)
         if discovery is not None:
             _discovery_core().validate_discovery(discovery, source_path=source, reparse=False)
-            if not discovery.full_corpus_design_ready:
+            if not discovery.full_corpus_design_ready and acceptance is None:
                 raise ValueError("Full-corpus design requires complete discovery; resume the partial run")
-            _discovery_core().discovery_design_context(
-                discovery, node_ids=list(dict.fromkeys([discovery.corpus_summary_id, *discovery_nodes])),
-            )
+            if acceptance is not None:
+                discovery_partial_design_context(discovery, acceptance, node_ids=list(discovery_nodes) or None)
+            else:
+                _discovery_core().discovery_design_context(
+                    discovery, node_ids=list(dict.fromkeys([discovery.corpus_summary_id, *discovery_nodes])),
+                )
         seed = core._read_seed(seed_domain)
         seed_hash = seed.content_sha256 if seed else None
         client, model_version = (None, "planned-model")
@@ -528,7 +599,15 @@ def domain_design_cmd(
                 "planned_model_calls": 1,
                 "writes": 0,
                 "samples_materialized": False,
-                "design_mode": "sample_only" if sample_only else "full_corpus_discovery",
+                "design_mode": "sample_only" if sample_only else (
+                    "reviewed_partial_discovery" if acceptance is not None else "full_corpus_discovery"
+                ),
+                **({
+                    "discovery_acceptance": _payload(acceptance),
+                    "discovery_status": discovery.status,
+                    "full_corpus_design_ready": discovery.full_corpus_design_ready,
+                    **_discovery_report(discovery),
+                } if acceptance is not None else {}),
                 **({
                     "discovery_hash": discovery.run_hash,
                     "prepared_corpus_hash": discovery.prepared.prepared_hash,
@@ -553,6 +632,7 @@ def domain_design_cmd(
             result = core.generate_domain_design(
                 preflight, client=client, seed_path=seed_domain,
                 **({"discovery": discovery} if discovery is not None else {"sample_only": True}),
+                **({"discovery_acceptance": acceptance} if acceptance is not None else {}),
                 **({"discovery_node_ids": list(discovery_nodes)} if discovery_nodes else {}),
                 **({"description": description} if description is not None else {}),
                 **({

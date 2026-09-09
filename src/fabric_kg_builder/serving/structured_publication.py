@@ -928,6 +928,24 @@ def _publication_authority(
     return contract, row
 
 
+def discovery_coverage_context(acceptance) -> dict[str, Any]:
+    """Project reviewed coverage counts, never evidence or completeness clearance."""
+    unknown = acceptance.total_chunks - acceptance.accounted_chunks
+    return {
+        "status": "pending_review",
+        "acceptance_hash": acceptance.acceptance_hash,
+        "discovery_run_hash": acceptance.discovery_run_hash,
+        "accounted_chunks": acceptance.accounted_chunks,
+        "total_chunks": acceptance.total_chunks,
+        "unknown_chunk_count": unknown,
+        "reason_counts": {"discovery_coverage_waived_pending": unknown},
+        "count_basis": "reviewed_discovery_chunks_not_candidates",
+        "completeness_asserted": False,
+        "quarantine_and_summary_gaps_cleared": False,
+        "candidate_mapping_or_evidence_approved": False,
+    }
+
+
 def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, Any]:
     """Read question intentions from existing sealed authority, not new serving rows."""
     from fabric_kg_builder.domain.question_routing import question_routing_context
@@ -955,6 +973,10 @@ def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, 
         "problem_context": contract.problem.model_dump(mode="json"),
         "execution_verified": False,
     }
+    acceptance = getattr(contract, "discovery_acceptance", None)
+    if acceptance is not None:
+        values["discovery_acceptance"] = acceptance.model_dump(mode="json")
+        values["discovery_coverage"] = discovery_coverage_context(acceptance)
     return {**values, "export_hash": canonical_sha256(values)}
 
 

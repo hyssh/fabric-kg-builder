@@ -377,7 +377,14 @@ def _selection_id(lakehouse_id: str, path: str) -> str:
 
 def _definition(handoff: _Handoff, name: str, search: dict[str, Any] | None) -> dict[str, Any]:
     context = handoff.context
-    instruction = (
+    coverage_warning = (
+        "This prototype uses explicitly accepted partial discovery coverage. The sealed acceptance "
+        "records residual missing-source, quarantine and summary gaps. Acceptance does not make unknown "
+        "data absent or approve evidence. Chunk coverage does not establish semantic recall or coverage "
+        "of business-critical evidence. Describe aggregates as covering the available validated subset, "
+        "not the full source population; disclose these gaps and do not infer absence from missing records.\n\n"
+    ) if context.get("discovery_acceptance") is not None else ""
+    instruction = coverage_warning + (
         "Use the attached Ontology first for canonical entity meanings, relationships, and semantic navigation. "
         "For SQL-routed questions, counts, joins, filters, and analytics, use only the attached Lakehouse's "
         "SQL analytics endpoint and its selected dbo tables. Never silently substitute GQL for a SQL-required "

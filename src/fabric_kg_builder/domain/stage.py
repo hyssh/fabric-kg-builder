@@ -2067,6 +2067,7 @@ def prepare_l1_stage(
     design_prompt_binding: tuple[str, str] | None = None,
     design_description: str | None = None,
     design_discovery: Any = None,
+    design_discovery_acceptance: Any = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
     started = started_at_utc or _utc_now()
@@ -2104,6 +2105,8 @@ def prepare_l1_stage(
         )
     if len(supplemental_design_locations) > 16:
         raise L1StageError("supplemental design evidence is capped at 16 findings")
+    if design_discovery_acceptance is not None and design_discovery is None:
+        raise L1StageError("Partial acceptance requires its exact discovery run")
     if design_discovery is not None:
         if design_prompt_binding is None or client is not None or candidates is None or supplemental_design_locations:
             raise L1StageError("Discovery evidence requires model-free design compilation without supplemental sampling")
@@ -2111,7 +2114,7 @@ def prepare_l1_stage(
         design_discovery = DiscoveryRun.model_validate(design_discovery.model_dump(mode="python"))
         validate_discovery(design_discovery, source_path=preflight.source_path, reparse=False)
         sample_manifest, profile, source_units, evidence_spans = discovery_design_artifacts(
-            design_discovery, preflight=preflight, verified_at_utc=started,
+            design_discovery, preflight=preflight, verified_at_utc=started, acceptance=design_discovery_acceptance,
         )
     else:
         sample_manifest, profile, source_units, evidence_spans = build_l1_design_artifacts(
@@ -2921,6 +2924,8 @@ def prepare_l1_stage(
     if design_discovery is not None:
         payload = draft_contract.model_dump(mode="python")
         payload["discovery_run_hash"] = design_discovery.run_hash
+        if design_discovery_acceptance is not None:
+            payload["discovery_acceptance"] = design_discovery_acceptance.binding.model_dump(mode="python")
         draft_contract = DomainContractV2.model_validate(payload)
     try:
         design_context = _build_design_context(

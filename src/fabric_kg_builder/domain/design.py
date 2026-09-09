@@ -40,6 +40,10 @@ from .question_routing import (
 )
 from .stage import L1Preflight, L1PreparedStage, _TracedProposalClient, _evidence_payload, prepare_l1_stage
 from .discovery import DiscoveryRun, discovery_design_artifacts, discovery_design_context, discovery_grounding_report, validate_discovery
+from .discovery_acceptance import (
+    DiscoveryAcceptanceBinding, DiscoveryPartialAcceptance,
+    discovery_partial_design_context, validate_discovery_acceptance,
+)
 
 DESIGN_PROMPT_VERSION = "domain-design/1.6.0"
 DESIGN_EVALUATOR_VERSION = "domain-design-evaluator/1.4.0"
@@ -161,6 +165,21 @@ DISCOVERY_DESIGN_PROMPT_HASH = canonical_sha256({
     "version": DISCOVERY_DESIGN_PROMPT_VERSION, "system": DISCOVERY_DESIGN_SYSTEM,
     "schema": DomainDesignSketch.model_json_schema(),
 })
+PARTIAL_DESIGN_PROMPT_VERSION = "domain-design/3.0.0"
+PARTIAL_DESIGN_SYSTEM = DESIGN_SYSTEM_PROMPT + """
+This design uses explicitly reviewed PARTIAL prototype discovery. Coverage
+acceptance is NOT ontology approval, evidence approval, answer verification or a
+semantic recall claim. All declared documents remain indexed; failed/deferred
+chunks, quarantines and missing summaries remain explicit unresolved gaps.
+Use only the supplied valid summary excerpts and anchor-grounded proposed term
+previews as unapproved interpretations, alongside business intent and questions.
+The deterministic frontier contains references, not newly synthesized facts.
+Do not invent evidence IDs or facts from failures, quarantines or envelope extras.
+Empty evidence_ids are allowed. Child context IDs support bounded retrieval."""
+PARTIAL_DESIGN_PROMPT_HASH = canonical_sha256({
+    "version": PARTIAL_DESIGN_PROMPT_VERSION, "system": PARTIAL_DESIGN_SYSTEM,
+    "schema": DomainDesignSketch.model_json_schema(),
+})
 
 
 class DesignSeedReference(ContractModel):
@@ -212,7 +231,7 @@ class DesignSamples(ContractModel):
 
 class DomainDesignDraft(ContractModel):
     artifact_kind: Literal["domain.design_draft"] = "domain.design_draft"
-    artifact_version: Literal["1.0.0", "2.0.0"] = "1.0.0"
+    artifact_version: Literal["1.0.0", "2.0.0", "3.0.0"] = "1.0.0"
     draft_id: RequiredText
     draft_hash: Sha256
     created_at_utc: datetime
@@ -220,12 +239,13 @@ class DomainDesignDraft(ContractModel):
     seed: DesignSeedReference | None
     samples: DesignSamples
     sketch: DomainDesignSketch
-    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0"] = DESIGN_PROMPT_VERSION
+    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0", "domain-design/3.0.0"] = DESIGN_PROMPT_VERSION
     prompt_hash: Sha256
     request_hash: Sha256
     model_call_count: Literal[1] = 1
     discovery: DiscoveryRun | None = None
     discovery_node_ids: list[str] | None = None
+    discovery_acceptance: DiscoveryPartialAcceptance | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
@@ -234,20 +254,27 @@ class DomainDesignDraft(ContractModel):
             values.pop("discovery", None)
         if self.discovery_node_ids is None:
             values.pop("discovery_node_ids", None)
+        if self.discovery_acceptance is None:
+            values.pop("discovery_acceptance", None)
         return values
 
     @model_validator(mode="after")
     def _binding(self) -> "DomainDesignDraft":
         expected_hash = DISCOVERY_DESIGN_PROMPT_HASH if self.discovery is not None else DESIGN_PROMPT_HASH
         expected_version = DISCOVERY_DESIGN_PROMPT_VERSION if self.discovery is not None else DESIGN_PROMPT_VERSION
+        if self.discovery_acceptance is not None:
+            if self.discovery is None:
+                raise ValueError("partial acceptance requires discovery")
+            validate_discovery_acceptance(self.discovery_acceptance, self.discovery)
+            expected_hash, expected_version = PARTIAL_DESIGN_PROMPT_HASH, PARTIAL_DESIGN_PROMPT_VERSION
         if self.prompt_hash != expected_hash or self.prompt_version != expected_version:
             raise ValueError("design prompt binding is unsupported")
-        if self.artifact_version != ("2.0.0" if self.discovery is not None else "1.0.0"):
+        if self.artifact_version != ("3.0.0" if self.discovery_acceptance is not None else "2.0.0" if self.discovery is not None else "1.0.0"):
             raise ValueError("design artifact version disagrees with discovery scope")
         if self.discovery is None and self.discovery_node_ids is not None:
             raise ValueError("retrieval requires discovery")
         if self.discovery is not None and (
-            not self.discovery.full_corpus_design_ready
+            (not self.discovery.full_corpus_design_ready and self.discovery_acceptance is None)
             or self.discovery.prepared.corpus.corpus_hash != self.inputs.corpus.corpus_hash
             or self.discovery.prepared.base_identity.project_id != self.inputs.base_identity.project_id
         ):
@@ -257,7 +284,7 @@ class DomainDesignDraft(ContractModel):
             raise ValueError("design draft hash mismatch")
         if self.draft_id != deterministic_contract_id("domain-design-draft", {"draft_hash": self.draft_hash}):
             raise ValueError("design draft ID mismatch")
-        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids)):
+        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids, self.discovery_acceptance)):
             raise ValueError("design request does not bind full seed/intake/samples")
         _validate_design_structure(self)
         return self
@@ -285,12 +312,15 @@ class DomainDesignEvaluation(ContractModel):
     evaluation_hash: Sha256
     answer_verification: Literal["not_performed"] = "not_performed"
     question_routing: QuestionRoutingContext | None = None
+    discovery_acceptance: DiscoveryAcceptanceBinding | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         values = handler(self)
         if self.question_routing is None:
             values.pop("question_routing", None)
+        if self.discovery_acceptance is None:
+            values.pop("discovery_acceptance", None)
         return values
 
     @model_validator(mode="after")
@@ -350,7 +380,7 @@ def read_design_seed(path: Path | None) -> DesignSeedReference | None:
 _read_seed = read_design_seed
 
 
-def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None) -> dict[str, Any]:
+def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None, discovery_acceptance: DiscoveryPartialAcceptance | None = None) -> dict[str, Any]:
     user = build_proposal_user_message(
         inputs.intake,
         source_profile_summary=samples.source_profile.model_dump(mode="json", exclude={"identity"}),
@@ -361,13 +391,17 @@ def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samp
     )
     if inputs.description is not None:
         user += "\nAdditional user design description (context, not verified evidence):\n" + canonical_json(inputs.description)
-    if discovery is not None:
+    if discovery_acceptance is not None:
+        user += "\nReviewed partial discovery context (coverage-only acceptance, not approval):\n" + canonical_json(
+            discovery_partial_design_context(discovery, discovery_acceptance, node_ids=discovery_node_ids)
+        )
+    elif discovery is not None:
         selected_nodes = list(dict.fromkeys([discovery.corpus_summary_id, *(discovery_node_ids or [])]))
         user += "\nComplete discovery synthesis and provenance (unapproved interpretations):\n" + canonical_json(
             discovery_design_context(discovery, node_ids=selected_nodes)
         )
     return {
-        "system": DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
+        "system": PARTIAL_DESIGN_SYSTEM if discovery_acceptance is not None else DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
         "json_schema": DomainDesignSketch.model_json_schema(),
         "max_completion_tokens": 16_000, "max_attempts": 1,
     }
@@ -450,6 +484,7 @@ def generate_domain_design(
     discovery: DiscoveryRun | None = None,
     sample_only: bool = False,
     discovery_node_ids: list[str] | None = None,
+    discovery_acceptance: DiscoveryPartialAcceptance | None = None,
     proposal_trace_callback: Callable[[dict[str, Any]], None] | None = None,
     max_prompt_chars: int = 192_000,
 ) -> DomainDesignDraft:
@@ -458,13 +493,15 @@ def generate_domain_design(
         raise DomainDesignError("Complete discovery is required by default; use explicit sample_only=True for legacy bounded sampling")
     if discovery is not None and sample_only:
         raise DomainDesignError("Choose discovery or explicit sample-only mode, not both")
+    if discovery_acceptance is not None and discovery is None:
+        raise DomainDesignError("Partial acceptance requires its exact discovery run")
     validate_corpus_manifest_against_source(
         preflight.corpus, preflight.source_path, identity=preflight.base_identity
     )
     created = datetime.now(timezone.utc)
     if discovery is not None:
         validate_discovery(discovery, source_path=preflight.source_path, reparse=False)
-        sample, profile, units, spans = discovery_design_artifacts(discovery, preflight=preflight, verified_at_utc=created)
+        sample, profile, units, spans = discovery_design_artifacts(discovery, preflight=preflight, verified_at_utc=created, acceptance=discovery_acceptance)
     else:
         sample, profile, units, spans = build_l1_design_artifacts(
             preflight.source_path, corpus=preflight.corpus,
@@ -479,7 +516,7 @@ def generate_domain_design(
     )
     samples = DesignSamples(sample_manifest=sample, source_profile=profile, source_units=units, evidence_spans=spans)
     seed = read_design_seed(seed_path)
-    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids)
+    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids, discovery_acceptance)
     if max_prompt_chars < 256 or len(canonical_json(request)) > max_prompt_chars:
         raise DomainDesignError("Full seed/intake/sample request exceeds design prompt budget; nothing was truncated")
     if proposal_trace_callback is not None:
@@ -497,6 +534,11 @@ def generate_domain_design(
         values["discovery"] = discovery
     if discovery_node_ids is not None:
         values["discovery_node_ids"] = discovery_node_ids
+    if discovery_acceptance is not None:
+        values.update(
+            discovery_acceptance=discovery_acceptance, artifact_version="3.0.0",
+            prompt_version=PARTIAL_DESIGN_PROMPT_VERSION, prompt_hash=PARTIAL_DESIGN_PROMPT_HASH,
+        )
     digest = canonical_sha256(values)
     return DomainDesignDraft(
         **values, draft_hash=digest,
@@ -613,6 +655,11 @@ def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
     relationships = {item.key: item for item in sketch.relationships}
     effective_questions = routed_question_copies(draft.inputs.intake.competency_questions, sketch.question_routes)
     findings = [*sketch.review_concerns, *_seed_concerns(draft)]
+    if draft.discovery_acceptance is not None:
+        findings.append(DesignFinding(
+            code="discovery_partial_accepted",
+            message="Prototype chunk coverage only was explicitly accepted; unresolved source, summary and grounding gaps remain. Quantitative criticality, semantic recall and answer verification remain unproven. " + canonical_json(draft.discovery_acceptance.binding),
+        ))
     if draft.discovery is not None:
         grounding = discovery_grounding_report(draft.discovery)
         if grounding["quarantined_candidate_count"]:
@@ -755,6 +802,8 @@ def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
     routing_context = question_routing_context({"competency_questions": effective_questions})
     if routing_context is not None:
         values["question_routing"] = QuestionRoutingContext.model_validate(routing_context)
+    if draft.discovery_acceptance is not None:
+        values["discovery_acceptance"] = draft.discovery_acceptance.binding
     digest = canonical_sha256(values)
     return DomainDesignEvaluation(
         **values, evaluation_hash=digest,
@@ -813,6 +862,7 @@ def compile_domain_design(
             design_prompt_binding=(draft.prompt_version, draft.prompt_hash),
             design_description=draft.inputs.description,
             design_discovery=draft.discovery,
+            design_discovery_acceptance=draft.discovery_acceptance,
         )
     except Exception as exc:
         raise DesignCapabilityError([DesignFinding(

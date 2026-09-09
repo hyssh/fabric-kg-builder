@@ -93,6 +93,30 @@ Only a complete discovery result is used for the normal design path. Completion
 means accounted source/chunk processing and consolidation, not perfect semantic
 recall. Inspect candidate grounding quality and pending work as well as status.
 
+An explicit prototype coverage acceptance can admit a partial run at an exact
+99% or greater processed-chunk ratio. First inspect the local plan, then add
+`--accept` to record the user's reviewed exception:
+
+```bash
+fabric-kg domain accept-discovery-partial --file .fkg/discovery/run-1.json \
+  --min-chunk-coverage 0.99 --actor reviewer \
+  --rationale "Prototype coverage accepted; retain remaining gaps for review" \
+  --out .fkg/discovery/coverage-acceptance.json
+```
+
+This does not alter the partial run or approve ontology facts. Pass the resulting
+artifact to `domain design --discovery-acceptance FILE` alongside its exact
+`--discovery`. All documents remain represented in a bounded valid-summary
+frontier, with missing processing, summary and grounding warnings. Initial
+acceptance checks current sources. After ontology approval, replay checks the
+actual supplied source mount and reconstructs the exact sealed acceptance;
+relocating identical bytes does not authorize a changed corpus.
+
+The threshold uses processed/no-candidates chunks, not candidate grounding or
+semantic recall. Accepted gaps remain `pending_review` through serving and agent
+context; permissions, evidence verification and final schema approval remain
+separate gates. Default behavior stays strict without an acceptance artifact.
+
 Grounding retains every original observation in a ledger. Exact primary-source
 matches enter a verified subset; ambiguous, malformed or context-only observations
 remain quarantined with stable IDs and reasons. A processed chunk with quarantine

@@ -439,7 +439,8 @@ def test_live_requires_prior_plan_and_explicit_preview(published):
     assert published.backend.calls == []
 
 
-def test_source_context_keeps_background_pending_and_sql_intentions(published):
+@pytest.mark.parametrize("accepted_partial", [False, True])
+def test_source_context_keeps_background_pending_and_sql_intentions(published, accepted_partial):
     handoff = agent._handoff(**{
         key: value for key, value in published.kwargs.items() if key != "out_state"
     })
@@ -453,6 +454,11 @@ def test_source_context_keeps_background_pending_and_sql_intentions(published):
             "pending_requirements": ["Count grain requires reviewed canonical identities"],
         }]},
     }
+    if accepted_partial:
+        context["discovery_acceptance"] = {
+            "acceptance_hash": "reviewed-acceptance-hash",
+            "status": "partial_accepted", "accounted_chunks": 100, "total_chunks": 100,
+        }
     definition = agent._definition(dataclasses.replace(handoff, context=context), "fixture", None)
     snapshot = decode_stage_snapshot(definition, "draft")
     assert canonical_json(context) in snapshot.instruction
@@ -462,6 +468,9 @@ def test_source_context_keeps_background_pending_and_sql_intentions(published):
     assert '"physical_binding_state":"unresolved"' in snapshot.instruction
     assert handoff.evidence_binding["evidence_count"] > 0
     assert handoff.evidence_binding["agent_text_access"].startswith("not-established")
+    assert ("do not infer absence from missing records" in snapshot.instruction) == accepted_partial
+    assert ("does not establish semantic recall" in snapshot.instruction) == accepted_partial
+    assert "asking user's permissions" in snapshot.instruction
 
 
 def _configured_search(published):

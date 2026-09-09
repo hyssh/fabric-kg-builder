@@ -15,6 +15,7 @@ from .domain_assessment_cmd import (
 )
 from .layout_cache_cmd import domain_analyze_layout_cmd
 from .domain_design_cmd import (
+    domain_accept_discovery_partial_cmd,
     domain_discover_cmd,
     domain_compile_design_cmd,
     domain_design_cmd,
@@ -171,6 +172,8 @@ domain_cmd.add_command(domain_assessment_schema_cmd)
 domain_cmd.add_command(domain_analyze_layout_cmd)
 domain_cmd.add_command(domain_design_cmd)
 domain_cmd.add_command(domain_discover_cmd)
+domain_cmd.add_command(domain_accept_discovery_partial_cmd)
+domain_cmd.add_command(domain_accept_discovery_partial_cmd, "accept-discovery")
 domain_cmd.add_command(domain_design_schema_cmd)
 domain_cmd.add_command(domain_evaluate_design_cmd)
 domain_cmd.add_command(domain_compile_design_cmd)

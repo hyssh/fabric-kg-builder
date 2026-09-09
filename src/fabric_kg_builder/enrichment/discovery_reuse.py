@@ -14,6 +14,7 @@ from fabric_kg_builder.domain.models import DomainContractV2
 from .schema2_extraction import ClosedVocabulary, RawCandidateResponse
 
 REUSE_VERSION = "discovery-approved-replay/1.4.0"
+PARTIAL_REUSE_VERSION = "discovery-approved-replay/1.5.0"
 
 
 @dataclass(frozen=True)
@@ -436,6 +437,14 @@ def _prepare_reuse(discovery_file, source_path, l1_state_root, domain_path, ocr_
         or inputs.l1_receipt.identity.project_id != run.prepared.base_identity.project_id
     ):
         raise ValueError("DISCOVERY_APPROVED_AUTHORITY_DRIFT: project or corpus differs")
+    acceptance = None
+    binding = getattr(inputs.domain_contract, "discovery_acceptance", None)
+    if binding is not None:
+        from fabric_kg_builder.domain.discovery_acceptance import resolve_discovery_acceptance
+
+        acceptance = resolve_discovery_acceptance(binding, run)
+    elif not run.full_corpus_design_ready:
+        raise ValueError("DISCOVERY_REPLAY_PARTIAL_REQUIRES_ACCEPTANCE: partial discovery needs exact reviewed L1 acceptance")
     reader = None
     if ocr_cache is not None:
         reader = indexed_corpus_reader(
@@ -457,7 +466,7 @@ def _prepare_reuse(discovery_file, source_path, l1_state_root, domain_path, ocr_
             previous.text_content_hash, previous.locator, previous.ordinal, previous.parent_source_unit_id, previous.unit_kind,
         ):
             raise ValueError("DISCOVERY_SOURCE_UNIT_CONTENT_DRIFT")
-    return inputs, run, replay_reader, materialized
+    return inputs, run, replay_reader, materialized, acceptance
 
 
 @_locked_reuse
@@ -486,9 +495,21 @@ def run_discovery_reuse(
     )
     from .schema2_work_units import WorkUnitCheckpoint, plan_work_units, split_work_unit
 
-    inputs, run, reader, materialized = _prepare_reuse(
+    inputs, run, reader, materialized, acceptance = _prepare_reuse(
         discovery_file, source_path, l1_state_root, domain_path, ocr_cache, ocr_identity,
     )
+    reuse_version = PARTIAL_REUSE_VERSION if acceptance is not None else REUSE_VERSION
+    waived_missing = set(acceptance.failed_chunk_ids + acceptance.deferred_chunk_ids) if acceptance else set()
+    coverage_gaps = {
+        "per_file_coverage": acceptance.per_file_coverage,
+        "failed_chunk_ids": acceptance.failed_chunk_ids,
+        "deferred_chunk_ids": acceptance.deferred_chunk_ids,
+        "grounding": acceptance.grounding,
+        "missing_document_summary_ids": acceptance.missing_document_summary_ids,
+        "corpus_summary_missing": acceptance.corpus_summary_missing,
+        "failed_summary_metadata": acceptance.failed_summary_metadata,
+        "run_issues": acceptance.run_issues,
+    } if acceptance is not None else None
     source_accounting = discovery_grounding_report(run, include_ledger_accounting=True)
     vocabulary = compile_closed_vocabulary(inputs.domain_contract)
     units = {item.source_unit_id: item for item in materialized.source_units}
@@ -501,7 +522,7 @@ def run_discovery_reuse(
             })
             or previous.get("discovery_hash") != run.run_hash
             or previous.get("domain_contract_hash") != vocabulary.contract_hash
-            or previous.get("reuse_version") != REUSE_VERSION
+            or previous.get("reuse_version") != reuse_version
         ):
             raise ValueError("DISCOVERY_REUSE_AUTHORITY_DRIFT: choose a fresh L2 state")
     mapped_chunks, provenance, pending, missing = [], [], [], []
@@ -583,7 +604,7 @@ def run_discovery_reuse(
             }
             target_key = canonical_sha256({
                 "request": request, "original_observation_hash": observation.artifact_hash,
-                "model_hash": run.model_hash, "reuse_version": REUSE_VERSION,
+                "model_hash": run.model_hash, "reuse_version": reuse_version,
             })
             cache_path = state_root / "discovery-targeted-cache" / f"{target_key}.json"
             target = None
@@ -699,6 +720,18 @@ def run_discovery_reuse(
             })
         if mapped is None:
             missing.append(chunk.chunk_id)
+            if chunk.chunk_id in waived_missing:
+                provenance.append({
+                    "chunk_id": chunk.chunk_id, "source_unit_id": chunk.source_unit_id,
+                    "original_observation_hash": observation.artifact_hash,
+                    "raw_response_hash": canonical_sha256(observation.raw_response) if observation.raw_response is not None else None,
+                    "disposition": "pending_accepted_coverage", "mapped_response_hash": None,
+                    "pending_reasons": list(reasons),
+                    "original_candidate_dispositions": original_rows,
+                    "original_envelope_anomalies": envelope_anomalies,
+                    "targeted_request_hash": targeted_request_hash,
+                    "targeted_raw_response_hash": targeted_raw_response_hash,
+                })
             continue
         mapped_chunks.append((chunk, mapped))
         provenance.append({
@@ -721,9 +754,15 @@ def run_discovery_reuse(
         })
     summary = {
         "operation": "enrich.discovery-reuse", "status": "planned" if dry_run else (
-            "pending_review" if pending else "replayed"
+            "pending_review" if pending or acceptance is not None else "replayed"
         ),
         "discovery_hash": run.run_hash, "discovery_status": run.status,
+        **({
+            "discovery_acceptance": acceptance.binding.model_dump(mode="json"),
+            "coverage_gaps": coverage_gaps,
+            "full_corpus_design_ready": run.full_corpus_design_ready,
+            "coverage_authority": "reviewed_available_subset_only",
+        } if acceptance is not None else {}),
         "prepared_corpus_hash": run.prepared.prepared_hash,
         "domain_contract_hash": vocabulary.contract_hash,
         "total_chunks": len(run.chunks), "reused_chunks": len(mapped_chunks) - targeted_calls,
@@ -771,12 +810,12 @@ def run_discovery_reuse(
     }
     if dry_run:
         return {**summary, "writes": 0}
-    if missing:
+    if set(missing) - waived_missing:
         raise ValueError("DISCOVERY_REPLAY_PENDING: missing/ambiguous chunks require explicit targeted re-extraction: " + canonical_json(summary))
 
     authority_values = {
         "artifact_kind": "discovery.approved_reuse", "artifact_version": "1.0.0",
-        "reuse_version": REUSE_VERSION, "discovery_hash": run.run_hash,
+        "reuse_version": reuse_version, "discovery_hash": run.run_hash,
         "prepared_corpus_hash": run.prepared.prepared_hash, "domain_contract_hash": vocabulary.contract_hash,
         "approved_l1_receipt_hash": inputs.l1_receipt.receipt_hash,
         "source_unit_rebindings": [{
@@ -787,18 +826,23 @@ def run_discovery_reuse(
             "approved_identity_hash": canonical_sha256(units[original.source_unit_id].identity),
         } for original in run.prepared.source_units],
         "chunks": provenance,
+        **({
+            "discovery_acceptance": acceptance.binding.model_dump(mode="json"),
+            "coverage_gaps": coverage_gaps, "pending_chunks": pending, "missing_chunks": missing,
+            "coverage_authority": "reviewed_available_subset_only",
+        } if acceptance is not None else {}),
     }
     prompt_hash = canonical_sha256(authority_values)
     _persist_exact(authority_path, {
         **authority_values, "artifact_hash": prompt_hash,
     })
     identity = stage._clean_identity(
-        inputs.l1_receipt.identity, contract_kind="l2.stage", prompt_version=REUSE_VERSION,
+        inputs.l1_receipt.identity, contract_kind="l2.stage", prompt_version=reuse_version,
         prompt_hash=prompt_hash, model_version=run.model_version, model_hash=run.model_hash,
         extractor_name="discovery-replay", extractor_version="1.0.0",
     )
     fingerprint = l2_input_fingerprint(
-        inputs, materialized.source_unit_manifest, prompt_version=REUSE_VERSION, prompt_hash=prompt_hash,
+        inputs, materialized.source_unit_manifest, prompt_version=reuse_version, prompt_hash=prompt_hash,
         model_version=run.model_version, model_hash=run.model_hash,
         extractor_name="discovery-replay", extractor_version="1.0.0",
         response_schema_hash=stage.L2_RESPONSE_SCHEMA_HASH, split_policy_version="paragraph-sentence-token/1.0.0",
@@ -806,6 +850,7 @@ def run_discovery_reuse(
     checkpoint = WorkUnitCheckpoint(state_root / "checkpoint.json", state_root / "checkpoint-leaves")
     extraction_authority = stage._authority(inputs, materialized)
     positioned: dict[str, list[tuple[dict, int]]] = {uid: [] for uid in units}
+    pending_ranges = [item.chunk for item in run.chunks if item.chunk.chunk_id in missing]
     for chunk, mapped in mapped_chunks:
         for item in mapped.response["candidates"]:
             anchor = item.get("anchor") or next(iter(item.get("anchors", [])), None)
@@ -832,10 +877,20 @@ def run_discovery_reuse(
             [item for item, _ in items], vocabulary=vocabulary, contract=inputs.domain_contract,
             authority=extraction_authority, base_identity=identity,
             source_unit_id=work.source_unit_id, work_unit_id=work.work_unit_id,
-            classifier_version=REUSE_VERSION, prompt_hash=prompt_hash, model_hash=run.model_hash,
+            classifier_version=reuse_version, prompt_hash=prompt_hash, model_hash=run.model_hash,
             extractor_name="discovery-replay", extractor_version="1.0.0",
             occurred_at_utc=inputs.l1_receipt.completed_at_utc,
         )
+        pending_count = sum(
+            chunk.source_unit_id == work.source_unit_id
+            and max(chunk.slice_start, work.slice_start) < min(chunk.slice_end, work.slice_end)
+            for chunk in pending_ranges
+        )
+        if pending_count:
+            # An empty derived subset is not a received no-candidates response.
+            leaf = replace(leaf, audit_reason_counts=tuple(sorted([
+                *leaf.audit_reason_counts, ("discovery_coverage_waived_pending", pending_count),
+            ])))
         checkpoint.record_leaf(work, extraction_leaf_to_dict(leaf))
 
     for root in plan_work_units(
@@ -849,9 +904,9 @@ def run_discovery_reuse(
 
     result = stage.run_l2(
         reader=reader, service=NoImplicitModel(), state_root=state_root, l1_state_root=l1_state_root,
-        domain_path=domain_path, prompt_version=REUSE_VERSION, prompt_hash=prompt_hash,
+        domain_path=domain_path, prompt_version=reuse_version, prompt_hash=prompt_hash,
         model_version=run.model_version, model_hash=run.model_hash,
-        extractor_name="discovery-replay", extractor_version="1.0.0", classifier_version=REUSE_VERSION,
+        extractor_name="discovery-replay", extractor_version="1.0.0", classifier_version=reuse_version,
     )
     return {
         **summary, "l2_model_calls": result.metrics.foundry_calls,
