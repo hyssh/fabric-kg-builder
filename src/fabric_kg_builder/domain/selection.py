@@ -8,6 +8,7 @@ from math import fsum
 from typing import Iterable
 
 from .proposal import ProposalQuestionRouteV2, RelationshipCandidateV2
+from .question_routing import SQL_ROUTING_UNRESOLVED
 
 SELECTOR_VERSION = "l1-domain-selector/1.0.0"
 
@@ -370,6 +371,9 @@ def select_relationship_vocabulary(
     states: set[frozenset[str]] = {frozenset(mandatory)}
     unsupported: dict[str, str] = {}
     for route in route_list:
+        if route.routing is not None and route.routing.backend == "lakehouse_sql":
+            unsupported[route.question_id] = SQL_ROUTING_UNRESOLVED
+            continue
         options = _enumerate_paths(route, merged, max_hops=4)
         if not options:
             unsupported[route.question_id] = (

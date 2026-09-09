@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_plugin_schema2_operations_are_registered_and_not_legacy_default():
     skill = (ROOT / "plugins/fabric-kg/skills/fabric-kg-pipeline/SKILL.md").read_text()
     for operation in (
-        "design", "evaluate-design", "compile-design",
+        "design", "evaluate-design", "compile-design", "question-context",
         "assess", "review-assessment", "revise",
     ):
         assert operation in cli.commands["domain"].commands
@@ -26,6 +26,8 @@ def test_plugin_schema2_operations_are_registered_and_not_legacy_default():
     assert "Legacy" in skill
     assert "Question references may be empty" in skill
     assert "not an approved Schema-2 domain" in skill
+    assert "routed to Lakehouse SQL" in skill
+    assert "not verified table/column bindings" in skill
 
 
 def test_machine_contract_discovery_requires_no_configuration_or_writes(tmp_path, monkeypatch):

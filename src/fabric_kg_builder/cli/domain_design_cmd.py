@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+import yaml
 from azure.core.exceptions import ClientAuthenticationError
 from openai import APIError
 
@@ -76,6 +77,7 @@ def _trace_writer(directory: Path, run_id: str):
 def domain_design_schema_cmd() -> None:
     """Print design/context/evaluation and model-response schemas; no config or calls."""
     core = _design_core()
+    from fabric_kg_builder.domain.question_routing import QuestionRoutingContext
     click.echo(canonical_json({
         "operation": "domain.design-schema",
         "schemas": {
@@ -84,9 +86,88 @@ def domain_design_schema_cmd() -> None:
                 core.DomainDesignDraft, core.DomainDesignEvaluation,
                 core.DomainDesignSketch, core.DesignInputs,
                 core.DesignSamples, core.DesignSeedReference,
+                QuestionRoutingContext,
             )
         },
     }))
+
+
+@click.command("question-context")
+@click.option("--file", "source_file",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Validated design-draft JSON or Schema-2 domain YAML/JSON.")
+@click.option("--l4-run", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Alternatively, export from a sealed L4 serving run without changing it.")
+@click.option("--l3-root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Required with --l4-run to resolve its exact upstream manifest.")
+def domain_question_context_cmd(
+    source_file: Path | None, l4_run: Path | None, l3_root: Path | None,
+) -> None:
+    """Print source-hash-bound routing/background context; no model, SQL or writes.
+
+    Declared Lakehouse SQL requirements are not physical bindings or executable
+    readiness. Unrouted question IDs and unresolved requirements remain explicit.
+    """
+    if (source_file is None) == (l4_run is None):
+        raise click.UsageError("Choose exactly one of --file or --l4-run")
+    if (l4_run is None) != (l3_root is None):
+        raise click.UsageError("--l4-run and --l3-root must be supplied together")
+    from fabric_kg_builder.domain.question_routing import (
+        question_routing_context, routed_question_copies,
+    )
+    from fabric_kg_builder.domain.models import DomainContractV2
+    from fabric_kg_builder.domain.service import compute_contract_hash
+    from fabric_kg_builder.serving.structured_publication import L5aPublicationError
+
+    try:
+        if l4_run is not None:
+            from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
+            from fabric_kg_builder.serving.structured_publication import export_serving_question_context
+
+            source = SealedL4ServingSource.from_run(
+                l4_run, input_manifest_search_roots=(l3_root,),
+            )
+            result = export_serving_question_context(source)
+        else:
+            from .domain_io import load_cli_domain_contract
+
+            raw = yaml.safe_load(source_file.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("artifact_kind") == "domain.design_draft":
+                draft = _design_core().load_domain_design(source_file)
+                questions = routed_question_copies(
+                    draft.inputs.intake.competency_questions, draft.sketch.question_routes,
+                )
+                context = question_routing_context({"competency_questions": questions})
+                values = {
+                    "source_kind": "design_draft", "source_hash": draft.draft_hash,
+                    "domain_contract_hash": None, "approval_status": "unapproved_design",
+                    "business_context": draft.inputs.intake.model_dump(mode="json"),
+                    "problem_context": {"additional_design_description": draft.inputs.description},
+                }
+            else:
+                contract = load_cli_domain_contract(source_file)
+                if not isinstance(contract, DomainContractV2):
+                    raise ValueError("question-context requires a design draft or Schema-2 domain")
+                questions = contract.competency_questions
+                context = question_routing_context(contract)
+                values = {
+                    "source_kind": "domain_contract", "source_hash": compute_contract_hash(contract),
+                    "domain_contract_hash": compute_contract_hash(contract),
+                    "approval_status": contract.approval.status,
+                    "business_context": contract.business.model_dump(mode="json"),
+                    "problem_context": contract.problem.model_dump(mode="json"),
+                }
+            routed = {item["question_id"] for item in context["questions"]} if context else set()
+            values.update({
+                "artifact_kind": "domain.question_context", "artifact_version": "1.0.0",
+                "question_routing_context": context,
+                "unrouted_question_ids": sorted(item.id for item in questions if item.id not in routed),
+                "execution_verified": False,
+            })
+            result = {**values, "export_hash": canonical_sha256(values)}
+    except (OSError, ValueError, TypeError, yaml.YAMLError, L5aPublicationError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(canonical_json(result))
 
 
 @click.command("design")
@@ -156,6 +237,19 @@ def domain_design_cmd(
                 "writes": 0,
                 "samples_materialized": False,
             }
+            from fabric_kg_builder.domain.question_routing import question_routing_context
+
+            routing = question_routing_context(preflight.intake)
+            if routing is not None:
+                routed_ids = {item["question_id"] for item in routing["questions"]}
+                result.update({
+                    "question_routing_context": routing,
+                    "unrouted_question_ids": sorted(
+                        item.id for item in preflight.intake.competency_questions
+                        if item.id not in routed_ids
+                    ),
+                    "execution_verified": False,
+                })
         else:
             result = core.generate_domain_design(
                 preflight, client=client, seed_path=seed_domain,

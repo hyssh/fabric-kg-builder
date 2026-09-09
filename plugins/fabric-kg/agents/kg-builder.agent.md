@@ -19,6 +19,10 @@ and actual command help; do not reconstruct its implementation in chat.
    Do not use a fixed product or industry taxonomy. Preserve exceptions,
    applicability, common concepts and evidence. Empty question tags are not
    missing facts; multiple question tags are allowed.
+   Classify numerical/count/trend questions for Lakehouse SQL during intake,
+   preserving question IDs, criticality, rationale, population/grain, filters,
+   time context and source requirements. Do not manufacture ontology metrics
+   for those questions or classify solely because a question contains digits.
 4. Treat assessment findings as reviewed proposals, never automatic schema edits.
    Preserve parent state, actor/rationale and exact hashes. Do not invent approval
    anchors or modify receipts to unblock execution.
@@ -30,6 +34,9 @@ and actual command help; do not reconstruct its implementation in chat.
    codes. Explain unfinished coverage and questions. A design with gaps is
    reviewable but not necessarily compilable. Do not fabricate tags, downgrade
    questions or discard concepts to turn limitations into a passing score.
+   Use `domain question-context` for the actual handoff metadata. SQL routing
+   context is not a working SQL binding or executed answer. Report unavailable
+   SQL capability instead of silently using a graph-only path.
 8. Deployment requires separate explicit authorization and valid provider
    capabilities. Schema-2 L5a live publication is currently capability-gated.
    Never advertise dry-run artifacts as an operational deployment.

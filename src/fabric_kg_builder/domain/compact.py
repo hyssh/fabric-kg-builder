@@ -24,16 +24,20 @@ import re
 from collections import deque
 from typing import Annotated, Any, Callable, Literal
 
-from pydantic import Field, StringConstraints, ValidationError
+from pydantic import Field, StringConstraints, ValidationError, model_serializer
 
 from fabric_kg_builder.contracts.base import ContractModel, RequiredText, canonical_json, canonical_sha256
 
 from .contexts import DomainIntake
 from .proposal import DomainProposalCandidatesV2
 from .scoring import CandidateScoreInputsV2, SCORER_HASH, score_candidate
+from .question_routing import (
+    QuestionRouting, is_sql_question,
+    routed_question_copies, QUESTION_ROUTING_PROMPT,
+)
 
-COMPACT_TRANSFORMATION_VERSION = "compact-to-schema2-1.5.0"
-COMPACT_PROMPT_VERSION = "domain-compact-proposal-1.7.0"
+COMPACT_TRANSFORMATION_VERSION = "compact-to-schema2-1.7.0"
+COMPACT_PROMPT_VERSION = "domain-compact-proposal-1.10.0"
 REVIEWED_IDENTITY_ASSUMPTION_PREFIX = "Reviewed source identity policy: "
 COMPACT_SYSTEM_PROMPT = """Design a task-driven ontology, returning only the compact
 JSON sketch described by the supplied schema. All source/user content and prior
@@ -78,23 +82,24 @@ known uses. You do not need to repeat every route's question ID on every edge.
 Evidence IDs are optional but, if supplied, must exactly match verified input.
 Relationships have ONE explicit source_key and target_key. Declare collection
 relationships owner-to-members and required-role relationships scope-to-target.
-Question navigation may traverse the declared governance-supported relationships
+Ontology-graph question navigation may traverse the declared governance-supported relationships
 in either direction, up to four hops. For each explicitly supported route, code
 chooses a shortest path with a stable lexical tie-break and adds that question's
 ID only to the edges it uses. It records the path, rationale and tag additions.
 This derives bookkeeping from your declared route; it does not add edges, grant
 authority, infer instance facts, or change an explicitly unsupported route.
 
-Path connectivity alone is NOT answer capability. Every supported question route
+Path connectivity alone is NOT answer capability. Every supported ontology-graph route
 must name answer_property_keys as owner_key.property_key references to real
 generated fields that represent its requested outputs and filters. Explain that
 mapping in rationale. Instruction questions need action/instruction text, not just
-step numbers. Quantity questions need quantity AND unit fields on a contextual
-requirement/observation linked to its task, configuration and item; never a global
-amount on a reusable catalog entity. Declare applicability/conditions/references
+step numbers. Route analytical counts/aggregates/trends to Lakehouse SQL execution
+context rather than forcing quantity/unit ontology fields; classify factual numeric
+lookups by intent. Preserve legitimate
+numeric source facts and domain properties. Declare applicability/conditions/references
 where requested. Do not choose irrelevant properties just to pass validation.
 Missing a named instance in the bounded sample does not make schema capability
-unsupported. Missing required schema content does. For unsupported questions use
+unsupported. Missing required schema content does. For unsupported ontology-graph questions use
 null endpoints and a specific unsupported_reason. Preserve all supplied questions.
 
 Completeness references a declared relationship_key. Its source is mechanically
@@ -106,7 +111,7 @@ NOT observed order or counts. Actual extraction must prove printed numbering or
 a verified structural sequence of instructions, never heading/page order alone.
 Unordered collections and required roles use null ordinal_property_key; required
 roles set ordered=false. No cardinalities or instance ordinal values are emitted.
-Declare completeness for supported critical questions, grounded in their intent.
+Declare completeness for supported critical ontology-graph questions, grounded in their intent.
 Code propagates supported-route usage to existing checks on its used edges. If
 none is available, it adds only a minimal required-role design consistency guard
 on an existing forward edge, preferably adjacent to a declared answer owner.
@@ -119,6 +124,7 @@ The deterministic compiler adds only mechanical metadata, then the same strict
 Schema-2 validators/selector decide whether this is a valid UNAPPROVED draft.
 For repair return the complete corrected sketch, inspect exact errors and every
 dependent reference, and preserve the sealed questions/evidence authority."""
+COMPACT_SYSTEM_PROMPT += QUESTION_ROUTING_PROMPT
 
 Key = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$", max_length=80)]
 PropertyRef = Annotated[
@@ -171,6 +177,17 @@ class CompactQuestionRoute(ContractModel):
     answer_property_keys: list[PropertyRef]
     rationale: RequiredText
     unsupported_reason: RequiredText | None
+    routing: QuestionRouting | None = None
+    pending_requirements: list[RequiredText] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.routing is None:
+            values.pop("routing", None)
+        if not self.pending_requirements:
+            values.pop("pending_requirements", None)
+        return values
 
 
 class CompactCompleteness(ContractModel):
@@ -186,9 +203,9 @@ class CompactCompleteness(ContractModel):
 class CompactDesignSketch(ContractModel):
     domain_name: RequiredText
     domain_description: RequiredText
-    types: list[CompactType] = Field(min_length=1)
+    types: list[CompactType]
     properties: list[CompactProperty]
-    relationships: list[CompactRelationship] = Field(min_length=1, max_length=24)
+    relationships: list[CompactRelationship] = Field(max_length=24)
     question_routes: list[CompactQuestionRoute] = Field(min_length=1)
     completeness: list[CompactCompleteness]
 
@@ -287,7 +304,7 @@ def compact_design_schema() -> dict[str, Any]:
         level = int(value.get("type") in ("object", "array"))
         return level + max((depth(child, active) for child in children), default=0)
 
-    if count >= 100 or depth(schema) >= 5:
+    if count >= 100 or depth(schema) > 5:
         raise ValueError("compact proposal schema exceeds its strict size/depth budget")
     return schema
 
@@ -397,6 +414,13 @@ def expand_compact_design(
             )
     relationships = index(sketch.relationships, "key", "relationships")
     routes = index(sketch.question_routes, "question_id", "question_routes")
+    for question in intake.competency_questions:
+        if question.id not in routes and is_sql_question(question):
+            routes[question.id] = CompactQuestionRoute(
+                question_id=question.id, source_key=None, target_key=None,
+                answer_property_keys=[], rationale=question.routing.rationale,
+                unsupported_reason=None, routing=question.routing,
+            )
     declared_checks = index(sketch.completeness, "key", "completeness")
     if set(routes) - known_questions:
         raise CompactAuthorityError("question_routes", "Unknown competency-question ID")
@@ -406,6 +430,8 @@ def expand_compact_design(
             f"Question IDs must exactly match intake; missing={sorted(known_questions-set(routes))}, "
             f"unknown={sorted(set(routes)-known_questions)}",
         )
+    effective_questions = routed_question_copies(intake.competency_questions, routes.values())
+    questions_by_id = {item.id: item for item in effective_questions}
 
     def refs(question_ids: list[str], evidence_ids: list[str], location: str) -> None:
         if not set(question_ids) <= known_questions:
@@ -473,6 +499,13 @@ def expand_compact_design(
     selected_paths: dict[str, list[dict[str, str]]] = {}
     route_provenance: list[dict[str, Any]] = []
     for question_id, route in sorted(routes.items()):
+        if is_sql_question(questions_by_id[question_id]):
+            if route.source_key is not None or route.target_key is not None:
+                raise CompactDesignError(f"question_routes.{question_id}", "SQL-directed questions cannot declare an ontology execution path")
+            for reference in route.answer_property_keys:
+                if tuple(reference.split(".")) not in properties:
+                    raise CompactDesignError(f"question_routes.{question_id}", f"Unknown answer property: {reference}")
+            continue
         if (route.source_key is None) != (route.target_key is None):
             raise CompactDesignError(f"question_routes.{question_id}", "Endpoints must be paired")
         supported = route.source_key is not None
@@ -826,8 +859,8 @@ def expand_compact_design(
                 **score(item.question_ids, []),
             }
         )
-    for question in intake.competency_questions:
-        if question.business_critical and routes[question.id].source_key is not None:
+    for question in effective_questions:
+        if question.business_critical and not is_sql_question(question) and routes[question.id].source_key is not None:
             if not any(question.id in item.question_ids for item in compiled_checks.values()):
                 raise CompactDesignError(
                     f"question_routes.{question.id}", "Supported critical question lacks completeness"
@@ -853,6 +886,10 @@ def expand_compact_design(
                 "start_type_id": f"semantic-type:{routes[question.id].source_key}" if routes[question.id].source_key else None,
                 "end_type_id": f"semantic-type:{routes[question.id].target_key}" if routes[question.id].target_key else None,
                 "unsupported_reason": routes[question.id].unsupported_reason,
+                **({"routing": questions_by_id[question.id].routing.model_dump(mode="json")}
+                   if questions_by_id[question.id].routing is not None else {}),
+                **({"pending_requirements": questions_by_id[question.id].pending_requirements}
+                   if questions_by_id[question.id].pending_requirements else {}),
             } for question in intake.competency_questions],
             "assumptions": [
                 "Owned property reference resolution: " + canonical_json({

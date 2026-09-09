@@ -69,6 +69,12 @@ guarantee. Failed structural generation must be surfaced, not silently replaced.
 
 ## Draft validity versus design evaluation
 
+[Question execution context](SPEC-QUESTION-ROUTING-CONTEXT.md) refines this
+boundary: numerical/count/trend questions can be delegated to Lakehouse SQL.
+Their analytical source requirements must flow through the pipeline, not be
+misreported as missing ontology quantity properties. SQL routing and readiness
+remain distinct; the original question and criticality are preserved.
+
 Hard draft errors remain malformed data, duplicate identifiers, unknown
 references, parent cycles, incompatible declared identity ownership and invented
 evidence references. An inability to support a question is not such an error.
@@ -94,6 +100,10 @@ Evaluation reports each question, the proposed answer fields and connections,
 gaps, and execution limitations. A path alone cannot prove that action text,
 quantities, conditions, applicability or complete source evidence exists.
 Unresolved semantic adequacy remains a review requirement.
+
+For SQL-directed questions, inspect the retained population/grain, filters/time
+and source requirements instead of demanding a graph answer path. Context
+presence does not prove that analytical rows or executable SQL bindings exist.
 
 The current compiler's four-hop, minimum-path, relationship-count and intake
 limits are compatibility constraints, not universal ontology validity rules.

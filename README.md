@@ -11,8 +11,8 @@ Historical L7 evidence remains in [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0
 0.2.3 assessment remains at
 [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md).
 
-See the [development roadmap](docs/ROADMAP.md) for the next query-time analytics
-policy and the deferred shared-Lakehouse, multi-ontology investigation.
+See the [development roadmap](docs/ROADMAP.md) for the implemented SQL
+question-context flow and the deferred shared-Lakehouse, multi-ontology investigation.
 
 ---
 
@@ -44,6 +44,7 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 - **Azure AI Search** — vector (text-embedding-3-large, 1536 dims) + keyword indexes for grounded retrieval  
 - **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
 - **Design-first ontology** — business intent, full seed YAML and bounded document samples; separate question-gap evaluation before strict Schema-2 compilation and approval
+- **Question execution context** — analytical questions retain Lakehouse SQL routing, scope, source needs and pending decisions through approval and serving; routing is not SQL execution
 - **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
 - **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  
 - **Multi-environment** — `dev` / `test` / `prod` configs in `ontology/environments/`  

@@ -479,6 +479,22 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
         ),
         "approved_max_hops": contract.reasoning_policy.max_hops,
     }
+    from fabric_kg_builder.domain.question_routing import question_routing_context
+
+    routing_context = question_routing_context(contract)
+    if routing_context is not None:
+        prompt_payload["question_routing_context"] = routing_context
+        prompt_payload["approved_business_context"] = contract.business.model_dump(mode="json")
+        prompt_payload["approved_problem_context"] = contract.problem.model_dump(mode="json")
+        prompt_payload["rules"].extend([
+            "Question routing and business background are context, not source evidence "
+            "or additional ontology vocabulary.",
+            "Lakehouse SQL population, grain, filters, time and source requirements "
+            "remain unresolved execution intentions. Do not invent physical bindings, "
+            "analytic entities, metrics, rows or aggregate answers from them.",
+            "Preserve observed numeric values for approved properties, including "
+            "legitimate identities and ordinals; SQL routing is not a numeric-data ban.",
+        ])
     return ClosedVocabulary(
         contract_hash=contract_hash,
         entities_by_alias=entities_by_alias,

@@ -2,6 +2,14 @@
 
 ## 0.2.6 (local development)
 
+- Route analytical questions to Lakehouse SQL through typed question context,
+  preserving original question IDs/criticality, population/grain, filter/time
+  and source requirements. SQL-directed questions no longer require fabricated
+  ontology quantity fields or Graph answer paths.
+- Add read-only `domain question-context` exports and carry approved context
+  through extraction request identity, sealed serving authority and agent
+  instructions. Pending requirements and additional user background survive
+  approval. SQL routing remains unbound/unexecuted; no SQL engine is added.
 - Introduce a design-first CLI boundary: preserve business intent, full reference
   YAML and bounded document samples in an unapproved design before evaluating
   question coverage. Separate design gaps from structural errors and strict

@@ -486,6 +486,11 @@ class L5aCompiledPublication:
     required_member_rows: tuple[Mapping[str, Any], ...]
     required_member_snapshots: tuple[L5aRequiredMemberSnapshot, ...]
 
+    @property
+    def question_routing_context(self) -> dict[str, Any] | None:
+        """Recover approved context without changing physical publication definitions."""
+        return export_serving_question_context(self.source)["question_routing_context"]
+
 
 @dataclass(frozen=True)
 class L5aStageResult:
@@ -921,6 +926,36 @@ def _publication_authority(
             "sealed L4 publication authority payload differs from its hashes",
         )
     return contract, row
+
+
+def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, Any]:
+    """Read question intentions from existing sealed authority, not new serving rows."""
+    from fabric_kg_builder.domain.question_routing import question_routing_context
+
+    contract, row = _publication_authority(_load_source_tables(source))
+    if row["domain_contract_hash"] != source.projection.sealed_domain_contract_hash:
+        raise L5aPublicationError(
+            "L5A_DOMAIN_AUTHORITY_MISMATCH", "question context differs from sealed L4 authority",
+        )
+    context = question_routing_context(contract)
+    routed = {item["question_id"] for item in context["questions"]} if context else set()
+    values = {
+        "artifact_kind": "domain.question_context",
+        "artifact_version": "1.0.0",
+        "source_kind": "sealed_l4",
+        "source_hash": source.manifest.manifest_hash,
+        "source_projection_hash": source.projection.projection_hash,
+        "domain_contract_hash": compute_contract_hash(contract),
+        "approval_status": contract.approval.status,
+        "question_routing_context": context,
+        "unrouted_question_ids": sorted(
+            question.id for question in contract.competency_questions if question.id not in routed
+        ),
+        "business_context": contract.business.model_dump(mode="json"),
+        "problem_context": contract.problem.model_dump(mode="json"),
+        "execution_verified": False,
+    }
+    return {**values, "export_hash": canonical_sha256(values)}
 
 
 def _validate_publish_authority(

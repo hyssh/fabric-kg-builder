@@ -31,6 +31,34 @@ Keep this information outside ontology entities and relationships. It is query
 planning context, not an asserted fact, SQL statement, actual table binding,
 computed metric, or authorization to run a query.
 
+## Public routing shape
+
+An intake/approved competency question can carry optional `routing` metadata.
+Its version is `1.0.0`; backends are `ontology_graph` and `lakehouse_sql`, and
+operations are `lookup`, `count`, `aggregate` and `trend`.
+The routing fields are `rationale`, optional `population` and `grain`,
+`filters`, `time_requirements`, `source_requirements`, and
+`physical_binding_state="unresolved"`.
+
+`question_routing_context(authority)` produces a canonical snapshot containing
+`context_version`, sorted explicit question entries and `context_hash`. Entries
+retain original question IDs, text and criticality. The enclosing export or
+request binds the snapshot to its exact domain/intake/source hash. When no
+explicit routing exists, omit the snapshot rather than invent default decisions.
+
+Pending business decisions and unresolved design requirements are retained as
+`competency_questions[i].pending_requirements` in approved authority and as
+`questions[i].pending_requirements` alongside `routing` in the snapshot. Do not
+hide them inside a rationale or mistake them for verified source bindings.
+Nonempty notes use snapshot version `1.1.0`; when notes are absent the field is
+omitted and the original `1.0.0` snapshot bytes/hash remain unchanged.
+Original intake notes and model-proposed unresolved requirements are preserved
+with stable deduplication; the original intake is never rewritten.
+
+`domain question-context --file DRAFT_OR_DOMAIN` exposes that information without
+calls or writes. `--l4-run DIR --l3-root DIR` reads the existing sealed serving
+authority instead of relying on a separately editable context file.
+
 ## Authority and compatibility
 
 - Explicit intake routing must not be silently overwritten by model proposals.
@@ -61,6 +89,12 @@ computed metric, or authorization to run a query.
 Reuse existing sealed-domain propagation rather than copying independent,
 unbound context files at every stage. If a sidecar/export is needed, include
 the source artifact/domain identity and context hash.
+
+Additional `domain design --description` background is appended with a clear
+label to the derived contract's `business.organization_context` before proposal
+and approval hashing. Original intake text/hash remains unchanged. Existing
+business-context consumers therefore retain the exact description through
+approved-domain reload, L2, serving export and agent instructions.
 
 ## Runtime boundary
 

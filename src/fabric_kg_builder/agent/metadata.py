@@ -104,6 +104,60 @@ class AgentMetadataError(Exception):
     """Raised when agent-metadata.yaml cannot be loaded or validated."""
 
 
+def question_routing_readiness(
+    context: dict[str, Any] | None,
+    *,
+    fabric_data_agent_connection_id: str | None = None,
+    data_agent_snapshot: Any | None = None,
+    source_hash: str | None = None,
+) -> dict[str, Any] | None:
+    """Describe configured sources without promoting declarations to SQL readiness."""
+    if context is None:
+        return None
+    from fabric_kg_builder.domain.question_routing import QuestionRoutingContext
+
+    routing = QuestionRoutingContext.model_validate(context).model_dump(mode="json")
+    if source_hash is not None and re.fullmatch(r"[0-9a-f]{64}", source_hash) is None:
+        raise ValueError("question routing source hash must be SHA-256")
+    sources = data_agent_snapshot.source_receipts() if data_agent_snapshot is not None else []
+    sql_sources = [
+        source for source in sources
+        if source["source_type"] in {"lakehouse", "lakehouse_tables", "data_warehouse"}
+    ]
+    return {
+        "question_routing_context": routing,
+        "source_hash": source_hash,
+        "fabric_data_agent_connection_configured": bool(fabric_data_agent_connection_id),
+        "data_agent_stage": data_agent_snapshot.stage if data_agent_snapshot is not None else None,
+        "configured_sql_source_references": sql_sources,
+        "sql_execution": {
+            "execution_verified": False,
+            "physical_binding_state": "unresolved",
+            "status": "configured_not_verified" if sql_sources else "source_binding_not_verified",
+            "blocking_reasons": [
+                "physical_table_field_time_bindings_unresolved",
+                "sql_execution_not_verified",
+            ],
+        },
+    }
+
+
+def matching_declared_sql_questions(
+    context: dict[str, Any] | None, question: str,
+) -> tuple[str, ...]:
+    """Match registered question wording only; this is not a free-form SQL classifier."""
+    if context is None:
+        return ()
+    from fabric_kg_builder.domain.question_routing import QuestionRoutingContext
+
+    validated = QuestionRoutingContext.model_validate(context)
+    text = question.strip().casefold()
+    return tuple(
+        item.question_id for item in validated.questions
+        if item.routing.backend == "lakehouse_sql" and item.question.strip().casefold() == text
+    )
+
+
 def load_agent_metadata(
     path: str | Path | None = None,
 ) -> AgentMetadata:

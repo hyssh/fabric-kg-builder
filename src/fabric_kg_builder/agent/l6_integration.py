@@ -3474,6 +3474,28 @@ class L6AgentOrchestrator:
             )
             return self._abstain(base, failure, started)
 
+        try:
+            from fabric_kg_builder.agent.metadata import matching_declared_sql_questions
+
+            routing_context = getattr(self._authorities.l5a.compiled, "question_routing_context", None)
+            sql_questions = matching_declared_sql_questions(routing_context, request.question)
+        except (ValueError, TypeError, OSError, RuntimeError):
+            return self._abstain(
+                base,
+                _failure("authority_invalid", "Approved question routing authority could not be validated"),
+                started,
+            )
+        if sql_questions:
+            return self._abstain(
+                base,
+                _failure(
+                    "scope_invalid",
+                    "Declared Lakehouse SQL question requires unresolved physical bindings "
+                    "and verified SQL execution; this Graph-only boundary cannot answer it.",
+                ),
+                started,
+            )
+
         graph_input = L6GraphToolInput(
             l6_run_id=request.graph_query.l6_run_id,
             resolved_ontology_scope_id=scopes.ontology_scope.resolved_ontology_scope_id,

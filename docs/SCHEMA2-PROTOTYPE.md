@@ -10,6 +10,7 @@ live technician-question acceptance is complete.
 ```bash
 fabric-kg --version
 fabric-kg domain design-schema
+fabric-kg domain question-context --help
 fabric-kg domain design --help
 fabric-kg domain evaluate-design --help
 fabric-kg domain compile-design --help
@@ -103,6 +104,84 @@ Name matching ignores case and separators, but is only a review aid. It does not
 establish that differently named concepts are equivalent, or that a matching
 name has the same meaning. Review the actual endpoints and property ownership:
 model-written rationales can contradict the generated graph.
+
+## Question routing and Lakehouse SQL context
+
+Collect the expected answer and business background along with each question.
+Use ontology/graph retrieval for concepts, relationships and procedural scope.
+Analytical counts, numeric analysis and trends normally belong to Lakehouse SQL.
+Do not create ontology quantity/metric properties solely to answer those
+questions. Numeric source facts, identifiers and safety text remain intact.
+
+An intake question can explicitly declare routing. The following is **one entry**
+in `competency_questions`, not a complete intake:
+
+```yaml
+id: cq:q6
+question: How many distinct parts are linked to this repair job?
+business_critical: true
+pending_requirements:
+  - Confirm whether the requested count is distinct SKUs or physical pieces.
+routing:
+  version: "1.0.0"
+  backend: lakehouse_sql
+  operation: count
+  rationale: Count the scoped part records in Lakehouse SQL.
+  population: Parts linked to the selected repair job and device variant
+  grain: Distinct governed part identity, not physical part occurrences
+  filters:
+    - Selected repair job, model and variant
+  time_requirements: []
+  source_requirements:
+    - Approved part records and task-to-part associations
+    - Complete scoped records and original source evidence
+  physical_binding_state: unresolved
+```
+
+The two backends are `ontology_graph` and `lakehouse_sql`; operations are
+`lookup`, `count`, `aggregate` and `trend`. Missing population/grain/time/source
+details remain review requirements, not fabricated physical bindings. Explicit
+intake routing is authoritative; the model can propose routing for unclassified
+questions. A SKU lookup is not SQL analysis merely because the SKU contains digits.
+
+Inspect the context before and after approval:
+
+```bash
+fabric-kg domain question-context --file .fkg/design/draft.json
+fabric-kg domain question-context --file .fkg/l1-026/domain.yaml
+fabric-kg domain question-context --l4-run <sealed-l4-run> --l3-root <l3-state>
+```
+
+These commands write JSON to stdout only. They include the source/domain hash,
+canonical routing context/hash, original question criticality, business
+background, unrouted question IDs and unresolved requirements. No model or SQL
+is called. Redirect stdout only when a separate local export is desired.
+
+SQL-directed questions remain in the domain but do not need a fabricated
+ontology answer path or quantity property. Their Graph coverage remains false;
+SQL readiness is separately unverified. All-SQL designs can be saved and
+exported, but the strict ontology compilation path reports that no ontology
+handoff is needed rather than fabricating graph definitions.
+
+Per-question `pending_requirements` also survive compilation and approval,
+including unresolved design notes. They remain separate from `routing` and do
+not become facts or execution permission. Snapshots use version `1.1.0` when
+these notes exist, otherwise the unchanged `1.0.0` representation.
+Additional user descriptions remain labeled in approved business context without
+modifying the original intake.
+
+Approved context is included in extraction request identity and retained through
+the existing sealed domain in serving. For the prompt-agent deployment path,
+supply that same approved domain using `app deploy-agent --domain-contract`.
+Use `--dry-run` for local planning; omitting it can deploy and is not authorized
+by a context inspection request. The static `app compile-l6` command is not a
+replacement for this per-domain runtime handoff.
+
+Routing is **not** a SQL executor, verified table/column mapping or computed
+answer. The current L6 guard protects exact registered SQL-question wording
+before Graph/Search; it is not a general paraphrase classifier. Unregistered
+paraphrases and mixed requests still need intent resolution and source readiness.
+Never substitute a graph-only answer when a registered SQL route is unresolved.
 
 ## Foundry project inference
 

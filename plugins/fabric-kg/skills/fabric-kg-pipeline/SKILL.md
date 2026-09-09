@@ -22,6 +22,28 @@ model calls, loading data or deployment. Ask only for missing high-impact inputs
 Collect roles, decisions, domain, competency questions, expected answers, source
 paths and access/retention requirements. Do not default to a sample taxonomy.
 
+Classify question intent while collecting that context. Use ontology/graph for
+entities, relationships, applicability and procedural retrieval; numerical,
+count and trend analysis should be routed to Lakehouse SQL. A SKU, model number
+or numeric safety threshold in a question does not by itself make it analytical.
+Preserve both needs in mixed requests or require review instead of silently
+discarding one part.
+
+Keep the question ID, text, criticality, routing rationale, population/scope,
+grain, filters, time context and required source information as execution context.
+Keep unresolved decisions in per-question `pending_requirements`; do not drop
+them after evaluation or mark them solved merely because compilation succeeds.
+Do not add quantity/metric/trend ontology types or properties merely to satisfy
+an SQL-directed question. Preserve ordinary source facts and quotations.
+Distinct SKU counts and physical occurrences are not interchangeable, and
+truncated chat results are not a valid counting population.
+
+Inspect `domain question-context --help` and export the actual retained context
+when handing work to another pipeline stage or agent. A route to Lakehouse SQL
+is a plan, not verified table/column bindings, SQL execution or answer readiness.
+If the configured consumer cannot execute that route, report the capability
+gap rather than substitute a graph query or invent a count.
+
 ## Design-first workflow (0.2.6)
 
 Prefer `domain design`, then `domain evaluate-design`, then explicit
@@ -37,8 +59,8 @@ approved seed does not automatically approve the generated design.
 Keep common concepts and useful independent types even when they do not support
 a current example question. Question references may be empty or contain multiple
 IDs. Do not invent tags, remove questions or downgrade criticality to pass a gate.
-Assess requested answer fields, applicability, ordering, quantities and units,
-not just graph connectivity.
+Assess ontology answer fields, applicability and ordering separately from SQL
+source requirements, calculation grain and time scope, not just graph connectivity.
 
 A design draft is not an approved Schema-2 domain. Gaps and compiler limitations
 must remain visible in the separate evaluation. If compilation is blocked,
@@ -57,6 +79,7 @@ options work in Schema-2; follow the installed CLI's explicit capability checks.
 |---|---|---|
 | Explore design | `fabric-kg domain design --help` | Seed-aware, unapproved design; gaps do not imply invalid ontology |
 | Evaluate design | `fabric-kg domain evaluate-design --help` | Separate structural question report; not factual answer acceptance |
+| Inspect question context | `fabric-kg domain question-context --help` | Read-only routing and data-requirement handoff; not a query executor |
 | Compile design | `fabric-kg domain compile-design --help` | Local strict Schema-2 handoff; does not approve or deploy |
 | Strict proposal (compatibility) | `fabric-kg init-domain --input ... --intake ... --non-interactive` | Model calls; strict Schema-2 draft requiring approval. `--dry-run` inventories only |
 | Plan document assessment | `fabric-kg domain assess --file ... --input ...` | Default mode: no model calls or output-file writes |

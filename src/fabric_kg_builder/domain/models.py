@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 from pydantic_core import PydanticCustomError
+
+from .question_routing import QuestionRouting, is_sql_question
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -526,6 +528,17 @@ class CompetencyQuestionV2(V2StrictModel):
     id: CompetencyQuestionId
     question: str = Field(min_length=15, pattern=r"\S")
     business_critical: bool = True
+    routing: QuestionRouting | None = None
+    pending_requirements: list[V2RequiredText] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.routing is None:
+            values.pop("routing", None)
+        if not self.pending_requirements:
+            values.pop("pending_requirements", None)
+        return values
 
 
 class QuestionPathStepV2(V2StrictModel):
@@ -1282,6 +1295,10 @@ class DomainContractV2(V2StrictModel):
         for question_id, coverage in coverage_by_id.items():
             if not set(coverage.requirement_ids) <= set(requirement_by_id):
                 raise ValueError("completeness coverage references unknown requirement")
+            if is_sql_question(questions_by_id[question_id]):
+                if plans_by_id[question_id].covered or coverage.coverage_status == "covered":
+                    raise ValueError("SQL-directed questions cannot claim ontology path/completeness coverage")
+                continue
             if (
                 questions_by_id[question_id].business_critical
                 and (

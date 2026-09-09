@@ -19,6 +19,7 @@ from .domain_design_cmd import (
     domain_design_cmd,
     domain_design_schema_cmd,
     domain_evaluate_design_cmd,
+    domain_question_context_cmd,
 )
 from .domain_io import load_cli_domain_contract
 from fabric_kg_builder.domain import (
@@ -171,6 +172,7 @@ domain_cmd.add_command(domain_design_cmd)
 domain_cmd.add_command(domain_design_schema_cmd)
 domain_cmd.add_command(domain_evaluate_design_cmd)
 domain_cmd.add_command(domain_compile_design_cmd)
+domain_cmd.add_command(domain_question_context_cmd)
 
 
 @domain_cmd.command("init")

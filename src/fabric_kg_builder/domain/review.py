@@ -8,6 +8,7 @@ from typing import Iterable
 
 from pydantic import ValidationError
 
+from .question_routing import is_sql_question, SQL_ROUTING_UNRESOLVED
 from .models import (
     AnyDomainContract,
     DOMAIN_SCHEMA_VERSION,
@@ -361,7 +362,14 @@ def _run_v2_deterministic_validation(
         plan = plans[question_id]
         completeness_coverage = completeness[question_id]
         notes = None
-        if not plan.covered or completeness_coverage.coverage_status != "covered":
+        if is_sql_question(question):
+            notes = SQL_ROUTING_UNRESOLVED
+            _append_finding(
+                findings, severity="warning", path=f"competency_questions[{question_id}].routing",
+                code="SQL-PLAN-UNBOUND",
+                message=f"business_critical={question.business_critical}; {SQL_ROUTING_UNRESOLVED}",
+            )
+        elif not plan.covered or completeness_coverage.coverage_status != "covered":
             notes = (
                 plan.unsupported_reason
                 or completeness_coverage.unsupported_reason

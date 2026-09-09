@@ -63,6 +63,7 @@ from .contexts import (
     DomainSourceProfile,
 )
 from .models import ApprovalMetadataV2, DomainContractV2
+from .question_routing import is_sql_question, routed_question_copies, SQL_ROUTING_UNRESOLVED
 from .proposal import (
     DOMAIN_PROPOSAL_PROMPT_HASH,
     DOMAIN_PROPOSAL_SYSTEM_PROMPT,
@@ -367,6 +368,13 @@ def _normalize_question_route_shapes(
         start = route.get("start_type_id")
         end = route.get("end_type_id")
         reason = route.get("unsupported_reason")
+        routing_fields = {"routing": route["routing"]} if route.get("routing") is not None else {}
+        if "pending_requirements" in route:
+            routing_fields["pending_requirements"] = route["pending_requirements"]
+        sql_directed = (
+            isinstance(route.get("routing"), dict)
+            and route["routing"].get("backend") == "lakehouse_sql"
+        )
         if not has_start or not has_end:
             code = "route_endpoint_key_missing"
         elif not (
@@ -380,7 +388,9 @@ def _normalize_question_route_shapes(
         elif (start is None) != (end is None):
             code = "route_endpoint_pair_half_defined"
         elif start is None:
-            if reason is None or (
+            if sql_directed and reason is None:
+                code = ""
+            elif reason is None or (
                 isinstance(reason, str) and not reason.strip()
             ):
                 code = "unsupported_reason_missing"
@@ -399,6 +409,7 @@ def _normalize_question_route_shapes(
                         "start_type_id": start,
                         "end_type_id": end,
                         "unsupported_reason": None,
+                        **routing_fields,
                     }
                 )
                 continue
@@ -407,7 +418,8 @@ def _normalize_question_route_shapes(
                 "question_id": question_id,
                 "start_type_id": None,
                 "end_type_id": None,
-                "unsupported_reason": code or str(reason),
+                "unsupported_reason": None if sql_directed and reason is None and not code else code or str(reason),
+                **routing_fields,
             }
         )
     normalized["question_routes"] = rebuilt
@@ -689,8 +701,8 @@ def _uncoverable_critical_question_ids(
     }
     return tuple(
         item.id
-        for item in preflight.intake.competency_questions
-        if item.business_critical and item.id not in coverable
+        for item in routed_question_copies(preflight.intake.competency_questions, candidates.question_routes)
+        if item.business_critical and not is_sql_question(item) and item.id not in coverable
     )
 
 
@@ -731,14 +743,22 @@ def _zero_route_audit(
     }
     critical_question_ids = {
         question.id
-        for question in preflight.intake.competency_questions
-        if question.business_critical
+        for question in routed_question_copies(preflight.intake.competency_questions, candidates.question_routes)
+        if question.business_critical and not is_sql_question(question)
     }
     route_codes: list[str] = []
     route_states: list[Literal["supported", "unsupported"]] = []
     supported_count = 0
     critical_supported_count = 0
+    sql_ids = {
+        item.id for item in routed_question_copies(preflight.intake.competency_questions, candidates.question_routes)
+        if is_sql_question(item)
+    }
     for route in candidates.question_routes:
+        if route.question_id in sql_ids:
+            route_codes.append(SQL_ROUTING_UNRESOLVED)
+            route_states.append("unsupported")
+            continue
         if route.start_type_id is not None:
             if _enumerate_paths(
                 route, eligible_relationships, max_hops=4
@@ -1091,8 +1111,8 @@ def _repair_zero_supported_routes(
         }
         ordered_questions = [
             {"question_id": item.id, "question": item.question}
-            for item in preflight.intake.competency_questions
-            if item.business_critical and item.id not in valid_route_ids
+            for item in routed_question_copies(preflight.intake.competency_questions, candidates.question_routes)
+            if item.business_critical and not is_sql_question(item) and item.id not in valid_route_ids
         ]
         diagnostic_by_id = dict(
             zip(
@@ -1228,6 +1248,8 @@ def _repair_zero_supported_routes(
                     start_type_id=patch.source_type_id,
                     end_type_id=patch.target_type_id,
                     unsupported_reason=None,
+                    routing=existing_routes[patch.question_id].routing,
+                    pending_requirements=existing_routes[patch.question_id].pending_requirements,
                 )
             else:
                 route = ProposalQuestionRouteV2(
@@ -1235,6 +1257,8 @@ def _repair_zero_supported_routes(
                     start_type_id=None,
                     end_type_id=None,
                     unsupported_reason=patch.unsupported_reason,
+                    routing=existing_routes[patch.question_id].routing,
+                    pending_requirements=existing_routes[patch.question_id].pending_requirements,
                 )
             repaired_routes[route.question_id] = route
         routes = [
@@ -1246,8 +1270,8 @@ def _repair_zero_supported_routes(
         )
         critical_ids = {
             item.id
-            for item in preflight.intake.competency_questions
-            if item.business_critical
+            for item in routed_question_copies(preflight.intake.competency_questions, repaired_candidates.question_routes)
+            if item.business_critical and not is_sql_question(item)
         }
         supported_critical_ids: set[str] = set()
         for route in repaired_candidates.question_routes:
@@ -2041,6 +2065,7 @@ def prepare_l1_stage(
     identity_policy_actor: str | None = None,
     identity_policy_rationale: str | None = None,
     design_prompt_binding: tuple[str, str] | None = None,
+    design_description: str | None = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
     started = started_at_utc or _utc_now()
@@ -2055,6 +2080,11 @@ def prepare_l1_stage(
             or re.fullmatch(r"[0-9a-f]{64}", design_prompt_binding[1]) is None
         ):
             raise L1StageError("Invalid design-first prompt binding")
+    if design_description is not None:
+        if design_prompt_binding is None or client is not None or candidates is None:
+            raise L1StageError("Additional design description requires model-free design compilation")
+        if not isinstance(design_description, str) or not design_description.strip():
+            raise L1StageError("Additional design description must be nonempty text")
     try:
         reviewed_policy = reviewed_source_identity_policy(
             source_identity_types, identity_policy_actor, identity_policy_rationale
@@ -2364,6 +2394,12 @@ def prepare_l1_stage(
         },
         attempt_count=model_call_count or 1,
     )
+    effective_questions = routed_question_copies(preflight.intake.competency_questions, candidates.question_routes)
+    if all(is_sql_question(question) for question in effective_questions):
+        raise L1StageError(
+            "L1_NO_ONTOLOGY_NEEDED: all questions are SQL-directed; retain the routing "
+            "plan with domain design/evaluate-design. No ontology graph or SQL execution was fabricated."
+        )
     initial_route_audit = _zero_route_audit(
         preflight=preflight,
         candidates=candidates,
@@ -2450,8 +2486,8 @@ def prepare_l1_stage(
                 )
                 if state != "supported"
                 and question_id in {
-                    question.id for question in preflight.intake.competency_questions
-                    if question.business_critical
+                    question.id for question in routed_question_copies(preflight.intake.competency_questions, candidates.question_routes)
+                    if question.business_critical and not is_sql_question(question)
                 }
             ],
         }
@@ -2865,6 +2901,14 @@ def prepare_l1_stage(
                 ),
             )
         ) from exc
+    if design_description is not None:
+        payload = draft_contract.model_dump(mode="python")
+        payload["business"]["organization_context"] = (
+            draft_contract.business.organization_context
+            + "\n\nAdditional user design context:\n"
+            + design_description
+        )
+        draft_contract = DomainContractV2.model_validate(payload)
     try:
         design_context = _build_design_context(
             preflight=preflight,
@@ -3070,7 +3114,7 @@ def render_l1_summary(
         item.question_id: item
         for item in contract.completeness_question_coverage
     }
-    for question in intake.competency_questions:
+    for question in contract.competency_questions:
         plan = plans[question.id]
         coverage = completeness[question.id]
         path = " -> ".join(
@@ -3080,6 +3124,14 @@ def render_l1_summary(
             f"  - {question.id}: {question.question} | path={path} | "
             f"completeness={coverage.coverage_status}"
         )
+        if question.routing is not None:
+            lines.append(
+                f"    backend={question.routing.backend}; operation={question.routing.operation}; "
+                f"business_critical={question.business_critical}; physical_binding={question.routing.physical_binding_state}; "
+                "execution=not_performed"
+            )
+        for requirement in question.pending_requirements:
+            lines.append(f"    pending requirement (unresolved): {requirement}")
     lines.append("Semantic types:")
     for item in contract.candidate_model.entity_types:
         key_policy = (

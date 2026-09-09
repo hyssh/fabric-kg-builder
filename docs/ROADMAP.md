@@ -13,12 +13,12 @@ Development stays local with task-labelled commits; no push or PR is implied.
   are implemented. See [the specification](specs/SPEC-0.2.6-DESIGN-FIRST.md).
 - Real design generation succeeded, but the generated design was not ready for
   approval or Fabric publication. Bounded sampling was dominated by one file.
-- Track A is being implemented under the refined question-routing scope below.
-  Previous passing regression results do not validate this new context flow.
+- Track A's local question-routing/context flow is implemented. This does not
+  mean that physical SQL bindings or analytical execution are available.
 
 ## A. Next priority: query-time numeric analysis
 
-Status: implementation in progress. See
+Status: local context-flow implementation complete; SQL execution remains separate. See
 [Question execution context](specs/SPEC-QUESTION-ROUTING-CONTEXT.md).
 
 ### Decision
@@ -43,24 +43,26 @@ This is a product design policy, not a restriction of Microsoft Fabric.
 It is not an instruction to delete existing approved data or migrate deployed
 ontologies without a separate plan.
 
-### Work remaining
+### Implemented scope
 
-1. Remove conflicting instructions that currently ask the model to add quantity
-   and unit properties in `domain/design.py`, `domain/compact.py` and
-   `domain/proposal.py`. Keep generation modes consistent.
-2. Record the policy in machine-readable CLI context and human-readable helper
-   guidance, including scope, identity, deduplication and counting grain.
-3. Separate SQL analytical requirements from missing ontology fields in design
-   evaluation. A SQL count question must not require a stored count property or
-   fake graph path. Missing source data or an unsupported computation remains visible.
-4. Preserve structural identity/order metadata and evidence guarantees. Do not
-   implement a blanket rejection of every identifier or source string containing
-   digits.
-5. Update CLI help, the pipeline skill, agent instructions and design
-   specifications together.
-6. Add focused tests for routed question/context preservation from intake through
-   approval, extraction and serving/agent handoff, correct grain and unchanged
-   source-evidence boundaries.
+1. Shared generation guidance routes analytical questions to Lakehouse SQL,
+   rather than forcing ontology quantity fields or graph paths for them.
+2. Typed per-question routing retains rationale, scope/grain, filter/time/source
+   requirements and unresolved binding status. Pending requirements remain
+   distinct, with versioned canonical hashes.
+3. Explicit intake decisions are honored; model-proposed decisions are reviewed.
+   Original question text and criticality survive compilation and approval.
+4. Additional user background survives in derived approved business context,
+   without rewriting the original intake.
+5. Read-only `domain question-context` exports and existing sealed domain
+   authority preserve this context through L2, serving/L5a and agent consumers.
+6. Numeric facts and structural identity/order metadata remain valid. No SQL
+   engine, numerical result, table binding or ontology metric is fabricated.
+
+The current L6 guard recognizes exact registered SQL-question wording and stops
+before Graph/Search when SQL is unresolved. General paraphrase classification,
+actual SQL binding/execution and full business-answer acceptance are not delivered
+by this context-flow change. Generated ontology designs still require review.
 
 ### Completion criteria
 
