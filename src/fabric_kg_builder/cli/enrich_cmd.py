@@ -391,42 +391,16 @@ def _schema2_state_roots(
 
 
 def _schema2_source_reader(inputs, input_path, ocr_cache=None, ocr_identity=None):
-    from datetime import datetime, timezone
-    from fabric_kg_builder.enrichment.schema2_sources import IndexedSourceCorpusReader
-    from fabric_kg_builder.model.schemas import AssetRow, AssetVersionRow
+    from fabric_kg_builder.sources.preparation import indexed_corpus_reader
 
-    now = datetime.now(timezone.utc)
-    assets, versions = [], []
-    for entry in inputs.corpus_manifest.entries:
-        if entry.disposition != "eligible":
-            continue
-        uri = f"https://fabric-kg.invalid/assets/{entry.asset_id}"
-        assets.append(AssetRow(
-            asset_id=entry.asset_id,
-            project_id=inputs.l1_receipt.identity.project_id,
-            original_name=Path(entry.relative_source_ref).name,
-            media_type=entry.media_type, source_uri=uri,
-            created_at=now, created_by="fabric-kg",
-        ))
-        versions.append(AssetVersionRow(
-            asset_version_id=entry.asset_version_id, asset_id=entry.asset_id,
-            version_identity=entry.original_byte_hash, content_hash=entry.original_byte_hash,
-            size_bytes=entry.byte_count, original_name=Path(entry.relative_source_ref).name,
-            media_type=entry.media_type, source_uri=uri,
-            blob_uri=f"{uri}/versions/{entry.asset_version_id}",
-            blob_version_id=entry.original_byte_hash,
-            landing_path=entry.relative_source_ref, registered_at=now,
-            landing_timestamp=now, ingestion_status="ready",
-        ))
     identity = None
     if ocr_identity is not None:
         identity = json.loads(Path(ocr_identity).read_text(encoding="utf-8"))
         if not isinstance(identity, dict):
             raise ValueError("OCR identity must be a JSON object")
-    source = Path(input_path)
-    return IndexedSourceCorpusReader(
-        source_root=source if source.is_dir() else source.parent,
-        assets=tuple(assets), versions=tuple(versions),
+    return indexed_corpus_reader(
+        inputs.corpus_manifest, Path(input_path),
+        project_id=inputs.l1_receipt.identity.project_id,
         layout_cache=Path(ocr_cache) if ocr_cache else None,
         layout_identity=identity,
     )
@@ -1946,6 +1920,13 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
               help="Exact nonsecret extraction identity JSON for --ocr-cache.")
 @click.option("--compact-response", is_flag=True,
               help="Schema-2: share source anchors in the model response; full validation is unchanged.")
+@click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Replay immutable full-corpus raw candidates after approval; no implicit second model pass.")
+@click.option("--replay-only", is_flag=True,
+              help="Explicit zero-new-model-call discovery replay (also the default with --discovery).")
+@click.option("--reextract-pending", is_flag=True,
+              help="Authorize targeted calls for missing/unmappable discovery chunks only.")
+@click.option("--max-reextract-calls", default=1, show_default=True, type=click.IntRange(0, 100_000))
 @click.pass_context
 def enrich_cmd(
     ctx: click.Context,
@@ -1973,6 +1954,10 @@ def enrich_cmd(
     ocr_cache: str | None = None,
     ocr_identity: str | None = None,
     compact_response: bool = False,
+    discovery_file: Path | None = None,
+    replay_only: bool = False,
+    reextract_pending: bool = False,
+    max_reextract_calls: int = 1,
 ) -> None:
     """Run LLM extraction on source files and produce structured JSON in build/enriched/.
 
@@ -1994,6 +1979,12 @@ def enrich_cmd(
     planning = dry_run or bool(ctx.obj.get("dry_run"))
     if (ocr_cache is None) != (ocr_identity is None):
         raise click.UsageError("--ocr-cache and --ocr-identity must be supplied together")
+    if replay_only and reextract_pending:
+        raise click.UsageError("--replay-only conflicts with --reextract-pending")
+    if (replay_only or reextract_pending) and discovery_file is None:
+        raise click.UsageError("Discovery replay/re-extraction flags require --discovery")
+    if discovery_file is not None and (force or compact_response):
+        raise click.UsageError("Discovery replay cannot use --force/--compact-response; choose a fresh L2 state when changing authority")
 
     try:
         effective_max_concurrent = _resolve_max_concurrent(
@@ -2027,7 +2018,39 @@ def enrich_cmd(
                 f"Invalid domain contract: {exc}"
             ) from exc
         if isinstance(resolved_contract, DomainContractV2):
+            if getattr(resolved_contract, "discovery_run_hash", None) is not None and discovery_file is None:
+                raise click.UsageError(
+                    "This approved domain binds discovery; supply --discovery FILE with discovery_hash "
+                    f"{resolved_contract.discovery_run_hash}. "
+                    "An implicit full second model pass is forbidden."
+                )
             try:
+                if discovery_file is not None:
+                    from fabric_kg_builder.enrichment.discovery_reuse import run_discovery_reuse
+                    from .domain_design_cmd import _build_client
+                    from fabric_kg_builder.domain.proposal import compute_model_hash
+
+                    l1_root, l2_root = _schema2_state_roots(
+                        input_path=input_path, domain_file=schema2_domain_file,
+                        l1_state=l1_state, l2_state=l2_state, force=False,
+                    )
+
+                    def retry_client():
+                        client, version = _build_client(ctx)
+                        if model is not None and model != version:
+                            raise ValueError("--model must match discovery's configured model")
+                        return client, version, compute_model_hash(client, version)
+
+                    summary = run_discovery_reuse(
+                        discovery_file=discovery_file, source_path=Path(input_path),
+                        l1_state_root=l1_root, domain_path=Path(schema2_domain_file), state_root=l2_root,
+                        dry_run=planning, reextract_pending=reextract_pending,
+                        max_reextract_calls=max_reextract_calls, client_factory=retry_client,
+                        ocr_cache=Path(ocr_cache) if ocr_cache else None,
+                        ocr_identity=Path(ocr_identity) if ocr_identity else None,
+                    )
+                    click.echo(json.dumps(summary, sort_keys=True))
+                    return
                 if planning:
                     from dataclasses import asdict
                     from fabric_kg_builder.enrichment.schema2_stage import dry_run_l2
@@ -2089,7 +2112,7 @@ def enrich_cmd(
             )
             return
 
-    if planning or l1_state is not None or l2_state is not None or ocr_cache is not None or compact_response:
+    if planning or l1_state is not None or l2_state is not None or ocr_cache is not None or compact_response or discovery_file is not None:
         raise click.UsageError(
             "--dry-run/--l1-state/--l2-state require a schema-2 domain contract"
         )

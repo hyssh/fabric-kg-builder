@@ -42,6 +42,12 @@ At minimum distinguish processed candidates, processed-empty responses, failed,
 unsupported and deferred work. A response containing no candidates is not proof
 that the source has no relevant information.
 
+Keep chunk-processing coverage separate from candidate grounding quality.
+An invalid or ambiguous quote must not discard unrelated valid candidates from
+the same model response. Retain original raw candidates, a verified subset and
+per-candidate quarantine reasons/identities. A nonempty response whose candidates
+are all quarantined is not an honestly empty response.
+
 The normal workflow has no per-kind quota that a first file can consume.
 Bounded text windows and request budgets control individual calls, not silent
 exclusion of later files. Preserve document/page/section location, parent context
@@ -74,6 +80,16 @@ Validate quotes/references against actual prepared source text before using them
 as design support. Source offsets, labels, values and relationships remain
 proposals until their appropriate evidence/semantic checks pass. Unknown
 references and fabricated quotes must not become design authority.
+
+Accept an exact in-range supplied span before considering unique-quote relocation.
+Ambiguous or context-only quotes are not assigned an arbitrary primary-source
+location. Secondary context is for interpretation, not evidence for another
+page. Summaries use only grounded observations and explicit quality diagnostics.
+
+When a verification fix can recover an existing exact-bound raw response,
+resume may revalidate it without another model call. Preserve its original
+request/prompt/model provenance, write new derived verification artifacts rather
+than overwriting the old ones, and account for remaining quarantined observations.
 
 ## Document and corpus consolidation
 
@@ -130,8 +146,10 @@ reuse every prior observation.
 ## Public workflow and acceptance
 
 The CLI must expose planning, bounded live discovery, resume, discovery-aware
-design and approved reuse. Planning must show all files/chunks and prospective
-work without model calls or output-state writes.
+design and approved reuse. Read-only planning lists all files and exact cached
+page coverage where available; chunk counts remain explicitly unknown until
+preparation. Explicit zero-model-call preparation may persist the full chunk
+inventory and a partial run before any model work is authorized.
 
 Acceptance cases:
 

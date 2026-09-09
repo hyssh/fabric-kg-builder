@@ -4,15 +4,15 @@
 
 📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
-📋 **Current development version:** `0.2.6` — design-first drafts, separate
-question evaluation, and explicit compilation into approved Schema-2 workflows.
+📋 **Current development version:** `0.2.6` — corpus-first discovery, reusable
+candidates, separate design/question evaluation, and explicit Schema-2 approval.
 See [`docs/SCHEMA2-PROTOTYPE.md`](docs/SCHEMA2-PROTOTYPE.md).
 Historical L7 evidence remains in [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md); it is not proof of a 0.2.6 live deployment. The validated
 0.2.3 assessment remains at
 [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md).
 
-See the [development roadmap](docs/ROADMAP.md) for the implemented SQL
-question-context flow and the deferred shared-Lakehouse, multi-ontology investigation.
+See the [development roadmap](docs/ROADMAP.md) for corpus-first processing, the
+SQL question-context flow and the deferred shared-Lakehouse, multi-ontology investigation.
 
 ---
 
@@ -43,7 +43,8 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 - **Fabric Ontology** — generates Ontology definition parts deployable to any Fabric workspace  
 - **Azure AI Search** — vector (text-embedding-3-large, 1536 dims) + keyword indexes for grounded retrieval  
 - **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
-- **Design-first ontology** — business intent, full seed YAML and bounded document samples; separate question-gap evaluation before strict Schema-2 compilation and approval
+- **Corpus-first ontology design** — full chunk discovery and document/corpus consolidation before business/seed-driven design; separate question-gap evaluation and explicit approval
+- **Reusable observations** — preserve raw candidates and grounding diagnostics; reuse prepared sources after approval and target only missing/unmapped work for additional model calls
 - **Question execution context** — analytical questions retain Lakehouse SQL routing, scope, source needs and pending decisions through approval and serving; routing is not SQL execution
 - **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
 - **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  

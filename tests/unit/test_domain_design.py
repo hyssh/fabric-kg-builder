@@ -20,7 +20,7 @@ from fabric_kg_builder.domain.design import (
     compile_domain_design,
     design_preflight,
     evaluate_domain_design,
-    generate_domain_design,
+    generate_domain_design as _generate_domain_design,
     load_design_evaluation,
     load_domain_design,
     read_design_seed,
@@ -35,6 +35,12 @@ from tests.unit.test_l1_stage import _intake, _candidates
 
 
 QUESTIONS = [f"cq:q{index}" for index in range(1, 6)]
+
+
+def generate_domain_design(*args, **kwargs):
+    """These regressions explicitly exercise the retained sample-only workflow."""
+    kwargs.setdefault("sample_only", True)
+    return _generate_domain_design(*args, **kwargs)
 
 
 def _preflight(tmp_path):

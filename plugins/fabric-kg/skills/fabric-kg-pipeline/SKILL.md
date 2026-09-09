@@ -44,12 +44,27 @@ is a plan, not verified table/column bindings, SQL execution or answer readiness
 If the configured consumer cannot execute that route, report the capability
 gap rather than substitute a graph query or invent a count.
 
-## Design-first workflow (0.2.6)
+## Corpus-first workflow (0.2.6)
 
-Prefer `domain design`, then `domain evaluate-design`, then explicit
-`domain compile-design` before the existing approval/extraction workflow.
-Read each command's help for its exact options. Generation requires explicit
-model authorization; evaluation and compilation are not deployment.
+Collect intent first, then use `domain discover` to prepare the complete corpus
+and collect open candidates before `domain design`. Consolidate results per
+document and across the corpus, then evaluate and compile the discovery-bound
+design before the existing approval/extraction workflow. Read each command's
+help for its exact options. Live discovery/generation require explicit model
+authorization; evaluation and compilation are not deployment.
+
+Inspect actual file/chunk coverage, failed/unsupported/deferred work and resume
+bindings. A partial discovery is not full-corpus understanding. Do not quietly
+substitute a small sample, truncate the corpus or label an empty failed response
+as successful discovery. The old bounded design route is explicit `--sample-only`
+compatibility mode, not the normal full-corpus path.
+
+Use prepared parsing/OCR and grounded candidate responses again after approval
+through `enrich --discovery`. Do not automatically send every chunk to the model
+a second time. Reuse only unambiguously compatible observations; expose unmapped
+or missing work and authorize only the necessary targeted re-extraction.
+Discovery is not approval or final semantic evidence: existing L3 verification
+still applies. Never edit caches, IDs or receipts to raise the reuse rate.
 
 Pass an existing YAML design through the dedicated seed input. Preserve the full
 design intent, not only its description. A user sketch is reference material;
@@ -77,7 +92,8 @@ options work in Schema-2; follow the installed CLI's explicit capability checks.
 
 | Operation | Command | Boundary |
 |---|---|---|
-| Explore design | `fabric-kg domain design --help` | Seed-aware, unapproved design; gaps do not imply invalid ontology |
+| Discover corpus | `fabric-kg domain discover --help` | Full source/chunk accounting and cached unapproved observations; explicit partial state |
+| Explore design | `fabric-kg domain design --help` | Discovery-bound, seed-aware unapproved design; explicit sample-only compatibility |
 | Evaluate design | `fabric-kg domain evaluate-design --help` | Separate structural question report; not factual answer acceptance |
 | Inspect question context | `fabric-kg domain question-context --help` | Read-only routing and data-requirement handoff; not a query executor |
 | Compile design | `fabric-kg domain compile-design --help` | Local strict Schema-2 handoff; does not approve or deploy |
@@ -88,7 +104,7 @@ options work in Schema-2; follow the installed CLI's explicit capability checks.
 | Record decisions | `fabric-kg domain review-assessment --file ... --assessment ... --decisions ... --actor ... --out ... --revision-out ...` | Every finding gets accepted/rejected/deferred plus rationale; does not approve an ontology |
 | Regenerate draft | `fabric-kg domain revise --parent-state ... --input ... --assessment ... --review ... --request ... --out-state ... --live --max-calls ...` | New, separate unapproved L1 state; parent remains unchanged. No execution mode means dry-run |
 | Approve exact draft | `fabric-kg domain approve --file ... --state-dir ... --approved-by ... --project-id ... --run-id ... --proposal-hash ...` | Use actual anchors from the draft; obtain explicit user approval |
-| Extract | `fabric-kg enrich --input ... --domain-file ... --l1-state ... --l2-state ...` | Consumes exact approved L1; model calls; `--dry-run` checks the handoff/source without calls or writes |
+| Reuse/extract | `fabric-kg enrich --input ... --domain-file ... --l1-state ... --l2-state ... --discovery ...` | Consumes exact approved L1; reuse candidates and scope additional work; inspect help and dry-run before calls |
 | Verify evidence | `fabric-kg validate-evidence --l1-state ... --l2-state ... --state ... --domain ...` | Local L3; inspect unresolved/unsupported outcomes, not just exit status |
 | Materialize serving | `fabric-kg project-serving --l1-state ... --l2-state ... --l3-state ... --state ... --domain ...` | Local L4 asserted/audit tables |
 

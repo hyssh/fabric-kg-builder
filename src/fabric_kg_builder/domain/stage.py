@@ -2066,6 +2066,7 @@ def prepare_l1_stage(
     identity_policy_rationale: str | None = None,
     design_prompt_binding: tuple[str, str] | None = None,
     design_description: str | None = None,
+    design_discovery: Any = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
     started = started_at_utc or _utc_now()
@@ -2103,14 +2104,22 @@ def prepare_l1_stage(
         )
     if len(supplemental_design_locations) > 16:
         raise L1StageError("supplemental design evidence is capped at 16 findings")
-    sample_manifest, profile, source_units, evidence_spans = (
-        build_l1_design_artifacts(
+    if design_discovery is not None:
+        if design_prompt_binding is None or client is not None or candidates is None or supplemental_design_locations:
+            raise L1StageError("Discovery evidence requires model-free design compilation without supplemental sampling")
+        from .discovery import DiscoveryRun, discovery_design_artifacts, validate_discovery
+        design_discovery = DiscoveryRun.model_validate(design_discovery.model_dump(mode="python"))
+        validate_discovery(design_discovery, source_path=preflight.source_path, reparse=False)
+        sample_manifest, profile, source_units, evidence_spans = discovery_design_artifacts(
+            design_discovery, preflight=preflight, verified_at_utc=started,
+        )
+    else:
+        sample_manifest, profile, source_units, evidence_spans = build_l1_design_artifacts(
             preflight.source_path,
             corpus=preflight.corpus,
             base_identity=preflight.base_identity,
             verified_at_utc=started,
             budget=preflight.budget,
-        )
     )
     if supplemental_design_locations:
         preflight, sample_manifest, profile, source_units, evidence_spans = (
@@ -2908,6 +2917,10 @@ def prepare_l1_stage(
             + "\n\nAdditional user design context:\n"
             + design_description
         )
+        draft_contract = DomainContractV2.model_validate(payload)
+    if design_discovery is not None:
+        payload = draft_contract.model_dump(mode="python")
+        payload["discovery_run_hash"] = design_discovery.run_hash
         draft_contract = DomainContractV2.model_validate(payload)
     try:
         design_context = _build_design_context(

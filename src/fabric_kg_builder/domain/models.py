@@ -966,6 +966,15 @@ class DomainContractV2(V2StrictModel):
     """New-project-only domain authority sealed by L1 approval."""
 
     schema_version: Literal[DOMAIN_SCHEMA_V2_VERSION]
+    discovery_run_hash: Sha256Text | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.discovery_run_hash is None:
+            values.pop("discovery_run_hash", None)
+        return values
+
     domain: DomainSectionV2
     business: BusinessSectionV2
     problem: ProblemSectionV2

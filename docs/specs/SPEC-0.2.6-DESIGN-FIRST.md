@@ -5,8 +5,12 @@ claim of completed Fabric deployment or six-question live answer acceptance.
 
 ## Goal
 
-Combine business intent, an optional existing YAML design, and bounded document
-samples into a reviewable ontology draft. Evaluate the draft against the supplied
+Combine business intent, an optional existing YAML design, and complete
+pre-approval corpus discovery/consolidation into a reviewable ontology draft.
+Bounded supporting detail is available from retained discovery records; the old
+sample-only route is explicit compatibility mode. See
+[Corpus-first pipeline](SPEC-CORPUS-FIRST-PIPELINE.md).
+Evaluate the draft against the supplied
 questions without making question coverage a prerequisite for saving the draft.
 Only an explicitly compiled, reviewed and approved Schema-2 domain may drive
 extraction. Preserve the existing source, identity, evidence and approval rules.
@@ -18,7 +22,8 @@ replace the downstream Schema-2 pipeline.
 
 | Artifact | Producer | Consumer | Authority |
 |---|---|---|---|
-| Design context | `domain design` | Model and draft compiler | Intake, seed YAML and verified bounded samples; not extracted facts |
+| Corpus discovery | `domain discover` | Design and later approved reuse | Full chunk accounting, open observations and document/corpus summaries; not asserted facts |
+| Design context | `domain design --discovery` | Model and draft compiler | Intake, seed YAML and discovery-bound context; not extracted facts |
 | Design draft | `domain design` | `domain evaluate-design`, `domain compile-design` | Unapproved design choices, including common and currently unused concepts |
 | Design evaluation | `domain evaluate-design` | Reviewer and compilation preflight | Structural support and gaps; not proof of correct live answers |
 | Compiled L1 proposal | `domain compile-design` | Existing `domain approve` | Existing strict Schema-2 proposal, still unapproved |

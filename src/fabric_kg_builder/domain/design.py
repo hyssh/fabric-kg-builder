@@ -39,6 +39,7 @@ from .question_routing import (
     QUESTION_ROUTING_PROMPT, SQL_ROUTING_UNRESOLVED,
 )
 from .stage import L1Preflight, L1PreparedStage, _TracedProposalClient, _evidence_payload, prepare_l1_stage
+from .discovery import DiscoveryRun, discovery_design_artifacts, discovery_design_context, discovery_grounding_report, validate_discovery
 
 DESIGN_PROMPT_VERSION = "domain-design/1.6.0"
 DESIGN_EVALUATOR_VERSION = "domain-design-evaluator/1.4.0"
@@ -144,6 +145,22 @@ DESIGN_PROMPT_HASH = canonical_sha256(
     {"version": DESIGN_PROMPT_VERSION, "system": DESIGN_SYSTEM_PROMPT,
      "schema": DomainDesignSketch.model_json_schema()}
 )
+DISCOVERY_DESIGN_PROMPT_VERSION = "domain-design/2.0.0"
+DISCOVERY_DESIGN_SYSTEM = DESIGN_SYSTEM_PROMPT.replace(
+    "verified bounded source samples", "source-verified full-corpus discovery and document/corpus consolidation"
+).replace("bounded samples", "consolidated observations").replace("bounded sample", "consolidated observations")
+DISCOVERY_DESIGN_SYSTEM += """
+This is the discovery-first workflow: all source chunks were processed before
+ontology design. Use the supplied complete corpus synthesis and immutable
+provenance graph, business/seed/questions and SQL routing together. Summaries are
+unapproved interpretations, not verified facts or completeness/recall claims.
+Do not invent evidence IDs from summary node IDs. Empty evidence_ids are allowed.
+Child provenance nodes can be retrieved with the bounded discovery context API;
+operator-selected retrieval is explicitly hash-bound in this request."""
+DISCOVERY_DESIGN_PROMPT_HASH = canonical_sha256({
+    "version": DISCOVERY_DESIGN_PROMPT_VERSION, "system": DISCOVERY_DESIGN_SYSTEM,
+    "schema": DomainDesignSketch.model_json_schema(),
+})
 
 
 class DesignSeedReference(ContractModel):
@@ -195,7 +212,7 @@ class DesignSamples(ContractModel):
 
 class DomainDesignDraft(ContractModel):
     artifact_kind: Literal["domain.design_draft"] = "domain.design_draft"
-    artifact_version: Literal["1.0.0"] = "1.0.0"
+    artifact_version: Literal["1.0.0", "2.0.0"] = "1.0.0"
     draft_id: RequiredText
     draft_hash: Sha256
     created_at_utc: datetime
@@ -203,21 +220,44 @@ class DomainDesignDraft(ContractModel):
     seed: DesignSeedReference | None
     samples: DesignSamples
     sketch: DomainDesignSketch
-    prompt_version: Literal["domain-design/1.6.0"] = DESIGN_PROMPT_VERSION
+    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0"] = DESIGN_PROMPT_VERSION
     prompt_hash: Sha256
     request_hash: Sha256
     model_call_count: Literal[1] = 1
+    discovery: DiscoveryRun | None = None
+    discovery_node_ids: list[str] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.discovery is None:
+            values.pop("discovery", None)
+        if self.discovery_node_ids is None:
+            values.pop("discovery_node_ids", None)
+        return values
 
     @model_validator(mode="after")
     def _binding(self) -> "DomainDesignDraft":
-        if self.prompt_hash != DESIGN_PROMPT_HASH:
+        expected_hash = DISCOVERY_DESIGN_PROMPT_HASH if self.discovery is not None else DESIGN_PROMPT_HASH
+        expected_version = DISCOVERY_DESIGN_PROMPT_VERSION if self.discovery is not None else DESIGN_PROMPT_VERSION
+        if self.prompt_hash != expected_hash or self.prompt_version != expected_version:
             raise ValueError("design prompt binding is unsupported")
+        if self.artifact_version != ("2.0.0" if self.discovery is not None else "1.0.0"):
+            raise ValueError("design artifact version disagrees with discovery scope")
+        if self.discovery is None and self.discovery_node_ids is not None:
+            raise ValueError("retrieval requires discovery")
+        if self.discovery is not None and (
+            not self.discovery.full_corpus_design_ready
+            or self.discovery.prepared.corpus.corpus_hash != self.inputs.corpus.corpus_hash
+            or self.discovery.prepared.base_identity.project_id != self.inputs.base_identity.project_id
+        ):
+            raise ValueError("design requires complete discovery over its exact corpus")
         values = self.model_dump(mode="json", exclude={"draft_id", "draft_hash"})
         if canonical_sha256(values) != self.draft_hash:
             raise ValueError("design draft hash mismatch")
         if self.draft_id != deterministic_contract_id("domain-design-draft", {"draft_hash": self.draft_hash}):
             raise ValueError("design draft ID mismatch")
-        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples)):
+        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids)):
             raise ValueError("design request does not bind full seed/intake/samples")
         _validate_design_structure(self)
         return self
@@ -310,19 +350,24 @@ def read_design_seed(path: Path | None) -> DesignSeedReference | None:
 _read_seed = read_design_seed
 
 
-def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples) -> dict[str, Any]:
+def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None) -> dict[str, Any]:
     user = build_proposal_user_message(
         inputs.intake,
         source_profile_summary=samples.source_profile.model_dump(mode="json", exclude={"identity"}),
-        verified_design_evidence=_evidence_payload(samples.evidence_spans),
+        verified_design_evidence=_evidence_payload(samples.evidence_spans) if discovery is None else [],
     )
     user += "\nFull reference seed (no inherited approval/evidence authority):\n" + canonical_json(
         seed.model_dump(mode="json") if seed is not None else None
     )
     if inputs.description is not None:
         user += "\nAdditional user design description (context, not verified evidence):\n" + canonical_json(inputs.description)
+    if discovery is not None:
+        selected_nodes = list(dict.fromkeys([discovery.corpus_summary_id, *(discovery_node_ids or [])]))
+        user += "\nComplete discovery synthesis and provenance (unapproved interpretations):\n" + canonical_json(
+            discovery_design_context(discovery, node_ids=selected_nodes)
+        )
     return {
-        "system": DESIGN_SYSTEM_PROMPT, "user": user,
+        "system": DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
         "json_schema": DomainDesignSketch.model_json_schema(),
         "max_completion_tokens": 16_000, "max_attempts": 1,
     }
@@ -402,18 +447,29 @@ def _validate_design_structure(draft: DomainDesignDraft) -> None:
 def generate_domain_design(
     preflight: L1Preflight, *, client: Any, seed_path: Path | None = None,
     description: str | None = None,
+    discovery: DiscoveryRun | None = None,
+    sample_only: bool = False,
+    discovery_node_ids: list[str] | None = None,
     proposal_trace_callback: Callable[[dict[str, Any]], None] | None = None,
     max_prompt_chars: int = 192_000,
 ) -> DomainDesignDraft:
     """One model call creates a separate draft; no Schema-2 compilation occurs."""
+    if discovery is None and not sample_only:
+        raise DomainDesignError("Complete discovery is required by default; use explicit sample_only=True for legacy bounded sampling")
+    if discovery is not None and sample_only:
+        raise DomainDesignError("Choose discovery or explicit sample-only mode, not both")
     validate_corpus_manifest_against_source(
         preflight.corpus, preflight.source_path, identity=preflight.base_identity
     )
     created = datetime.now(timezone.utc)
-    sample, profile, units, spans = build_l1_design_artifacts(
-        preflight.source_path, corpus=preflight.corpus,
-        base_identity=preflight.base_identity, verified_at_utc=created, budget=preflight.budget,
-    )
+    if discovery is not None:
+        validate_discovery(discovery, source_path=preflight.source_path, reparse=False)
+        sample, profile, units, spans = discovery_design_artifacts(discovery, preflight=preflight, verified_at_utc=created)
+    else:
+        sample, profile, units, spans = build_l1_design_artifacts(
+            preflight.source_path, corpus=preflight.corpus,
+            base_identity=preflight.base_identity, verified_at_utc=created, budget=preflight.budget,
+        )
     inputs = DesignInputs(
         source_path=str(preflight.source_path.resolve()), run_id=preflight.run_id,
         base_identity=preflight.base_identity, intake=preflight.intake, corpus=preflight.corpus,
@@ -423,7 +479,7 @@ def generate_domain_design(
     )
     samples = DesignSamples(sample_manifest=sample, source_profile=profile, source_units=units, evidence_spans=spans)
     seed = read_design_seed(seed_path)
-    request = _design_request(inputs, seed, samples)
+    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids)
     if max_prompt_chars < 256 or len(canonical_json(request)) > max_prompt_chars:
         raise DomainDesignError("Full seed/intake/sample request exceeds design prompt budget; nothing was truncated")
     if proposal_trace_callback is not None:
@@ -431,12 +487,16 @@ def generate_domain_design(
     raw = client.complete_json(**request)
     sketch = DomainDesignSketch.model_validate(raw)
     values = {
-        "artifact_kind": "domain.design_draft", "artifact_version": "1.0.0",
+        "artifact_kind": "domain.design_draft", "artifact_version": "2.0.0" if discovery is not None else "1.0.0",
         "created_at_utc": created, "inputs": inputs, "samples": samples,
-        "seed": seed, "sketch": sketch, "prompt_version": DESIGN_PROMPT_VERSION,
-        "prompt_hash": DESIGN_PROMPT_HASH, "request_hash": canonical_sha256(request),
+        "seed": seed, "sketch": sketch, "prompt_version": DISCOVERY_DESIGN_PROMPT_VERSION if discovery is not None else DESIGN_PROMPT_VERSION,
+        "prompt_hash": DISCOVERY_DESIGN_PROMPT_HASH if discovery is not None else DESIGN_PROMPT_HASH, "request_hash": canonical_sha256(request),
         "model_call_count": 1,
     }
+    if discovery is not None:
+        values["discovery"] = discovery
+    if discovery_node_ids is not None:
+        values["discovery_node_ids"] = discovery_node_ids
     digest = canonical_sha256(values)
     return DomainDesignDraft(
         **values, draft_hash=digest,
@@ -553,6 +613,17 @@ def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
     relationships = {item.key: item for item in sketch.relationships}
     effective_questions = routed_question_copies(draft.inputs.intake.competency_questions, sketch.question_routes)
     findings = [*sketch.review_concerns, *_seed_concerns(draft)]
+    if draft.discovery is not None:
+        grounding = discovery_grounding_report(draft.discovery)
+        if grounding["quarantined_candidate_count"]:
+            findings.append(DesignFinding(
+                code="discovery_grounding_gaps",
+                message=(
+                    f"{grounding['quarantined_candidate_count']} raw observations remain quarantined; "
+                    f"{grounding['verified_candidate_count']} observations have source-grounded anchors. "
+                    "Completed chunk processing/consolidation is not semantic recall or verified answers."
+                ),
+            ))
     limits: list[DesignFinding] = []
     if all(is_sql_question(item) for item in effective_questions):
         limits.append(DesignFinding(
@@ -732,6 +803,7 @@ def compile_domain_design(
             started_at_utc=draft.created_at_utc,
             design_prompt_binding=(draft.prompt_version, draft.prompt_hash),
             design_description=draft.inputs.description,
+            design_discovery=draft.discovery,
         )
     except Exception as exc:
         raise DesignCapabilityError([DesignFinding(

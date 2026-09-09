@@ -9,7 +9,7 @@ import yaml
 from fabric_kg_builder.contracts.base import canonical_sha256
 from fabric_kg_builder.contracts.registry import REGISTERED_CONTRACT_VERSIONS
 from fabric_kg_builder.domain.design import (
-    DomainDesignDraft, DesignCapabilityError, generate_domain_design,
+    DomainDesignDraft, DesignCapabilityError,
     evaluate_domain_design, compile_domain_design, load_domain_design,
     save_design_artifact,
 )
@@ -22,7 +22,7 @@ from fabric_kg_builder.domain.review import run_deterministic_validation
 from fabric_kg_builder.domain.stage import (
     preflight_l1_inputs, prepare_l1_stage, finalize_l1_stage, approve_persisted_l1_draft,
 )
-from tests.unit.test_domain_design import _preflight, _sketch, Client
+from tests.unit.test_domain_design import _preflight, _sketch, Client, generate_domain_design
 from tests.unit.test_l1_stage import _intake, _candidates
 
 

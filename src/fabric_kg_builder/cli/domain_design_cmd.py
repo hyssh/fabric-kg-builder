@@ -27,6 +27,88 @@ def _design_core():
     return design
 
 
+def _discovery_core():
+    from fabric_kg_builder.domain import discovery
+
+    return discovery
+
+
+def _validate_discovery_resume_cache(prior, cache_dir: Path) -> None:
+    from fabric_kg_builder.domain.discovery import discovery_observation_cache_path
+
+    records = []
+    records.extend(
+        (discovery_observation_cache_path(cache_dir, item), item)
+        for item in prior.chunks if item.raw_response is not None
+    )
+    records.extend(
+        (cache_dir / "summaries" / f"{item.request_hash}.json", item) for item in prior.summaries
+    )
+    for path, expected in records:
+        if not path.is_file() or type(expected).model_validate_json(path.read_text(encoding="utf-8")) != expected:
+            raise ValueError(f"DISCOVERY_RESUME_CACHE_DRIFT: {path}")
+
+
+def _discovery_plan_inventory(corpus, source: Path, layout_cache, layout_identity) -> dict:
+    """Inspect exact cached PDF coverage without text extraction or disk snapshots."""
+    import hashlib
+    from fabric_kg_builder.sources.docintel_cache import load_cached_layout, validate_extractor_identity
+    from .layout_cache_cmd import _page_count
+
+    if layout_identity is not None:
+        validate_extractor_identity(layout_identity)
+    inventory = []
+    for entry in corpus.entries:
+        row = {
+            "source_file_id": entry.source_file_id, "source": entry.relative_source_ref,
+            "disposition": entry.disposition, "adapter_status": entry.adapter_status,
+            "media_type": entry.media_type, "byte_count": entry.byte_count,
+            "pdf_pages": None, "cached_pdf_pages": None, "exact_page_coverage": False,
+        }
+        if entry.media_type == "application/pdf" and entry.disposition == "eligible" and layout_cache is not None:
+            path = source if source.is_file() else source / entry.relative_source_ref
+            if source.is_dir() and not path.resolve().is_relative_to(source.resolve()):
+                raise ValueError("DISCOVERY_PLAN_SOURCE_ESCAPE")
+            data = path.read_bytes()
+            if len(data) != entry.byte_count or hashlib.sha256(data).hexdigest() != entry.original_byte_hash:
+                raise ValueError(f"DISCOVERY_PLAN_SOURCE_DRIFT: {entry.source_file_id}")
+            count = _page_count(data, entry.media_type)
+            del data
+            row["pdf_pages"] = count
+            cached = load_cached_layout(
+                layout_cache, input_sha256=entry.original_byte_hash, extractor_identity=layout_identity,
+            )
+            row["layout_cache_status"] = "missing" if cached is None else "exact"
+            if cached is not None:
+                numbers = [
+                    page.get("pageNumber", page.get("page_number"))
+                    for page in cached.analyze_result.get("pages", ())
+                ]
+                expected = set(range(1, count + 1))
+                row.update({
+                    "layout_cache_key": cached.cache_key,
+                    "cached_pdf_pages": len(numbers),
+                    "exact_page_coverage": len(numbers) == count and set(numbers) == expected,
+                })
+                if not row["exact_page_coverage"]:
+                    row["layout_cache_status"] = "incomplete_pages"
+        inventory.append(row)
+    pdfs = [row for row in inventory if row["media_type"] == "application/pdf"]
+    return {
+        "source_inventory": inventory,
+        "page_coverage": {
+            "scope": "exact_cached_pdf_pages_not_extraction_or_semantic_recall",
+            "pdf_files": len(pdfs),
+            "source_pdf_pages": sum(row["pdf_pages"] for row in pdfs) if all(
+                row["pdf_pages"] is not None for row in pdfs
+            ) else None,
+            "verified_cached_pdf_pages": sum(row["pdf_pages"] for row in pdfs if row["exact_page_coverage"]),
+            "complete": bool(pdfs) and all(row["exact_page_coverage"] for row in pdfs),
+            "pending_source_file_ids": [row["source_file_id"] for row in pdfs if not row["exact_page_coverage"]],
+        },
+    }
+
+
 def _root_options(ctx: click.Context) -> dict:
     options = ctx.find_root().obj
     return options if isinstance(options, dict) else {}
@@ -78,6 +160,7 @@ def domain_design_schema_cmd() -> None:
     """Print design/context/evaluation and model-response schemas; no config or calls."""
     core = _design_core()
     from fabric_kg_builder.domain.question_routing import QuestionRoutingContext
+    discovery = _discovery_core()
     click.echo(canonical_json({
         "operation": "domain.design-schema",
         "schemas": {
@@ -87,6 +170,7 @@ def domain_design_schema_cmd() -> None:
                 core.DomainDesignSketch, core.DesignInputs,
                 core.DesignSamples, core.DesignSeedReference,
                 QuestionRoutingContext,
+                discovery.DiscoveryBudget, discovery.PreparedCorpus, discovery.DiscoveryRun,
             )
         },
     }))
@@ -170,6 +254,134 @@ def domain_question_context_cmd(
     click.echo(canonical_json(result))
 
 
+@click.command("discover")
+@click.option("--input", "source", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--intake", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Optional existing business intake; discovery does not require questions or an ontology.")
+@click.option("--out", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--cache-dir", "--state-dir", "cache_dir", default=".fkg/discovery",
+              show_default=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--resume", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Resume a prior immutable discovery run into a new --out path.")
+@click.option("--project-id")
+@click.option("--live", is_flag=True, help="Permit bounded full-corpus parsing and model calls.")
+@click.option("--dry-run", is_flag=True, help="Read-only inventory/cache coverage; no text extraction, calls or writes.")
+@click.option("--max-calls", default=256, show_default=True, type=click.IntRange(0, 100_000))
+@click.option("--concurrency", default=4, show_default=True, type=click.IntRange(1, 16))
+@click.option("--max-chunk-chars", default=12_000, show_default=True, type=click.IntRange(128, 64_000))
+@click.option("--max-tokens", default=2_000_000, show_default=True, type=click.IntRange(0))
+@click.option("--ocr-cache", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--ocr-identity", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.pass_context
+def domain_discover_cmd(
+    ctx, source, intake, out, cache_dir, resume, project_id, live, dry_run,
+    max_calls, concurrency, max_chunk_chars, max_tokens, ocr_cache, ocr_identity,
+) -> None:
+    """Visit all corpus chunks before design; observations and summaries are unapproved.
+
+    Planning inventories files and supplied exact cached PDF page coverage.
+    Chunk counts remain unknown until explicit preparation; budget-limited runs are partial.
+    Resume reuses immutable responses; choose a fresh output path, not overwrite.
+    """
+    planning = dry_run or bool(_root_options(ctx).get("dry_run")) or not live
+    if live and planning:
+        raise click.UsageError("--dry-run cannot be combined with --live")
+    if (ocr_cache is None) != (ocr_identity is None):
+        raise click.UsageError("--ocr-cache and --ocr-identity must be supplied together")
+    if not planning and out.exists():
+        raise click.ClickException("Discovery output is immutable; choose a new --out path")
+    if out.resolve().is_relative_to(source.resolve()) or cache_dir.resolve().is_relative_to(source.resolve()):
+        raise click.UsageError("Discovery output/cache must be outside the source corpus")
+    try:
+        core = _discovery_core()
+        prior = core.load_discovery(resume) if resume else None
+        intake_raw = load_domain_intake(intake) if intake else (prior.business_context if prior else None)
+        selected_project = project_id or (
+            prior.prepared.base_identity.project_id if prior else f"project:{source.resolve().name}"
+        )
+        selected_run = prior.prepared.base_identity.run_id if prior else f"run:{uuid.uuid4().hex}"
+        if intake is not None:
+            preflight = preflight_l1_inputs(
+                source_path=source, intake_raw=intake_raw, project_id=selected_project,
+                run_id=selected_run,
+                model_version="planned-model", model_hash=canonical_sha256({"discovery_plan": True}),
+            )
+        else:
+            preflight = core.preflight_discovery_inputs(
+                source_path=source, project_id=selected_project, run_id=selected_run,
+            )
+        budget = core.DiscoveryBudget(
+            max_calls=max_calls, max_concurrency=concurrency, max_chunk_chars=max_chunk_chars,
+            max_tokens=max_tokens,
+        )
+        if prior is not None:
+            _validate_discovery_resume_cache(prior, cache_dir)
+            if (
+                prior.prepared.base_identity.project_id != selected_project
+                or prior.prepared.corpus.corpus_hash != preflight.corpus.corpus_hash
+                or prior.business_context != intake_raw
+                or prior.budget.max_chunk_chars != budget.max_chunk_chars
+            ):
+                raise ValueError("DISCOVERY_RESUME_DRIFT: corpus, project, intake or chunk policy changed")
+        binding = prior.prepared.reader_binding if prior else {}
+        layout_identity = json.loads(ocr_identity.read_text(encoding="utf-8")) if ocr_identity else binding.get("layout_identity")
+        layout_cache = ocr_cache or (Path(binding["layout_cache"]) if binding.get("layout_cache") else None)
+        if planning:
+            result = {
+                "operation": "domain.discover", "status": "planned",
+                "corpus_hash": preflight.corpus.corpus_hash,
+                "corpus_entries": preflight.corpus.total_entry_count,
+                "budget": budget.model_dump(mode="json"), "model_calls": 0, "writes": 0,
+                "source_units_materialized": False,
+                "chunk_count": len(prior.chunks) if prior else None,
+                "resume_hash": prior.run_hash if prior else None,
+                "full_corpus_design_ready": False,
+                **_discovery_plan_inventory(preflight.corpus, source, layout_cache, layout_identity),
+            }
+            if prior is not None:
+                result["prior_grounding"] = core.discovery_grounding_report(prior)
+        else:
+            from fabric_kg_builder.sources.preparation import indexed_corpus_reader
+
+            reader = indexed_corpus_reader(
+                preflight.corpus, source, project_id=selected_project,
+                layout_cache=layout_cache, layout_identity=layout_identity,
+            )
+            if prior:
+                prepared = core.resume_discovery_preparation(
+                    prior, source_path=source, reader=reader, cache_dir=cache_dir,
+                )
+            else:
+                prepared = core.prepare_discovery_corpus(preflight, reader=reader, cache_dir=cache_dir)
+            client, model_version = _build_client(ctx)
+            model_hash = compute_model_hash(client, model_version)
+            if prior and (prior.model_version != model_version or prior.model_hash != model_hash):
+                raise ValueError("DISCOVERY_RESUME_MODEL_DRIFT: model identity changed")
+            run = core.run_discovery(
+                prepared, client=client, model_version=model_version, model_hash=model_hash,
+                cache_dir=cache_dir, budget=budget, business_context=intake_raw,
+                prior=prior,
+            )
+            core.save_discovery(out, run)
+            result = {
+                "operation": "domain.discover", "status": run.status, "artifact": str(out),
+                "discovery_hash": run.run_hash, "prepared_corpus_hash": prepared.prepared_hash,
+                "corpus_entries": prepared.corpus.total_entry_count, "chunk_count": len(run.chunks),
+                "model_calls": run.model_call_count, "reused_responses": run.reused_response_count,
+                "pending_chunks": sum(item.response is None for item in run.chunks),
+                "prepared_sources": sum(item.status in {"processed", "no_candidates"} for item in prepared.sources),
+                "pending_sources": sum(item.status not in {"processed", "no_candidates"} for item in prepared.sources),
+                "full_corpus_design_ready": run.full_corpus_design_ready,
+                "issues": run.issues, "authority": run.authority,
+                **core.discovery_grounding_report(run),
+            }
+    except (APIError, ClientAuthenticationError) as exc:
+        raise _model_failure(exc) from exc
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(canonical_json(result))
+
+
 @click.command("design")
 @click.option("--input", "source", required=True,
               type=click.Path(exists=True, path_type=Path))
@@ -179,6 +391,12 @@ def domain_question_context_cmd(
 @click.option("--seed-domain", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Full safe YAML reference context, including generic sketches; never evidence or approval.")
 @click.option("--description", help="Additional design context; does not replace the full seed.")
+@click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Complete immutable full-corpus discovery; the default design workflow.")
+@click.option("--discovery-node", "discovery_nodes", multiple=True,
+              help="Additional exact document/corpus summary node ID; repeat for bounded detail beside the corpus root.")
+@click.option("--sample-only", is_flag=True,
+              help="Explicit legacy bounded-sample compatibility, NOT full-corpus discovery.")
 @click.option("--project-id", help="Stable project identity (default: project:<source name>).")
 @click.option("--live", is_flag=True, help="Explicitly permit bounded model generation.")
 @click.option("--dry-run", is_flag=True, help="Plan only, without calls or writes (default).")
@@ -192,8 +410,9 @@ def domain_design_cmd(
     seed_domain: Path | None, description: str | None, project_id: str | None,
     live: bool, dry_run: bool, max_calls: int,
     proposal_trace_dir: Path | None,
+    discovery_file: Path | None, sample_only: bool, discovery_nodes: tuple[str, ...],
 ) -> None:
-    """Design an additive, unapproved ontology from intent, seed and bounded samples.
+    """Design an unapproved ontology from intent, seed and complete corpus discovery.
 
     Saving a draft does not require complete question coverage. Reference examples
     are suggestions, never verified facts. Use evaluate-design for local structural
@@ -201,6 +420,12 @@ def domain_design_cmd(
     Discover artifact and model schemas with domain design-schema.
     """
     planning = dry_run or bool(_root_options(ctx).get("dry_run")) or not live
+    if (discovery_file is None) == (not sample_only):
+        raise click.UsageError(
+            "Supply --discovery from 'domain discover', or explicitly choose --sample-only (not both)"
+        )
+    if discovery_nodes and discovery_file is None:
+        raise click.UsageError("--discovery-node requires --discovery")
     if live and planning:
         raise click.UsageError("--dry-run cannot be combined with --live")
     if project_id is not None and not project_id.strip():
@@ -210,6 +435,14 @@ def domain_design_cmd(
     try:
         intake_raw = load_domain_intake(intake)
         core = _design_core()
+        discovery = _discovery_core().load_discovery(discovery_file) if discovery_file else None
+        if discovery is not None:
+            _discovery_core().validate_discovery(discovery, source_path=source, reparse=False)
+            if not discovery.full_corpus_design_ready:
+                raise ValueError("Full-corpus design requires complete discovery; resume the partial run")
+            _discovery_core().discovery_design_context(
+                discovery, node_ids=list(dict.fromkeys([discovery.corpus_summary_id, *discovery_nodes])),
+            )
         seed = core._read_seed(seed_domain)
         seed_hash = seed.content_sha256 if seed else None
         client, model_version = (None, "planned-model")
@@ -219,7 +452,9 @@ def domain_design_cmd(
             model_hash = compute_model_hash(client, model_version)
         preflight = preflight_l1_inputs(
             source_path=source, intake_raw=intake_raw,
-            project_id=project_id or f"project:{source.resolve().name}",
+            project_id=project_id or (
+                discovery.prepared.base_identity.project_id if discovery else f"project:{source.resolve().name}"
+            ),
             run_id=f"run:{uuid.uuid4().hex}",
             model_version=model_version, model_hash=model_hash,
         )
@@ -236,6 +471,13 @@ def domain_design_cmd(
                 "planned_model_calls": 1,
                 "writes": 0,
                 "samples_materialized": False,
+                "design_mode": "sample_only" if sample_only else "full_corpus_discovery",
+                **({
+                    "discovery_hash": discovery.run_hash,
+                    "prepared_corpus_hash": discovery.prepared.prepared_hash,
+                    "discovery_chunks": len(discovery.chunks),
+                    "discovery_node_ids": list(discovery_nodes),
+                } if discovery else {}),
             }
             from fabric_kg_builder.domain.question_routing import question_routing_context
 
@@ -253,6 +495,8 @@ def domain_design_cmd(
         else:
             result = core.generate_domain_design(
                 preflight, client=client, seed_path=seed_domain,
+                **({"discovery": discovery} if discovery is not None else {"sample_only": True}),
+                **({"discovery_node_ids": list(discovery_nodes)} if discovery_nodes else {}),
                 **({"description": description} if description is not None else {}),
                 **({
                     "proposal_trace_callback": _trace_writer(proposal_trace_dir, preflight.run_id),

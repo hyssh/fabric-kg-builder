@@ -1,4 +1,4 @@
-# Testing the 0.2.6 design-first prototype
+# Testing the 0.2.6 corpus-first prototype
 
 This local prototype keeps exploratory design separate from the existing strict
 DomainContractV2 approval/extraction contract. It also retains the document
@@ -9,6 +9,7 @@ live technician-question acceptance is complete.
 
 ```bash
 fabric-kg --version
+fabric-kg domain discover --help
 fabric-kg domain design-schema
 fabric-kg domain question-context --help
 fabric-kg domain design --help
@@ -25,19 +26,60 @@ fabric-kg enrich --help
 `assessment-schema` prints the actual versioned JSON schemas. Package version
 alone is insufficient to identify a prototype build; record the source commit.
 
-## Design first: seed YAML, intent, then question evaluation
+## Corpus first: discover, consolidate, then design
 
-The 0.2.6 sequence is `domain design` -> `domain evaluate-design` ->
-`domain compile-design` -> existing `domain approve` -> `enrich`.
-The [design-first specification](specs/SPEC-0.2.6-DESIGN-FIRST.md) defines the
-authority boundaries and acceptance cases.
+The normal sequence is `domain discover` -> `domain design --discovery` ->
+`domain evaluate-design` -> `domain compile-design` -> existing `domain approve`
+-> `enrich --discovery`. See the
+[corpus-first contract](specs/SPEC-CORPUS-FIRST-PIPELINE.md).
 
-Plan first; this does not write output or call a model:
+Plan source discovery first; this inventories files and supplied OCR-cache page
+coverage without extracting text, writing state or calling a model:
 
 ```bash
-fabric-kg domain design --input ./documents --intake intake.json \
-  --seed-domain reference.yaml --out .fkg/design/draft.json
+fabric-kg domain discover --input ./documents \
+  --cache-dir .fkg/discovery --out .fkg/discovery/prepared.json
 ```
+
+Discovery does not require an ontology or fabricated intake questions.
+`--intake intake.json` is optional when business context is already available.
+With cached OCR, supply `--ocr-cache` and `--ocr-identity`; a cache miss must
+not trigger a hidden Document Intelligence request.
+
+Exact chunk counts require source preparation. This explicit local preparation
+writes a partial checkpoint but allows **zero** model calls:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain discover --input ./documents \
+  --cache-dir .fkg/discovery --out .fkg/discovery/prepared.json \
+  --live --max-calls 0
+```
+
+Then allow bounded discovery and document/corpus synthesis. The following budget
+is illustrative, not a promise that it covers every corpus:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain discover --input ./documents \
+  --cache-dir .fkg/discovery --resume .fkg/discovery/prepared.json \
+  --out .fkg/discovery/run-1.json --live --max-calls 256 --concurrency 4
+```
+
+If the run is partial, retain it and resume into a fresh output path with an
+appropriate budget. Matching successful work is reused. Failed source preparation
+can recover without rereading successful sources. Preserve the same source,
+extractor, model and influential business context; resume must not hide drift.
+When intake is omitted during resume, the previous business context is retained.
+
+Only a complete discovery result is used for the normal design path. Completion
+means accounted source/chunk processing and consolidation, not perfect semantic
+recall. Inspect candidate grounding quality and pending work as well as status.
+
+Grounding retains every original observation in a ledger. Exact primary-source
+matches enter a verified subset; ambiguous, malformed or context-only observations
+remain quarantined with stable IDs and reasons. A processed chunk with quarantine
+is not an empty response or fully verified knowledge. After verifier changes,
+exact-bound received responses can be revalidated without repeating model calls;
+old request/prompt provenance and original caches remain immutable.
 
 The seed may be a reference sketch or a domain YAML. Its complete parsed content
 and hash are preserved as design context, not source evidence. The optional
@@ -49,11 +91,20 @@ Explicitly allow bounded generation, then evaluate the saved design locally:
 ```bash
 fabric-kg --config fabric-kg.yaml domain design \
   --input ./documents --intake intake.json --seed-domain reference.yaml \
+  --discovery .fkg/discovery/run-1.json \
   --out .fkg/design/draft.json --live --max-calls 2 \
   --proposal-trace-dir .fkg/design/private-traces
 fabric-kg domain evaluate-design --file .fkg/design/draft.json \
   --out .fkg/design/evaluation.json
 ```
+
+Continue with `run-1.json` only if its reported status is complete. Otherwise,
+resume and substitute the actual completed run path in subsequent commands.
+Do not rename or edit a partial run to make it appear complete.
+Use repeatable `--discovery-node NODE_ID` for bounded document/chunk detail
+alongside the corpus root. The earlier bounded-sample workflow now requires
+explicit `--sample-only`, is labelled limited, and cannot be combined with
+`--discovery`.
 
 A draft can retain common types with no question assignments and concepts that
 are not used by the current questions. Question gaps are not JSON/schema errors.
@@ -87,13 +138,34 @@ Do not pass the design JSON to `enrich`. Do not assume `init-domain --domain-fil
 loads a seed in Schema-2: unsupported legacy seed options now fail explicitly
 with guidance to use `domain design`.
 
-### Current design-first limits
+### Approved reuse and current limits
 
-The existing sampler can exhaust a sample-kind quota on a single file; a corpus
-inventory is not evidence that every document influenced the proposal. Inspect
-the draft's actual `samples.source_units`, not just `corpus_entries`. Design
-generation currently uses the native bounded sampler, not the full OCR cache
-used by later assessment/extraction commands.
+After explicit approval, reuse the exact discovery bound into that L1 handoff:
+
+```bash
+fabric-kg enrich --input ./documents --domain-file .fkg/l1-026/domain.yaml \
+  --l1-state .fkg/l1-026 --l2-state .fkg/l2-026 \
+  --discovery .fkg/discovery/run-1.json --replay-only --dry-run
+```
+
+Remove `--dry-run` to execute local candidate mapping/replay. The default with
+`--discovery` is no new model calls. Missing/unmapped work stays pending;
+`--reextract-pending --max-reextract-calls N` explicitly permits targeted new
+calls. Omission by a retry is not authority to delete an original observation.
+Inspect reuse, pending and candidate-disposition counts rather than just exit
+status. Existing L3 verification still applies.
+
+A discovery-bound approved domain requires its matching discovery; forgetting it
+must not launch a full second model pass. Legacy approved domains retain their
+compatibility behavior. Source bytes and cache hashes are rechecked; prepared
+units are not reparsed in normal design/compile/replay.
+Use the exact discovery run sealed into approval, not merely the latest resume
+filename: a successor run has its own hash even when it reuses every response.
+Quarantined observations remain pending in replay, never silently discarded.
+
+The sample-only compatibility route still has a bounded sampler; it is not
+evidence of full-corpus understanding. Normal discovery processes all declared
+eligible chunks, with budgets and unsupported content explicitly accounted for.
 
 The intake still requires five to ten questions. Existing strict compilation
 limits remain visible, including relationship-usage tags and retained-type/path

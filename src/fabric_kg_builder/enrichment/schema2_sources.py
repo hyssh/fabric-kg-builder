@@ -1,4 +1,4 @@
-"""L2-only input gates and complete-corpus SourceUnit materialization."""
+"""L2 input gates and shared, domain-neutral SourceUnit materialization."""
 
 from __future__ import annotations
 
@@ -140,7 +140,7 @@ class SourceCorpusReader(Protocol):
     """Resolve one manifest entry from immutable Asset/AssetVersion authority."""
 
     def read(self, entry: SourceCorpusEntry) -> CorpusAsset:
-        """Read exact landed bytes and dispatch the approved existing adapter."""
+        """Read exact landed bytes and dispatch the registered existing adapter."""
 
 
 class IndexedSourceCorpusReader:
@@ -725,6 +725,49 @@ def _source_unit_manifest(
     return ArtifactManifest(**values, manifest_hash=canonical_sha256(values))
 
 
+def materialize_corpus_entry(
+    entry: SourceCorpusEntry, reader: SourceCorpusReader, *,
+    base_identity: CanonicalIdentityEnvelope, corpus_manifest_id: str,
+) -> tuple[tuple[SourceUnit, ...], str, str]:
+    """Parse exact source authority without requiring an approved L2 handoff."""
+    asset = reader.read(entry)
+    if (
+        asset.consumed_byte_hash != entry.original_byte_hash
+        or asset.consumed_byte_count != entry.byte_count
+        or asset.version.content_hash != entry.original_byte_hash
+        or asset.version.size_bytes != entry.byte_count
+    ):
+        raise L2StageError("L2_ASSET_CONTENT_MISMATCH", f"landed bytes differ for {entry.source_file_id}")
+    if (
+        asset.asset.asset_id != entry.asset_id
+        or asset.version.asset_version_id != entry.asset_version_id
+        or asset.version.asset_id != entry.asset_id
+    ):
+        raise L2StageError("L2_CORPUS_DISPOSITION_MISMATCH", f"asset authority differs for {entry.source_file_id}")
+    identity = base_identity.model_copy(update={
+        "contract_kind": "c0.source_unit", "asset_id": entry.asset_id,
+        "asset_version_id": entry.asset_version_id, "source_file_id": entry.source_file_id,
+        "source_unit_id": None, "content_hash": entry.original_byte_hash,
+        "immutable_locator": None, "parent_artifact_ids": (corpus_manifest_id,),
+    })
+    units, parents, seen = [], {}, set()
+    for element in sorted(asset.elements, key=lambda item: (item.ordinal, item.element_id)):
+        try:
+            unit = SourceUnit.mint(
+                identity=identity, unit_kind=element.unit_kind, text=element.text,
+                ordinal=element.ordinal, locator=element.locator,
+                parent_source_unit_id=parents.get(element.parent_element_id),
+            )
+        except (ValidationError, ValueError) as exc:
+            raise L2StageError("L2_SOURCE_UNIT_INVALID", f"invalid SourceUnit for {entry.source_file_id}: {exc}") from exc
+        if unit.source_unit_id in seen:
+            raise L2StageError("L2_SOURCE_UNIT_ID_COLLISION", unit.source_unit_id)
+        seen.add(unit.source_unit_id)
+        parents[element.element_id] = unit.source_unit_id
+        units.append(unit)
+    return tuple(units), asset.adapter_name, asset.adapter_version
+
+
 def materialize_source_corpus(
     inputs: L2Inputs,
     reader: SourceCorpusReader,
@@ -759,70 +802,17 @@ def materialize_source_corpus(
             )
             continue
 
-        asset = reader.read(entry)
-        if (
-            asset.consumed_byte_hash != entry.original_byte_hash
-            or asset.consumed_byte_count != entry.byte_count
-            or asset.version.content_hash != entry.original_byte_hash
-            or asset.version.size_bytes != entry.byte_count
-        ):
-            raise L2StageError(
-                "L2_ASSET_CONTENT_MISMATCH",
-                f"landed bytes differ for {entry.source_file_id}",
-            )
-        if (
-            asset.asset.asset_id != entry.asset_id
-            or asset.version.asset_version_id != entry.asset_version_id
-            or asset.version.asset_id != entry.asset_id
-        ):
-            raise L2StageError(
-                "L2_CORPUS_DISPOSITION_MISMATCH",
-                f"asset authority differs for {entry.source_file_id}",
-            )
-        identity = inputs.l1_receipt.identity.model_copy(
-            update={
-                "contract_kind": "c0.source_unit",
-                "asset_id": entry.asset_id,
-                "asset_version_id": entry.asset_version_id,
-                "source_file_id": entry.source_file_id,
-                "source_unit_id": None,
-                "content_hash": entry.original_byte_hash,
-                "immutable_locator": None,
-                "parent_artifact_ids": (
-                    inputs.corpus_manifest.source_corpus_manifest_id,
-                ),
-            }
+        entry_units, adapter_name, adapter_version = materialize_corpus_entry(
+            entry, reader, base_identity=inputs.l1_receipt.identity,
+            corpus_manifest_id=inputs.corpus_manifest.source_corpus_manifest_id,
         )
-        entry_units: list[SourceUnit] = []
-        parent_units: dict[str, str] = {}
-        for element in sorted(asset.elements, key=lambda item: (item.ordinal, item.element_id)):
-            parent_source_unit_id = (
-                parent_units.get(element.parent_element_id)
-                if element.parent_element_id is not None
-                else None
-            )
-            try:
-                unit = SourceUnit.mint(
-                    identity=identity,
-                    unit_kind=element.unit_kind,
-                    text=element.text,
-                    ordinal=element.ordinal,
-                    locator=element.locator,
-                    parent_source_unit_id=parent_source_unit_id,
-                )
-            except (ValidationError, ValueError) as exc:
-                raise L2StageError(
-                    "L2_SOURCE_UNIT_INVALID",
-                    f"invalid SourceUnit for {entry.source_file_id}: {exc}",
-                ) from exc
+        for unit in entry_units:
             if unit.source_unit_id in seen_unit_ids:
                 raise L2StageError(
                     "L2_SOURCE_UNIT_ID_COLLISION",
                     f"duplicate SourceUnit ID {unit.source_unit_id}",
                 )
             seen_unit_ids.add(unit.source_unit_id)
-            parent_units[element.element_id] = unit.source_unit_id
-            entry_units.append(unit)
         units.extend(entry_units)
         counts_by_version[entry.asset_version_id] = len(entry_units)
         dispositions.append(
@@ -833,8 +823,8 @@ def materialize_source_corpus(
                 source_unit_ids=tuple(
                     sorted(unit.source_unit_id for unit in entry_units)
                 ),
-                adapter_name=asset.adapter_name,
-                adapter_version=asset.adapter_version,
+                adapter_name=adapter_name,
+                adapter_version=adapter_version,
             )
         )
 

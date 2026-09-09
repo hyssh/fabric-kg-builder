@@ -145,3 +145,49 @@ def test_public_dry_run_checks_cache_boundary_without_analysis_or_writes(cached_
     assert result.exit_code == 2, result.output
     assert "--ocr-cache and --ocr-identity must be supplied together" in result.output
     assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("cache_status", ["complete", "partial", "missing", "identity-drift"])
+def test_discovery_plan_accounts_for_every_cached_pdf_page_without_extraction(
+    cached_pdf, tmp_path, monkeypatch, cache_status,
+):
+    import json
+    from fabric_kg_builder.cli import domain_design_cmd
+
+    case = cached_pdf
+    (case.path.parent / "second.pdf").write_bytes(case.path.read_bytes())
+    case.cache.mkdir()
+    raw = deepcopy(case.raw)
+    if cache_status == "partial":
+        raw["pages"] = raw["pages"][:1]
+        raw["content"] = case.page_text
+    if cache_status != "missing":
+        store_cached_layout(case.cache, make_cached_layout(case.path.read_bytes(), raw, case.identity))
+    identity = deepcopy(case.identity)
+    if cache_status == "identity-drift":
+        identity["options"]["features"] = []
+    identity_path = tmp_path / "identity.json"
+    identity_path.write_text(json.dumps(identity))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("planning must not extract text, materialize units or build a client")
+    monkeypatch.setattr(IndexedSourceCorpusReader, "read", forbidden)
+    monkeypatch.setattr(domain_design_cmd, "_build_client", forbidden)
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    result = CliRunner().invoke(cli, [
+        "domain", "discover", "--input", str(case.path.parent),
+        "--out", str(tmp_path / "discovery.json"), "--cache-dir", str(tmp_path / "discovery-cache"),
+        "--ocr-cache", str(case.cache), "--ocr-identity", str(identity_path),
+    ])
+    assert result.exit_code == 0, result.output
+    plan = json.loads(result.output)
+    assert plan["corpus_entries"] == len(plan["source_inventory"]) == 2
+    assert plan["page_coverage"]["pdf_files"] == 2
+    assert plan["page_coverage"]["source_pdf_pages"] == 4
+    complete = cache_status == "complete"
+    assert plan["page_coverage"]["complete"] is complete
+    assert plan["page_coverage"]["verified_cached_pdf_pages"] == (4 if complete else 0)
+    assert len(plan["page_coverage"]["pending_source_file_ids"]) == (0 if complete else 2)
+    assert plan["model_calls"] == plan["writes"] == 0
+    assert plan["chunk_count"] is None and not plan["source_units_materialized"]
+    assert not plan["full_corpus_design_ready"] and "analyze_result" not in result.output
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before

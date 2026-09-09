@@ -2,6 +2,16 @@
 
 ## 0.2.6 (local development)
 
+- Reorder the normal workflow to full-corpus source preparation and open
+  candidate discovery, document/corpus consolidation, then discovery-bound
+  ontology design. Bounded design now requires explicit `--sample-only`.
+- Reuse prepared source units and observations after approval with
+  `enrich --discovery`; no implicit second full model pass. Missing/unmapped
+  work requires explicit targeted authorization and remains accounted for.
+- Add atomic immutable caches, recovery of failed source preparation, zero-call
+  raw-response revalidation and candidate-level grounding quarantine. Raw
+  observations and original request provenance are preserved; retries cannot
+  silently delete observations or clear unresolved work.
 - Route analytical questions to Lakehouse SQL through typed question context,
   preserving original question IDs/criticality, population/grain, filter/time
   and source requirements. SQL-directed questions no longer require fabricated

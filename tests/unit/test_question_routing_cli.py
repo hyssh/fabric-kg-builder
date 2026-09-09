@@ -23,7 +23,7 @@ def _invoke(arguments, **kwargs):
 def _approved_design(tmp_path, *, routed=True):
     preflight = _inputs(tmp_path) if routed else _preflight(tmp_path)
     client = Client(_mixed() if routed else _sketch())
-    draft = generate_domain_design(preflight, client=client)
+    draft = generate_domain_design(preflight, client=client, sample_only=True)
     draft_path, evaluation_path = tmp_path / "draft.json", tmp_path / "evaluation.json"
     domain_path, state_root = tmp_path / "domain.yaml", tmp_path / ".fkg" / "l1"
     save_design_artifact(draft_path, draft)
@@ -63,7 +63,7 @@ def test_design_plan_exposes_explicit_sql_context_without_calls_or_writes(tmp_pa
     )
     before = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     result = _invoke([
-        "domain", "design", "--input", str(preflight.source_path),
+        "domain", "design", "--sample-only", "--input", str(preflight.source_path),
         "--intake", str(intake_path), "--out", str(output),
     ])
     assert result["status"] == "planned"
@@ -107,7 +107,7 @@ def test_read_only_draft_and_approved_exports_preserve_proposed_sql_route(tmp_pa
 
 
 def test_legacy_draft_export_reports_unrouted_without_inventing_routes(tmp_path):
-    draft = generate_domain_design(_preflight(tmp_path), client=Client(_sketch()))
+    draft = generate_domain_design(_preflight(tmp_path), client=Client(_sketch()), sample_only=True)
     path = tmp_path / "draft.json"
     save_design_artifact(path, draft)
     exported = _invoke(["domain", "question-context", "--file", str(path)])

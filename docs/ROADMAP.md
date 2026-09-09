@@ -18,7 +18,7 @@ Development stays local with task-labelled commits; no push or PR is implied.
 
 ## C. Active priority: corpus-first discovery and reuse
 
-Status: implementation in progress, authorized 2026-09-09.
+Status: local pipeline implementation complete, authorized 2026-09-09.
 See [Corpus-first pipeline](specs/SPEC-CORPUS-FIRST-PIPELINE.md).
 
 Move full source preparation, chunk-level open candidate discovery and
@@ -34,6 +34,19 @@ Completion is based on auditable file/chunk coverage, safe resume and measured
 candidate reuse, not on the number of files inventoried or the absence of errors.
 Partial budgets and unsupported content must remain visible. This work does not
 authorize multi-ontology deployment or treat discovery as asserted knowledge.
+
+Current evidence: all 22 PDFs prepared as 1,425 cached-OCR SourceUnits/chunks with
+zero model calls; a separate two-document, 33-page live smoke run completed
+discovery/consolidation and discovery-bound design. It retained 403 raw
+observations, 165 grounded candidates and 238 quarantined candidates. Revalidation
+used no repeated chunk calls, consolidation used nine additional calls, and a
+completed replay used zero calls.
+
+Still open: full 22-document model processing, grounding-quality improvement,
+final ontology approval, real-data post-approval reuse/answer acceptance and
+Fabric/SQL execution. The real smoke design remains unapproved with separate
+schema gaps. Offline CLI integration proves the approved reuse path, not those
+remaining live business outcomes.
 
 ## A. Next priority: query-time numeric analysis
 

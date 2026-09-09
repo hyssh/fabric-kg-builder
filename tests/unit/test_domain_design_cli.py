@@ -135,7 +135,7 @@ def design_paths(tmp_path: Path):
     intake.write_text(json.dumps(_intake()), encoding="utf-8")
     out = tmp_path / "new-output" / "draft.json"
     args = [
-        "domain", "design", "--input", str(source),
+        "domain", "design", "--sample-only", "--input", str(source),
         "--intake", str(intake), "--out", str(out),
     ]
     return source, intake, out, args
