@@ -11,6 +11,9 @@ Historical L7 evidence remains in [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0
 0.2.3 assessment remains at
 [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md).
 
+See the [development roadmap](docs/ROADMAP.md) for the next query-time analytics
+policy and the deferred shared-Lakehouse, multi-ontology investigation.
+
 ---
 
 ## What It Does
