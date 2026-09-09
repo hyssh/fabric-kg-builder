@@ -1,7 +1,8 @@
 """Deterministic L5a publication crosswalk compiler.
 
-L5a requires a :class:`PublicationCrosswalkV1_2` that exactly covers the sealed
-L4 authority: one type mapping per non-tombstoned entity type, one ownership
+Business-only authorities retain :class:`PublicationCrosswalkV1_2`; authorities
+with source-identity roots use :class:`PublicationCrosswalkV1_3`. Both exactly
+cover the sealed L4 authority: one type mapping per non-tombstoned entity type, one ownership
 mapping per declared property, and one relationship mapping per declared
 relationship type. This module derives that crosswalk from the sealed source
 alone, so the same L4 projection always compiles to the same crosswalk hash.
@@ -10,14 +11,10 @@ Stable identifier assignment is positional over lexicographically sorted
 canonical IDs, which makes every physical name, ontology BigInt, and graph
 label a pure function of the sealed domain contract.
 
-A relationship type may declare several admissible source or target types. The
-crosswalk carries a single *physical representative* per endpoint, and L5a's
-emitted definitions publish the full declared and compatible endpoint sets
-alongside it (``source_semantic_type_ids``,
-``compatible_source_semantic_type_ids``), with the representative's key columns
-labelled ``physical_projection_only``/``schema_only``. Choosing the
-lexicographically smallest admissible endpoint is therefore a deterministic
-naming decision, not a narrowing of the published semantics.
+A relationship type may declare several admissible endpoint types. Version 1.2
+retains its representative property-key columns. Version 1.3 instead binds the
+actual canonical endpoint IDs across the complete compatible type sets, while
+business-key facts remain required on their actual typed entities.
 """
 
 from __future__ import annotations
@@ -44,6 +41,12 @@ from fabric_kg_builder.contracts.publication import (
     PublicationAuthorityReferencesV1_2,
     PublicationCrosswalkIdentityV1_2,
     PublicationCrosswalkV1_2,
+    PublicationCrosswalkIdentityV1_3,
+    PublicationCrosswalkV1_3,
+    CanonicalEntityIdentityBindingV1_3,
+    CanonicalEndpointIdentityBindingV1_3,
+    SemanticTypeProjectionMappingV1_3,
+    RelationshipProjectionMappingV1_3,
     RelationshipProjectionMappingV1_1,
     SemanticPropertyOwnershipMappingV1_1,
     SemanticTypeProjectionMappingV1_1,
@@ -198,7 +201,7 @@ def compile_publication_crosswalk(
     *,
     publication_crosswalk_id: str = "publication-crosswalk:l5a",
     stable_id_lock_id: str = "stable-id-lock:l5a",
-) -> PublicationCrosswalkV1_2:
+) -> PublicationCrosswalkV1_2 | PublicationCrosswalkV1_3:
     """Compile the exact crosswalk a sealed L4 source admits."""
 
     authority_row = _authority_row(source)
@@ -215,6 +218,11 @@ def compile_publication_crosswalk(
             "sealed domain contract declares no publishable entity type",
         )
     entity_by_id = {item.type_id: item for item in entity_types}
+    canonical_identity_mode = any(
+        item.identity_key_policy is not None
+        and item.identity_key_policy.key_mode == "stable_source_identity"
+        for item in entity_types
+    )
     relationship_types = list(contract.candidate_model.relationship_types)
 
     property_owner: dict[str, tuple[str, Any]] = {}
@@ -258,11 +266,6 @@ def compile_publication_crosswalk(
     for type_id in sorted(entity_by_id):
         definition = entity_by_id[type_id]
         effective_ids = tuple(effective_by_type[type_id])
-        if not effective_ids:
-            raise L5aCrosswalkError(
-                "L5A_CROSSWALK_TYPE_WITHOUT_PROPERTIES",
-                f"type {type_id} has no effective property to materialize",
-            )
         local_ids = tuple(
             prop.property_id for prop in definition.declared_properties
         )
@@ -271,13 +274,32 @@ def compile_publication_crosswalk(
             if property_id not in local_ids
         )
         root = entity_by_id.get(definition.identity_root_type_id)
-        if root is None:
+        if root is None or root.identity_key_policy is None:
             raise L5aCrosswalkError(
                 "L5A_CROSSWALK_IDENTITY_ROOT_MISSING",
                 f"identity root {definition.identity_root_type_id} for {type_id} "
                 "is not a publishable type",
             )
-        type_mappings.append(SemanticTypeProjectionMappingV1_1(
+        if not effective_ids and root.identity_key_policy.key_mode != "stable_source_identity":
+            raise L5aCrosswalkError(
+                "L5A_CROSSWALK_TYPE_WITHOUT_PROPERTIES",
+                f"type {type_id} has no effective property to materialize",
+            )
+        identity_binding = {}
+        if canonical_identity_mode:
+            identity_binding["canonical_identity_binding"] = CanonicalEntityIdentityBindingV1_3(
+                identity_root_type_id=root.type_id,
+                policy_mode=root.identity_key_policy.key_mode,
+                root_policy_hash=canonical_sha256(root.identity_key_policy.model_dump(mode="json")),
+                identity_policy_hash=str(authority_row["identity_policy_hash"]),
+                source_l4_manifest_id=source.manifest.artifact_manifest_id,
+                source_l4_manifest_hash=source.manifest.manifest_hash,
+                source_projection_id=source.projection.projection_id,
+                source_projection_hash=source.projection.projection_hash,
+            )
+        type_model = SemanticTypeProjectionMappingV1_3 if canonical_identity_mode else SemanticTypeProjectionMappingV1_1
+        type_mappings.append(type_model(
+            **identity_binding,
             canonical_semantic_type_id=type_id,
             canonical_parent_semantic_type_id=definition.parent_type_id,
             physical_table_id=type_slugs[type_id],
@@ -336,7 +358,20 @@ def compile_publication_crosswalk(
             endpoint="target",
         )
         slug = relationship_slugs[relationship_id]
-        relationship_mappings.append(RelationshipProjectionMappingV1_1(
+        endpoint_bindings = {}
+        if canonical_identity_mode:
+            for side in ("source", "target"):
+                compatible = getattr(
+                    contract.hierarchy_closure,
+                    f"compatible_{side}_type_ids_by_relationship",
+                )[relationship_id]
+                endpoint_bindings[f"{side}_identity_binding"] = CanonicalEndpointIdentityBindingV1_3(
+                    physical_column_id=f"__{side}_entity_id",
+                    compatible_semantic_type_ids=tuple(compatible),
+                )
+        relationship_model = RelationshipProjectionMappingV1_3 if canonical_identity_mode else RelationshipProjectionMappingV1_1
+        relationship_mappings.append(relationship_model(
+            **endpoint_bindings,
             canonical_semantic_relationship_id=relationship_id,
             source_semantic_type_id=source_type,
             target_semantic_type_id=target_type,
@@ -346,14 +381,14 @@ def compile_publication_crosswalk(
             graph_aliases=(),
             source_canonical_key_property_ids=key_ids_by_type[source_type],
             target_canonical_key_property_ids=key_ids_by_type[target_type],
-            source_key_bindings=tuple(
+            source_key_bindings=() if canonical_identity_mode else tuple(
                 EndpointPhysicalKeyBindingV1_1(
                     canonical_property_id=property_id,
                     physical_column_id=f"{slug}__src__{property_slugs[property_id]}",
                 )
                 for property_id in sorted(key_ids_by_type[source_type])
             ),
-            target_key_bindings=tuple(
+            target_key_bindings=() if canonical_identity_mode else tuple(
                 EndpointPhysicalKeyBindingV1_1(
                     canonical_property_id=property_id,
                     physical_column_id=f"{slug}__tgt__{property_slugs[property_id]}",
@@ -379,9 +414,10 @@ def compile_publication_crosswalk(
     }
 
     identity_values = _identity_values(source, "c0.publication_crosswalk")
-    identity_values["contract_version"] = "1.2.0"
+    identity_values["contract_version"] = "1.3.0" if canonical_identity_mode else "1.2.0"
+    identity_model = PublicationCrosswalkIdentityV1_3 if canonical_identity_mode else PublicationCrosswalkIdentityV1_2
     values = {
-        "identity": PublicationCrosswalkIdentityV1_2.model_validate(identity_values),
+        "identity": identity_model.model_validate(identity_values),
         "publication_crosswalk_id": publication_crosswalk_id,
         "authority": _authority_references(source),
         "semantic_contract_hash": source.projection.sealed_semantic_contract_hash,
@@ -395,7 +431,13 @@ def compile_publication_crosswalk(
         "semantic_type_mappings": tuple(type_mappings),
         "relationship_mappings": tuple(relationship_mappings),
     }
-    return PublicationCrosswalkV1_2(
+    if canonical_identity_mode:
+        values.update({
+            "source_l4_manifest_id": source.manifest.artifact_manifest_id,
+            "source_l4_manifest_hash": source.manifest.manifest_hash,
+        })
+    crosswalk_model = PublicationCrosswalkV1_3 if canonical_identity_mode else PublicationCrosswalkV1_2
+    return crosswalk_model(
         **values,
         crosswalk_hash=canonical_sha256(values),
     )
@@ -410,8 +452,8 @@ def _representative(
 ) -> str:
     """Pick the deterministic physical representative for a relationship endpoint.
 
-    L5a publishes the full declared and compatible endpoint sets from the sealed
-    contract, so this choice only names the schema-only key columns.
+    Version 1.2 uses this representative's physical property-key columns.
+    Version 1.3 retains the representative as metadata, never as an identity join.
     """
 
     admissible = sorted(

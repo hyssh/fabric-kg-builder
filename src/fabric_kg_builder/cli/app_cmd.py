@@ -1412,6 +1412,35 @@ def _run_offline_evaluation(cases: list[EvalCase]) -> list[dict]:
     type=click.Path(file_okay=False, path_type=Path),
     help="Write the compiled tables and target definitions to this directory.",
 )
+@click.option(
+    "--prototype-create-only",
+    is_flag=True,
+    help="Explicit nontransactional prototype: create new items only; retain every partial item.",
+)
+@click.option(
+    "--prototype-journal",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Durable create-only journal; required in prototype mode, reused for exact resume.",
+)
+@click.option(
+    "--prototype-approve-limitation",
+    "prototype_approved_limitations",
+    multiple=True,
+    help="Exact diagnostic from a prototype dry-run; approvals are bound into a new plan.",
+)
+@click.option(
+    "--prototype-semantic-model",
+    is_flag=True,
+    help="Also create a DirectLake Semantic Model; column exclusions require explicit approval.",
+)
+@click.option(
+    "--prototype-readback-page-size", type=click.IntRange(1, 1000), default=1000,
+    show_default=True, help="Canonical-ID readback window size, not a table-size limit.",
+)
+@click.option(
+    "--prototype-readback-total-rows", type=click.IntRange(1, 10_000_000), default=1_000_000,
+    show_default=True, help="Approved total data-row readback cap per live invocation.",
+)
 def publish_structured_cmd(
     l4_run: Path,
     l3_root: Path,
@@ -1421,15 +1450,63 @@ def publish_structured_cmd(
     approve_live: str | None,
     plan_path: Path,
     materialize_dir: Path | None,
+    prototype_create_only: bool,
+    prototype_journal: Path | None,
+    prototype_approved_limitations: tuple[str, ...],
+    prototype_semantic_model: bool,
+    prototype_readback_page_size: int,
+    prototype_readback_total_rows: int,
 ) -> None:
     """Compile and plan the L5a structured publication of a sealed L4 run.
 
-    Live publication of the four Fabric targets is a capability NO-GO on the
-    0.2.4 line: Fabric's item control plane returns an empty ETag and ignores
+    Transactional live publication is a capability NO-GO on the 0.2.4 line:
+    Fabric's item control plane returns an empty ETag and ignores
     ``If-Match`` on delete, so creating or rolling back a release-owned item
     cannot be fenced by compare-and-swap. The plan records that verdict
     explicitly rather than attempting an unfenced mutation.
+
+    The explicit --prototype-create-only path is separate: it retains partial
+    resources, never compensates, and requires exact dry-run plan approval.
     """
+
+    context = click.get_current_context(silent=True)
+    root_options = context.find_root().obj if context is not None else None
+    if isinstance(root_options, dict) and root_options.get("dry_run") and not dry_run:
+        raise click.ClickException("Global --dry-run cannot be combined with publish-structured --live")
+
+    if prototype_create_only:
+        from fabric_kg_builder.deploy.schema2_prototype import publish_schema2_prototype
+
+        try:
+            result = publish_schema2_prototype(
+                l4_run=l4_run, l3_root=l3_root, workspace_id=workspace_id,
+                name_prefix=name_prefix, dry_run=dry_run, approve_live=approve_live,
+                plan_path=plan_path, materialize_dir=materialize_dir,
+                journal_path=prototype_journal,
+                approved_limitations=prototype_approved_limitations,
+                semantic_model=prototype_semantic_model,
+                readback_page_size=prototype_readback_page_size,
+                readback_total_rows=prototype_readback_total_rows,
+            )
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+        click.echo(f"plan_hash={result['plan_hash']}")
+        click.echo(f"plan={plan_path}")
+        click.echo(f"mode={'dry-run' if dry_run else 'prototype-create-only'}")
+        if dry_run:
+            click.echo(f"blockers={json.dumps(result['blockers'])}")
+            click.echo(f"limitations={json.dumps(result['limitations'])}")
+        else:
+            click.echo(f"journal={prototype_journal}")
+            click.echo(f"status={result['status']}")
+            click.echo(f"ontology_readiness={result.get('ontology_readiness', 'unverified')}")
+            click.echo(f"semantic_model_readiness={result.get('semantic_model_readiness', 'unverified')}")
+        return
+    if (
+        prototype_journal or prototype_approved_limitations or prototype_semantic_model
+        or prototype_readback_page_size != 1000 or prototype_readback_total_rows != 1_000_000
+    ):
+        raise click.ClickException("Prototype options require --prototype-create-only")
 
     from fabric_kg_builder.contracts.base import (
         canonical_json,
@@ -1558,6 +1635,134 @@ def publish_structured_cmd(
         "live L5a publication is a capability NO-GO on this release line: "
         + str(capabilities["fabric.capability_reason"])
     )
+
+
+@app_cmd.command("contract-schema")
+@click.option("--output-dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option("--kind", default=None, help="Inspect one registered C0 contract kind.")
+@click.option("--version", "contract_version", default=None, help="Exact version to inspect with --kind.")
+def contract_schema_cmd(
+    output_dir: Path | None, kind: str | None, contract_version: str | None,
+) -> None:
+    """Inspect/export the registered contract schemas without cloud operations.
+
+    With --output-dir, export schemas and the registry index. Every existing
+    schema file must remain byte-identical; old contracts are never resealed.
+    With --kind and --version, print the registered schema without writing files.
+    """
+    from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
+    from fabric_kg_builder.contracts.registry import (
+        negotiate_contract, schema_catalog, write_registered_schemas,
+    )
+
+    if (kind is None) != (contract_version is None) or (output_dir is None) == (kind is None):
+        raise click.ClickException("Choose --output-dir OR both --kind and --version")
+    try:
+        catalog = schema_catalog()
+        if kind is not None:
+            negotiate_contract(kind, contract_version)
+            click.echo(canonical_json(catalog[(kind, contract_version)]))
+            return
+        preserved = {}
+        for (registered_kind, version), schema in catalog.items():
+            filename = f"{registered_kind.replace('.', '-')}-{version}.schema.json"
+            path = output_dir / filename
+            if path.exists():
+                expected = (canonical_json(schema) + "\n").encode("utf-8")
+                if path.read_bytes() != expected:
+                    raise ValueError(f"Existing schema would change: {path}; historical contract export refused")
+                preserved[f"{registered_kind}@{version}"] = canonical_sha256(schema)
+        context = click.get_current_context(silent=True)
+        root_options = context.find_root().obj if context is not None else None
+        if isinstance(root_options, dict) and root_options.get("dry_run"):
+            click.echo(f"mode=dry-run would_export={len(catalog)} preserved_existing={len(preserved)}")
+            return
+        hashes = write_registered_schemas(output_dir)
+        if any(hashes[key] != value for key, value in preserved.items()):
+            raise ValueError("Historical schema hash changed during export")
+        click.echo(f"exported={len(catalog)} preserved_existing={len(preserved)}")
+        click.echo(f"output_dir={output_dir}")
+    except (ValueError, OSError) as error:
+        raise click.ClickException(str(error)) from error
+
+
+@app_cmd.command("query-prototype")
+@click.option("--journal", "journal_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--plan", "plan_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--materialize", "materialize_dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--l4-run", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--l3-root", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--questions", "questions_path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--target", type=click.Choice(["ontology-companion", "independent-graph"]),
+    default="ontology-companion", show_default=True,
+    help="Independent Graph evidence is explicitly not Ontology acceptance.",
+)
+@click.option("--live", is_flag=True, help="Required: execute real read-only Fabric queries; no offline fallback.")
+@click.option("--acknowledge-beta", is_flag=True, help="Required acknowledgement of the Fabric Graph query beta API.")
+@click.option(
+    "--max-rows", type=click.IntRange(1, 10_000_000), default=100, show_default=True,
+    help="Complete answer row cap; must fit the approved plan's total readback budget.",
+)
+@click.option("--max-pages", type=click.IntRange(1, 10_000), default=100, show_default=True)
+@click.option(
+    "--timeout-seconds", type=click.IntRange(1, 600), default=90, show_default=True,
+    help="Client-side request budget; does not cancel server-side graph work.",
+)
+def query_prototype_cmd(
+    journal_path: Path, plan_path: Path, materialize_dir: Path, l4_run: Path,
+    l3_root: Path, questions_path: Path, output: Path, target: str, live: bool,
+    acknowledge_beta: bool, max_rows: int, max_pages: int, timeout_seconds: int,
+) -> None:
+    """Probe six operator-authored questions against an owned, live prototype.
+
+    Questions JSON: contract_version "1.0.0" and six questions, each with
+    question_id, question, query, expected. Expected conditions support min_rows,
+    max_rows, contains_rows and order-sensitive exact_rows (use ORDER BY).
+    Optional derive/expected_derived compute counts and unit-separated sums from
+    COMPLETE returned rows. derive accepts group_by, count_distinct and sum
+    entries with value, unit, distinct_by (including the quantity owner's ID).
+    Units must appear in group_by. Derived groups contain row_count,
+    count_distinct and sums; each sum reports value_decimal, unit,
+    distinct_count and distinct_by. expected_derived checks those group objects.
+
+    Queries allow fixed, labelled MATCH paths (up to eight hops), AND predicates,
+    canonical-ID equality joins, property-only RETURN expressions with AS aliases,
+    optional ORDER BY aliases, and a mandatory LIMIT. No constants, aggregation,
+    procedures or writes in RETURN. Canonical entity IDs are appended automatically.
+    LIMIT is a completeness cap, not a successful truncation/top-k operation.
+
+    Readbacks and sealed source citations are written to a new probe report.
+    Publication journals and production receipts are never created or modified.
+    """
+    context = click.get_current_context(silent=True)
+    root_options = context.find_root().obj if context is not None else None
+    if isinstance(root_options, dict) and root_options.get("dry_run"):
+        raise click.ClickException("query-prototype cannot run under global --dry-run; no offline fallback")
+    from fabric_kg_builder.deploy.schema2_prototype_query import query_schema2_prototype
+
+    try:
+        report = query_schema2_prototype(
+            journal_path=journal_path, plan_path=plan_path, materialize_dir=materialize_dir,
+            l4_run=l4_run, l3_root=l3_root, questions_path=questions_path, output=output,
+            target=target, live=live, acknowledge_beta=acknowledge_beta,
+            max_rows=max_rows, max_pages=max_pages, timeout_seconds=timeout_seconds,
+        )
+    except (ValueError, OSError) as error:
+        raise click.ClickException(str(error)) from error
+    except (KeyError, TypeError) as error:
+        raise click.ClickException("Invalid prototype artifact or question JSON shape") from error
+    click.echo(f"report={output}")
+    click.echo(f"status={report['status']}")
+    click.echo(f"target_kind={report['target_kind']}")
+    click.echo(f"graph_id={report['graph_id']}")
+    click.echo(f"ontology_equivalent={str(report['ontology_equivalent']).lower()}")
+    if report["status"] not in (
+        "six-question-ontology-probe-passed",
+        "independent-graph-probe-passed-not-ontology-acceptance",
+    ):
+        raise click.ClickException("Live probe did not pass all six source-linked operator assertions")
 
 
 # ---------------------------------------------------------------------------

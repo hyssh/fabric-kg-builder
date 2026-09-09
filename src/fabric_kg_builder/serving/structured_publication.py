@@ -36,6 +36,7 @@ from fabric_kg_builder.contracts.publication import (
     ProjectionEquivalenceV1_1,
     ProjectionEvidence,
     PublicationCrosswalkV1_2,
+    PublicationCrosswalkV1_3,
     StorageReference,
 )
 from fabric_kg_builder.contracts.receipts import (
@@ -105,6 +106,16 @@ L5A_ACCEPTED_VERSIONS = {
     "c0.stage_receipt": "1.0.0",
     "c0.stage_resource_metrics": "1.0.0",
 }
+
+
+def _accepted_versions(crosswalks: Sequence[PublicationCrosswalkV1_2]) -> dict[str, str]:
+    versions = {item.identity.contract_version for item in crosswalks}
+    if len(versions) != 1:
+        raise L5aPublicationError("L5A_CROSSWALK_VERSION_MISMATCH", "crosswalk versions must agree")
+    return {
+        **L5A_ACCEPTED_VERSIONS,
+        **({"c0.publication_crosswalk": "1.3.0"} if versions == {"1.3.0"} else {}),
+    }
 
 _SOURCE_TABLES = (
     "semantic_publication_authority",
@@ -1021,6 +1032,23 @@ def _validate_publish_authority(
         "contract_version": "1.2.0",
     }
     for crosswalk in crosswalks:
+        from fabric_kg_builder.contracts.registry import parse_contract
+
+        validated_crosswalk = parse_contract(canonical_json(crosswalk))
+        if validated_crosswalk != crosswalk:
+            raise L5aPublicationError("L5A_CROSSWALK_INVALID", "crosswalk differs from its registered contract")
+        if crosswalk.identity.contract_version not in ("1.2.0", "1.3.0"):
+            raise L5aPublicationError("L5A_CROSSWALK_VERSION_UNSUPPORTED", "L5a requires crosswalk 1.2 or 1.3")
+        expected_crosswalk_lineage = {
+            **expected_crosswalk_lineage, "contract_version": crosswalk.identity.contract_version,
+        }
+        if isinstance(crosswalk, PublicationCrosswalkV1_3) and (
+            crosswalk.source_l4_manifest_id != source.manifest.artifact_manifest_id
+            or crosswalk.source_l4_manifest_hash != source.manifest.manifest_hash
+        ):
+            raise L5aPublicationError(
+                "L5A_CANONICAL_IDENTITY_AUTHORITY_MISMATCH", "canonical IDs must bind the exact sealed L4 manifest"
+            )
         authority = crosswalk.authority
         if (
             authority.source_artifact_manifest_id
@@ -1148,6 +1176,22 @@ def _validate_publish_authority(
                     f"type {definition.type_id} has no canonical root key policy",
                 )
             key_policy = root.identity_key_policy
+            if isinstance(crosswalk, PublicationCrosswalkV1_3):
+                binding = mapping.canonical_identity_binding
+                if (
+                    binding.identity_root_type_id != root.type_id
+                    or binding.policy_mode != key_policy.key_mode
+                    or binding.root_policy_hash != canonical_sha256(key_policy.model_dump(mode="json"))
+                    or binding.identity_policy_hash != contract.identity_policy_hash
+                    or binding.source_projection_id != source.projection.projection_id
+                    or binding.source_projection_hash != source.projection.projection_hash
+                    or binding.source_l4_manifest_id != source.manifest.artifact_manifest_id
+                    or binding.source_l4_manifest_hash != source.manifest.manifest_hash
+                ):
+                    raise L5aPublicationError(
+                        "L5A_CANONICAL_IDENTITY_AUTHORITY_MISMATCH",
+                        f"identity binding for {definition.type_id} differs from its approved root policy/L4 authority",
+                    )
             expected_keys = set(key_policy.business_key_fields)
             local_properties = set(
                 mapping.locally_owned_canonical_property_ids
@@ -1297,6 +1341,13 @@ def _validate_publish_authority(
                     definition.relationship_type_id
                 ]
             )
+            if isinstance(crosswalk, PublicationCrosswalkV1_3) and (
+                set(relationship.source_identity_binding.compatible_semantic_type_ids) != compatible_sources
+                or set(relationship.target_identity_binding.compatible_semantic_type_ids) != compatible_targets
+            ):
+                raise L5aPublicationError(
+                    "L5A_RELATIONSHIP_ENDPOINT_MISMATCH", "canonical endpoint type sets differ from sealed authority"
+                )
             for row in relationship_rows:
                 if (
                     row["semantic_relationship_id"]
@@ -1562,6 +1613,14 @@ def _all_tables(
         for prop in entity.declared_properties
         if prop.required
     )
+    if isinstance(crosswalk, PublicationCrosswalkV1_3):
+        required_properties = required_properties.union(
+            property_id
+            for entity in contract.candidate_model.entity_types
+            if entity.identity_key_policy is not None
+            and entity.identity_key_policy.key_mode == "business_key"
+            for property_id in entity.identity_key_policy.business_key_fields
+        )
     typed = {
         **_entity_tables(source_tables, crosswalk, values, required_properties),
         **_relationship_tables(source_tables, crosswalk, values),
@@ -1774,6 +1833,23 @@ def _definitions(
             }),
         },
     }
+    if isinstance(crosswalk, PublicationCrosswalkV1_3):
+        common["canonical_identity_bindings"] = {
+            "contract_version": "1.3.0",
+            "source_l4_manifest_id": crosswalk.source_l4_manifest_id,
+            "source_l4_manifest_hash": crosswalk.source_l4_manifest_hash,
+            "semantic_types": {
+                item.canonical_semantic_type_id: item.canonical_identity_binding.model_dump(mode="json")
+                for item in crosswalk.semantic_type_mappings
+            },
+            "relationships": {
+                item.canonical_semantic_relationship_id: {
+                    "source": item.source_identity_binding.model_dump(mode="json"),
+                    "target": item.target_identity_binding.model_dump(mode="json"),
+                }
+                for item in crosswalk.relationship_mappings
+            },
+        }
     type_by_id = {
         item.canonical_semantic_type_id: item
         for item in crosswalk.semantic_type_mappings
@@ -2876,10 +2952,13 @@ def _output_manifest(
             root / "publication-crosswalks.json",
             canonical_sha256({
                 "type": "array",
-                "items": PublicationCrosswalkV1_2.model_json_schema(),
+                "items": (
+                    PublicationCrosswalkV1_3 if isinstance(compiled.crosswalks[0], PublicationCrosswalkV1_3)
+                    else PublicationCrosswalkV1_2
+                ).model_json_schema(),
             }),
             len(compiled.crosswalks),
-            "1.1.0",
+            "1.3.0" if isinstance(compiled.crosswalks[0], PublicationCrosswalkV1_3) else "1.1.0",
         ),
         (
             "l5a-access-policy",
@@ -3048,7 +3127,7 @@ def _receipt(
             output_manifest.manifest_hash if output_manifest else None
         ),
         "skip_key": compiled.fingerprint,
-        "accepted_contract_versions": L5A_ACCEPTED_VERSIONS,
+        "accepted_contract_versions": _accepted_versions(compiled.crosswalks),
         "resource_metrics_id": metrics.resource_metrics_id,
         "resource_metrics_hash": metrics.metrics_hash,
         "attempt_count": 1,
@@ -3149,7 +3228,7 @@ def _existing_is_intact(
         or receipt.output_manifest_id != manifest.artifact_manifest_id
         or receipt.output_manifest_hash != manifest.manifest_hash
         or receipt.skip_key != compiled.fingerprint
-        or dict(receipt.accepted_contract_versions) != L5A_ACCEPTED_VERSIONS
+        or dict(receipt.accepted_contract_versions) != _accepted_versions(compiled.crosswalks)
     ):
         return None
     expected_receipt_id = deterministic_contract_id(
@@ -3866,7 +3945,7 @@ def require_l5a_publication_receipt(
         or result.receipt.status not in {"succeeded", "skipped"}
         or result.receipt.skip_key != result.compiled.fingerprint
         or dict(result.receipt.accepted_contract_versions)
-        != L5A_ACCEPTED_VERSIONS
+        != _accepted_versions(result.compiled.crosswalks)
         or result.receipt.input_manifest_id != source.manifest.artifact_manifest_id
         or result.receipt.input_manifest_hash != source.manifest.manifest_hash
         or result.receipt.output_manifest_id

@@ -19,7 +19,9 @@ would misdescribe four fifths of them. The widening is reported by
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -57,7 +59,14 @@ class FabricOntologyCompilation:
 
 
 def _name(canonical_id: str) -> str:
-    return canonical_id.split(":", 1)[-1].replace("-", "_")
+    name = canonical_id.split(":", 1)[-1].replace("-", "_")
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", name):
+        return name
+    normalized = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not normalized or not normalized[0].isalpha():
+        normalized = "semantic_" + normalized
+    suffix = hashlib.sha256(canonical_id.encode("utf-8")).hexdigest()[:16]
+    return normalized[:111] + "_" + suffix
 
 
 def _part(path: str, payload: dict[str, Any]) -> dict[str, str]:
@@ -80,12 +89,28 @@ def _part(path: str, payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _property_payload(prop: dict[str, Any]) -> dict[str, Any]:
+    data_type = prop.get("data_type", "string")
+    value_types = {
+        "string": "String",
+        "integer": "BigInt",
+        "number": "Double",
+        "boolean": "Boolean",
+        "datetime": "DateTime",
+    }
+    if data_type not in value_types:
+        raise ValueError(
+            f"Ontology property {prop['canonical_property_id']!r} has unsupported "
+            f"native data type {data_type!r}; no implicit scalar conversion is allowed"
+        )
+    name = _name(str(prop["canonical_property_id"]))
+    if name in ("id", LABEL_PROPERTY_NAME):
+        name = "property_" + name
     return {
         "id": str(prop["id"]),
-        "name": _name(str(prop["canonical_property_id"])),
+        "name": name,
         "redefines": None,
         "baseTypeNamespaceType": None,
-        "valueType": "String",
+        "valueType": value_types[data_type],
     }
 
 
@@ -115,6 +140,13 @@ def _entity_type_payload(
     properties.extend(
         _property_payload(prop) for prop in entity_type.get("properties", ())
     )
+    for key in ("id", "name"):
+        values = [prop[key] for prop in properties]
+        if len(set(values)) != len(values):
+            raise ValueError(
+                f"Native Ontology property {key} collision in "
+                f"{entity_type['canonical_semantic_type_id']!r}"
+            )
     return {
         "$schema": f"{_SCHEMA_ROOT}/entityType/1.0.0/schema.json",
         "id": str(entity_type["id"]),
