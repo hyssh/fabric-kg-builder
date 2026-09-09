@@ -29,6 +29,27 @@ DomainContractV2, cannot impersonate an approved domain, and does not inherit
 approval from a seed. Existing sealed artifacts are not rewritten or rehashed.
 Historical L7 receipt release `0.2.4` remains unchanged under CLI `0.2.6`.
 
+## Public artifact contracts (1.0.0)
+
+`domain design-schema` exports the exact Pydantic JSON schemas without loading
+configuration or contacting a model. The public artifacts are:
+
+- `domain.design_draft`: `draft_id`, `draft_hash`, `created_at_utc`, `inputs`,
+  `seed`, `samples`, `sketch`, `prompt_version`, `prompt_hash`, `request_hash`
+  and `model_call_count`.
+- `domain.design_evaluation`: `evaluation_id`, `evaluation_hash`, `draft_id`,
+  `draft_hash`, `evaluator_version`, `questions`, `findings`,
+  `compiler_limitations`, and `answer_verification="not_performed"`.
+- A seed retains `raw_yaml`, `parsed_content`, `content_sha256`, `source_path`,
+  a reference kind and `authority="reference_only"`.
+- Each question has `question_id`, `status`, `reason`, `missing_fields`,
+  `structural_path` and `execution_limitations`. Status is `supported`, `partial`,
+  `unsupported` or `review_needed`; it concerns design structure, not live facts.
+
+The initial implementation makes one logical generation call, with no repair
+loop. `--max-calls` is a ceiling, not a request to repeat calls or a billing
+guarantee. Failed structural generation must be surfaced, not silently replaced.
+
 ## Input contract
 
 - Preserve the full parsed seed YAML, not only its description. Accept a reference
@@ -55,6 +76,19 @@ evidence references. An inability to support a question is not such an error.
 Types and relationships may have zero, one or multiple question references.
 Common/domain distinctions and independent types must remain representable.
 Relevance follows the design; questions do not define the entire vocabulary.
+
+Proposing a new type, property or relationship to represent a business requirement
+is schema design, not fabrication of an instance fact. A seed is not a vocabulary
+ceiling. Account for seed relationship intents as well as types, and explain
+omissions or changes. Do not leave a representable requirement unmodeled merely
+because sampled documents contain no concrete value for it.
+
+Accept equivalent local and owner-qualified property reference spellings when
+the declared owner is unambiguous. Canonicalization must not accept foreign
+owners, invent properties, or change semantic identity. Retain original model
+responses in requested private traces and version the normalization behavior.
+Inherited answer properties count as reachable through the declared ancestor
+chain; inheritance is not an extra relationship hop.
 
 Evaluation reports each question, the proposed answer fields and connections,
 gaps, and execution limitations. A path alone cannot prove that action text,

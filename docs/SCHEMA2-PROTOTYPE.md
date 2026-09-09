@@ -1,12 +1,18 @@
-# Testing the schema-2 document-review prototype
+# Testing the 0.2.6 design-first prototype
 
-This local prototype retains DomainContractV2 and adds a document challenge and
-revision loop. It does not claim that the complete cloud release roadmap is done.
+This local prototype keeps exploratory design separate from the existing strict
+DomainContractV2 approval/extraction contract. It also retains the document
+challenge and revision loop. It does not claim that the cloud release roadmap or
+live technician-question acceptance is complete.
 
 ## Capability discovery
 
 ```bash
 fabric-kg --version
+fabric-kg domain design-schema
+fabric-kg domain design --help
+fabric-kg domain evaluate-design --help
+fabric-kg domain compile-design --help
 fabric-kg domain assessment-schema
 fabric-kg domain assess --help
 fabric-kg domain review-assessment --help
@@ -17,6 +23,86 @@ fabric-kg enrich --help
 
 `assessment-schema` prints the actual versioned JSON schemas. Package version
 alone is insufficient to identify a prototype build; record the source commit.
+
+## Design first: seed YAML, intent, then question evaluation
+
+The 0.2.6 sequence is `domain design` -> `domain evaluate-design` ->
+`domain compile-design` -> existing `domain approve` -> `enrich`.
+The [design-first specification](specs/SPEC-0.2.6-DESIGN-FIRST.md) defines the
+authority boundaries and acceptance cases.
+
+Plan first; this does not write output or call a model:
+
+```bash
+fabric-kg domain design --input ./documents --intake intake.json \
+  --seed-domain reference.yaml --out .fkg/design/draft.json
+```
+
+The seed may be a reference sketch or a domain YAML. Its complete parsed content
+and hash are preserved as design context, not source evidence. The optional
+`--description` supplies additional business/domain intent. Existing seed
+approval does not transfer to a generated design.
+
+Explicitly allow bounded generation, then evaluate the saved design locally:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain design \
+  --input ./documents --intake intake.json --seed-domain reference.yaml \
+  --out .fkg/design/draft.json --live --max-calls 2 \
+  --proposal-trace-dir .fkg/design/private-traces
+fabric-kg domain evaluate-design --file .fkg/design/draft.json \
+  --out .fkg/design/evaluation.json
+```
+
+A draft can retain common types with no question assignments and concepts that
+are not used by the current questions. Question gaps are not JSON/schema errors.
+Inspect structural support, missing answer fields, unresolved semantic adequacy
+and compiler limitations separately. This evaluation is not an answer oracle.
+
+Generation currently makes one logical model call with no automatic repair loop;
+`--max-calls` is a ceiling. Optional traces retain private requests and completed
+responses, including invalid designs, for diagnosis. Treat them as sensitive
+source artifacts and keep them outside version control. A new run can use the
+original seed plus `--description` feedback; there is no automatic design-revision
+controller. The description is saved separately without rewriting the intake.
+
+After reviewing the actual report, supply its exact hash to compilation:
+
+```bash
+fabric-kg domain compile-design --file .fkg/design/draft.json \
+  --input ./documents --evaluation .fkg/design/evaluation.json \
+  --accept-evaluation-hash <exact-evaluation-hash> \
+  --out-state .fkg/l1-026 --out-domain .fkg/l1-026/domain.yaml
+```
+
+Compilation is model-free and rechecks current sources. It cannot silently drop
+types, invent question tags or alter criticality to fit the existing compiler.
+An unsupported design remains saved for review; a compiler limitation does not
+mean the ontology itself is invalid. Existing strict limits still apply at the
+Schema-2 handoff. A successful compilation remains unapproved: use the emitted
+project/run/proposal anchors with `domain approve` before extraction.
+
+Do not pass the design JSON to `enrich`. Do not assume `init-domain --domain-file`
+loads a seed in Schema-2: unsupported legacy seed options now fail explicitly
+with guidance to use `domain design`.
+
+### Current design-first limits
+
+The existing sampler can exhaust a sample-kind quota on a single file; a corpus
+inventory is not evidence that every document influenced the proposal. Inspect
+the draft's actual `samples.source_units`, not just `corpus_entries`. Design
+generation currently uses the native bounded sampler, not the full OCR cache
+used by later assessment/extraction commands.
+
+The intake still requires five to ten questions. Existing strict compilation
+limits remain visible, including relationship-usage tags and retained-type/path
+constraints. Draft creation can succeed while compilation remains blocked.
+Do not describe this milestone as a universally compilable design workflow.
+
+Name matching ignores case and separators, but is only a review aid. It does not
+establish that differently named concepts are equivalent, or that a matching
+name has the same meaning. Review the actual endpoints and property ownership:
+model-written rationales can contradict the generated graph.
 
 ## Foundry project inference
 
@@ -42,10 +128,11 @@ still rejects generated candidates that violate evidence, ordering or endpoint
 contracts. HTTP provider failures now retain a bounded, redacted status/detail
 in the CLI failure audit.
 
-## 1. Propose and inspect
+## 1. Strict compatibility proposals and document assessment
 
-Use `init-domain --input ... --intake ... --non-interactive` to prepare a blocked
-draft. Live L1 generation uses the configured model and requires a budget.
+The older `init-domain --input ... --intake ... --non-interactive` path prepares a
+strict Schema-2 draft, not the exploratory draft above. Live L1 generation uses
+the configured model and requires a budget.
 `--candidates` supplies an explicitly offline fixture instead. The draft is not
 approved merely because the command exits successfully.
 

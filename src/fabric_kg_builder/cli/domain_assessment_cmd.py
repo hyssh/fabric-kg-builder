@@ -23,7 +23,8 @@ from fabric_kg_builder.domain.assessment import (
     save_new_artifact,
 )
 from fabric_kg_builder.domain.models import DomainContractV2
-from fabric_kg_builder.domain.service import compute_contract_hash, load_domain_contract
+from fabric_kg_builder.domain.service import compute_contract_hash
+from .domain_io import load_cli_domain_contract
 
 
 def _model_client(ctx: click.Context):
@@ -118,7 +119,7 @@ def domain_assess_cmd(
     if not planning and out.exists():
         raise click.ClickException(f"Refusing to overwrite assessment: {out}")
     try:
-        contract = load_domain_contract(domain_file)
+        contract = load_cli_domain_contract(domain_file)
         if not isinstance(contract, DomainContractV2):
             raise ValueError("domain assess requires a schema-2 contract")
         client = None
@@ -199,7 +200,7 @@ def domain_review_assessment_cmd(
     if not planning and (out.exists() or revision_out.exists()):
         raise click.ClickException("Refusing to overwrite an existing review/revision")
     try:
-        contract = load_domain_contract(domain_file)
+        contract = load_cli_domain_contract(domain_file)
         if not isinstance(contract, DomainContractV2):
             raise ValueError("review-assessment requires a schema-2 contract")
         report = AssessmentReport.model_validate_json(assessment.read_text(encoding="utf-8"))

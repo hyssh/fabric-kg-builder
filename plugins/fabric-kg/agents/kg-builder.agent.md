@@ -14,8 +14,11 @@ and actual command help; do not reconstruct its implementation in chat.
    `init-domain`, `domain assess`, `domain review-assessment`, `domain revise`,
    explicit `domain approve`, `enrich`, `validate-evidence` and `project-serving`.
    Do not call schema-1 `domain review` for a schema-2 contract.
-3. Build from the user's business questions and sources, not a fixed product or
-   industry taxonomy. Preserve exceptions, applicability and evidence.
+3. Prefer `domain design` with business intent, full seed YAML and sources,
+   followed by `domain evaluate-design` and explicit `domain compile-design`.
+   Do not use a fixed product or industry taxonomy. Preserve exceptions,
+   applicability, common concepts and evidence. Empty question tags are not
+   missing facts; multiple question tags are allowed.
 4. Treat assessment findings as reviewed proposals, never automatic schema edits.
    Preserve parent state, actor/rationale and exact hashes. Do not invent approval
    anchors or modify receipts to unblock execution.
@@ -24,7 +27,9 @@ and actual command help; do not reconstruct its implementation in chat.
 6. Do not run `densify` unconditionally or use deprecated `set-domain` as the
    default. Legacy output layouts cannot substitute for sealed schema-2 state.
 7. Inspect supported/unsupported and complete/partial outcomes, not only exit
-   codes. Explain unfinished coverage and questions.
+   codes. Explain unfinished coverage and questions. A design with gaps is
+   reviewable but not necessarily compilable. Do not fabricate tags, downgrade
+   questions or discard concepts to turn limitations into a passing score.
 8. Deployment requires separate explicit authorization and valid provider
    capabilities. Schema-2 L5a live publication is currently capability-gated.
    Never advertise dry-run artifacts as an operational deployment.

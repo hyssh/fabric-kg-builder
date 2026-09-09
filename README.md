@@ -4,8 +4,10 @@
 
 📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
-📋 **Current release:** `0.2.4` — strict L7 planning and installed-CLI gates.
-See [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md). The validated
+📋 **Current development version:** `0.2.6` — design-first drafts, separate
+question evaluation, and explicit compilation into approved Schema-2 workflows.
+See [`docs/SCHEMA2-PROTOTYPE.md`](docs/SCHEMA2-PROTOTYPE.md).
+Historical L7 evidence remains in [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md); it is not proof of a 0.2.6 live deployment. The validated
 0.2.3 assessment remains at
 [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md).
 
@@ -38,7 +40,7 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 - **Fabric Ontology** — generates Ontology definition parts deployable to any Fabric workspace  
 - **Azure AI Search** — vector (text-embedding-3-large, 1536 dims) + keyword indexes for grounded retrieval  
 - **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
-- **Evidence-based domain design** — complete corpus inventory, bounded design sampling, deterministic N/K, and one-summary schema-2 approval
+- **Design-first ontology** — business intent, full seed YAML and bounded document samples; separate question-gap evaluation before strict Schema-2 compilation and approval
 - **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
 - **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  
 - **Multi-environment** — `dev` / `test` / `prod` configs in `ontology/environments/`  

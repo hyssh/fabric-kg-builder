@@ -1,6 +1,6 @@
 ---
 name: fabric-kg-pipeline
-description: Use the installed fabric-kg CLI to propose an ontology, assess document counterexamples, review revisions, and extract evidence-governed data. Separately authorize model spending, approval and deployment.
+description: Use the installed fabric-kg CLI to design from business intent, seed YAML and documents, evaluate question gaps separately, and compile reviewed designs into evidence-governed extraction. Separately authorize model spending, approval and deployment.
 ---
 
 ## Purpose
@@ -22,11 +22,43 @@ model calls, loading data or deployment. Ask only for missing high-impact inputs
 Collect roles, decisions, domain, competency questions, expected answers, source
 paths and access/retention requirements. Do not default to a sample taxonomy.
 
+## Design-first workflow (0.2.6)
+
+Prefer `domain design`, then `domain evaluate-design`, then explicit
+`domain compile-design` before the existing approval/extraction workflow.
+Read each command's help for its exact options. Generation requires explicit
+model authorization; evaluation and compilation are not deployment.
+
+Pass an existing YAML design through the dedicated seed input. Preserve the full
+design intent, not only its description. A user sketch is reference material;
+its example identifiers and safety statements are not source evidence. An
+approved seed does not automatically approve the generated design.
+
+Keep common concepts and useful independent types even when they do not support
+a current example question. Question references may be empty or contain multiple
+IDs. Do not invent tags, remove questions or downgrade criticality to pass a gate.
+Assess requested answer fields, applicability, ordering, quantities and units,
+not just graph connectivity.
+
+A design draft is not an approved Schema-2 domain. Gaps and compiler limitations
+must remain visible in the separate evaluation. If compilation is blocked,
+retain the draft and explain the specific unsupported capability; do not shorten
+its meaning to fit a hop limit or add fake completeness evidence. Never pass a
+design draft directly to `enrich` or describe structural support as live answer
+correctness.
+
+The older `init-domain` path is a strict compatibility workflow, not the preferred
+way to explore an incomplete design. Do not assume its legacy seed/profile
+options work in Schema-2; follow the installed CLI's explicit capability checks.
+
 ## Supported schema-2 local workflow
 
 | Operation | Command | Boundary |
 |---|---|---|
-| Propose draft | `fabric-kg init-domain --input ... --intake ... --non-interactive` | Model calls; creates a blocked draft requiring approval. `--dry-run` inventories only |
+| Explore design | `fabric-kg domain design --help` | Seed-aware, unapproved design; gaps do not imply invalid ontology |
+| Evaluate design | `fabric-kg domain evaluate-design --help` | Separate structural question report; not factual answer acceptance |
+| Compile design | `fabric-kg domain compile-design --help` | Local strict Schema-2 handoff; does not approve or deploy |
+| Strict proposal (compatibility) | `fabric-kg init-domain --input ... --intake ... --non-interactive` | Model calls; strict Schema-2 draft requiring approval. `--dry-run` inventories only |
 | Plan document assessment | `fabric-kg domain assess --file ... --input ...` | Default mode: no model calls or output-file writes |
 | Execute assessment | `fabric-kg domain assess --file ... --input ... --live --max-calls ... --out ...` | Explicit model authorization; inspect complete/partial coverage and findings |
 | Offline assessment | Same command with `--responses ...` instead of `--live` | Fixture/replay mode is not live model validation |
@@ -70,9 +102,12 @@ correctly, and incomplete/unsupported OCR provenance must remain visible.
 ## Deployment is separate and capability-gated
 
 `fabric-kg app publish-structured --help` describes the schema-2 L5a planning
-surface. Its concrete live publication is capability NO-GO on the current
-prototype. Do not remove guards, create fake receipts or describe a dry-run as
-deployment. Fabric workspace authority is separate from Azure resource groups.
+surface. Default transactional live publication remains capability NO-GO.
+An explicit create-only prototype path, where available, is not transactional
+deployment or recovery. Inspect its exact plan, owned-item journal and readback
+requirements before separately authorizing any live call. Do not remove guards,
+create fake receipts or describe a dry-run as deployment. Fabric workspace
+authority is separate from Azure resource groups.
 
 Existing semantic-bundle deployment commands remain compatibility paths; they
 are not an automatic continuation from L4. Obtain the exact supported target,

@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_plugin_schema2_operations_are_registered_and_not_legacy_default():
     skill = (ROOT / "plugins/fabric-kg/skills/fabric-kg-pipeline/SKILL.md").read_text()
-    for operation in ("assess", "review-assessment", "revise"):
+    for operation in (
+        "design", "evaluate-design", "compile-design",
+        "assess", "review-assessment", "revise",
+    ):
         assert operation in cli.commands["domain"].commands
         assert f"domain {operation}" in skill
     for command in ("validate-evidence", "project-serving"):
@@ -21,6 +24,8 @@ def test_plugin_schema2_operations_are_registered_and_not_legacy_default():
     assert "Design-only" in skill or "design-only" in skill
     assert "NO-GO" in skill
     assert "Legacy" in skill
+    assert "Question references may be empty" in skill
+    assert "not an approved Schema-2 domain" in skill
 
 
 def test_machine_contract_discovery_requires_no_configuration_or_writes(tmp_path, monkeypatch):

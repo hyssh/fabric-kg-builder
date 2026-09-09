@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.6 (local development)
+
+- Introduce a design-first CLI boundary: preserve business intent, full reference
+  YAML and bounded document samples in an unapproved design before evaluating
+  question coverage. Separate design gaps from structural errors and strict
+  Schema-2 compilation/approval.
+- Permit common concepts without question assignments and retain multi-question
+  usage. A generated draft is neither an approved extraction contract nor proof
+  that source data can answer a question.
+- Align the Copilot helper with design, evaluation, compilation and explicit
+  approval rather than asking the model to satisfy all execution gates at once.
+- Keep historical L7 `0.2.4` receipt formats independent of the CLI package
+  version. No historical approval or deployment receipt is upgraded implicitly.
+- Retain local prototype work on compact model transport, exact cached OCR-page
+  extraction, source-identity crosswalks and create-only Fabric publication.
+  These capabilities do not imply a completed live Fabric acceptance run.
+
 ## 0.2.4
 
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a

@@ -421,7 +421,6 @@ class DomainEntityTypeV2(V2StrictModel):
             )
         return self
 
-
 class RelationshipIdentityPolicyV2(V2StrictModel):
     seed_fields: list[
         Literal[
@@ -500,6 +499,27 @@ class DomainRelationshipTypeV2(V2StrictModel):
 class CandidateModelSectionV2(V2StrictModel):
     entity_types: list[DomainEntityTypeV2] = Field(min_length=1)
     relationship_types: list[DomainRelationshipTypeV2] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_property_root_ownership(self) -> "CandidateModelSectionV2":
+        roots_by_property: dict[str, str] = {}
+        for entity in self.entity_types:
+            for prop in entity.declared_properties:
+                previous_root = roots_by_property.setdefault(
+                    prop.property_id, entity.identity_root_type_id
+                )
+                if previous_root != entity.identity_root_type_id:
+                    raise PydanticCustomError(
+                        "property_id_multiple_identity_roots",
+                        "Property {property_id} is declared under unrelated identity "
+                        "roots {first_root} and {second_root}; use distinct type-qualified IDs",
+                        {
+                            "property_id": prop.property_id,
+                            "first_root": previous_root,
+                            "second_root": entity.identity_root_type_id,
+                        },
+                    )
+        return self
 
 
 class CompetencyQuestionV2(V2StrictModel):

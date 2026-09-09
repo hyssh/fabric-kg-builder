@@ -14,6 +14,13 @@ from .domain_assessment_cmd import (
     domain_review_assessment_cmd, domain_revise_cmd,
 )
 from .layout_cache_cmd import domain_analyze_layout_cmd
+from .domain_design_cmd import (
+    domain_compile_design_cmd,
+    domain_design_cmd,
+    domain_design_schema_cmd,
+    domain_evaluate_design_cmd,
+)
+from .domain_io import load_cli_domain_contract
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
     DomainContract,
@@ -45,7 +52,10 @@ def _build_foundry_client(ctx_obj: dict):
     from ..enrichment.foundry_client import FoundryClient
 
     env = (ctx_obj or {}).get("env", "dev")
-    config = load_config(env=env)
+    config = load_config(
+        env=env,
+        yaml_path=Path(str((ctx_obj or {}).get("config", "fabric-kg.yaml"))),
+    )
     return FoundryClient(config.foundry)
 
 
@@ -157,6 +167,10 @@ domain_cmd.add_command(domain_review_assessment_cmd)
 domain_cmd.add_command(domain_revise_cmd)
 domain_cmd.add_command(domain_assessment_schema_cmd)
 domain_cmd.add_command(domain_analyze_layout_cmd)
+domain_cmd.add_command(domain_design_cmd)
+domain_cmd.add_command(domain_design_schema_cmd)
+domain_cmd.add_command(domain_evaluate_design_cmd)
+domain_cmd.add_command(domain_compile_design_cmd)
 
 
 @domain_cmd.command("init")
@@ -197,7 +211,7 @@ def domain_init_cmd(interactive: bool, output_path: str, force: bool) -> None:
 )
 def domain_validate_cmd(contract_path: str) -> None:
     """Validate YAML syntax, schema conformance, and deterministic quality gates."""
-    contract = load_domain_contract(contract_path)
+    contract = load_cli_domain_contract(contract_path)
     findings, coverage = run_deterministic_validation(contract)
     error_count = sum(1 for finding in findings if finding.severity == "error")
     warning_count = sum(1 for finding in findings if finding.severity == "warning")

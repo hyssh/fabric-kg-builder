@@ -1,12 +1,17 @@
 # Schema-2 prototype integration contracts
 
-Status: frozen prototype boundary, revision 4. Changes require a new revision and
+Status: frozen prototype boundary, revision 7. Changes require a new revision and
 producer/consumer fixture changes before dependent implementation continues.
 
 This is the implementation contract for the local prototype, not a claim that
 all supported cloud deployments already work. DomainContractV2 remains the
 business authority. Existing C0 contracts retain their independently versioned
 formats. Existing safety and capability gates must not be weakened.
+
+For CLI 0.2.6, [the design-first specification](SPEC-0.2.6-DESIGN-FIRST.md)
+adds a separate unapproved draft and evaluation boundary before this contract.
+Question gaps may exist in that draft without invalidating its structure.
+They do not relax the approved DomainContractV2 or evidence rules below.
 
 ## Scope and authority
 
@@ -224,3 +229,131 @@ Use the existing pytest runner and fake provider boundaries:
 Live acceptance uses small authorized sandbox inputs and existing resources.
 An unavailable provider or unsafe publication capability is reported blocked;
 it does not justify weakening the contract or claiming deployment success.
+
+## B9: explicitly authorized create-only Fabric prototype
+
+The transactional publication policy remains unchanged. A separate
+`--prototype-create-only` mode may create isolated test items after the user
+authorizes a workspace and name prefix, and the exact dry-run plan is approved.
+It deliberately does not promise transactional rollback.
+
+Inputs are sealed L4/L3 artifacts and their approved Schema-2 authority.
+Do not substitute legacy model files, independently authored tables or fake
+receipts. Reuse native definition compilers, preserving their diagnostics.
+
+The approved plan binds source/schema/data hashes, actual destination workspace,
+prefix, per-run unique names, target types, dependency order, semantic conversion
+limitations, and the retain-on-failure policy. Refuse empty semantic data and
+unapproved semantic widening/type exclusions. Item existence alone is not
+business acceptance.
+
+Before every create, persist intent. Record returned IDs and long-running
+operation references immediately. Names must start with the approved prefix.
+Refuse pre-existing-name collisions; never adopt an item solely by name.
+Only exact items/operations already proved by this journal may be resumed.
+Ambiguous creation outcomes stop for reconciliation rather than another POST.
+
+Create a schema-enabled Lakehouse and write new Delta tables in create-only
+mode. Never call an overwrite path on a pre-existing Lakehouse. Bind native
+Ontology/Semantic Model/Graph definitions to actual returned IDs and verified
+table locations. Record service-created companions; do not delete them.
+
+Read back definitions, schemas, row counts and required values. If required
+refresh/framing is unsupported, remain partial and do not claim a usable
+ontology. Record all partial resources and errors; no automatic deletion,
+replacement, compensation or modification of unrelated workspace items.
+
+Emit a distinct prototype publication journal/report, not a transactional
+L5a success receipt. Final acceptance requires actual question results from
+the deployed ontology/graph and its bound evidence, with model/variant/scope
+and source citations. Mere creation, successful JSON generation or local
+tests do not satisfy that gate.
+
+## B10: compact model-facing design, full Schema-2 authority
+
+An explicit compact proposal mode may request a smaller semantic sketch from
+the model instead of repeating complete internal contract envelopes. This is
+not Schema-1, a candidate fixture, or permission to bypass Schema-2 validation.
+
+Type question references may be empty when a design rationale or evidence
+supports the type, matching the formal Schema-2 type contract. A common type
+does not need an invented question assignment. The new design-first draft is
+not required to pass the strict proposal gates in this section before being
+saved and evaluated.
+
+The sketch must retain domain intent, type/property meanings and value types,
+identity-property choices, directed relationship endpoints, question bindings,
+and ordered/unordered membership requirements. Simple local keys reference
+definitions within the same sketch; undefined references are errors.
+
+The CLI deterministically expands the sketch into DomainProposalCandidatesV2:
+mint stable typed identifiers, qualify property IDs by their declaring type,
+derive endpoint IDs from a single relationship definition, calculate scores
+from verified references and question bindings, and fill mechanical ordering
+policy fields. A root identity key can use only that root's properties.
+
+Metadata expansion must not invent instance facts, counts, compatibility,
+source quotations, evidence IDs or approvals. Governance rationale may describe
+the customer's supplied question/requirement as schema-design authority; it
+does not prove an extracted business fact.
+
+The expanded proposal passes the same evidence, hierarchy, identity, endpoint,
+selection and critical-question gates. A connected path alone is not acceptance
+of the actual technician answer. Preserve the raw sketch and expanded output
+in opt-in CLI traces for comparison. The verbose proposal mode remains available
+for compatibility; proposal-format/version is part of execution identity.
+
+CQ tags describe schema usage, not access control or instance evidence. For an
+explicitly supported sketch route, the expander may resolve a bounded path over
+declared governance-supported relationships and attach that question ID to the
+relationships actually used. Record this deterministic usage propagation.
+Never clear an explicit unsupported reason, invent an edge, or treat propagated
+tags as proof that source data answers the question.
+The same usage binding may reuse a declared completeness rule on that path.
+When none exists, the compiler may add a required-role check on an actual path
+edge, using its exact declared forward endpoints and the customer's question
+as design governance. This adds no relationship, source fact, cardinality or
+ordering assumption. It is not a claim that all real instances were extracted.
+This compatibility behavior is not a substitute for evaluating design gaps in
+the new design-first workflow; new compilation must expose unsupported
+completeness requirements rather than silently manufacture a passing assessment.
+
+## B11: explicit cached-layout text units
+
+`enrich --ocr-cache ... --ocr-identity ...` may use complete verified DI page
+text instead of detached native PDF headings/paragraphs. Cache identity and
+original byte hash must match; PDF page coverage must match the original file.
+No cache miss may trigger a hidden analysis request or native-text fallback.
+
+These are normalized text-stream SourceUnits, represented by the existing
+text/paragraph evidence kind. Their actual page granularity is explicit in
+`native_layer_id=docintel-pages/1.0.0`, page coordinates and cache-key-backed
+native object IDs. This does not claim they are single original paragraphs.
+SourceUnit hashes bind the normalization, content and provenance. Existing
+literal evidence and assertion checks remain unchanged.
+
+Dry-run validates/materializes these units in memory, reports their count/hash,
+and performs no model calls or writes. It must not mistake unit accounting for
+semantic completeness, or document order for unconditional execution order.
+
+## B12: canonical source-identity publication binding
+
+A versioned publication-crosswalk successor may represent an approved
+`stable_source_identity` policy without inventing a business-ID property.
+The binding must explicitly identify the identity-root type, approved policy
+mode/hash, sealed L4 authority and the unchanged canonical `entity_id`.
+
+For this binding only, an empty business-key-property list is valid:
+`L4.entity_id -> __canonical_id`, and relationship endpoints bind the actual
+`__source_entity_id` / `__target_entity_id`. This is the canonical identity
+already re-proven by L3, not a physical surrogate substituted for meaning.
+
+Business-key policies retain their declared-property/value-proof requirements.
+No empty-key relaxation applies to old 1.1/1.2 contracts; their hashes and
+validation remain unchanged. Propertyless source-identity types are allowed
+only when the approved domain permits them. All source/target type constraints,
+evidence and readback checks remain required.
+
+The new representation needs explicit producer/consumer support and schema
+version negotiation. It does not promise identity continuity after source-unit
+or local-reference changes across document revisions.
