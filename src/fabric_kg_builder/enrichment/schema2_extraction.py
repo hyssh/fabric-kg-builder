@@ -55,7 +55,7 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 
 from .schema2_sources import L2StageError
 
-L2_PROMPT_VERSION = "l2-schema-constrained/1.1.0"
+L2_PROMPT_VERSION = "l2-schema-constrained/1.2.0"
 L2_EXTRACTOR_VERSION = "1.3.0"
 UNKNOWN_SEMANTIC_TYPE = {
     "entity": "unapproved-observation:entity",
@@ -417,6 +417,7 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             {
                 "type_id": entity.type_id,
                 "display_name": entity.display_name,
+                "description": entity.description,
                 "aliases": entity.aliases,
                 "abstract": entity.abstract,
                 "parent_type_id": entity.parent_type_id,
@@ -432,6 +433,12 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
                         entity.type_id
                     ]
                 ),
+                "effective_properties": [
+                    declared_properties[property_id].model_dump(mode="json")
+                    for property_id in contract.hierarchy_closure.effective_property_ids_by_type[
+                        entity.type_id
+                    ]
+                ],
             }
             for entity in contract.candidate_model.entity_types
         ],
@@ -440,6 +447,7 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
                 "relationship_type_id": relationship.relationship_type_id,
                 "predicate_id": relationship.predicate_id,
                 "display_name": relationship.display_name,
+                "description": relationship.description,
                 "direction": relationship.direction,
                 "endpoint_policy": relationship.endpoint_policy,
                 "source_type_ids": relationship.source_type_ids,
@@ -458,6 +466,10 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             "Proposed source anchors use Unicode codepoint offsets and are not verified evidence.",
             "Do not return asserted state, verified evidence IDs, or publication fields.",
             "Do not truncate candidates.",
+            "Emit explicit property candidates for observed declared attributes, "
+            "including identity-key values when supported by the source quote. "
+            "Use each effective property's declared value_type; entity identity_key "
+            "strings are not a substitute for typed, evidence-backed property observations.",
         ],
         "max_relations_per_work_unit": (
             contract.reasoning_policy.max_relations_per_work_unit

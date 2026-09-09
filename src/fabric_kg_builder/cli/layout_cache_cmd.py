@@ -38,15 +38,18 @@ def _page_count(data: bytes, media_type: str) -> int:
 @click.option("--cache-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--model-id", default="prebuilt-layout", show_default=True)
 @click.option("--api-version", default="2024-11-30", show_default=True)
-@click.option("--max-pages", default=1, show_default=True, type=click.IntRange(1, 10))
+@click.option("--max-pages", default=1, show_default=True, type=click.IntRange(1, 2000),
+              help="Explicit whole-document page cap; S0 supports up to 2000 pages.")
 @click.option("--max-bytes", default=10_000_000, show_default=True, type=click.IntRange(1, 50_000_000))
+@click.option("--poll-timeout", default=90, show_default=True, type=click.IntRange(1, 1800),
+              help="Maximum wait in seconds for an already submitted analysis.")
 @click.option("--live", is_flag=True, help="Permit exactly one new analysis POST; otherwise plan only.")
 @click.option("--dry-run", is_flag=True, help="No calls or writes (default mode).")
 @click.pass_context
 def domain_analyze_layout_cmd(
     ctx: click.Context, source: Path, endpoint: str, cache_dir: Path,
     model_id: str, api_version: str, max_pages: int, max_bytes: int,
-    live: bool, dry_run: bool,
+    live: bool, dry_run: bool, poll_timeout: int,
 ) -> None:
     """Cache the full DI response; never silently reanalyze or use API keys.
 
@@ -120,7 +123,7 @@ def domain_analyze_layout_cmd(
                 )
                 submitted = True
                 calls = 1
-                raw = poller.result(timeout=90)
+                raw = poller.result(timeout=poll_timeout)
                 if not poller.done():
                     raise TimeoutError(
                         f"analysis still pending; do not retry POST; inspect reservation {pending.name}"
