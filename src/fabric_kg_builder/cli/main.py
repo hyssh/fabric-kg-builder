@@ -54,14 +54,32 @@ from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 
 
 _GROUP_EPILOG = """\b
-Schema-2 local prototype (explicit approval and state bindings):
+Default: corpus-first Schema-2 pipeline (explicit approval and state bindings):
+  domain discover --input <sources> --out <discovery.json> [--intake <intake>]
+  -> domain design --input <sources> --intake <intake>
+       --discovery <discovery.json> --out <design-draft.json>
+  -> domain evaluate-design -> review evaluation -> domain compile-design
+  -> domain approve -> enrich --discovery <approved-discovery.json>
+  -> validate-evidence -> project-serving
+  Discover accounts for the entire declared corpus before design. Intake is
+  optional during discovery; business context/questions guide subsequent design.
+  Discovery defaults to a no-call/no-write plan; --live and explicit budgets
+  authorize execution. Resume reuses received observations. Approval binds the
+  exact discovery hash; enrichment reuses it rather than silently extracting
+  the full corpus again. Processing coverage is not verified semantic recall.
+  Evaluate locally, review findings, compile with the exact evaluation-hash
+  acknowledgment, then explicitly approve the compiled contract, not the draft.
+
+\b
+Explicit compatibility only (not the default corpus-first workflow):
+  domain design --sample-only
+  Or the existing direct-L1 assessment/revision path:
   init-domain --input <sources> --intake <intake> --non-interactive
   -> domain assess -> domain review-assessment -> [domain revise]
   -> domain approve -> enrich -> validate-evidence -> project-serving
   Assessment and revision default to no-call/no-write planning. Use their help
   for live/fixture modes and bounded calls. A revision creates separate L1 state;
-  do not silently replace the parent's artifacts. app publish-structured can
-  compile a deployment plan, but concrete live publication remains gated.
+  do not silently replace the parent's artifacts.
 
 \b
 Legacy semantic-bundle pipeline (not a direct continuation of schema-2 L4):
@@ -100,14 +118,15 @@ Legacy semantic-bundle pipeline (not a direct continuation of schema-2 L4):
 
 \b
 Guidance for Copilot and other AI agents:
-  Prefer the ordered workflow above. For large document sets, choose Blob +
+  Prefer the default corpus-first workflow; legacy steps are a separate
+  compatibility path. For large Search document sets, choose Blob +
   indexer ingestion with --integrated-vectorization; do not default to repeated
   direct Search uploads. Never invent or bypass projection receipts, deploy a
   Foundry agent before its Fabric Data Agent dependency, or treat a CLI polling
   timeout as an indexer failure without checking indexer status.
 
 \b
-PowerShell example (large document set):
+Legacy semantic-bundle PowerShell example (compatibility only):
   fabric-kg init --target .\\my-kg-project
   fabric-kg domain review --file .\\my-kg-project\\domain.yaml
   fabric-kg domain approve --file .\\my-kg-project\\domain.yaml
@@ -169,10 +188,11 @@ def cli(
     Transforms heterogeneous domain assets into traceable Search, Lakehouse,
     Graph, and Ontology artifacts plus a deployable agent experience.
 
-    Graph quality depends on an approved domain contract. Capture the business
-    context, problem, entity and relationship concepts, constraints, and
-    competency questions before enrichment. Optional densification is driven by
-    explicit domain configuration; no sample taxonomy is applied implicitly.
+    Default to corpus discovery, then business/question-driven design using
+    --discovery. Evaluate and review the design, compile it, and explicitly
+    approve the contract before enrichment reuses that exact discovery.
+    Sample-only design, direct init-domain, and the legacy semantic-bundle
+    pipeline are explicit compatibility paths, not the default workflow.
 
     Run any subcommand with --help for options, defaults, and a usage example.
 

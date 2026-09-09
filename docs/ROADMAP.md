@@ -8,11 +8,12 @@ Development stays local with task-labelled commits; no push or PR is implied.
 
 ## Current baseline
 
-- Local CLI: 0.2.6, implementation milestone `a4df579`.
+- Local CLI: 0.2.6, corpus-first implementation milestone `1779e16`.
 - Design-first generation, separate evaluation and strict compilation/approval
   are implemented. See [the specification](specs/SPEC-0.2.6-DESIGN-FIRST.md).
-- Real design generation succeeded, but the generated design was not ready for
-  approval or Fabric publication. Bounded sampling was dominated by one file.
+- Real discovery-bound design generation succeeded on the two-document smoke
+  corpus; that draft still needs review before approval or Fabric publication.
+  The old first-file sampling limitation is not the normal discovery workflow.
 - Track A's local question-routing/context flow is implemented. This does not
   mean that physical SQL bindings or analytical execution are available.
 
@@ -47,6 +48,37 @@ final ontology approval, real-data post-approval reuse/answer acceptance and
 Fabric/SQL execution. The real smoke design remains unapproved with separate
 schema gaps. Offline CLI integration proves the approved reuse path, not those
 remaining live business outcomes.
+
+## D. Active release acceptance: full corpus and a user-facing Data Agent
+
+Status: execution/development authorized and started 2026-09-09.
+
+Two parallel workstreams:
+
+1. Resume the prepared 22-PDF, 1,425-chunk corpus through the public CLI. Complete
+   candidate collection and document/corpus consolidation, preserve partial work
+   and grounding diagnostics, then generate/review the full-corpus design and
+   approve only the exact acceptable proposal.
+2. Complete a Schema-2-native Data Agent publication handoff from the owned
+   structured-publication journal, sealed source authority and readback. Do not
+   fabricate the legacy projection receipt expected by the compatibility command.
+
+Join the workstreams only after approved data is ready: reuse candidates, verify
+evidence, publish structured data, then create and validate the Data Agent through
+the CLI. The user-facing deliverable is an actual Fabric Data Agent URL with
+declared source/readiness status, not a plan file or an old unrelated agent.
+
+Publication remains create-only in the user-selected workspace and prefix, with
+dry-run planning, exact approval and retained partial resources. Ontology and
+Lakehouse SQL source bindings must reference the actual new items; Search is
+included only when a real index and authorized connection are available.
+No existing shared item is adopted, deleted or replaced to make acceptance pass.
+
+Required acceptance distinguishes Graph/ontology retrieval, SQL analysis and
+source-evidence retrieval. Agent creation alone does not establish correct
+answers to all six technician questions. Full-corpus discovery is currently
+running; completion, approval, deployment and user acceptance must be recorded
+as separate milestones.
 
 ## A. Next priority: query-time numeric analysis
 
