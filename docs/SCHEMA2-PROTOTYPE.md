@@ -397,6 +397,53 @@ Do not claim cached OCR text is perfect interpretation of the original image.
 
 ## 5. Offline acceptance and live boundaries
 
+### Schema-2 prototype Data Agent handoff
+
+After the create-only structured publication has verified its owned Ontology,
+bound tables and companion graph, inspect:
+
+```bash
+fabric-kg app publish-prototype-agent --help
+```
+
+This separate path consumes the actual prototype plan/journal and sealed L4/L3
+authority. It does not create or accept a fabricated legacy H3 projection receipt.
+Plan first:
+
+```bash
+fabric-kg app publish-prototype-agent \
+  --prototype-journal <publication-journal> --prototype-plan <publication-plan> \
+  --materialize <publication-materialized-root> \
+  --l4-run <sealed-l4-run> --l3-root <l3-state> \
+  --workspace-id <approved-workspace-id> --name-prefix <approved-prefix> \
+  --out-state <separate-agent-state>
+```
+
+After inspecting the actual plan, live creation requires the same arguments plus
+`--live --approve-live <exact-agent-plan-hash> --acknowledge-preview`.
+This creates one new **draft** Data Agent with the actual owned Ontology and
+same-Lakehouse SQL source. It does not adopt, update, publish or delete an
+existing agent. A ready SQL endpoint binding is required.
+
+Lakehouse SQL endpoint provisioning may finish after initial Lakehouse creation.
+If the saved metadata is not ready, resume the exact approved
+`app publish-structured --prototype-create-only --live` plan/journal. Its owned
+item readback refreshes metadata without creating replacements. Plan the agent
+only after that readback succeeds; its plan binds the updated publication journal.
+Do not edit SQL endpoint fields in the journal by hand.
+
+Optional `--search-source FILE` requires a real captured native Search source
+configuration; an endpoint name alone is not evidence of a working source.
+Without it, do not promise original-text retrieval from an index. Local evidence
+validation does not establish that the Data Agent can access those quotations.
+
+Definition/source readback is not end-user acceptance. The user must have
+appropriate access to the new draft and sources, and actual questions must
+exercise ontology lookup, SQL counts and source citations. Published-stage
+availability, asking-user permissions and runtime SQL answers remain unverified
+until explicitly tested. Keep partial items and recorded operation IDs on error;
+do not create a replacement blindly.
+
 The existing pytest runner contains a complete fake-provider CLI exercise:
 
 ```bash

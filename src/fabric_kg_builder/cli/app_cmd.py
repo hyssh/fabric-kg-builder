@@ -1380,6 +1380,58 @@ def _run_offline_evaluation(cases: list[EvalCase]) -> list[dict]:
     return responses
 
 
+@app_cmd.command("publish-prototype-agent")
+@click.option("--prototype-journal", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--prototype-plan", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--materialize", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--l4-run", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--l3-root", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-id", required=True, help="Explicit workspace owning the prototype publication.")
+@click.option("--name-prefix", required=True, help="Exact create-only prototype publication prefix.")
+@click.option("--out-state", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--search-source", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Optional native-search-source/1.0.0 capability record from a real configured Data Agent.")
+@click.option("--live/--dry-run", default=False, help="Default is offline planning. Live creates one new draft agent.")
+@click.option("--approve-live", help="Exact immutable agent plan hash printed by the offline plan.")
+@click.option("--acknowledge-preview", is_flag=True, help="Acknowledge native Ontology/Search preview sources.")
+def publish_prototype_agent_cmd(
+    prototype_journal: Path, prototype_plan: Path, materialize: Path,
+    l4_run: Path, l3_root: Path, workspace_id: str, name_prefix: str, out_state: Path,
+    search_source: Path | None, live: bool, approve_live: str | None, acknowledge_preview: bool,
+) -> None:
+    """Create a testable Schema-2 Fabric Data Agent; never adopt/overwrite/delete.
+
+    Requires a source-verified create-only publication, not a legacy H3 receipt.
+    SQL endpoint binding is required; actual SQL execution and user acceptance
+    remain unverified until separately tested. No model calls are made here.
+    """
+    context = click.get_current_context(silent=True)
+    root_options = context.find_root().obj if context is not None else None
+    if isinstance(root_options, dict) and root_options.get("dry_run") and live:
+        raise click.ClickException("Global --dry-run cannot be combined with publish-prototype-agent --live")
+
+    from fabric_kg_builder.deploy.schema2_prototype_agent import (
+        Error,
+        publish_schema2_prototype_agent,
+    )
+
+    try:
+        result = publish_schema2_prototype_agent(
+            prototype_journal=prototype_journal, prototype_plan=prototype_plan,
+            materialize=materialize, l4_run=l4_run, l3_root=l3_root,
+            workspace_id=workspace_id, name_prefix=name_prefix, out_state=out_state,
+            search_source=search_source, live=live, approve_live=approve_live,
+            acknowledge_preview=acknowledge_preview,
+        )
+    except (Error, ValueError, OSError, KeyError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        key: result[key] for key in (
+            "status", "plan", "journal", "plan_hash", "agent_id", "readiness", "cost_scope",
+        ) if key in result
+    }, ensure_ascii=False, indent=2))
+
+
 @app_cmd.command("publish-structured")
 @click.option(
     "--l4-run",
