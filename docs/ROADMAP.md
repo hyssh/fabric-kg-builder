@@ -16,6 +16,25 @@ Development stays local with task-labelled commits; no push or PR is implied.
 - Track A's local question-routing/context flow is implemented. This does not
   mean that physical SQL bindings or analytical execution are available.
 
+## C. Active priority: corpus-first discovery and reuse
+
+Status: implementation in progress, authorized 2026-09-09.
+See [Corpus-first pipeline](specs/SPEC-CORPUS-FIRST-PIPELINE.md).
+
+Move full source preparation, chunk-level open candidate discovery and
+document/corpus consolidation before ontology design. After approval, reuse the
+retained sources/candidates and perform only explicitly needed additional model
+work. The sample-only path becomes explicit compatibility mode.
+
+Required sequence: shared source preparation -> all-chunk discovery -> document
+and corpus consolidation -> design/routing -> approval -> candidate reuse and
+evidence validation -> serving.
+
+Completion is based on auditable file/chunk coverage, safe resume and measured
+candidate reuse, not on the number of files inventoried or the absence of errors.
+Partial budgets and unsupported content must remain visible. This work does not
+authorize multi-ontology deployment or treat discovery as asserted knowledge.
+
 ## A. Next priority: query-time numeric analysis
 
 Status: local context-flow implementation complete; SQL execution remains separate. See
@@ -74,7 +93,7 @@ facts. Existing approved artifacts are not silently rewritten.
 ## B. Deferred: multiple ontologies over one Lakehouse
 
 Status: investigation complete; implementation and live proof deferred.
-Resume after track A unless the user changes priority.
+Resume only when requested; active track C takes priority over this investigation.
 
 ### Recommended design
 
