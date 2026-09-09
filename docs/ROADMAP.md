@@ -13,19 +13,25 @@ Development stays local with task-labelled commits; no push or PR is implied.
   are implemented. See [the specification](specs/SPEC-0.2.6-DESIGN-FIRST.md).
 - Real design generation succeeded, but the generated design was not ready for
   approval or Fabric publication. Bounded sampling was dominated by one file.
-- The following policy change has been requested but is **not implemented**.
-  Previous passing regression results do not validate this new policy.
+- Track A is being implemented under the refined question-routing scope below.
+  Previous passing regression results do not validate this new context flow.
 
 ## A. Next priority: query-time numeric analysis
 
-Status: user decision accepted; implementation pending.
+Status: implementation in progress. See
+[Question execution context](specs/SPEC-QUESTION-ROUTING-CONTEXT.md).
 
 ### Decision
 
-Do not model numeric values, quantities or trend-analysis results as ontology
-analytics. The ontology supplies entities, relationships and scope. Counts and
-other numerical/trend calculations belong to query-time execution, not stored
-ontology result entities or properties.
+Classify numerical/count/trend questions as Lakehouse SQL work when collecting
+the domain, expected questions and background. Retain the backend decision and
+relevant source/analysis requirements as context through the pipeline. Do not
+create ontology quantity/metric/trend entities or properties merely to answer
+those questions.
+
+The user's 2026-09-09 clarification supersedes interpreting this as a blanket
+numeric-property prohibition. This change carries context; it does not implement
+an analytical SQL engine or claim that physical SQL bindings already exist.
 
 For part-count questions, count the relevant connected records at a defined
 grain. Distinguish distinct part/SKU counts from physical part occurrences;
@@ -44,17 +50,17 @@ ontologies without a separate plan.
    `domain/proposal.py`. Keep generation modes consistent.
 2. Record the policy in machine-readable CLI context and human-readable helper
    guidance, including scope, identity, deduplication and counting grain.
-3. Separate query-time analytical requirements from missing ontology fields in
-   design evaluation. A count question must not require a stored count property.
-   Missing source data or an unsupported computation must remain visible.
+3. Separate SQL analytical requirements from missing ontology fields in design
+   evaluation. A SQL count question must not require a stored count property or
+   fake graph path. Missing source data or an unsupported computation remains visible.
 4. Preserve structural identity/order metadata and evidence guarantees. Do not
    implement a blanket rejection of every identifier or source string containing
    digits.
 5. Update CLI help, the pipeline skill, agent instructions and design
    specifications together.
-6. Add focused tests for counts without quantity properties, numerical/trend
-   queries without stored analysis results, correct grain and unchanged approval
-   and source-evidence boundaries.
+6. Add focused tests for routed question/context preservation from intake through
+   approval, extraction and serving/agent handoff, correct grain and unchanged
+   source-evidence boundaries.
 
 ### Completion criteria
 
