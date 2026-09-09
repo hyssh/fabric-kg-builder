@@ -70,6 +70,25 @@ can recover without rereading successful sources. Preserve the same source,
 extractor, model and influential business context; resume must not hide drift.
 When intake is omitted during resume, the previous business context is retained.
 
+If dense chunks repeatedly fail to return complete JSON, first inspect the
+missing-only plan. An explicit retry can raise the output ceiling for **only**
+prior chunks without received responses:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain discover --input ./documents \
+  --cache-dir .fkg/discovery --resume .fkg/discovery/run-1.json \
+  --out .fkg/discovery/run-2.json \
+  --retry-missing --retry-max-completion-tokens 16384
+```
+
+Add `--live` only after reviewing the plan and call/token budget. Successful
+responses and received malformed envelopes are reused, not retargeted; the
+global model configuration and summary output ceilings remain unchanged.
+The ceiling can be explicitly increased up to 32,768, but does not guarantee a
+valid response. Missing-response diagnostics retain partial provider output and
+status privately; they are not repaired into valid JSON or printed to stdout.
+Treat diagnostic/cache files as sensitive source artifacts.
+
 Only a complete discovery result is used for the normal design path. Completion
 means accounted source/chunk processing and consolidation, not perfect semantic
 recall. Inspect candidate grounding quality and pending work as well as status.

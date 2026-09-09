@@ -477,6 +477,7 @@ def run_discovery_reuse(
 ) -> dict[str, Any]:
     """Map first, optionally repair only pending chunks, then run genuine cached L2."""
     import json
+    from fabric_kg_builder.domain.discovery import discovery_grounding_report
     from . import schema2_stage as stage
     from .schema2_sources import l2_input_fingerprint
     from .schema2_extraction import (
@@ -488,6 +489,7 @@ def run_discovery_reuse(
     inputs, run, reader, materialized = _prepare_reuse(
         discovery_file, source_path, l1_state_root, domain_path, ocr_cache, ocr_identity,
     )
+    source_accounting = discovery_grounding_report(run, include_ledger_accounting=True)
     vocabulary = compile_closed_vocabulary(inputs.domain_contract)
     units = {item.source_unit_id: item for item in materialized.source_units}
     authority_path = state_root / "discovery-reuse-authority.json"
@@ -742,9 +744,10 @@ def run_discovery_reuse(
         "original_corrected_candidates": sum(row["disposition"] == "superseded_by_explicit_correction" for row in original_dispositions),
         "original_verified_candidates": sum(row["grounding_disposition"] == "verified" for row in original_dispositions),
         "original_quarantined_candidates": sum(row["grounding_disposition"] == "quarantined" for row in original_dispositions),
-        "original_candidate_ledger_entries": sum(row["grounding_ledger_recorded"] for row in original_dispositions),
-        "original_unaccounted_candidates": sum(not row["grounding_ledger_recorded"] for row in original_dispositions),
-        "original_candidate_ledger_complete": all(row["grounding_ledger_recorded"] for row in original_dispositions),
+        "original_candidate_ledger_entries": source_accounting["candidate_ledger_entry_count"],
+        "original_unaccounted_candidates": source_accounting["unaccounted_raw_candidate_count"],
+        "original_unaccounted_arrays": source_accounting["unaccounted_raw_array_count"],
+        "original_candidate_ledger_complete": source_accounting["received_array_ledger_complete"],
         "original_envelope_anomaly_count": len(original_envelopes),
         "original_envelope_quarantined_field_count": sum(len(item["field_names"]) for item in original_envelopes),
         "targeted_added_candidates": sum(row["disposition"] == "addition" for row in targeted_dispositions),

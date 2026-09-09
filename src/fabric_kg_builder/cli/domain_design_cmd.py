@@ -36,6 +36,7 @@ def _discovery_core():
 def _validate_discovery_resume_cache(prior, cache_dir: Path) -> None:
     from fabric_kg_builder.domain.discovery import (
         discovery_observation_cache_path, discovery_summary_failure_cache_path,
+        discovery_provider_diagnostic_cache_path, DiscoveryProviderDiagnostic,
     )
 
     records = []
@@ -59,6 +60,23 @@ def _validate_discovery_resume_cache(prior, cache_dir: Path) -> None:
             matches = False
         if not matches:
             raise ValueError(f"DISCOVERY_RESUME_CACHE_DRIFT: {path}")
+    for record in [*prior.chunks, *prior.failed_summaries]:
+        path = discovery_provider_diagnostic_cache_path(cache_dir, record)
+        if record.provider_diagnostic_hash is None:
+            continue
+        try:
+            diagnostic = DiscoveryProviderDiagnostic.model_validate_json(
+                path.read_text(encoding="utf-8")
+            ) if path is not None and path.is_file() else None
+            matches = (
+                diagnostic is not None
+                and diagnostic.artifact_hash == record.provider_diagnostic_hash
+                and diagnostic.request_hash == record.request_hash
+            )
+        except ValueError:
+            matches = False
+        if not matches:
+            raise ValueError(f"DISCOVERY_RESUME_DIAGNOSTIC_DRIFT: {path}")
 
 
 def _discovery_report(run) -> dict:
@@ -282,6 +300,11 @@ def domain_question_context_cmd(
               show_default=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--resume", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Resume a prior immutable discovery run into a new --out path.")
+@click.option("--retry-missing", is_flag=True,
+              help="Raise output capacity only for prior chunks with no received raw response; requires --resume.")
+@click.option("--retry-max-completion-tokens", default=16_384, show_default=True,
+              type=click.IntRange(256, 32_768),
+              help="Per-missing-chunk output ceiling; requires --retry-missing. Global/summary ceilings stay unchanged.")
 @click.option("--project-id")
 @click.option("--live", is_flag=True, help="Permit bounded full-corpus parsing and model calls.")
 @click.option("--dry-run", is_flag=True, help="Read-only inventory/cache coverage; no text extraction, calls or writes.")
@@ -293,7 +316,8 @@ def domain_question_context_cmd(
 @click.option("--ocr-identity", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.pass_context
 def domain_discover_cmd(
-    ctx, source, intake, out, cache_dir, resume, project_id, live, dry_run,
+    ctx, source, intake, out, cache_dir, resume, retry_missing, retry_max_completion_tokens,
+    project_id, live, dry_run,
     max_calls, concurrency, max_chunk_chars, max_tokens, ocr_cache, ocr_identity,
 ) -> None:
     """Visit all corpus chunks before design; observations and summaries are unapproved.
@@ -305,6 +329,12 @@ def domain_discover_cmd(
     planning = dry_run or bool(_root_options(ctx).get("dry_run")) or not live
     if live and planning:
         raise click.UsageError("--dry-run cannot be combined with --live")
+    if retry_missing and resume is None:
+        raise click.UsageError("--retry-missing requires --resume")
+    if not retry_missing and ctx.get_parameter_source("retry_max_completion_tokens") not in (
+        None, click.core.ParameterSource.DEFAULT,
+    ):
+        raise click.UsageError("--retry-max-completion-tokens requires --retry-missing")
     if (ocr_cache is None) != (ocr_identity is None):
         raise click.UsageError("--ocr-cache and --ocr-identity must be supplied together")
     if not planning and out.exists():
@@ -314,6 +344,10 @@ def domain_discover_cmd(
     try:
         core = _discovery_core()
         prior = core.load_discovery(resume) if resume else None
+        retry_policy = core.DiscoveryMissingRetry(
+            max_completion_tokens=retry_max_completion_tokens,
+        ) if retry_missing else None
+        retry_plan = core.plan_missing_discovery_retry(prior, retry_policy) if retry_policy else None
         intake_raw = load_domain_intake(intake) if intake else (prior.business_context if prior else None)
         selected_project = project_id or (
             prior.prepared.base_identity.project_id if prior else f"project:{source.resolve().name}"
@@ -332,6 +366,7 @@ def domain_discover_cmd(
         budget = core.DiscoveryBudget(
             max_calls=max_calls, max_concurrency=concurrency, max_chunk_chars=max_chunk_chars,
             max_tokens=max_tokens,
+            **({"max_completion_tokens": prior.budget.max_completion_tokens} if prior else {}),
         )
         if prior is not None:
             _validate_discovery_resume_cache(prior, cache_dir)
@@ -379,7 +414,7 @@ def domain_discover_cmd(
             run = core.run_discovery(
                 prepared, client=client, model_version=model_version, model_hash=model_hash,
                 cache_dir=cache_dir, budget=budget, business_context=intake_raw,
-                prior=prior,
+                prior=prior, retry_missing=retry_policy,
             )
             core.save_discovery(out, run)
             result = {
@@ -395,6 +430,8 @@ def domain_discover_cmd(
                 "issues": run.issues, "authority": run.authority,
                 **_discovery_report(run),
             }
+        if retry_plan is not None:
+            result["missing_retry_plan"] = retry_plan
     except (APIError, ClientAuthenticationError) as exc:
         raise _model_failure(exc) from exc
     except (OSError, ValueError, TypeError) as exc:

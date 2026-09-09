@@ -46,6 +46,10 @@ def test_envelope_extras_remain_pending_without_becoming_candidates(tmp_path, em
     assert discovered["raw_candidate_count"] == discovered["verified_candidate_count"] == raw_count
     assert discovered["candidate_ledger_entry_count"] == raw_count
     assert discovered["unaccounted_candidate_count"] == 0 and discovered["candidate_ledger_complete"] is True
+    assert discovered["candidate_ledger_scope"] == "received_raw_response.candidates_only"
+    assert discovered["unaccounted_raw_candidate_count"] == discovered["unaccounted_raw_array_count"] == 0
+    assert discovered["received_array_ledger_complete"] is True
+    assert "candidate_ledger_entry_count" not in core.discovery_grounding_report(run)
     assert discovered["envelope_anomaly_count"] == 1
     assert discovered["envelope_quarantined_field_count"] == 2
     assert discovered["grounding_quality"] == "gaps"
@@ -289,6 +293,7 @@ def test_public_zero_call_resume_salvages_legacy_extra_root_array_without_overwr
     before = _discovery_report(prior)
     assert before["raw_candidate_count"] == before["unaccounted_candidate_count"] == 3
     assert before["candidate_ledger_entry_count"] == 0 and before["candidate_ledger_complete"] is False
+    assert before["unaccounted_raw_array_count"] == 1 and before["unaccounted_raw_candidate_count"] == 3
     legacy = tmp_path / "legacy-envelope.json"
     core.save_discovery(legacy, prior)
     protected = {path: path.read_bytes() for path in (legacy, cached)}

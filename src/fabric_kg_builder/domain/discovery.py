@@ -108,6 +108,11 @@ class DiscoveryBudget(ContractModel):
     max_completion_tokens: int = Field(default=4_096, ge=128, le=16_000)
 
 
+class DiscoveryMissingRetry(ContractModel):
+    operation_version: Literal["discovery-missing-retry/1.0.0"] = "discovery-missing-retry/1.0.0"
+    max_completion_tokens: int = Field(default=16_384, ge=256, le=32_768)
+
+
 class _Hashed(ContractModel):
     artifact_hash: Sha256
 
@@ -226,11 +231,18 @@ class ChunkObservation(_Hashed):
     candidate_grounding_scope: Literal["raw_response.candidates"] | None = None
     envelope_anomalies: list[EnvelopeAnomaly] = Field(default_factory=list)
     origin_artifact_hash: Sha256 | None = None
+    request_max_completion_tokens: int | None = Field(default=None, ge=256, le=32_768)
+    retry_operation_version: Literal["discovery-missing-retry/1.0.0"] | None = None
+    retry_of_artifact_hash: Sha256 | None = None
+    provider_diagnostic_hash: Sha256 | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         values = handler(self)
-        for key in ("verifier_version", "request_prompt_version", "origin_artifact_hash", "candidate_grounding_scope"):
+        for key in (
+            "verifier_version", "request_prompt_version", "origin_artifact_hash", "candidate_grounding_scope",
+            "request_max_completion_tokens", "retry_operation_version", "retry_of_artifact_hash", "provider_diagnostic_hash",
+        ):
             if getattr(self, key) is None:
                 values.pop(key, None)
         if not self.candidate_grounding:
@@ -261,6 +273,19 @@ class FailedDiscoverySummary(_Hashed):
     request_hash: Sha256
     raw_response: Any = None
     reason: RequiredText
+    provider_diagnostic_hash: Sha256 | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.provider_diagnostic_hash is None:
+            values.pop("provider_diagnostic_hash", None)
+        return values
+
+
+class DiscoveryProviderDiagnostic(_Hashed):
+    request_hash: Sha256
+    diagnostics: dict[str, Any]
 
 
 class DiscoveryRun(_Hashed):
@@ -270,6 +295,7 @@ class DiscoveryRun(_Hashed):
     prompt_version: Literal["open-candidate-discovery/1.1.0", "open-candidate-discovery/1.2.0"] = DISCOVERY_PROMPT_VERSION
     verifier_version: Literal["discovery-grounding/2.0.0", "discovery-grounding/2.1.0", "discovery-grounding/2.2.0"] | None = None
     revalidated_from: Sha256 | None = None
+    retry_missing_policy: DiscoveryMissingRetry | None = None
     model_version: RequiredText
     model_hash: Sha256
     business_context: dict[str, Any] | None = None
@@ -290,7 +316,7 @@ class DiscoveryRun(_Hashed):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         values = handler(self)
-        for key in ("verifier_version", "revalidated_from"):
+        for key in ("verifier_version", "revalidated_from", "retry_missing_policy"):
             if getattr(self, key) is None:
                 values.pop(key, None)
         if not self.failed_summaries:
@@ -602,10 +628,12 @@ def _chunk_payload(prepared: PreparedCorpus, chunk: DiscoveryChunk, units=None, 
     return payload
 
 
-def _request(system: str, payload: Any, schema: dict[str, Any], budget: DiscoveryBudget, model_version: str, model_hash: str, business_context: Any, *, prompt_version=DISCOVERY_PROMPT_VERSION):
+def _request(system: str, payload: Any, schema: dict[str, Any], budget: DiscoveryBudget, model_version: str, model_hash: str, business_context: Any, *, prompt_version=DISCOVERY_PROMPT_VERSION, max_completion_tokens=None):
     request = {
         "system": system, "user": canonical_json({"input": payload, "business_context": business_context}),
-        "json_schema": schema, "max_completion_tokens": budget.max_completion_tokens, "max_attempts": 1,
+        "json_schema": schema,
+        "max_completion_tokens": budget.max_completion_tokens if max_completion_tokens is None else max_completion_tokens,
+        "max_attempts": 1,
     }
     key = canonical_sha256({
         "request": request, "model_version": model_version, "model_hash": model_hash,
@@ -646,12 +674,12 @@ def _legacy_verified_response(raw: dict[str, Any], unit: SourceUnit, chunk: Disc
     return RawCandidateResponse.model_validate({"candidates": verified})
 
 
-def _chunk_request(prepared, chunk, units, budget, model_version, model_hash, business_context, prompt_version):
+def _chunk_request(prepared, chunk, units, budget, model_version, model_hash, business_context, prompt_version, *, request_max_completion_tokens=None):
     return _request(
         LEGACY_DISCOVERY_SYSTEM if prompt_version == LEGACY_DISCOVERY_PROMPT_VERSION else DISCOVERY_SYSTEM,
         _chunk_payload(prepared, chunk, units, prompt_version=prompt_version),
         RawCandidateResponse.model_json_schema(), budget, model_version, model_hash, business_context,
-        prompt_version=prompt_version,
+        prompt_version=prompt_version, max_completion_tokens=request_max_completion_tokens,
     )
 
 
@@ -786,7 +814,10 @@ def ground_discovery_response(
     return _ground_response(raw_response, source_unit, chunk)
 
 
-def _grounded_observation(chunk, key, raw, unit, *, request_prompt_version, origin_artifact_hash=None):
+def _grounded_observation(
+    chunk, key, raw, unit, *, request_prompt_version, origin_artifact_hash=None,
+    request_max_completion_tokens=None, retry_operation_version=None, retry_of_artifact_hash=None,
+):
     response, accounting = _ground_response(raw, unit, chunk)
     anomalies = discovery_envelope_anomalies(raw_response=raw, chunk=chunk)
     return _seal(
@@ -796,6 +827,8 @@ def _grounded_observation(chunk, key, raw, unit, *, request_prompt_version, orig
         candidate_grounding_scope="raw_response.candidates", envelope_anomalies=anomalies,
         verifier_version=GROUNDING_VERSION, request_prompt_version=request_prompt_version,
         origin_artifact_hash=origin_artifact_hash,
+        request_max_completion_tokens=request_max_completion_tokens,
+        retry_operation_version=retry_operation_version, retry_of_artifact_hash=retry_of_artifact_hash,
     )
 
 
@@ -932,6 +965,60 @@ def discovery_summary_failure_cache_path(cache_dir: Path, record: FailedDiscover
     return Path(cache_dir) / "failed-summaries" / f"{record.request_hash}-{record.artifact_hash}.json"
 
 
+def discovery_provider_diagnostic_cache_path(cache_dir: Path, record) -> Path | None:
+    if record.provider_diagnostic_hash is None:
+        return None
+    return Path(cache_dir) / "diagnostics" / f"{record.request_hash}-{record.provider_diagnostic_hash}.json"
+
+
+def _save_provider_diagnostic(cache_dir, request_hash, exc):
+    from fabric_kg_builder.enrichment.foundry_client import FoundryJSONResponseError
+
+    if not isinstance(exc, FoundryJSONResponseError):
+        return None
+    allowed = {
+        "transport", "max_completion_tokens", "attempt", "raw_output", "response_id", "status",
+        "incomplete_reason", "finish_reason", "usage", "parse_error", "response_format",
+    }
+    record = _seal(
+        DiscoveryProviderDiagnostic, request_hash=request_hash,
+        diagnostics={key: value for key, value in exc.diagnostics.items() if key in allowed},
+    )
+    _write(Path(cache_dir) / "diagnostics" / f"{request_hash}-{record.artifact_hash}.json", record)
+    return record.artifact_hash
+
+
+def plan_missing_discovery_retry(prior: DiscoveryRun, policy: DiscoveryMissingRetry) -> dict[str, Any]:
+    prior = DiscoveryRun.model_validate(prior.model_dump(mode="python"))
+    policy = DiscoveryMissingRetry.model_validate(policy.model_dump(mode="python"))
+    if policy.max_completion_tokens <= prior.budget.max_completion_tokens:
+        raise ValueError("missing-only retry must increase the output ceiling without changing the global budget")
+    pending = [item for item in prior.chunks if item.raw_response is None]
+    if any(policy.max_completion_tokens < (item.request_max_completion_tokens or prior.budget.max_completion_tokens) for item in pending):
+        raise ValueError("missing-only retry cannot reduce an existing per-request output ceiling")
+    return {
+        "operation_version": policy.operation_version, "max_completion_tokens": policy.max_completion_tokens,
+        "pending_chunk_ids": [item.chunk.chunk_id for item in pending], "pending_chunk_count": len(pending),
+        "prior_run_hash": prior.run_hash,
+    }
+
+
+def _retry_metadata(record):
+    return {
+        key: getattr(record, key) if record is not None else None
+        for key in ("request_max_completion_tokens", "retry_operation_version", "retry_of_artifact_hash")
+    }
+
+
+def _check_request_override(record, budget):
+    override = _retry_metadata(record)
+    if any(value is not None for value in override.values()) and (
+        any(value is None for value in override.values())
+        or record.request_max_completion_tokens <= budget.max_completion_tokens
+    ):
+        raise ValueError("missing-only discovery request override/provenance mismatch")
+
+
 class _BudgetedClient:
     def __init__(self, client, budget: DiscoveryBudget):
         self.client, self.budget = client, budget
@@ -942,7 +1029,7 @@ class _BudgetedClient:
         size = len(canonical_json(request))
         # UTF-8 bytes plus response ceiling and framing conservatively reserve
         # tokens without pretending that an unavailable tokenizer is exact usage.
-        reserve = len(canonical_json(request).encode("utf-8")) + self.budget.max_completion_tokens + 1024
+        reserve = len(canonical_json(request).encode("utf-8")) + request["max_completion_tokens"] + 1024
         with self.lock:
             if size > self.budget.max_request_chars:
                 raise _Deferred("request exceeds bound; no input was truncated")
@@ -962,6 +1049,7 @@ def run_discovery(
     cache_dir: Path, budget: DiscoveryBudget | None = None,
     business_context: dict[str, Any] | None = None,
     prior: DiscoveryRun | None = None,
+    retry_missing: DiscoveryMissingRetry | None = None,
 ) -> DiscoveryRun:
     prepared = PreparedCorpus.model_validate(prepared.model_dump(mode="python"))
     validate_corpus_manifest_against_source(prepared.corpus, Path(prepared.source_path), identity=prepared.base_identity)
@@ -970,6 +1058,12 @@ def run_discovery(
             raise ValueError("prepared OCR cache/extractor identity changed before discovery reuse")
     budget = budget or DiscoveryBudget()
     prior_records = {}
+    retry_ids = set()
+    if retry_missing is not None:
+        if prior is None:
+            raise ValueError("missing-only retry requires a prior discovery run")
+        retry_missing = DiscoveryMissingRetry.model_validate(retry_missing.model_dump(mode="python"))
+        retry_ids = set(plan_missing_discovery_retry(prior, retry_missing)["pending_chunk_ids"])
     if prior is not None:
         prior = DiscoveryRun.model_validate(prior.model_dump(mode="python"))
         if (
@@ -984,10 +1078,87 @@ def run_discovery(
     executor = _BudgetedClient(client, budget)
     units = {unit.source_unit_id: unit for unit in prepared.source_units}
     cache_dir = Path(cache_dir)
+    chunks = plan_discovery_chunks(prepared, budget)
+    requests, selected_records = {}, {}
+
+    def check_record(record, chunk, expected_key, prompt_version):
+        if record.chunk != chunk or record.request_hash != expected_key:
+            raise ValueError("cached discovery response differs from its source/request")
+        _check_request_override(record, budget)
+        version = record.request_prompt_version or prompt_version
+        _, actual_key = _chunk_request(
+            prepared, chunk, units, budget, model_version, model_hash, business_context, version,
+            request_max_completion_tokens=record.request_max_completion_tokens,
+        )
+        if actual_key != record.request_hash:
+            raise ValueError("cached discovery request/cap/provenance binding mismatch")
+        if record.status in {"processed", "no_candidates"}:
+            _check_observation(record, units[chunk.source_unit_id])
+        elif record.response is not None:
+            raise ValueError("failed/deferred cache cannot contribute candidates")
+        diagnostic_path = discovery_provider_diagnostic_cache_path(cache_dir, record)
+        if diagnostic_path is not None:
+            try:
+                diagnostic = DiscoveryProviderDiagnostic.model_validate_json(diagnostic_path.read_text(encoding="utf-8"))
+                if diagnostic.artifact_hash != record.provider_diagnostic_hash or diagnostic.request_hash != record.request_hash:
+                    raise ValueError("diagnostic binding mismatch")
+            except (OSError, ValueError, TypeError):
+                raise ValueError("DISCOVERY_RESUME_DIAGNOSTIC_DRIFT") from None
+        return version
+
+    # Resolve every available response before dispatching any paid work.
+    for chunk in chunks:
+        previous = prior_records.get(chunk.chunk_id)
+        metadata = _retry_metadata(previous)
+        if chunk.chunk_id in retry_ids:
+            metadata = {
+                "request_max_completion_tokens": retry_missing.max_completion_tokens,
+                "retry_operation_version": retry_missing.operation_version,
+                "retry_of_artifact_hash": previous.artifact_hash,
+            }
+        request, key = _chunk_request(
+            prepared, chunk, units, budget, model_version, model_hash, business_context, DISCOVERY_PROMPT_VERSION,
+            request_max_completion_tokens=metadata["request_max_completion_tokens"],
+        )
+        requests[chunk.chunk_id] = request, key, metadata
+        if previous is not None and previous.raw_response is not None:
+            version = check_record(previous, chunk, previous.request_hash, prior.prompt_version)
+            selected_records[chunk.chunk_id] = previous, version
+            continue
+        applicable = {key: DISCOVERY_PROMPT_VERSION}
+        if previous is not None:
+            version = check_record(previous, chunk, previous.request_hash, prior.prompt_version)
+            applicable[previous.request_hash] = version
+        available = []
+        for request_hash, version in applicable.items():
+            successful = cache_dir / "chunks" / f"{request_hash}.json"
+            paths = [successful] if successful.exists() else []
+            paths.extend(sorted((cache_dir / "failed").glob(f"{request_hash}-*.json")))
+            for namespace in ("v2", "v2.1", "v2.2"):
+                paths.extend(sorted((cache_dir / "grounded" / namespace).glob(f"{request_hash}-*.json")))
+            for path in paths:
+                record = ChunkObservation.model_validate_json(path.read_text(encoding="utf-8"))
+                record_version = check_record(record, chunk, request_hash, version)
+                if path == successful:
+                    if record.status not in {"processed", "no_candidates"}:
+                        raise ValueError("successful discovery cache contains a non-success record")
+                elif path != discovery_observation_cache_path(cache_dir, record):
+                    raise ValueError("discovery cache filename/provenance mismatch")
+                if record.raw_response is not None:
+                    available.append((record, record_version))
+        identities = {(record.request_hash, canonical_sha256(record.raw_response)) for record, _ in available}
+        if len(identities) > 1:
+            raise ValueError("multiple distinct received responses require an explicit prior artifact containing the selected raw response")
+        if available:
+            selected_records[chunk.chunk_id] = max(available, key=lambda item: (
+                item[0].status in {"processed", "no_candidates"},
+                item[0].verifier_version or "", item[0].artifact_hash,
+            ))
 
     def received(record, prompt_version):
         _, expected_key = _chunk_request(
             prepared, record.chunk, units, budget, model_version, model_hash, business_context, prompt_version,
+            request_max_completion_tokens=record.request_max_completion_tokens,
         )
         if expected_key != record.request_hash:
             raise ValueError("received raw response has different source/model/request bindings")
@@ -1000,6 +1171,7 @@ def run_discovery(
                     record.chunk, expected_key, record.raw_response, units[record.chunk.source_unit_id],
                     request_prompt_version=prompt_version,
                     origin_artifact_hash=record.origin_artifact_hash or record.artifact_hash,
+                    **_retry_metadata(record),
                 )
             except ValueError as exc:
                 grounded = _seal(
@@ -1007,6 +1179,7 @@ def run_discovery(
                     status="failed", raw_response=record.raw_response, reason=str(exc),
                     verifier_version=GROUNDING_VERSION, request_prompt_version=prompt_version,
                     origin_artifact_hash=record.origin_artifact_hash or record.artifact_hash,
+                    **_retry_metadata(record),
                 )
         path = discovery_observation_cache_path(cache_dir, grounded)
         if path.exists():
@@ -1023,56 +1196,41 @@ def run_discovery(
         return grounded
 
     def observe(chunk):
-        request, key = _chunk_request(
-            prepared, chunk, units, budget, model_version, model_hash, business_context, DISCOVERY_PROMPT_VERSION,
-        )
+        request, key, metadata = requests[chunk.chunk_id]
         path = cache_dir / "chunks" / f"{key}.json"
         raw = None
-        previous = prior_records.get(chunk.chunk_id)
-        if previous is not None and previous.raw_response is not None:
-            if previous.chunk != chunk:
-                raise ValueError("prior discovery chunk/source binding changed")
-            return received(previous, previous.request_prompt_version or prior.prompt_version)
-        if path.exists():
-            record = ChunkObservation.model_validate_json(path.read_text(encoding="utf-8"))
-            if record.request_hash != key or record.chunk != chunk:
-                raise ValueError("cached discovery response differs from its source/request")
-            return received(record, record.request_prompt_version or DISCOVERY_PROMPT_VERSION)
-        failed_key = previous.request_hash if previous is not None else key
-        failed_version = (previous.request_prompt_version or prior.prompt_version) if previous is not None else DISCOVERY_PROMPT_VERSION
-        failed_records = []
-        for failed_path in sorted((cache_dir / "failed").glob(f"{failed_key}-*.json")):
-            record = ChunkObservation.model_validate_json(failed_path.read_text(encoding="utf-8"))
-            if record.request_hash != failed_key or record.chunk != chunk:
-                raise ValueError("failed raw cache source/request binding differs")
-            if record.raw_response is not None:
-                failed_records.append(record)
-        if failed_records:
-            if len({canonical_sha256(record.raw_response) for record in failed_records}) != 1:
-                raise ValueError("multiple distinct received responses require an explicit prior artifact; no response was discarded")
-            return received(failed_records[0], failed_version)
+        if chunk.chunk_id in selected_records:
+            return received(*selected_records[chunk.chunk_id])
+        if retry_missing is not None and chunk.chunk_id not in retry_ids:
+            return _seal(
+                ChunkObservation, chunk=chunk, request_hash=key, status="deferred",
+                reason="outside explicit prior missing-only retry scope", **metadata,
+            )
         try:
             raw = executor.call(request)
             record = _grounded_observation(
                 chunk, key, raw, units[chunk.source_unit_id], request_prompt_version=DISCOVERY_PROMPT_VERSION,
+                **metadata,
             )
             _write(path, record)
             _write(discovery_observation_cache_path(cache_dir, record), record)
             return record
         except _Deferred as exc:
-            return _seal(ChunkObservation, chunk=chunk, request_hash=key, status="deferred", reason=str(exc))
+            return _seal(ChunkObservation, chunk=chunk, request_hash=key, status="deferred", reason=str(exc), **metadata)
         except Exception as exc:
             failure = _seal(
                 ChunkObservation, chunk=chunk, request_hash=key, status="failed",
                 raw_response=raw if isinstance(raw, dict) else None,
                 reason=f"{type(exc).__name__}: {exc}",
                 verifier_version=GROUNDING_VERSION, request_prompt_version=DISCOVERY_PROMPT_VERSION,
+                provider_diagnostic_hash=_save_provider_diagnostic(cache_dir, key, exc),
+                **metadata,
             )
             _write(cache_dir / "failed" / f"{key}-{failure.artifact_hash}.json", failure)
             return failure
 
     with ThreadPoolExecutor(max_workers=budget.max_concurrency) as pool:
-        observations = list(pool.map(observe, plan_discovery_chunks(prepared, budget)))
+        observations = list(pool.map(observe, chunks))
     summaries, failed_summaries, documents, issues = [], [], {}, []
     children = {
         item.chunk.chunk_id: _observation_payload(item)
@@ -1111,6 +1269,7 @@ def run_discovery(
                     FailedDiscoverySummary, level=level, source_file_id=source_id,
                     child_ids=ids, request_hash=key, raw_response=raw,
                     reason=f"{type(exc).__name__}: {exc}",
+                    provider_diagnostic_hash=_save_provider_diagnostic(cache_dir, key, exc),
                 )
                 _write(discovery_summary_failure_cache_path(cache_dir, failure), failure)
                 failed_summaries.append(failure)
@@ -1149,6 +1308,7 @@ def run_discovery(
         model_call_count=executor.calls, reserved_tokens=executor.tokens,
         reused_response_count=executor.reused, issues=issues,
         verifier_version=GROUNDING_VERSION, revalidated_from=prior.run_hash if prior is not None else None,
+        retry_missing_policy=retry_missing,
     )
 
 
@@ -1169,9 +1329,11 @@ def _validate_run(run: DiscoveryRun) -> None:
     units = {unit.source_unit_id: unit for unit in run.prepared.source_units}
     children = {}
     for record in run.chunks:
+        _check_request_override(record, run.budget)
         _, key = _chunk_request(
             run.prepared, record.chunk, units, run.budget, run.model_version, run.model_hash,
             run.business_context, record.request_prompt_version or run.prompt_version,
+            request_max_completion_tokens=record.request_max_completion_tokens,
         )
         if key != record.request_hash:
             raise ValueError("discovery request/source binding mismatch")

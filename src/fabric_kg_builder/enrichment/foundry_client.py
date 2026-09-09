@@ -150,6 +150,37 @@ class TransportOutageError(RuntimeError):
         self.budget_seconds = budget_seconds
 
 
+class FoundryJSONResponseError(ValueError):
+    """A failed JSON boundary with private diagnostics, never raw text in its message."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
+def _json_response_diagnostics(response, raw, *, transport, output_limit, attempt, finish_reason=None):
+    def field(value, key):
+        return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+    result = {
+        "transport": transport, "max_completion_tokens": output_limit, "attempt": attempt,
+        "raw_output": raw if isinstance(raw, str) else None,
+    }
+    for key, value in (
+        ("response_id", field(response, "id")),
+        ("status", field(response, "status")),
+        ("incomplete_reason", field(field(response, "incomplete_details"), "reason")),
+        ("finish_reason", finish_reason),
+    ):
+        if isinstance(value, str):
+            result[key] = value
+    usage = field(response, "usage")
+    result["usage"] = {
+        key: value for key in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens")
+        if isinstance(value := field(usage, key), int) and not isinstance(value, bool)
+    }
+    return result
+
+
 class _TransportOutageBreaker:
     """Shared, bounded delayed-retry policy for provider outages.
 
@@ -646,6 +677,7 @@ class FoundryClient:
         raw = ""
         strict_rejected = False
         empty_response = False
+        diagnostics = {}
         for attempt in range(max_attempts):
             attempt_system = system + schema_instruction
             if attempt:
@@ -704,6 +736,16 @@ class FoundryClient:
                     )
                 )
             raw = response.choices[0].message.content
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+            diagnostics = _json_response_diagnostics(
+                response, raw, transport="chat_completions", output_limit=max_completion_tokens,
+                attempt=attempt + 1, finish_reason=finish_reason,
+            )
+            if finish_reason in ("length", "content_filter"):
+                last_error = json.JSONDecodeError("provider did not finish the JSON response", "", 0)
+                diagnostics["parse_error"] = "provider_incomplete"
+                empty_response = False
+                continue
             if not raw or not raw.strip():
                 last_error = json.JSONDecodeError(
                     "empty model response", "", 0
@@ -712,20 +754,24 @@ class FoundryClient:
                 continue
             empty_response = False
             try:
-                return json.loads(raw)
+                result = json.loads(raw)
+                if not isinstance(result, dict):
+                    raise json.JSONDecodeError("response is not a JSON object", raw, 0)
+                return result
             except json.JSONDecodeError as exc:
                 last_error = exc
+                diagnostics["parse_error"] = {"line": exc.lineno, "column": exc.colno, "position": exc.pos}
 
         assert last_error is not None
         if empty_response:
-            raise ValueError(
+            raise FoundryJSONResponseError(
                 "Foundry returned an empty completion after "
                 f"{max_attempts} attempt(s); the deployment produced no "
-                "content for this request"
+                "content for this request", diagnostics,
             )
-        raise ValueError(
+        raise FoundryJSONResponseError(
             f"Foundry response could not be parsed as JSON after {max_attempts} "
-            f"attempt(s); line={last_error.lineno}; column={last_error.colno}"
+            f"attempt(s); line={last_error.lineno}; column={last_error.colno}", diagnostics,
         )
 
     def _complete_project_json(
@@ -738,6 +784,7 @@ class FoundryClient:
         if json_schema:
             instructions += "\nRequired JSON schema:\n" + json.dumps(json_schema, sort_keys=True)
         strict_schema = None
+        diagnostics = {}
         if json_schema:
             try:
                 strict_schema = _azure_strict_schema(json_schema)
@@ -776,16 +823,28 @@ class FoundryClient:
                     lambda: self._client.responses.create(**request)
                 )
             raw = response.output_text
+            diagnostics = _json_response_diagnostics(
+                response, raw, transport="project_responses", output_limit=max_completion_tokens,
+                attempt=attempt + 1,
+            )
+            diagnostics["response_format"] = request["text"]["format"]["type"]
+            if diagnostics.get("status") not in (None, "completed") or diagnostics.get("incomplete_reason"):
+                diagnostics["parse_error"] = "provider_incomplete"
+                continue
             if not raw or not raw.strip():
+                diagnostics["parse_error"] = "empty_output"
                 continue
             try:
                 result = json.loads(raw)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                diagnostics["parse_error"] = {"line": exc.lineno, "column": exc.colno, "position": exc.pos}
                 continue
             if isinstance(result, dict):
                 return result
-        raise ValueError(
-            f"Foundry project returned no complete JSON object after {max_attempts} attempt(s)"
+            diagnostics["parse_error"] = "not_a_json_object"
+        raise FoundryJSONResponseError(
+            f"Foundry project returned no complete JSON object after {max_attempts} attempt(s)",
+            diagnostics,
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
