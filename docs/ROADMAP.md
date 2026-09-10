@@ -8,12 +8,13 @@ Development stays local with task-labelled commits; no push or PR is implied.
 
 ## Current baseline
 
-- Local CLI: 0.2.6, corpus-first implementation milestone `1779e16`.
+- Local CLI: 0.2.6; current full-corpus compilation fix `da14b0f`.
 - Design-first generation, separate evaluation and strict compilation/approval
   are implemented. See [the specification](specs/SPEC-0.2.6-DESIGN-FIRST.md).
-- Real discovery-bound design generation succeeded on the two-document smoke
-  corpus; that draft still needs review before approval or Fabric publication.
-  The old first-file sampling limitation is not the normal discovery workflow.
+- Full 22-document discovery and reviewed domain approval have completed.
+  Real zero-call replay through L3/L4 produced 3,680 entities but zero relations
+  and one property; vocabulary alignment and detail-evidence issues remain.
+  This is not a usable deployed Data Agent yet.
 - Track A's local question-routing/context flow is implemented. This does not
   mean that physical SQL bindings or analytical execution are available.
 
@@ -43,11 +44,34 @@ observations, 165 grounded candidates and 238 quarantined candidates. Revalidati
 used no repeated chunk calls, consolidation used nine additional calls, and a
 completed replay used zero calls.
 
-Still open: full 22-document model processing, grounding-quality improvement,
-final ontology approval, real-data post-approval reuse/answer acceptance and
-Fabric/SQL execution. The real smoke design remains unapproved with separate
-schema gaps. Offline CLI integration proves the approved reuse path, not those
-remaining live business outcomes.
+Full-corpus follow-up: all 1,425 chunks were processed. The remaining summary
+gaps were explicitly accepted for the prototype, without clearing grounding
+quarantine. A full-corpus domain was approved and reused through real local
+L2/L3/L4 without model calls. Its low relation/property yield motivates track E.
+Grounding-quality improvement and Fabric/SQL business acceptance remain open.
+
+## E. Current priority: windowed working schema and mapping
+
+Status: implementation started, user-authorized 2026-09-09 19:27.
+See [window operation contracts](specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md).
+
+Process saved discovery observations in deterministic windows. Every worker
+within a batch uses one frozen working schema. After gathering changes, evaluate
+and commit the next version with local snapshots and before/after change logs.
+Preserve aliases, stable concept IDs, owner/endpoint constraints and unresolved
+choices through the last declared chunk. Review the final mappings before
+approved replay; do not mutate the already approved domain or raw observations.
+
+Implement the state/control/mapping flow in the CLI. Keep detailed owner/value
+retrieval and Search index extension as
+[Foundry Agent integration guidance](FOUNDRY-SEARCH-ORCHESTRATION.md), not a new
+CLI search engine. Ontology holds core structure and keys; Search supplies
+scoped original detail, and SQL handles analytical questions. Optional detail
+need not become an ontology property, but asserted facts still require proof.
+
+Implementation order: freeze snapshot/transition/mapping contracts -> parallel
+core and CLI/replay work -> helper guidance -> targeted regression and public
+CLI checks on existing saved candidates. No full raw-corpus recollection.
 
 ## D. Active release acceptance: full corpus and a user-facing Data Agent
 
@@ -76,8 +100,8 @@ No existing shared item is adopted, deleted or replaced to make acceptance pass.
 
 Required acceptance distinguishes Graph/ontology retrieval, SQL analysis and
 source-evidence retrieval. Agent creation alone does not establish correct
-answers to all six technician questions. Full-corpus discovery is currently
-running; completion, approval, deployment and user acceptance must be recorded
+answers to all six technician questions. Full-corpus discovery is finished;
+completion, approval, deployment and user acceptance must be recorded
 as separate milestones.
 
 User decision at 2026-09-09 15:34: for this prototype, at least 99% processed
