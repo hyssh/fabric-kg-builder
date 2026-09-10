@@ -1922,6 +1922,8 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
               help="Schema-2: share source anchors in the model response; full validation is unchanged.")
 @click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Replay immutable full-corpus raw candidates after approval; no implicit second model pass.")
+@click.option("--window-run", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Replay a completed integrated run after final domain approval and --mapping-review.")
 @click.option("--window-mapping", "--mapping-review", "window_mapping",
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Explicitly reviewed, discovery/domain/window-bound schema mapping for zero-call replay.")
@@ -1965,6 +1967,7 @@ def enrich_cmd(
     max_reextract_calls: int = 1,
     window_mapping: Path | None = None,
     window_state: Path | None = None,
+    window_run: Path | None = None,
 ) -> None:
     """Run LLM extraction on source files and produce structured JSON in build/enriched/.
 
@@ -1988,13 +1991,17 @@ def enrich_cmd(
         raise click.UsageError("--ocr-cache and --ocr-identity must be supplied together")
     if replay_only and reextract_pending:
         raise click.UsageError("--replay-only conflicts with --reextract-pending")
-    if (replay_only or reextract_pending) and discovery_file is None:
+    if window_run is not None and (
+        discovery_file is not None or window_state is not None or reextract_pending or window_mapping is None
+    ):
+        raise click.UsageError("--window-run requires --mapping-review; conflicts with --discovery, --window-state and --reextract-pending")
+    if (replay_only or reextract_pending) and discovery_file is None and window_run is None:
         raise click.UsageError("Discovery replay/re-extraction flags require --discovery")
-    if (window_mapping is None) != (window_state is None):
+    if window_run is None and (window_mapping is None) != (window_state is None):
         raise click.UsageError("--window-mapping and --window-state must be supplied together")
-    if window_mapping is not None and (discovery_file is None or reextract_pending):
+    if window_run is None and window_mapping is not None and (discovery_file is None or reextract_pending):
         raise click.UsageError("--window-mapping requires --discovery and zero-call replay, not --reextract-pending")
-    if discovery_file is not None and (force or compact_response):
+    if (discovery_file is not None or window_run is not None) and (force or compact_response):
         raise click.UsageError("Discovery replay cannot use --force/--compact-response; choose a fresh L2 state when changing authority")
 
     try:
@@ -2029,6 +2036,8 @@ def enrich_cmd(
                 f"Invalid domain contract: {exc}"
             ) from exc
         if isinstance(resolved_contract, DomainContractV2):
+            if resolved_contract.window_run_binding is not None and window_run is None:
+                raise click.UsageError("This approved domain binds an integrated run; supply --window-run and --mapping-review. Implicit re-extraction is forbidden.")
             if getattr(resolved_contract, "discovery_run_hash", None) is not None and discovery_file is None:
                 raise click.UsageError(
                     "This approved domain binds discovery; supply --discovery FILE with discovery_hash "
@@ -2036,7 +2045,7 @@ def enrich_cmd(
                     "An implicit full second model pass is forbidden."
                 )
             try:
-                if discovery_file is not None:
+                if discovery_file is not None or window_run is not None:
                     from fabric_kg_builder.enrichment.discovery_reuse import run_discovery_reuse
                     from .domain_design_cmd import _build_client
                     from fabric_kg_builder.domain.proposal import compute_model_hash
@@ -2061,6 +2070,7 @@ def enrich_cmd(
                         ocr_identity=Path(ocr_identity) if ocr_identity else None,
                         **({"window_mapping_path": window_mapping, "window_state": window_state}
                            if window_mapping is not None else {}),
+                        **({"window_run_path": window_run} if window_run is not None else {}),
                     )
                     click.echo(json.dumps(summary, sort_keys=True))
                     return
@@ -2125,7 +2135,7 @@ def enrich_cmd(
             )
             return
 
-    if planning or l1_state is not None or l2_state is not None or ocr_cache is not None or compact_response or discovery_file is not None:
+    if planning or l1_state is not None or l2_state is not None or ocr_cache is not None or compact_response or discovery_file is not None or window_run is not None:
         raise click.UsageError(
             "--dry-run/--l1-state/--l2-state require a schema-2 domain contract"
         )

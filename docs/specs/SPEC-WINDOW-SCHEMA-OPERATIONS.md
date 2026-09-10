@@ -2,7 +2,9 @@
 
 Status, 2026-09-09: cached-candidate alignment/replay is implemented. The
 standalone first-document bootstrap is experimental. The integrated raw-text
-window loop below is PLANNED, not implemented.
+coordinator and approval/replay bridge are implemented locally. Bounded live
+execution covered the first document and continuation into the second;
+full-corpus semantic acceptance is not complete.
 
 ## Goal and scope
 
@@ -160,11 +162,11 @@ Do not infer active execution from a task timer or a stale `in_progress` label.
 
 ## Integration plan: close the raw-text window loop
 
-Planning requested 2026-09-09. This section supersedes any implication that
+Planning and implementation were authorized 2026-09-09. This section supersedes any implication that
 `window-align` already performs progressive extraction from raw document chunks.
-No implementation or model execution is authorized by this planning document.
+Implementation and bounded inference do not authorize cloud publication.
 
-### Current capability and missing connections
+### Gap assessment recorded before integration
 
 | Surface | Available now | Missing for the integrated loop |
 |---|---|---|
@@ -227,6 +229,13 @@ decisions, its current primary chunks, and explicitly identified relevant
 paragraph/table-row/section context. Do not repeatedly send the entire history
 of raw documents. Neighboring context retains its own source identity and cannot
 silently become evidence for a primary chunk.
+
+Pending vocabulary context must be a versioned, deduplicated conflict catalog,
+not concatenated historical raw proposals and diagnostics. Keep the complete
+ledger locally and bind the catalog to its hash and counts; preserve distinct
+owner/endpoint scopes and make any representative examples explicit. Reconstruct
+the catalog from that ledger during validation. This is not permission to
+truncate the working schema, current source text or original user context.
 
 Bound both input and output size before dispatch. Prefer smaller planned windows
 over truncating source text or the shared schema. If mandatory context/schema
@@ -328,7 +337,7 @@ Keep ontology focused on core structure, relationships and retrieval keys.
 Search detail expansion and SQL execution remain separate responsibilities;
 neither is implemented or claimed by this coordinator.
 
-### Proposed CLI contract (not available yet)
+### CLI contract
 
 ```bash
 # Read-only plan over an existing prepared source artifact.
@@ -345,7 +354,8 @@ Expose compatible read-only status/history/schema inspection for both run kinds.
 The one-document stop is an invocation budget, not a new schema reset or changed
 corpus scope; resume can proceed to document two. Changing intake or model/prompt
 configuration requires a new explicitly identified run, not silent resume drift.
-Finalize flag names with CLI contract tests before documenting them as supported.
+The implemented flags and approval commands are documented in
+[the prototype guide](../SCHEMA2-PROTOTYPE.md#integrated-raw-text-windows).
 
 ### Implementation sequence and ownership
 

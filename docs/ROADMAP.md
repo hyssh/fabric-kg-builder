@@ -52,8 +52,8 @@ Grounding-quality improvement and Fabric/SQL business acceptance remain open.
 
 ## E. Current priority: windowed working schema and mapping
 
-Status: local implementation and full-corpus deterministic replay complete;
-semantic model-assisted alignment and Fabric business acceptance remain open.
+Status: local integrated-loop implementation and full-corpus deterministic
+replay complete; semantic coverage tuning and Fabric business acceptance remain open.
 See [window operation contracts](specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md).
 
 Process saved discovery observations in deterministic windows. Every worker
@@ -86,6 +86,26 @@ original 6,676 quarantined candidates were not promoted. Processing completion
 does not mean semantic coverage: 233 grounded relationship candidates still need
 semantic/endpoint alignment, and evidence and identity requirements still apply.
 This result does not justify Fabric publication or claim all six questions work.
+
+Integrated raw-text follow-up: `domain window-run` now carries the original
+domain/questions and a frozen schema into extraction, evaluates proposals and
+explicitly linked repairs, and connects the final run to domain approval and
+reviewed replay. Protocol 1.1 reconstructs transitions from raw responses and
+preserves received-invalid diagnostics. Typed, explicit >=99% processing
+acceptance retains partial status and gaps; previews cannot authorize replay.
+
+The real pilot completed the first guide's 78 chunks in ten windows (S0 to S10),
+then processed eight chunks of the second guide using S10 and the same context,
+producing S11. Completed windows were reused across resumes. The first guide
+produced 68 schema concepts: 64 entity types, two relationship types and two
+properties. Its 775 grounded candidates include only two mapped relationship
+candidates; schema granularity and relationship coverage still need review.
+This is not an asserted L4 relationship count.
+
+The retained full-corpus run is intentionally partial at 86/1,425 chunks, far
+below the coverage-waiver threshold. Genuine approved replay is covered by
+offline CLI tests, not yet a complete live integrated-run L4/Fabric acceptance.
+No full-corpus semantic-completion or deployment claim is made.
 
 ## D. Active release acceptance: full corpus and a user-facing Data Agent
 

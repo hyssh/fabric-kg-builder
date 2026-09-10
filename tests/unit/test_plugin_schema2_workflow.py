@@ -14,6 +14,9 @@ def test_plugin_schema2_operations_are_registered_and_not_legacy_default():
     for operation in (
         "discover", "design", "evaluate-design", "compile-design", "question-context",
         "window-align", "window-status", "window-history", "review-window-mapping",
+        "window-bootstrap", "window-run", "window-run-status", "window-run-history",
+        "review-window-run-mapping",
+        "accept-window-run-partial",
         "assess", "review-assessment", "revise",
     ):
         assert operation in cli.commands["domain"].commands

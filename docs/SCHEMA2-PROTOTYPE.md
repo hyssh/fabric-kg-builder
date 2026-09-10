@@ -224,6 +224,104 @@ model-written rationales can contradict the generated graph.
 
 ## Windowed common-schema alignment and snapshots
 
+### Integrated raw-text windows
+
+`domain window-run` connects raw source chunks, the complete intake, evolving
+working schemas and candidate extraction. Unlike `window-align`, it starts from
+an empty schema and makes new bounded extraction calls. Existing discovery is
+used only as a verified source cache, not as a substitute for those new results.
+
+```bash
+fabric-kg --config fabric-kg.yaml domain window-run \
+  --discovery .fkg/discovery/run-1.json --intake intake.json \
+  --out-state .fkg/window-run --window-size 8 --concurrency 4 \
+  --max-calls 96 --max-repair-calls 2 --stop-after-document 1
+```
+
+Default is a read-only plan. Alternatively use `--prepared PREPARED.json` instead
+of `--discovery`. Add `--live` to execute. Each chunk request produces raw
+candidates and schema proposals together. Domain context, all example questions
+and the frozen input schema accompany every extraction and repair request.
+Only the coordinator evaluates proposals and commits the successor schema.
+
+`--max-calls` includes repair calls for the current invocation;
+`--max-repair-calls` is a run-wide repair ceiling. `--max-tokens` optionally caps
+conservative token reservations, not measured provider token usage. Input,
+completion and prepared-source chunk bounds are available through
+`--max-request-chars`, `--max-completion-tokens` and `--max-chunk-chars`.
+Existing discovery chunk coordinates are preserved.
+
+Resume with the same input, intake and configuration plus `--resume --live`.
+Invocation call budgets and the document stop can change without resetting the
+schema. Use `--max-calls 0` for client-free cached continuation. Retrying an
+uncertain dispatched request requires explicit `--retry-uncertain`; it is not a
+guarantee of exactly-once remote execution.
+Known invalid-JSON responses have separately retained private provider
+diagnostics and require `--retry-invalid-response`. These two retry permissions
+are not interchangeable.
+
+```bash
+fabric-kg domain window-run-status --state .fkg/window-run
+fabric-kg domain window-run-history --state .fkg/window-run
+fabric-kg domain window-run-schema --state .fkg/window-run
+```
+
+A stop after document one retains the entire input scope. If more documents
+remain, the run is partial. Continue it instead of treating its completed prefix
+as a complete corpus. The only partial-processing exception is an explicit
+review at or above 99% of the complete declared chunk inventory:
+
+```bash
+fabric-kg domain accept-window-run-partial --window-run .fkg/window-run \
+  --min-chunk-coverage 0.99 --actor reviewer \
+  --rationale "Reviewed remaining processing gaps for this prototype" \
+  --out .fkg/window-coverage.json
+```
+
+Default is a non-authorizing preview; `--accept` seals the reviewed coverage.
+Incomplete source preparation cannot be waived because the chunk denominator
+is unknown. For an accepted partial run, supply
+`domain design --window-run-acceptance .fkg/window-coverage.json` alongside
+`--window-run`. The exact acceptance and all gaps remain bound to the approved
+domain and replay; original partial status and grounding quarantine are not
+cleared. A first-document stop far below 99% cannot use this exception.
+
+For a complete run, the design path consumes its actual context, prepared source
+identity, final schema and candidate ledger:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain design \
+  --input ./documents --intake intake.json --window-run .fkg/window-run \
+  --out .fkg/window-design.json --live
+```
+
+Use the existing `evaluate-design`, `compile-design` and `domain approve` steps.
+Then explicitly review the working-to-approved mappings:
+
+```bash
+fabric-kg domain review-window-run-mapping \
+  --window-run .fkg/window-run --target-domain .fkg/l1/domain.yaml \
+  --actor reviewer --rationale "Reviewed final concept names and scopes" \
+  --out .fkg/window-run-mapping.json
+```
+
+The default review is a non-authorizing preview; `--accept` explicitly seals it.
+The approved domain and review bind run, prepared-source, context, final schema
+and final mapping hashes. Use fresh L2 state for replay:
+
+```bash
+fabric-kg enrich --input ./documents --domain-file .fkg/l1/domain.yaml \
+  --l1-state .fkg/l1 --l2-state .fkg/l2-window-run \
+  --window-run .fkg/window-run --mapping-review .fkg/window-run-mapping.json \
+  --replay-only --dry-run
+```
+
+Remove `--dry-run` to execute the reviewed zero-call replay. Continue with
+unchanged `validate-evidence` and `project-serving`. Working schema acceptance
+does not approve evidence, invent identities or assert graph edges.
+
+### Align previously received candidates
+
 Align saved discovery observations before repeating any raw extraction. The
 current CLI requires a hash-verified, approved Schema-2 seed domain, used only
 as a working reference; its approval does not approve later working changes.

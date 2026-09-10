@@ -2,6 +2,18 @@
 
 ## 0.2.6 (local development)
 
+- Add `domain window-run`: bootstrap from an empty working schema, carry the
+  complete intake through raw-text extraction and bounded schema repair, then
+  commit one schema transition per frozen batch. Document stops preserve corpus
+  scope, and read-only status/history/schema commands expose committed progress.
+- Connect complete integrated runs to explicit domain design/approval, scoped
+  mapping review and zero-call approved L2 replay. Planning previews cannot
+  authorize replay. Existing L3/L4 evidence and identity rules remain intact.
+- Bind schema transitions to original model proposals and explicitly linked
+  repair replacements. Preserve invalid-response diagnostics privately, require
+  explicit retry authorization, and reject stale or tampered resume authority.
+  The integrated protocol is `raw-working-window/1.1.0`; experimental 1.0 state
+  is retained separately rather than silently upgraded.
 - Add windowed common-schema alignment over saved discovery observations.
   Each batch uses one frozen version; snapshots, proposals, decisions and final
   mappings remain inspectable with `domain window-status` and `window-history`.

@@ -93,6 +93,11 @@ options work in Schema-2; follow the installed CLI's explicit capability checks.
 | Operation | Command | Boundary |
 |---|---|---|
 | Discover corpus | `fabric-kg domain discover --help` | Full source/chunk accounting and cached unapproved observations; explicit partial state |
+| Infer initial schema | `fabric-kg domain window-bootstrap --help` | Empty schema plus one document's complete cached text; no approved seed or prior model candidates; provisional concepts only |
+| Run integrated windows | `fabric-kg domain window-run --help` | Full intake plus raw chunks; empty schema, extraction and schema proposals in one pass; bounded calls and durable transitions |
+| Inspect integrated run | `fabric-kg domain window-run-status --state ...` / `domain window-run-history --state ...` | Committed raw-window progress; a document stop does not shrink the corpus or approve a partial run |
+| Review integrated mappings | `fabric-kg domain review-window-run-mapping --help` | Final approved domain and five-hash source/context/schema binding before zero-call `enrich --window-run` |
+| Review partial integrated coverage | `fabric-kg domain accept-window-run-partial --help` | Explicit >=99% processing waiver; preserves the original partial run, missing chunks and quarantine |
 | Align windows | `fabric-kg domain window-align --help` | One working-schema version per batch; explicit deterministic/model mode; snapshots are not ontology approval |
 | Inspect window history | `fabric-kg domain window-status --state ...` / `domain window-history --state ...` | Read-only progress and version transitions through the last committed chunk |
 | Review mappings | `fabric-kg domain review-window-mapping --help` | Explicit target-domain-bound mapping acceptance before `enrich --mapping-review`; new concepts stay pending |
@@ -125,6 +130,26 @@ without DI calls. A cached-layout read is not proof OCR interpreted every fact
 correctly, and incomplete/unsupported OCR provenance must remain visible.
 
 ## Review, cost and replay
+
+For first-document schema inference, use `domain window-bootstrap` rather than
+constraining the model with the already approved domain. It consumes the cached
+raw source chunks of one explicitly identified document, not other documents or
+previous model summaries. Show the selected file, exact chunk coverage, inferred
+concepts/typed relationships and unresolved decisions. Source quotations support
+schema proposals, not asserted relationship instances. Do not advance to another
+document or approve the result when the user asked only to inspect the first.
+
+For the full domain/questions/schema/extraction loop, use `domain window-run`
+with the original intake and prepared sources (or discovery as a source cache).
+The standalone bootstrap and cached-candidate alignment commands are not
+equivalent to that loop. The integrated run retains all question context and
+uses frozen schema versions across each batch, including bounded repairs.
+Use a document stop for staged inspection, but do not send an unreviewed partial
+run into design/approval. A partial run needs explicit >=99% full-scope processing
+acceptance with `accept-window-run-partial --accept` and design's
+`--window-run-acceptance`; preparation gaps with unknown denominators cannot be
+waived. Complete runs enter `domain design --window-run`;
+final approval and `review-window-run-mapping --accept` are still explicit.
 
 For windowed alignment, keep the working schema in versioned CLI snapshots.
 Every worker in a batch uses one frozen version; aggregate and evaluate changes

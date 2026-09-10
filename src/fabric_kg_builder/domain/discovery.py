@@ -1510,10 +1510,6 @@ def discovery_design_artifacts(run: DiscoveryRun, *, preflight, verified_at_utc,
 The legacy carrier still disclaims extraction authority. Full-corpus scope and
 the complete consolidation tree are separately bound by DiscoveryRun.
 """
-    from fabric_kg_builder.domain.contexts import DomainSourceProfile
-    from fabric_kg_builder.sources.corpus import DesignSampleEntry, build_design_sample_manifest
-    from fabric_kg_builder.sources.evidence_verifier import mint_verified_span
-
     if acceptance is not None:
         from .discovery_acceptance import validate_discovery_acceptance
         validate_discovery_acceptance(acceptance, run)
@@ -1522,7 +1518,21 @@ the complete consolidation tree are separately bound by DiscoveryRun.
         or run.prepared.base_identity.project_id != preflight.base_identity.project_id
     ):
         raise ValueError("discovery is incomplete or belongs to a different corpus")
-    units = tuple(_rebind_prepared_units(run.prepared.source_units, preflight))
+    return prepared_design_artifacts(run.prepared, preflight=preflight, verified_at_utc=verified_at_utc)
+
+
+def prepared_design_artifacts(prepared: PreparedCorpus, *, preflight, verified_at_utc):
+    """Build verified L1 support from immutable prepared units, without sampling."""
+    from fabric_kg_builder.domain.contexts import DomainSourceProfile
+    from fabric_kg_builder.sources.corpus import DesignSampleEntry, build_design_sample_manifest
+    from fabric_kg_builder.sources.evidence_verifier import mint_verified_span
+
+    if (
+        prepared.corpus.corpus_hash != preflight.corpus.corpus_hash
+        or prepared.base_identity.project_id != preflight.base_identity.project_id
+    ):
+        raise ValueError("Prepared design sources differ from the compilation corpus")
+    units = tuple(_rebind_prepared_units(prepared.source_units, preflight))
     spans = tuple(
         mint_verified_span(
             source_unit=unit, span_start=0, span_end=unit.codepoint_count,

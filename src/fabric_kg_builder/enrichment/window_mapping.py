@@ -116,6 +116,19 @@ def align_verified_candidates(candidates, mapping, *, chunk_id, contract):
         candidate = copy.deepcopy(original)
         digest = canonical_sha256(original)
         record = records.get(digest)
+        if record is None and mapping.review.policy == "exact_names_approved_scopes_v1":
+            field = {"entity": "observed_type", "property": "observed_property",
+                     "relationship": "observed_predicate"}[candidate["candidate_kind"]]
+            # Do not let the legacy alias mapper bypass an integrated run's
+            # explicit review. Keep the original immutable observation in trace.
+            candidate[field] = f"unreviewed-window:{digest}"
+            trace.append({
+                "binding_kind": "unreviewed_window_schema",
+                "review_hash": mapping.review.artifact_hash,
+                "verified_candidate_hash": digest,
+                "field": field, "original_term": original[field],
+                "pending_term": candidate[field],
+            })
         if record is not None:
             field = {"entity": "observed_type", "property": "observed_property",
                      "relationship": "observed_predicate"}[candidate["candidate_kind"]]

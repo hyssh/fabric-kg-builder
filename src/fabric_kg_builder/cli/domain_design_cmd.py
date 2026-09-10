@@ -502,6 +502,11 @@ def domain_accept_discovery_partial_cmd(
               help="Full safe YAML reference context, including generic sketches; never evidence or approval.")
 @click.option("--window-state", type=click.Path(exists=True, file_okay=False, path_type=Path),
               help="Completed, discovery-bound working schema as unapproved design reference; never evidence.")
+@click.option("--window-run", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Completed integrated raw-text run, bound to its exact original intake and prepared sources.")
+@click.option("--window-run-acceptance", "window_run_acceptance_file",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Exact explicit >=99% processing waiver for a partial --window-run; not semantic approval.")
 @click.option("--description", help="Additional design context; does not replace the full seed.")
 @click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Immutable discovery; complete by default, or explicitly reviewed partial coverage.")
@@ -528,6 +533,8 @@ def domain_design_cmd(
     discovery_file: Path | None, sample_only: bool, discovery_nodes: tuple[str, ...],
     discovery_acceptance_file: Path | None,
     window_state: Path | None = None,
+    window_run: Path | None = None,
+    window_run_acceptance_file: Path | None = None,
 ) -> None:
     """Design an unapproved ontology from intent, seed and reviewed corpus discovery.
 
@@ -537,12 +544,14 @@ def domain_design_cmd(
     Discover artifact and model schemas with domain design-schema.
     """
     planning = dry_run or bool(_root_options(ctx).get("dry_run")) or not live
-    if (discovery_file is None) == (not sample_only):
+    if sum((discovery_file is not None, window_run is not None, sample_only)) != 1:
         raise click.UsageError(
-            "Supply --discovery from 'domain discover', or explicitly choose --sample-only (not both)"
+            "Choose exactly one of --discovery, --window-run, or explicit --sample-only"
         )
     if discovery_nodes and discovery_file is None:
         raise click.UsageError("--discovery-node requires --discovery")
+    if window_run_acceptance_file is not None and window_run is None:
+        raise click.UsageError("--window-run-acceptance requires --window-run")
     if discovery_acceptance_file is not None and discovery_file is None:
         raise click.UsageError("--discovery-acceptance requires --discovery")
     if window_state is not None and discovery_file is None:
@@ -557,6 +566,19 @@ def domain_design_cmd(
         intake_raw = load_domain_intake(intake)
         core = _design_core()
         discovery = _discovery_core().load_discovery(discovery_file) if discovery_file else None
+        integrated = None
+        window_acceptance = None
+        if window_run is not None:
+            from fabric_kg_builder.domain.window_run import load_windowed_run
+            from fabric_kg_builder.enrichment.window_run_reuse import checked_window_run
+
+            if window_run_acceptance_file is not None:
+                from fabric_kg_builder.domain.window_run_acceptance import load_window_run_acceptance
+
+                window_acceptance = load_window_run_acceptance(window_run_acceptance_file)
+            integrated = checked_window_run(load_windowed_run(window_run), window_acceptance)
+            if integrated.context.intake_raw != intake_raw:
+                raise ValueError("WINDOW_RUN_CONTEXT_DRIFT: use the original full intake")
         window_context = None
         if window_state is not None:
             from fabric_kg_builder.enrichment.window_mapping import load_design_window_context
@@ -599,11 +621,20 @@ def domain_design_cmd(
         preflight = preflight_l1_inputs(
             source_path=source, intake_raw=intake_raw,
             project_id=project_id or (
+                integrated.prepared.base_identity.project_id if integrated else
                 discovery.prepared.base_identity.project_id if discovery else f"project:{source.resolve().name}"
             ),
             run_id=f"run:{uuid.uuid4().hex}",
             model_version=model_version, model_hash=model_hash,
         )
+        if integrated is not None:
+            from fabric_kg_builder.enrichment.window_run_reuse import WindowRunReuseError
+
+            if (
+                integrated.prepared.corpus.corpus_hash != preflight.corpus.corpus_hash
+                or integrated.prepared.base_identity.project_id != preflight.base_identity.project_id
+            ):
+                raise WindowRunReuseError("WINDOW_RUN_CONTEXT_OR_SOURCE_DRIFT")
         if planning:
             result = {
                 "project_id": preflight.base_identity.project_id,
@@ -618,7 +649,7 @@ def domain_design_cmd(
                 "planned_model_calls": 1,
                 "writes": 0,
                 "samples_materialized": False,
-                "design_mode": "sample_only" if sample_only else (
+                "design_mode": "reviewed_partial_window_run" if window_acceptance is not None else "integrated_window_run" if integrated is not None else "sample_only" if sample_only else (
                     "reviewed_partial_discovery" if acceptance is not None else "full_corpus_discovery"
                 ),
                 **({
@@ -633,6 +664,8 @@ def domain_design_cmd(
                     "discovery_chunks": len(discovery.chunks),
                     "discovery_node_ids": list(discovery_nodes),
                 } if discovery else {}),
+                **({"window_run_hash": integrated.artifact_hash} if integrated is not None else {}),
+                **({"window_run_acceptance": _payload(window_acceptance)} if window_acceptance is not None else {}),
             }
             from fabric_kg_builder.domain.question_routing import question_routing_context
 
@@ -650,7 +683,9 @@ def domain_design_cmd(
         else:
             result = core.generate_domain_design(
                 preflight, client=client, seed_path=seed_domain,
-                **({"discovery": discovery} if discovery is not None else {"sample_only": True}),
+                **({"window_run": integrated} if integrated is not None else
+                   {"discovery": discovery} if discovery is not None else {"sample_only": True}),
+                **({"window_run_acceptance": window_acceptance} if window_acceptance is not None else {}),
                 **({"discovery_acceptance": acceptance} if acceptance is not None else {}),
                 **({"discovery_node_ids": list(discovery_nodes)} if discovery_nodes else {}),
                 **({"description": description} if description is not None else {}),

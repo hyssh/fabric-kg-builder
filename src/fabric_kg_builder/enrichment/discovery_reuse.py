@@ -440,9 +440,11 @@ def _prepare_reuse(discovery_file, source_path, l1_state_root, domain_path, ocr_
     import json
     from fabric_kg_builder.domain.discovery import load_discovery, validate_discovery
     from fabric_kg_builder.sources.preparation import indexed_corpus_reader
-    from .schema2_sources import load_l2_inputs, materialize_source_corpus
+    from .schema2_sources import load_l2_inputs
 
     inputs = load_l2_inputs(l1_state_root=l1_state_root, domain_path=domain_path)
+    if inputs.domain_contract.window_run_binding is not None:
+        raise ValueError("WINDOW_RUN_APPROVED_AUTHORITY_REQUIRED: legacy discovery cannot replace the approved integrated run")
     run = load_discovery(discovery_file)
     approved_discovery = getattr(inputs.domain_contract, "discovery_run_hash", None)
     if approved_discovery is not None and approved_discovery != run.run_hash:
@@ -473,6 +475,14 @@ def _prepare_reuse(discovery_file, source_path, l1_state_root, domain_path, ocr_
         run, source_path=source_path, reader=reader,
         reparse=approved_discovery is None, expected_run_hash=approved_discovery,
     )
+    replay_reader, materialized = materialize_reuse_sources(inputs, run, source_path)
+    return inputs, run, replay_reader, materialized, acceptance
+
+
+def materialize_reuse_sources(inputs, run, source_path):
+    """Rebind retained prepared text to genuine approved L2 identities."""
+    from .schema2_sources import materialize_source_corpus
+
     replay_reader = DiscoverySourceReader(run, source_path)
     materialized = materialize_source_corpus(inputs, replay_reader)
     original = {unit.source_unit_id: unit for unit in run.prepared.source_units}
@@ -484,13 +494,13 @@ def _prepare_reuse(discovery_file, source_path, l1_state_root, domain_path, ocr_
             previous.text_content_hash, previous.locator, previous.ordinal, previous.parent_source_unit_id, previous.unit_kind,
         ):
             raise ValueError("DISCOVERY_SOURCE_UNIT_CONTENT_DRIFT")
-    return inputs, run, replay_reader, materialized, acceptance
+    return replay_reader, materialized
 
 
 @_locked_reuse
 def run_discovery_reuse(
     *,
-    discovery_file: Path,
+    discovery_file: Path | None = None,
     source_path: Path,
     l1_state_root: Path,
     domain_path: Path,
@@ -503,6 +513,7 @@ def run_discovery_reuse(
     ocr_identity: Path | None = None,
     window_mapping_path: Path | None = None,
     window_state: Path | None = None,
+    window_run_path: Path | None = None,
 ) -> dict[str, Any]:
     """Map first, optionally repair only pending chunks, then run genuine cached L2."""
     import json
@@ -517,9 +528,32 @@ def run_discovery_reuse(
 
     reviewed_mapping = None
     mapping_authority = {}
-    if (window_mapping_path is None) != (window_state is None):
+    window_acceptance = None
+    if window_run_path is not None and (
+        discovery_file is not None or window_state is not None or reextract_pending or window_mapping_path is None
+    ):
+        raise ValueError("Integrated replay requires --window-run and --mapping-review only, without discovery or re-extraction")
+    if window_run_path is None and (window_mapping_path is None) != (window_state is None):
         raise ValueError("Window mapping and window state must be supplied together")
-    if window_mapping_path is not None:
+    if window_run_path is not None:
+        from .window_run_reuse import (
+            load_window_run_replay_mapping, prepare_window_run_reuse, window_run_ledger_accounting,
+        )
+
+        reviewed_mapping, mapping_authority = load_window_run_replay_mapping(
+            window_mapping_path, window_run_path=window_run_path, domain_path=domain_path,
+        )
+        inputs, run, reader, materialized, window_acceptance = prepare_window_run_reuse(
+            window_run_path, source_path, l1_state_root, domain_path,
+        )
+        acceptance = None
+        source_accounting = window_run_ledger_accounting(run)
+        run_hash, run_status = run.artifact_hash, run.state
+        hash_field, status_field = "window_run_hash", "window_run_status"
+        operation, authority_kind = "enrich.window-run-reuse", "window_run.approved_reuse"
+        authority_filename = "window-run-reuse-authority.json"
+        extractor_name = "window-run-replay"
+    elif window_mapping_path is not None:
         if reextract_pending:
             raise ValueError("Reviewed window mapping is restricted to zero-call discovery replay")
         from .window_mapping import load_replay_mapping
@@ -528,12 +562,21 @@ def run_discovery_reuse(
             window_mapping_path, state_root=window_state,
             discovery_path=discovery_file, domain_path=domain_path,
         )
-    inputs, run, reader, materialized, acceptance = _prepare_reuse(
-        discovery_file, source_path, l1_state_root, domain_path, ocr_cache, ocr_identity,
-    )
+    if window_run_path is None:
+        inputs, run, reader, materialized, acceptance = _prepare_reuse(
+            discovery_file, source_path, l1_state_root, domain_path, ocr_cache, ocr_identity,
+        )
+        source_accounting = discovery_grounding_report(run, include_ledger_accounting=True)
+        run_hash, run_status = run.run_hash, run.status
+        hash_field, status_field = "discovery_hash", "discovery_status"
+        operation, authority_kind = "enrich.discovery-reuse", "discovery.approved_reuse"
+        authority_filename = "discovery-reuse-authority.json"
+        extractor_name = "discovery-replay"
     reuse_version = PARTIAL_REUSE_VERSION if acceptance is not None else REUSE_VERSION
     if reviewed_mapping is not None:
         reuse_version = WINDOW_REUSE_VERSION
+    if window_run_path is not None:
+        reuse_version = "window-run-approved-replay/1.0.0"
     waived_missing = set(acceptance.failed_chunk_ids + acceptance.deferred_chunk_ids) if acceptance else set()
     coverage_gaps = {
         "per_file_coverage": acceptance.per_file_coverage,
@@ -545,23 +588,55 @@ def run_discovery_reuse(
         "failed_summary_metadata": acceptance.failed_summary_metadata,
         "run_issues": acceptance.run_issues,
     } if acceptance is not None else None
-    source_accounting = discovery_grounding_report(run, include_ledger_accounting=True)
+    window_coverage_authority = {}
+    if window_acceptance is not None:
+        waived_missing = {gap.chunk_id for gap in window_acceptance.coverage.gaps}
+        coverage_gaps = window_acceptance.coverage.model_dump(mode="json")
+        window_coverage_authority = {
+            "window_run_acceptance": window_acceptance.model_dump(mode="json"),
+            "coverage_gaps": coverage_gaps,
+            "full_corpus_design_ready": False,
+            "coverage_authority": "reviewed_available_subset_only",
+            "processing_coverage": {
+                "processed_chunks": window_acceptance.coverage.processed_chunks,
+                "total_chunks": window_acceptance.coverage.total_chunks,
+                "min_chunk_coverage": str(window_acceptance.min_chunk_coverage),
+            },
+        }
     vocabulary = compile_closed_vocabulary(inputs.domain_contract)
     units = {item.source_unit_id: item for item in materialized.source_units}
-    authority_path = state_root / "discovery-reuse-authority.json"
+    authority_path = state_root / authority_filename
+    if window_run_path is not None and state_root.exists() and any(state_root.iterdir()) and not authority_path.exists():
+        raise ValueError("WINDOW_RUN_REPLAY_REQUIRES_FRESH_L2_STATE")
     if authority_path.exists():
         previous = json.loads(authority_path.read_text(encoding="utf-8"))
         if (
             previous.get("artifact_hash") != canonical_sha256({
                 key: value for key, value in previous.items() if key != "artifact_hash"
             })
-            or previous.get("discovery_hash") != run.run_hash
+            or previous.get(hash_field) != run_hash
             or previous.get("domain_contract_hash") != vocabulary.contract_hash
             or previous.get("reuse_version") != reuse_version
             or previous.get("window_mapping") != mapping_authority.get("window_mapping")
         ):
             raise ValueError("DISCOVERY_REUSE_AUTHORITY_DRIFT: choose a fresh L2 state")
     mapped_chunks, provenance, pending, missing = [], [], [], []
+    if window_acceptance is not None:
+        observed = {item.chunk.chunk_id for item in run.chunks}
+        for gap in window_acceptance.coverage.gaps:
+            if gap.chunk_id not in observed:
+                missing.append(gap.chunk_id)
+                pending.append({
+                    **gap.model_dump(mode="json"),
+                    "reasons": ["unprocessed_accepted_coverage"],
+                    "coverage_acceptance_hash": window_acceptance.acceptance_hash,
+                })
+                provenance.append({
+                    "chunk_id": gap.chunk_id, "source_unit_id": gap.source_unit_id,
+                    "original_observation_hash": None, "raw_response_hash": None,
+                    "disposition": "unprocessed_accepted_coverage", "mapped_response_hash": None,
+                    "coverage_acceptance_hash": window_acceptance.acceptance_hash,
+                })
     original_dispositions, targeted_dispositions, targeted_grounding = [], [], []
     original_envelopes, targeted_envelopes, targeted_response_issues = [], [], []
     targeted_raw_count, targeted_array_count = 0, 0
@@ -790,10 +865,11 @@ def run_discovery_reuse(
             "targeted_raw_response_hash": targeted_raw_response_hash,
         })
     summary = {
-        "operation": "enrich.discovery-reuse", "status": "planned" if dry_run else (
+        "operation": operation, "status": "planned" if dry_run else (
             "pending_review" if pending or acceptance is not None else "replayed"
         ),
-        "discovery_hash": run.run_hash, "discovery_status": run.status,
+        hash_field: run_hash, status_field: run_status,
+        **window_coverage_authority,
         **({
             "discovery_acceptance": acceptance.binding.model_dump(mode="json"),
             "coverage_gaps": coverage_gaps,
@@ -803,7 +879,8 @@ def run_discovery_reuse(
         "prepared_corpus_hash": run.prepared.prepared_hash,
         "domain_contract_hash": vocabulary.contract_hash,
         **mapping_authority,
-        "total_chunks": len(run.chunks), "reused_chunks": len(mapped_chunks) - targeted_calls,
+        "total_chunks": len(run.chunk_plan) if window_run_path is not None else len(run.chunks),
+        "reused_chunks": len(mapped_chunks) - targeted_calls,
         "mapped_chunks": len(mapped_chunks), "newly_extracted_chunks": targeted_calls,
         "mapping_complete_chunks": sum(not mapped.pending_reasons for _, mapped in mapped_chunks),
         "mapping_review_chunks": sum(bool(mapped.pending_reasons) for _, mapped in mapped_chunks),
@@ -852,16 +929,17 @@ def run_discovery_reuse(
         raise ValueError("DISCOVERY_REPLAY_PENDING: missing/ambiguous chunks require explicit targeted re-extraction: " + canonical_json(summary))
 
     authority_values = {
-        "artifact_kind": "discovery.approved_reuse", "artifact_version": "1.0.0",
-        "reuse_version": reuse_version, "discovery_hash": run.run_hash,
+        "artifact_kind": authority_kind, "artifact_version": "1.0.0",
+        "reuse_version": reuse_version, hash_field: run_hash,
         "prepared_corpus_hash": run.prepared.prepared_hash, "domain_contract_hash": vocabulary.contract_hash,
         "approved_l1_receipt_hash": inputs.l1_receipt.receipt_hash,
         **mapping_authority,
+        **window_coverage_authority,
         "source_unit_rebindings": [{
             "source_unit_id": original.source_unit_id,
             "source_text_hash": original.text_content_hash,
             "locator_hash": original.locator.locator_hash,
-            "discovery_identity_hash": canonical_sha256(original.identity),
+            ("prepared_identity_hash" if window_run_path is not None else "discovery_identity_hash"): canonical_sha256(original.identity),
             "approved_identity_hash": canonical_sha256(units[original.source_unit_id].identity),
         } for original in run.prepared.source_units],
         "chunks": provenance,
@@ -878,18 +956,19 @@ def run_discovery_reuse(
     identity = stage._clean_identity(
         inputs.l1_receipt.identity, contract_kind="l2.stage", prompt_version=reuse_version,
         prompt_hash=prompt_hash, model_version=run.model_version, model_hash=run.model_hash,
-        extractor_name="discovery-replay", extractor_version="1.0.0",
+        extractor_name=extractor_name, extractor_version="1.0.0",
     )
     fingerprint = l2_input_fingerprint(
         inputs, materialized.source_unit_manifest, prompt_version=reuse_version, prompt_hash=prompt_hash,
         model_version=run.model_version, model_hash=run.model_hash,
-        extractor_name="discovery-replay", extractor_version="1.0.0",
+        extractor_name=extractor_name, extractor_version="1.0.0",
         response_schema_hash=stage.L2_RESPONSE_SCHEMA_HASH, split_policy_version="paragraph-sentence-token/1.0.0",
     )
     checkpoint = WorkUnitCheckpoint(state_root / "checkpoint.json", state_root / "checkpoint-leaves")
     extraction_authority = stage._authority(inputs, materialized)
     positioned: dict[str, list[tuple[dict, int]]] = {uid: [] for uid in units}
-    pending_ranges = [item.chunk for item in run.chunks if item.chunk.chunk_id in missing]
+    planned_chunks = run.chunk_plan if window_run_path is not None else [item.chunk for item in run.chunks]
+    pending_ranges = [chunk for chunk in planned_chunks if chunk.chunk_id in missing]
     for chunk, mapped in mapped_chunks:
         for item in mapped.response["candidates"]:
             anchor = item.get("anchor") or next(iter(item.get("anchors", [])), None)
@@ -917,7 +996,7 @@ def run_discovery_reuse(
             authority=extraction_authority, base_identity=identity,
             source_unit_id=work.source_unit_id, work_unit_id=work.work_unit_id,
             classifier_version=reuse_version, prompt_hash=prompt_hash, model_hash=run.model_hash,
-            extractor_name="discovery-replay", extractor_version="1.0.0",
+            extractor_name=extractor_name, extractor_version="1.0.0",
             occurred_at_utc=inputs.l1_receipt.completed_at_utc,
         )
         pending_count = sum(
@@ -928,7 +1007,8 @@ def run_discovery_reuse(
         if pending_count:
             # An empty derived subset is not a received no-candidates response.
             leaf = replace(leaf, audit_reason_counts=tuple(sorted([
-                *leaf.audit_reason_counts, ("discovery_coverage_waived_pending", pending_count),
+                *leaf.audit_reason_counts,
+                ("window_run_coverage_waived_pending" if window_run_path is not None else "discovery_coverage_waived_pending", pending_count),
             ])))
         checkpoint.record_leaf(work, extraction_leaf_to_dict(leaf))
 
@@ -945,7 +1025,7 @@ def run_discovery_reuse(
         reader=reader, service=NoImplicitModel(), state_root=state_root, l1_state_root=l1_state_root,
         domain_path=domain_path, prompt_version=reuse_version, prompt_hash=prompt_hash,
         model_version=run.model_version, model_hash=run.model_hash,
-        extractor_name="discovery-replay", extractor_version="1.0.0", classifier_version=reuse_version,
+        extractor_name=extractor_name, extractor_version="1.0.0", classifier_version=reuse_version,
     )
     return {
         **summary, "l2_model_calls": result.metrics.foundry_calls,

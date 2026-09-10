@@ -9,6 +9,7 @@ from pydantic_core import PydanticCustomError
 
 from .question_routing import QuestionRouting, is_sql_question
 from .discovery_acceptance import DiscoveryAcceptanceBinding
+from .window_run_acceptance import WindowRunCoverageAcceptance
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -963,12 +964,32 @@ class ApprovalMetadataV2(V2StrictModel):
         return self
 
 
+class WindowRunBinding(V2StrictModel):
+    """Exact integrated observation authority reviewed with the final domain."""
+
+    window_run_hash: Sha256Text
+    prepared_corpus_hash: Sha256Text
+    context_hash: Sha256Text
+    snapshot_hash: Sha256Text
+    final_mapping_hash: Sha256Text
+    coverage_acceptance_hash: Sha256Text | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        values = handler(self)
+        if self.coverage_acceptance_hash is None:
+            values.pop("coverage_acceptance_hash", None)
+        return values
+
+
 class DomainContractV2(V2StrictModel):
     """New-project-only domain authority sealed by L1 approval."""
 
     schema_version: Literal[DOMAIN_SCHEMA_V2_VERSION]
     discovery_run_hash: Sha256Text | None = None
     discovery_acceptance: DiscoveryAcceptanceBinding | None = None
+    window_run_binding: WindowRunBinding | None = None
+    window_run_acceptance: WindowRunCoverageAcceptance | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
@@ -977,10 +998,27 @@ class DomainContractV2(V2StrictModel):
             values.pop("discovery_run_hash", None)
         if self.discovery_acceptance is None:
             values.pop("discovery_acceptance", None)
+        if self.window_run_binding is None:
+            values.pop("window_run_binding", None)
+        if self.window_run_acceptance is None:
+            values.pop("window_run_acceptance", None)
         return values
 
     @model_validator(mode="after")
     def _discovery_acceptance_binding(self):
+        binding = self.window_run_binding
+        acceptance = self.window_run_acceptance
+        if (binding is not None and binding.coverage_acceptance_hash is not None) != (acceptance is not None):
+            raise ValueError("window-run coverage binding requires its exact attached acceptance")
+        if acceptance is not None and (
+            acceptance.acceptance_hash != binding.coverage_acceptance_hash
+            or any(getattr(acceptance, field) != getattr(binding, field) for field in (
+                "window_run_hash", "prepared_corpus_hash", "context_hash", "snapshot_hash", "final_mapping_hash",
+            ))
+        ):
+            raise ValueError("window-run acceptance differs from contract binding")
+        if self.window_run_binding is not None and self.discovery_run_hash is not None:
+            raise ValueError("Choose discovery or integrated window-run authority, not both")
         if self.discovery_acceptance is not None and self.discovery_acceptance.discovery_run_hash != self.discovery_run_hash:
             raise ValueError("partial acceptance differs from contract discovery binding")
         return self

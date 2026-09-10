@@ -2069,6 +2069,8 @@ def prepare_l1_stage(
     design_description: str | None = None,
     design_discovery: Any = None,
     design_discovery_acceptance: Any = None,
+    design_window_run: Any = None,
+    design_window_run_acceptance: Any = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
     started = started_at_utc or _utc_now()
@@ -2108,7 +2110,17 @@ def prepare_l1_stage(
         raise L1StageError("supplemental design evidence is capped at 16 findings")
     if design_discovery_acceptance is not None and design_discovery is None:
         raise L1StageError("Partial acceptance requires its exact discovery run")
-    if design_discovery is not None:
+    if design_window_run_acceptance is not None and design_window_run is None:
+        raise L1StageError("Window coverage acceptance requires its exact integrated run")
+    if design_window_run is not None:
+        if design_discovery is not None or design_prompt_binding is None or client is not None or candidates is None or supplemental_design_locations:
+            raise L1StageError("Integrated evidence requires exclusive model-free design compilation")
+        from fabric_kg_builder.enrichment.window_run_reuse import window_run_design_artifacts
+
+        sample_manifest, profile, source_units, evidence_spans = window_run_design_artifacts(
+            design_window_run, preflight=preflight, verified_at_utc=started, acceptance=design_window_run_acceptance,
+        )
+    elif design_discovery is not None:
         if design_prompt_binding is None or client is not None or candidates is None or supplemental_design_locations:
             raise L1StageError("Discovery evidence requires model-free design compilation without supplemental sampling")
         from .discovery import DiscoveryRun, discovery_design_artifacts, validate_discovery
@@ -2928,6 +2940,14 @@ def prepare_l1_stage(
         payload["discovery_run_hash"] = design_discovery.run_hash
         if design_discovery_acceptance is not None:
             payload["discovery_acceptance"] = design_discovery_acceptance.binding.model_dump(mode="python")
+        draft_contract = DomainContractV2.model_validate(payload)
+    if design_window_run is not None:
+        from fabric_kg_builder.enrichment.window_run_reuse import window_run_binding
+
+        payload = draft_contract.model_dump(mode="python")
+        payload["window_run_binding"] = window_run_binding(design_window_run, design_window_run_acceptance).model_dump(mode="python")
+        if design_window_run_acceptance is not None:
+            payload["window_run_acceptance"] = design_window_run_acceptance.model_dump(mode="python")
         draft_contract = DomainContractV2.model_validate(payload)
     try:
         design_context = _build_design_context(

@@ -604,7 +604,7 @@ def _normalizations(snapshot, records):
             for (cid, alias), ids in sorted(changes.items())]
 
 
-def _evaluate(snapshot, records, proposal, normalizations, *, items):
+def _evaluate(snapshot, records, proposal, normalizations, *, items, partition_scoped_evidence=False):
     by_observation = {r.observation_id: r for r in records if r.status not in {"quarantined", "excluded"}}
     concepts = list(snapshot.concepts)
     provisional = list(snapshot.provisional_concept_ids)
@@ -640,6 +640,24 @@ def _evaluate(snapshot, records, proposal, normalizations, *, items):
         if not queue:
             break
         change, review = queue.pop(0)
+        if partition_scoped_evidence and review == "structural_working_review" and change.action in {"add_concept", "add_alias"}:
+            target = change.concept if change.action == "add_concept" else next(
+                (c for c in concepts if c.concept_id == change.concept_id), None)
+            if target is not None and target.kind != "entity" and set(change.observation_ids) <= set(by_observation):
+                valid_ids, invalid_ids = [], []
+                for oid in change.observation_ids:
+                    try:
+                        _check_observed_constraints(target, [by_observation[oid]], evaluation_snapshot)
+                        valid_ids.append(oid)
+                    except ValueError:
+                        invalid_ids.append(oid)
+                if valid_ids and invalid_ids:
+                    decisions.append(ChangeDecision(
+                        change=change.model_copy(update={"observation_ids": invalid_ids}),
+                        status="rejected", reason="scoped_support_has_unresolved_or_incompatible_owner_endpoints",
+                        review=review,
+                    ))
+                    change = change.model_copy(update={"observation_ids": valid_ids})
         if review == "deterministic_normalization":
             target = next((c for c in concepts if c.concept_id == change.concept_id), None)
             if target is not None and target.kind != "entity":
