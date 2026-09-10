@@ -29,6 +29,39 @@ def _emit(value):
     click.echo(canonical_json(value))
 
 
+@click.command("window-bootstrap")
+@click.option("--discovery", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--out-state", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--source-file-id", help="Select an eligible source; default: first prepared corpus entry.")
+@click.option("--live", is_flag=True, help="Write provisional schema 1 using one bounded model request.")
+@click.option("--resume", is_flag=True, help="Hash-check durable results without another model call.")
+@click.pass_context
+def domain_window_bootstrap_cmd(ctx, discovery, out_state, source_file_id, live, resume):
+    """Infer an initial schema from ALL cached slices of ONE document.
+
+    Read-only plan by default. No OCR, prior candidates, seeds or approval.
+    Limit: 512000 request characters, 16384 completion tokens, one attempt.
+    """
+    from fabric_kg_builder.domain.schema_bootstrap import bootstrap
+    from fabric_kg_builder.domain.proposal import compute_model_hash
+    from .domain_design_cmd import _build_client
+
+    if live and _options(ctx).get("dry_run"):
+        raise click.UsageError("--live conflicts with global --dry-run")
+
+    def client_factory():
+        client, version = _build_client(ctx)
+        return client, version, compute_model_hash(client, version)
+
+    try:
+        result = bootstrap(discovery=discovery, out_state=out_state,
+                           source_file_id=source_file_id, live=live, resume=resume,
+                           client_factory=client_factory)
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit(result)
+
+
 def _run_alignment(ctx, *, discovery, seed_domain, out_state, planning, resume,
                    window_size, concurrency, max_calls, proposal_mode):
     from fabric_kg_builder.domain.discovery import load_discovery
