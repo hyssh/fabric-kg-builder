@@ -251,6 +251,13 @@ completion and prepared-source chunk bounds are available through
 `--max-request-chars`, `--max-completion-tokens` and `--max-chunk-chars`.
 Existing discovery chunk coordinates are preserved.
 
+For an evolving schema that outgrows the initial admission ceiling, explicitly
+set `--request-char-budget N` on the invocation. This changes only the permitted
+request size, not the saved config, model, prompts, source data or cached request
+contents. New dispatch records retain the actual size and effective ceiling.
+It does not increase the provider's token/context capacity, truncate the schema
+or override an aggregate token budget.
+
 Resume with the same input, intake and configuration plus `--resume --live`.
 Invocation call budgets and the document stop can change without resetting the
 schema. Use `--max-calls 0` for client-free cached continuation. Retrying an

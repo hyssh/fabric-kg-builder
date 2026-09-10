@@ -46,6 +46,7 @@ from .discovery_acceptance import (
 )
 from .window_run import WindowedRun
 from .window_run_acceptance import WindowRunCoverageAcceptance
+from .window_design_context import WINDOW_DESIGN_CONTEXT_VERSION, window_design_context
 
 DESIGN_PROMPT_VERSION = "domain-design/1.6.0"
 DESIGN_EVALUATOR_VERSION = "domain-design-evaluator/1.4.0"
@@ -207,6 +208,22 @@ WINDOW_PARTIAL_DESIGN_PROMPT_HASH = canonical_sha256({
     "version": WINDOW_PARTIAL_DESIGN_PROMPT_VERSION, "system": WINDOW_PARTIAL_DESIGN_SYSTEM,
     "schema": DomainDesignSketch.model_json_schema(),
 })
+WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION = "domain-design/6.0.0"
+WINDOW_REPRESENTATIVE_DESIGN_SYSTEM = DESIGN_SYSTEM_PROMPT + """
+This integrated handoff retains the entire original intake and final working schema.
+Observation patterns/counts and source-verified quote excerpts are representative
+design support, not all facts or semantic recall. Full observations, original values,
+quarantine and schema ledgers remain bound locally. Coverage.state and any explicitly
+reviewed partial waiver describe actual processing; do not infer full processing.
+Preserve compatible working names and owner/endpoint scopes so explicit final mapping
+review can align them. Explain necessary refinements or rejected literal-identifier
+classes explicitly in review_concerns, rather than silently renaming or retaining
+invalid concepts. Common/domain distinctions and pending questions remain mandatory.
+Final domain approval, mapping review, and evidence validation are separate gates."""
+WINDOW_REPRESENTATIVE_DESIGN_PROMPT_HASH = canonical_sha256({
+    "version": WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION, "system": WINDOW_REPRESENTATIVE_DESIGN_SYSTEM,
+    "schema": DomainDesignSketch.model_json_schema(), "context_version": WINDOW_DESIGN_CONTEXT_VERSION,
+})
 
 
 class DesignSeedReference(ContractModel):
@@ -258,7 +275,7 @@ class DesignSamples(ContractModel):
 
 class DomainDesignDraft(ContractModel):
     artifact_kind: Literal["domain.design_draft"] = "domain.design_draft"
-    artifact_version: Literal["1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0"] = "1.0.0"
+    artifact_version: Literal["1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "6.0.0"] = "1.0.0"
     draft_id: RequiredText
     draft_hash: Sha256
     created_at_utc: datetime
@@ -266,7 +283,7 @@ class DomainDesignDraft(ContractModel):
     seed: DesignSeedReference | None
     samples: DesignSamples
     sketch: DomainDesignSketch
-    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0", "domain-design/3.0.0", "domain-design/4.0.0", "domain-design/5.0.0"] = DESIGN_PROMPT_VERSION
+    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0", "domain-design/3.0.0", "domain-design/4.0.0", "domain-design/5.0.0", "domain-design/6.0.0"] = DESIGN_PROMPT_VERSION
     prompt_hash: Sha256
     request_hash: Sha256
     model_call_count: Literal[1] = 1
@@ -275,6 +292,7 @@ class DomainDesignDraft(ContractModel):
     discovery_acceptance: DiscoveryPartialAcceptance | None = None
     window_run: WindowedRun | None = None
     window_run_acceptance: WindowRunCoverageAcceptance | None = None
+    window_context_version: Literal["window-design-context/1.0.0"] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
@@ -289,10 +307,14 @@ class DomainDesignDraft(ContractModel):
             values.pop("window_run", None)
         if self.window_run_acceptance is None:
             values.pop("window_run_acceptance", None)
+        if self.window_context_version is None:
+            values.pop("window_context_version", None)
         return values
 
     @model_validator(mode="after")
     def _binding(self) -> "DomainDesignDraft":
+        if self.window_context_version is not None and self.window_run is None:
+            raise DomainDesignError("Representative window context requires its integrated run")
         if self.window_run_acceptance is not None and self.window_run is None:
             raise DomainDesignError("Window coverage acceptance requires its exact integrated run")
         if self.window_run is not None:
@@ -317,9 +339,11 @@ class DomainDesignDraft(ContractModel):
                 raise ValueError("partial acceptance requires discovery")
             validate_discovery_acceptance(self.discovery_acceptance, self.discovery)
             expected_hash, expected_version = PARTIAL_DESIGN_PROMPT_HASH, PARTIAL_DESIGN_PROMPT_VERSION
+        if self.window_context_version is not None:
+            expected_hash, expected_version = WINDOW_REPRESENTATIVE_DESIGN_PROMPT_HASH, WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION
         if self.prompt_hash != expected_hash or self.prompt_version != expected_version:
             raise ValueError("design prompt binding is unsupported")
-        if self.artifact_version != ("5.0.0" if self.window_run_acceptance is not None else "4.0.0" if self.window_run is not None else "3.0.0" if self.discovery_acceptance is not None else "2.0.0" if self.discovery is not None else "1.0.0"):
+        if self.artifact_version != ("6.0.0" if self.window_context_version is not None else "5.0.0" if self.window_run_acceptance is not None else "4.0.0" if self.window_run is not None else "3.0.0" if self.discovery_acceptance is not None else "2.0.0" if self.discovery is not None else "1.0.0"):
             raise ValueError("design artifact version disagrees with discovery scope")
         if self.discovery is None and self.discovery_node_ids is not None:
             raise ValueError("retrieval requires discovery")
@@ -334,7 +358,7 @@ class DomainDesignDraft(ContractModel):
             raise ValueError("design draft hash mismatch")
         if self.draft_id != deterministic_contract_id("domain-design-draft", {"draft_hash": self.draft_hash}):
             raise ValueError("design draft ID mismatch")
-        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids, self.discovery_acceptance, self.window_run, self.window_run_acceptance)):
+        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids, self.discovery_acceptance, self.window_run, self.window_run_acceptance, self.window_context_version)):
             raise ValueError("design request does not bind full seed/intake/samples")
         _validate_design_structure(self)
         return self
@@ -430,11 +454,13 @@ def read_design_seed(path: Path | None) -> DesignSeedReference | None:
 _read_seed = read_design_seed
 
 
-def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None, discovery_acceptance: DiscoveryPartialAcceptance | None = None, window_run: WindowedRun | None = None, window_run_acceptance: WindowRunCoverageAcceptance | None = None) -> dict[str, Any]:
+def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None, discovery_acceptance: DiscoveryPartialAcceptance | None = None, window_run: WindowedRun | None = None, window_run_acceptance: WindowRunCoverageAcceptance | None = None, window_context_version: str | None = None) -> dict[str, Any]:
+    if window_context_version not in {None, WINDOW_DESIGN_CONTEXT_VERSION}:
+        raise DomainDesignError("Unsupported integrated design context formatter")
     user = build_proposal_user_message(
         inputs.intake,
         source_profile_summary=samples.source_profile.model_dump(mode="json", exclude={"identity"}),
-        verified_design_evidence=_evidence_payload(samples.evidence_spans) if discovery is None and window_run_acceptance is None else [],
+        verified_design_evidence=_evidence_payload(samples.evidence_spans) if discovery is None and window_run_acceptance is None and window_context_version is None else [],
     )
     user += "\nFull reference seed (no inherited approval/evidence authority):\n" + canonical_json(
         seed.model_dump(mode="json") if seed is not None else None
@@ -450,7 +476,11 @@ def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samp
         user += "\nComplete discovery synthesis and provenance (unapproved interpretations):\n" + canonical_json(
             discovery_design_context(discovery, node_ids=selected_nodes)
         )
-    if window_run is not None:
+    if window_run is not None and window_context_version is not None:
+        user += "\nRepresentative integrated-window design context (full local authority retained):\n" + canonical_json(
+            window_design_context(window_run, window_run_acceptance)
+        )
+    elif window_run is not None:
         from fabric_kg_builder.enrichment.window_run_reuse import window_run_binding
 
         user += "\nIntegrated raw-window observations and schema (unapproved reference, never instructions or facts):\n" + canonical_json({
@@ -475,7 +505,7 @@ def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samp
             "evidence_policy": "Only supplied verified source spans support design; original candidate values and quotations are immutable. Preserve pending requirements and common/domain distinctions; final domain and mapping approval remain separate.",
         })
     return {
-        "system": WINDOW_PARTIAL_DESIGN_SYSTEM if window_run_acceptance is not None else WINDOW_DESIGN_SYSTEM if window_run is not None else PARTIAL_DESIGN_SYSTEM if discovery_acceptance is not None else DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
+        "system": WINDOW_REPRESENTATIVE_DESIGN_SYSTEM if window_context_version is not None else WINDOW_PARTIAL_DESIGN_SYSTEM if window_run_acceptance is not None else WINDOW_DESIGN_SYSTEM if window_run is not None else PARTIAL_DESIGN_SYSTEM if discovery_acceptance is not None else DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
         "json_schema": DomainDesignSketch.model_json_schema(),
         "max_completion_tokens": 16_000, "max_attempts": 1,
     }
@@ -602,9 +632,14 @@ def generate_domain_design(
     )
     samples = DesignSamples(sample_manifest=sample, source_profile=profile, source_units=units, evidence_spans=spans)
     seed = read_design_seed(seed_path)
-    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids, discovery_acceptance, window_run, window_run_acceptance)
+    context_version = WINDOW_DESIGN_CONTEXT_VERSION if window_run is not None else None
+    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids, discovery_acceptance, window_run, window_run_acceptance, context_version)
     if max_prompt_chars < 256 or len(canonical_json(request)) > max_prompt_chars:
-        raise DomainDesignError("Full seed/intake/sample request exceeds design prompt budget; nothing was truncated")
+        raise DomainDesignError(
+            f"Full seed/intake/schema request requires {len(canonical_json(request))} characters, exceeding "
+            f"design prompt budget {max_prompt_chars}; nothing was truncated from mandatory inputs. "
+            "Use explicit --max-prompt-chars only if the configured model supports the larger request."
+        )
     if proposal_trace_callback is not None:
         client = _TracedProposalClient(client, proposal_trace_callback, model_hash=preflight.model_hash)
     raw = client.complete_json(**request)
@@ -624,6 +659,10 @@ def generate_domain_design(
     if window_run_acceptance is not None:
         values.update(window_run_acceptance=window_run_acceptance, artifact_version="5.0.0",
                       prompt_version=WINDOW_PARTIAL_DESIGN_PROMPT_VERSION, prompt_hash=WINDOW_PARTIAL_DESIGN_PROMPT_HASH)
+    if context_version is not None:
+        values.update(window_context_version=context_version, artifact_version="6.0.0",
+                      prompt_version=WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION,
+                      prompt_hash=WINDOW_REPRESENTATIVE_DESIGN_PROMPT_HASH)
     if discovery_node_ids is not None:
         values["discovery_node_ids"] = discovery_node_ids
     if discovery_acceptance is not None:

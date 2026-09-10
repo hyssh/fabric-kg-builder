@@ -117,7 +117,7 @@ def test_exact_partial_acceptance_approved_public_replay_preserves_one_gap(parti
     draft = load_domain_design(draft_path)
     contract = load_domain_contract(domain)
     assert draft.window_run.state == "partial" and draft.window_run_acceptance == acceptance
-    assert draft.artifact_version == "5.0.0"
+    assert draft.artifact_version == "6.0.0"
     assert contract.window_run_acceptance == acceptance
     assert contract.window_run_binding.coverage_acceptance_hash == acceptance.acceptance_hash
     assert not contract.question_plans[-1].covered

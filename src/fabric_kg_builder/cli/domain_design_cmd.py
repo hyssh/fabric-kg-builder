@@ -522,6 +522,8 @@ def domain_accept_discovery_partial_cmd(
 @click.option("--dry-run", is_flag=True, help="Plan only, without calls or writes (default).")
 @click.option("--max-calls", default=2, show_default=True, type=click.IntRange(1, 8),
               help="Logical call ceiling; this design implementation uses one call, no repair loop.")
+@click.option("--max-prompt-chars", default=192_000, show_default=True, type=click.IntRange(256),
+              help="Explicit serialized request ceiling; full intake/schema are never truncated to fit.")
 @click.option("--proposal-trace-dir", type=click.Path(file_okay=False, path_type=Path),
               help="Opt-in private, create-only request/response JSON traces; not a replay cache.")
 @click.pass_context
@@ -535,6 +537,7 @@ def domain_design_cmd(
     window_state: Path | None = None,
     window_run: Path | None = None,
     window_run_acceptance_file: Path | None = None,
+    max_prompt_chars: int = 192_000,
 ) -> None:
     """Design an unapproved ontology from intent, seed and reviewed corpus discovery.
 
@@ -647,6 +650,7 @@ def domain_design_cmd(
                 **({"window_schema_reference": window_context} if window_context is not None else {}),
                 "model_calls": 0,
                 "planned_model_calls": 1,
+                "max_prompt_chars": max_prompt_chars,
                 "writes": 0,
                 "samples_materialized": False,
                 "design_mode": "reviewed_partial_window_run" if window_acceptance is not None else "integrated_window_run" if integrated is not None else "sample_only" if sample_only else (
@@ -683,6 +687,7 @@ def domain_design_cmd(
         else:
             result = core.generate_domain_design(
                 preflight, client=client, seed_path=seed_domain,
+                max_prompt_chars=max_prompt_chars,
                 **({"window_run": integrated} if integrated is not None else
                    {"discovery": discovery} if discovery is not None else {"sample_only": True}),
                 **({"window_run_acceptance": window_acceptance} if window_acceptance is not None else {}),

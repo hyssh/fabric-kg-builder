@@ -153,6 +153,59 @@ def test_invalid_empty_target_keeps_valid_sibling_and_bad_pending_quarantined(tm
     assert all(r.status == "mapped" for r in result.final_mapping.records)
 
 
+def test_cached_empty_pending_object_preserves_candidates_and_reports_shape(tmp_path, monkeypatch):
+    import fabric_kg_builder.domain.window_run as engine
+
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    root = tmp_path / "windows"
+    def empty_pending(payload):
+        raw = response(payload)
+        raw["pending"] = {}
+        return raw
+    client = Client(empty_pending)
+    decode = engine._decode
+    def previous_decoder(received, config):
+        decoded = decode(received, config)
+        if decoded.get("pending") == {}:
+            raise ValueError("invalid pending/working_context envelope")
+        return decoded
+    monkeypatch.setattr(engine, "_decode", previous_decoder)
+    prior = run_windowed(inputs=data, output_dir=root, budget=budget(), client=client)
+    assert prior.state == "partial" and prior.cursor == 0
+    calls = len(client.requests)
+    assert calls > 0
+    before = {path: path.read_bytes() for path in (root / "responses").glob("*.json")}
+    monkeypatch.setattr(engine, "_decode", decode)
+    resumed = run_windowed(inputs=data, output_dir=root, client=None)
+    assert resumed.state == "complete" and resumed.model_call_count == 0
+    assert len(client.requests) == calls
+    assert resumed.chunks[0].response.candidates
+    assert any(d.channel == "pending" and "empty_pending_object" in d.reason
+               for log in resumed.logs for d in log.diagnostics)
+    assert before == {path: path.read_bytes() for path in (root / "responses").glob("*.json")}
+    assert load_windowed_run(root).artifact_hash == resumed.artifact_hash
+
+
+def test_nonempty_pending_object_is_not_silently_discarded(tmp_path):
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    def malformed_pending(payload):
+        raw = response(payload)
+        raw["pending"] = {"reason": "This content must not be erased"}
+        return raw
+    result = run_windowed(
+        inputs=data, output_dir=tmp_path / "windows", budget=budget(),
+        client=Client(malformed_pending),
+    )
+    assert result.state == "complete" and result.cursor > 0
+    assert all(not log.pending for log in result.logs)
+    assert any(d.channel == "pending" and "invalid_pending_metadata" in d.reason
+               and d.proposal == {"reason": "This content must not be erased"}
+               for log in result.logs for d in log.diagnostics)
+    assert result.logs[0].exchanges[0].response.payload["response"]["pending"] == {
+        "reason": "This content must not be erased",
+    }
+
+
 def test_candidate_grounding_blocks_fabrication_and_dependency_closure(tmp_path):
     data = inputs(tmp_path, files=1, paragraphs=1)
     def draft(payload):
@@ -1124,3 +1177,150 @@ def test_columnar_registry_preserves_relationship_endpoint_direction_scopes(tmp_
         pairs.add((tuple(registry["catalogs"]["identifiers"][i] for i in scope["sources"]),
                    tuple(registry["catalogs"]["identifiers"][i] for i in scope["targets"])))
     assert pairs == {(("missing:type",), ("type:record",)), (("type:record",), ("missing:type",))}
+
+
+def test_explicit_invocation_request_ceiling_admits_same_request_without_config_migration(tmp_path):
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    config = RunConfig(max_request_chars=1024)
+    root = tmp_path / "windows"
+    client = Client()
+    stopped = run_windowed(inputs=data, output_dir=root, config=config, budget=budget(), client=client)
+    assert stopped.reason == "context_limit" and stopped.model_call_count == 0 and not client.requests
+    manifest = (root / "manifest.json").read_bytes()
+    saved_requests = {p: p.read_bytes() for p in (root / "requests").glob("*.json")}
+    admitted = run_windowed(inputs=data, output_dir=root, config=config,
+                            budget=budget(request_char_budget=512_000), client=client)
+    assert admitted.state == "complete" and admitted.model_call_count == admitted.cursor
+    assert admitted.config.max_request_chars == 1024
+    assert (root / "manifest.json").read_bytes() == manifest
+    assert all(p.read_bytes() == original for p, original in saved_requests.items())
+    for path in (root / "dispatches").glob("*.json"):
+        record = json.loads(path.read_text())["payload"]
+        request = json.loads((root / "requests" / f"{record['request_hash']}.json").read_text())["payload"]["request"]
+        assert record["request_chars"] == len(canonical_json(request))
+        assert 1024 < record["request_chars"] <= record["effective_request_char_budget"] == 512_000
+    responses = {p: p.read_bytes() for p in (root / "responses").glob("*.json")}
+    completed = run_windowed(inputs=data, output_dir=root, config=config)
+    assert completed.artifact_hash == admitted.artifact_hash and completed.model_call_count == 0
+    assert all(p.read_bytes() == original for p, original in responses.items())
+
+
+def test_old_dispatch_and_received_responses_reuse_under_lower_invocation_ceiling(tmp_path, monkeypatch):
+    import fabric_kg_builder.domain.window_run as engine
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    root = tmp_path / "windows"
+    seal, write = engine._seal, engine._write
+    def old_dispatch(model, **values):
+        if model is engine._Ledger and values.get("kind") == "dispatch":
+            values["payload"] = {k: v for k, v in values["payload"].items()
+                                 if k not in {"request_chars", "effective_request_char_budget"}}
+        return seal(model, **values)
+    def before_commit(path, artifact):
+        if isinstance(artifact, engine._Commit):
+            raise RuntimeError("stop after durable responses")
+        write(path, artifact)
+    monkeypatch.setattr(engine, "_seal", old_dispatch)
+    monkeypatch.setattr(engine, "_write", before_commit)
+    client = Client()
+    with pytest.raises(RuntimeError, match="durable responses"):
+        run_windowed(inputs=data, output_dir=root, budget=budget(), client=client)
+    old = {p: p.read_bytes() for folder in ["dispatches", "responses", "requests"]
+           for p in (root / folder).glob("*.json")}
+    assert all("effective_request_char_budget" not in json.loads(p.read_text())["payload"]
+               for p in (root / "dispatches").glob("*.json"))
+    monkeypatch.setattr(engine, "_seal", seal)
+    monkeypatch.setattr(engine, "_write", write)
+    result = run_windowed(inputs=data, output_dir=root, budget=RunBudget(request_char_budget=1024))
+    assert result.state == "complete" and result.model_call_count == 0
+    assert result.reused_response_count == len(client.requests)
+    assert all(p.read_bytes() == original for p, original in old.items())
+    assert load_windowed_run(root).artifact_hash == result.artifact_hash
+
+
+def test_request_admission_override_is_opt_in_and_never_bypasses_call_budget(tmp_path):
+    with pytest.raises(ValueError):
+        RunBudget(request_char_budget=0)
+    with pytest.raises(ValueError):
+        RunBudget(request_char_budget=1023)
+    assert RunBudget().request_char_budget is None
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    client = Client()
+    result = run_windowed(inputs=data, output_dir=tmp_path / "windows",
+                          config=RunConfig(max_request_chars=1024),
+                          budget=RunBudget(request_char_budget=512_000), client=client)
+    assert result.reason == "model_budget_exhausted" and result.model_call_count == 0
+    assert not client.requests and not list((tmp_path / "windows" / "dispatches").glob("*.json"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pending", None), ("pending", "unstructured pending text"), ("pending", {"reason": "retain all content"}),
+    ("working_context", None), ("working_context", ["unstructured annotation"]), ("working_context", "raw context"),
+])
+def test_cached_malformed_optional_metadata_is_quarantined_without_losing_valid_channels(tmp_path, monkeypatch, field, value):
+    import fabric_kg_builder.domain.window_run as engine
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    root = tmp_path / "windows"
+    def metadata(payload):
+        raw = response(payload)
+        raw[field] = value
+        return raw
+    decoder = engine._decode
+    def old_decoder(received, config):
+        raw = decoder(received, config)
+        if (not isinstance(raw.get("pending", []), list)
+                or not isinstance(raw.get("working_context", {}), dict)):
+            raise ValueError("invalid pending/working_context envelope")
+        return raw
+    monkeypatch.setattr(engine, "_decode", old_decoder)
+    client = Client(metadata)
+    before = run_windowed(inputs=data, output_dir=root, budget=budget(), client=client)
+    assert before.cursor == 0 and before.state == "partial"
+    response_bytes = {p: p.read_bytes() for p in (root / "responses").glob("*.json")}
+    manifest = (root / "manifest.json").read_bytes()
+    monkeypatch.setattr(engine, "_decode", decoder)
+    recovered = run_windowed(inputs=data, output_dir=root, budget=RunBudget(), client=None)
+    assert recovered.state == "complete" and recovered.model_call_count == 0
+    assert recovered.reused_response_count == len(client.requests)
+    assert all(r.status == "mapped" for r in recovered.final_mapping.records)
+    for log in recovered.logs:
+        assert not log.pending
+        assert any(d.channel == field and d.proposal == value for d in log.diagnostics)
+        assert all(e.response.payload["response"][field] == value for e in log.exchanges)
+        if field == "working_context":
+            assert all(context["annotations"] == {} for context in log.working_context)
+    assert (root / "manifest.json").read_bytes() == manifest
+    assert all(p.read_bytes() == original for p, original in response_bytes.items())
+    completed = run_windowed(inputs=data, output_dir=root)
+    assert completed.artifact_hash == recovered.artifact_hash and completed.model_call_count == 0
+
+
+@pytest.mark.parametrize("channel,value", [
+    ("candidates", None), ("candidates", {}), ("schema_proposals", None), ("schema_proposals", {}),
+])
+def test_optional_metadata_quarantine_never_waives_required_response_channels(tmp_path, channel, value):
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    def invalid(payload):
+        raw = response(payload)
+        raw[channel] = value
+        raw["pending"] = None
+        raw["working_context"] = []
+        return raw
+    result = run_windowed(inputs=data, output_dir=tmp_path / "windows", budget=budget(), client=Client(invalid))
+    assert result.state == "partial" and result.cursor == 0
+    assert "response_validation_failed" in result.reason
+    assert not result.chunks and not result.final_snapshot.concepts
+
+
+def test_optional_metadata_quarantine_does_not_waive_candidate_grounding(tmp_path):
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    def unsupported(payload):
+        raw = response(payload)
+        raw["candidates"][0]["anchors"][0]["quote"] = "Fabricated source statement"
+        raw["pending"] = {"unstructured": "keep"}
+        raw["working_context"] = ["not an annotation object"]
+        return raw
+    result = run_windowed(inputs=data, output_dir=tmp_path / "windows", budget=budget(), client=Client(unsupported))
+    assert result.state == "partial" and result.reason == "bootstrap_blocked"
+    assert not result.final_snapshot.concepts
+    assert all(r.status == "quarantined" for r in result.final_mapping.records)
+    assert {d.channel for log in result.logs for d in log.diagnostics} >= {"pending", "working_context"}

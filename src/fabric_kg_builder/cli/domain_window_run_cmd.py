@@ -26,6 +26,8 @@ def _core():
 @click.option("--window-size", default=8, show_default=True, type=click.IntRange(1, 1024))
 @click.option("--concurrency", default=4, show_default=True, type=click.IntRange(1, 16))
 @click.option("--max-request-chars", default=96000, show_default=True, type=click.IntRange(1024))
+@click.option("--request-char-budget", type=click.IntRange(1024),
+              help="Explicit invocation input-size admission limit; preserves recorded config and request contents.")
 @click.option("--max-completion-tokens", default=8192, show_default=True,
               type=click.IntRange(128, 32768))
 @click.option("--max-chunk-chars", default=8000, show_default=True,
@@ -49,7 +51,7 @@ def _core():
 @click.pass_context
 def domain_window_run_cmd(
     ctx, prepared, discovery, intake, out_state, window_size, concurrency,
-    max_request_chars, max_completion_tokens, max_chunk_chars, max_calls,
+    max_request_chars, request_char_budget, max_completion_tokens, max_chunk_chars, max_calls,
     max_repair_calls, max_tokens, stop_after_document, live, dry_run, resume,
     retry_uncertain, retry_invalid_response,
 ):
@@ -96,6 +98,7 @@ def domain_window_run_cmd(
             max_calls=max_calls, max_repair_calls=max_repair_calls,
             max_tokens=max_tokens, stop_after_document=stop_after_document,
             retry_uncertain=retry_uncertain, retry_invalid_response=retry_invalid_response,
+            request_char_budget=request_char_budget,
         )
         binding = core.windowed_model_binding(out_state) if resume else None
         if binding is not None and (
@@ -128,6 +131,7 @@ def domain_window_run_cmd(
             "state": str(out_state), "authority": "working_only",
             "ontology_approved": False, "model_calls": result.model_call_count,
             "invocation": result.invocation, "result": result.model_dump(mode="json"),
+            "request_char_budget": request_char_budget or config.max_request_chars,
         })
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc

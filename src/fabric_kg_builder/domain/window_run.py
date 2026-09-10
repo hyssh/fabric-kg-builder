@@ -88,6 +88,8 @@ class RunBudget(_WindowModel):
     stop_after_document: int | None = Field(default=None, ge=1)
     retry_uncertain: bool = False
     retry_invalid_response: bool = False
+    request_char_budget: int | None = Field(
+        default=None, ge=1024, description="Explicit invocation admission ceiling; None uses the immutable config ceiling.")
 
 
 class RunContext(_WindowArtifact):
@@ -140,7 +142,7 @@ class ProposalDiagnostic(_WindowModel):
     status: Literal["rejected", "pending"]
     reason: str
     response_hash: Sha256
-    channel: Literal["schema_proposals", "pending", "repair"] = "schema_proposals"
+    channel: Literal["schema_proposals", "pending", "repair", "working_context"] = "schema_proposals"
 
 
 class _Ledger(_WindowArtifact):
@@ -482,8 +484,6 @@ def _decode(response, config):
         raise ValueError("unparseable candidate envelope")
     if not isinstance(raw.get("schema_proposals"), list):
         raise ValueError("missing schema_proposals channel")
-    if not isinstance(raw.get("pending", []), list) or not isinstance(raw.get("working_context", {}), dict):
-        raise ValueError("invalid pending/working_context envelope")
     return raw
 
 
@@ -496,6 +496,28 @@ def _error_text(exc):
 
 def _proposals(raw, observation, response_hash, *, repair=False):
     changes, pending, errors = [], [], []
+    raw_pending = raw.get("pending", [])
+    if raw.get("pending") == {}:
+        errors.append(ProposalDiagnostic(
+            chunk_id=observation.chunk.chunk_id, proposal_index=-1,
+            proposal={}, status="rejected", response_hash=response_hash,
+            reason="empty_pending_object: no entries; original shape retained in raw response",
+            channel="pending",
+        ))
+    elif not isinstance(raw_pending, list):
+        errors.append(ProposalDiagnostic(
+            chunk_id=observation.chunk.chunk_id, proposal_index=-1,
+            proposal=raw_pending, status="rejected", response_hash=response_hash,
+            reason="invalid_pending_metadata: expected an array; original value retained, not interpreted as pending entries",
+            channel="pending",
+        ))
+    if not isinstance(raw.get("working_context", {}), dict):
+        errors.append(ProposalDiagnostic(
+            chunk_id=observation.chunk.chunk_id, proposal_index=-1,
+            proposal=raw["working_context"], status="rejected", response_hash=response_hash,
+            reason="invalid_working_context_metadata: expected an object; original value retained, not used as annotations",
+            channel="working_context",
+        ))
     eligible = {g.candidate_index: g.observation_id for g in observation.candidate_grounding
                 if g.disposition == "verified"}
     known_ids = set(eligible.values())
@@ -521,7 +543,7 @@ def _proposals(raw, observation, response_hash, *, repair=False):
             errors.append(ProposalDiagnostic(chunk_id=observation.chunk.chunk_id, proposal_index=index,
                                             proposal=proposal, status="rejected", reason=_error_text(exc),
                                             response_hash=response_hash))
-    for index, item in enumerate(raw.get("pending", [])):
+    for index, item in enumerate(raw_pending if isinstance(raw_pending, list) else []):
         try:
             value = dict(item)
             indices = value.pop("candidate_indices", None)
@@ -624,8 +646,10 @@ def _effective_window(snapshot, items, exchanges, config):
         changes.extend(batch)
         pending.extend(waiting)
         errors.extend(invalid)
+        annotations = raw.get("working_context", {})
         contexts.append({"chunk_id": chunk_id, "response_hash": exchange.response.artifact_hash,
-                         "annotations": raw.get("working_context", {}), "schema_annotations": raw["schema_proposals"]})
+                         "annotations": annotations if isinstance(annotations, dict) else {},
+                         "schema_annotations": raw["schema_proposals"]})
     _, initial_decisions, initial_diagnostics, _ = _barrier(snapshot, items, changes, pending, errors)
     repairable = {item.chunk.chunk_id: _repairable(item, changes, initial_decisions, initial_diagnostics) for item in items}
     if len(exchanges) > len(items):
@@ -1189,7 +1213,9 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
             counters["reused_response_count"] += 1
             return response, None
         is_repair = request.payload["repair"]
-        if len(canonical_json(request.payload["request"])) > config.max_request_chars:
+        request_chars = len(canonical_json(request.payload["request"]))
+        request_char_budget = config.max_request_chars if budget.request_char_budget is None else budget.request_char_budget
+        if request_chars > request_char_budget:
             return None, "context_limit"
         prior_dispatches = sorted((root / "dispatches").glob(f"{key}-*.json"))
         if prior_dispatches:
@@ -1218,6 +1244,7 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
         dispatch = _seal(_Ledger, kind="dispatch", payload={
             "request_hash": key, "repair": is_repair, "reserved_tokens": reserve_tokens,
             "attempt": len(prior_dispatches), "explicit_retry": bool(prior_dispatches),
+            "request_chars": request_chars, "effective_request_char_budget": request_char_budget,
         })
         _write(root / "dispatches" / f"{key}-{len(prior_dispatches):04d}.json", dispatch)
         counters["model_call_count"] += 1
