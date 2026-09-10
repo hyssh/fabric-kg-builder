@@ -1326,7 +1326,9 @@ class DomainContractV2(V2StrictModel):
                 )
             ):
                 raise ValueError(
-                    "business-critical questions require path and completeness coverage"
+                    "business-critical questions require path and completeness coverage: "
+                    f"question_id={question_id}; path_covered={plans_by_id[question_id].covered}; "
+                    f"completeness_status={coverage.coverage_status}"
                 )
         return self
 

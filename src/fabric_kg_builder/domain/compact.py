@@ -809,7 +809,15 @@ def expand_compact_design(
                 "original_reference": item.ordinal_property_key,
                 "property_id": ordinal_id,
             })
-        unsupported = [question_id for question_id in item.question_ids if routes[question_id].source_key is None]
+        # A deliberately pathless SQL route cannot invalidate a shared graph requirement.
+        graph_questions = [
+            question_id for question_id in item.question_ids
+            if not is_sql_question(questions_by_id[question_id])
+        ]
+        unsupported = [
+            question_id for question_id in (graph_questions or item.question_ids)
+            if routes[question_id].source_key is None
+        ]
         requirement: dict[str, Any] = {
             "requirement_id": f"completeness-requirement:{item.key}",
             "competency_question_ids": item.question_ids,

@@ -38,7 +38,7 @@ from .question_routing import (
     routed_question_copies, question_routing_context,
     QUESTION_ROUTING_PROMPT, SQL_ROUTING_UNRESOLVED,
 )
-from .stage import L1Preflight, L1PreparedStage, _TracedProposalClient, _evidence_payload, prepare_l1_stage
+from .stage import L1Preflight, L1PreparedStage, L1ProposalSchemaRepairError, _TracedProposalClient, _evidence_payload, prepare_l1_stage
 from .discovery import DiscoveryRun, discovery_design_artifacts, discovery_design_context, discovery_grounding_report, validate_discovery
 from .discovery_acceptance import (
     DiscoveryAcceptanceBinding, DiscoveryPartialAcceptance,
@@ -864,6 +864,16 @@ def compile_domain_design(
             design_discovery=draft.discovery,
             design_discovery_acceptance=draft.discovery_acceptance,
         )
+    except L1ProposalSchemaRepairError as exc:
+        raise DesignCapabilityError([
+            DesignFinding(
+                code=code,
+                message=f"{path[:160]}: " + " ".join(
+                    exc.validation_details.get((path, code), "Schema invariant rejected the compiled contract").split()
+                )[:240],
+            )
+            for path, code in exc.validation_failures[:10]
+        ]) from exc
     except Exception as exc:
         raise DesignCapabilityError([DesignFinding(
             code="compiler_schema2_rejected", message=str(exc)

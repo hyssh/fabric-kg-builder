@@ -234,6 +234,7 @@ def _stable_semantic_validation_code(
     error_type: str,
 ) -> str:
     known = (
+        ("business-critical questions require path and completeness coverage", "critical_question_coverage_incomplete"),
         ("exactly one path plan", "question_plan_cardinality_invalid"),
         ("at least one question must be covered", "question_coverage_zero"),
         ("question path references unknown relationship", "question_path_relationship_unknown"),
@@ -2858,6 +2859,7 @@ def prepare_l1_stage(
             raise L1ProposalSchemaRepairError(
                 attempt_count=2 if model_call_count >= 2 else 1,
                 validation_failures=semantic_failures,
+                validation_details=semantic_details,
                 candidate_attempts=tuple(
                     item
                     for item in (
@@ -3078,6 +3080,7 @@ def prepare_l1_stage(
         raise L1ProposalSchemaRepairError(
             attempt_count=2 if model_call_count >= 2 else 1,
             validation_failures=proposal_failures,
+            validation_details=proposal_details,
             candidate_attempts=(current_diagnostics,),
         ) from exc
     summary = render_l1_summary(
