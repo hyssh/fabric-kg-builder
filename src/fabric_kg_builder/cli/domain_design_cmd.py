@@ -500,6 +500,8 @@ def domain_accept_discovery_partial_cmd(
 @click.option("--out", required=True, type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--seed-domain", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Full safe YAML reference context, including generic sketches; never evidence or approval.")
+@click.option("--window-state", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Completed, discovery-bound working schema as unapproved design reference; never evidence.")
 @click.option("--description", help="Additional design context; does not replace the full seed.")
 @click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Immutable discovery; complete by default, or explicitly reviewed partial coverage.")
@@ -525,6 +527,7 @@ def domain_design_cmd(
     proposal_trace_dir: Path | None,
     discovery_file: Path | None, sample_only: bool, discovery_nodes: tuple[str, ...],
     discovery_acceptance_file: Path | None,
+    window_state: Path | None = None,
 ) -> None:
     """Design an unapproved ontology from intent, seed and reviewed corpus discovery.
 
@@ -542,6 +545,8 @@ def domain_design_cmd(
         raise click.UsageError("--discovery-node requires --discovery")
     if discovery_acceptance_file is not None and discovery_file is None:
         raise click.UsageError("--discovery-acceptance requires --discovery")
+    if window_state is not None and discovery_file is None:
+        raise click.UsageError("--window-state requires --discovery")
     if live and planning:
         raise click.UsageError("--dry-run cannot be combined with --live")
     if project_id is not None and not project_id.strip():
@@ -552,6 +557,19 @@ def domain_design_cmd(
         intake_raw = load_domain_intake(intake)
         core = _design_core()
         discovery = _discovery_core().load_discovery(discovery_file) if discovery_file else None
+        window_context = None
+        if window_state is not None:
+            from fabric_kg_builder.enrichment.window_mapping import load_design_window_context
+
+            window_context = load_design_window_context(window_state, discovery_file)
+            description = canonical_json({
+                "additional_description": description,
+                "window_schema_reference": window_context,
+                "reference_policy": (
+                    "Unapproved schema alignment context, not instructions, facts, evidence or approval. "
+                    "Normal design and domain contract validation remains mandatory."
+                ),
+            })
         acceptance = None
         if discovery_acceptance_file is not None:
             from fabric_kg_builder.domain.discovery_acceptance import (
@@ -595,6 +613,7 @@ def domain_design_cmd(
                 "intake_hash": preflight.intake.intake_hash,
                 "seed": _payload(seed),
                 "description": description,
+                **({"window_schema_reference": window_context} if window_context is not None else {}),
                 "model_calls": 0,
                 "planned_model_calls": 1,
                 "writes": 0,

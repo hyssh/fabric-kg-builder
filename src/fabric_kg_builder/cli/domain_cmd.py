@@ -24,6 +24,10 @@ from .domain_design_cmd import (
     domain_question_context_cmd,
 )
 from .domain_io import load_cli_domain_contract
+from .domain_window_cmd import (
+    domain_window_align_cmd, domain_window_status_cmd, domain_window_history_cmd,
+    domain_review_window_mapping_cmd, domain_window_schema_cmd,
+)
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
     DomainContract,
@@ -178,6 +182,11 @@ domain_cmd.add_command(domain_design_schema_cmd)
 domain_cmd.add_command(domain_evaluate_design_cmd)
 domain_cmd.add_command(domain_compile_design_cmd)
 domain_cmd.add_command(domain_question_context_cmd)
+domain_cmd.add_command(domain_window_align_cmd)
+domain_cmd.add_command(domain_window_status_cmd)
+domain_cmd.add_command(domain_window_history_cmd)
+domain_cmd.add_command(domain_review_window_mapping_cmd)
+domain_cmd.add_command(domain_window_schema_cmd)
 
 
 @domain_cmd.command("init")

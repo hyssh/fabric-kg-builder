@@ -1922,6 +1922,11 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
               help="Schema-2: share source anchors in the model response; full validation is unchanged.")
 @click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Replay immutable full-corpus raw candidates after approval; no implicit second model pass.")
+@click.option("--window-mapping", "--mapping-review", "window_mapping",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Explicitly reviewed, discovery/domain/window-bound schema mapping for zero-call replay.")
+@click.option("--window-state", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Verified window state that sealed --window-mapping; requires a fresh L2 state.")
 @click.option("--replay-only", is_flag=True,
               help="Explicit zero-new-model-call discovery replay (also the default with --discovery).")
 @click.option("--reextract-pending", is_flag=True,
@@ -1958,6 +1963,8 @@ def enrich_cmd(
     replay_only: bool = False,
     reextract_pending: bool = False,
     max_reextract_calls: int = 1,
+    window_mapping: Path | None = None,
+    window_state: Path | None = None,
 ) -> None:
     """Run LLM extraction on source files and produce structured JSON in build/enriched/.
 
@@ -1983,6 +1990,10 @@ def enrich_cmd(
         raise click.UsageError("--replay-only conflicts with --reextract-pending")
     if (replay_only or reextract_pending) and discovery_file is None:
         raise click.UsageError("Discovery replay/re-extraction flags require --discovery")
+    if (window_mapping is None) != (window_state is None):
+        raise click.UsageError("--window-mapping and --window-state must be supplied together")
+    if window_mapping is not None and (discovery_file is None or reextract_pending):
+        raise click.UsageError("--window-mapping requires --discovery and zero-call replay, not --reextract-pending")
     if discovery_file is not None and (force or compact_response):
         raise click.UsageError("Discovery replay cannot use --force/--compact-response; choose a fresh L2 state when changing authority")
 
@@ -2048,6 +2059,8 @@ def enrich_cmd(
                         max_reextract_calls=max_reextract_calls, client_factory=retry_client,
                         ocr_cache=Path(ocr_cache) if ocr_cache else None,
                         ocr_identity=Path(ocr_identity) if ocr_identity else None,
+                        **({"window_mapping_path": window_mapping, "window_state": window_state}
+                           if window_mapping is not None else {}),
                     )
                     click.echo(json.dumps(summary, sort_keys=True))
                     return

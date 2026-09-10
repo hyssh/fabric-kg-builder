@@ -15,6 +15,7 @@ from .schema2_extraction import ClosedVocabulary, RawCandidateResponse
 
 REUSE_VERSION = "discovery-approved-replay/1.4.0"
 PARTIAL_REUSE_VERSION = "discovery-approved-replay/1.5.0"
+WINDOW_REUSE_VERSION = "discovery-approved-window-replay/1.0.1"
 
 
 @dataclass(frozen=True)
@@ -42,15 +43,31 @@ def map_discovery_candidates(
     chunk_id: str,
     vocabulary: ClosedVocabulary,
     contract: DomainContractV2,
+    window_mapping=None,
 ) -> MappedDiscoveryChunk:
     """Use only existing unique aliases and observed values; keep raw input untouched."""
     raw = RawCandidateResponse.model_validate(response).model_dump(mode="json")
     prefix = canonical_sha256({"discovery_chunk_id": chunk_id})[:24]
     candidates = list({canonical_sha256(item): item for item in raw["candidates"]}.values())
     original_hashes = {id(item): canonical_sha256(item) for item in candidates}
+    original_candidates = {canonical_sha256(item): item for item in candidates}
+    mapping_bindings = []
+    if window_mapping is not None:
+        from .window_mapping import align_verified_candidates
+
+        aligned, mapping_bindings = align_verified_candidates(
+            candidates, window_mapping, chunk_id=chunk_id, contract=contract,
+        )
+        original_hashes = {
+            id(item): original_hashes[id(original)]
+            for original, item in zip(candidates, aligned, strict=True)
+        }
+        candidates = aligned
     reasons_by_candidate: dict[int, set[str]] = {id(item): set() for item in candidates}
     entities: dict[str, dict[str, Any]] = {}
-    bindings: list[dict[str, Any]] = []
+    bindings: list[dict[str, Any]] = [
+        {"chunk_id": chunk_id, **item} for item in mapping_bindings
+    ]
     pending: set[str] = set()
     def mark(candidate, reason):
         pending.add(reason)
@@ -64,12 +81,13 @@ def map_discovery_candidates(
             raise ValueError(f"DISCOVERY_LOCAL_REFERENCE_AMBIGUOUS: {chunk_id}: {key}")
         entities[key] = candidate
         original = candidate["local_id"]
+        original_candidate = original_candidates[original_hashes[id(candidate)]]
         candidate["local_id"] = f"{prefix}:{original}"
         bindings.append({
             "chunk_id": chunk_id, "original_local_id": original,
             "approved_local_id": candidate["local_id"],
-            "original_identity_key": dict(candidate["identity_key"]),
-            "original_stable_source_identity": candidate["stable_source_identity"],
+            "original_identity_key": dict(original_candidate["identity_key"]),
+            "original_stable_source_identity": original_candidate["stable_source_identity"],
         })
 
     properties: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -483,6 +501,8 @@ def run_discovery_reuse(
     client_factory=None,
     ocr_cache: Path | None = None,
     ocr_identity: Path | None = None,
+    window_mapping_path: Path | None = None,
+    window_state: Path | None = None,
 ) -> dict[str, Any]:
     """Map first, optionally repair only pending chunks, then run genuine cached L2."""
     import json
@@ -495,10 +515,25 @@ def run_discovery_reuse(
     )
     from .schema2_work_units import WorkUnitCheckpoint, plan_work_units, split_work_unit
 
+    reviewed_mapping = None
+    mapping_authority = {}
+    if (window_mapping_path is None) != (window_state is None):
+        raise ValueError("Window mapping and window state must be supplied together")
+    if window_mapping_path is not None:
+        if reextract_pending:
+            raise ValueError("Reviewed window mapping is restricted to zero-call discovery replay")
+        from .window_mapping import load_replay_mapping
+
+        reviewed_mapping, mapping_authority = load_replay_mapping(
+            window_mapping_path, state_root=window_state,
+            discovery_path=discovery_file, domain_path=domain_path,
+        )
     inputs, run, reader, materialized, acceptance = _prepare_reuse(
         discovery_file, source_path, l1_state_root, domain_path, ocr_cache, ocr_identity,
     )
     reuse_version = PARTIAL_REUSE_VERSION if acceptance is not None else REUSE_VERSION
+    if reviewed_mapping is not None:
+        reuse_version = WINDOW_REUSE_VERSION
     waived_missing = set(acceptance.failed_chunk_ids + acceptance.deferred_chunk_ids) if acceptance else set()
     coverage_gaps = {
         "per_file_coverage": acceptance.per_file_coverage,
@@ -523,6 +558,7 @@ def run_discovery_reuse(
             or previous.get("discovery_hash") != run.run_hash
             or previous.get("domain_contract_hash") != vocabulary.contract_hash
             or previous.get("reuse_version") != reuse_version
+            or previous.get("window_mapping") != mapping_authority.get("window_mapping")
         ):
             raise ValueError("DISCOVERY_REUSE_AUTHORITY_DRIFT: choose a fresh L2 state")
     mapped_chunks, provenance, pending, missing = [], [], [], []
@@ -544,6 +580,7 @@ def run_discovery_reuse(
         try:
             mapped = map_discovery_candidates(
                 response, chunk_id=chunk.chunk_id, vocabulary=vocabulary, contract=inputs.domain_contract,
+                **({"window_mapping": reviewed_mapping} if reviewed_mapping is not None else {}),
             ) if response is not None else None
         except ValueError as exc:
             mapped, mapping_error = None, str(exc)
@@ -608,7 +645,7 @@ def run_discovery_reuse(
             })
             cache_path = state_root / "discovery-targeted-cache" / f"{target_key}.json"
             target = None
-            if cache_path.exists():
+            if cache_path.exists() and reviewed_mapping is None:
                 target = json.loads(cache_path.read_text(encoding="utf-8"))
                 if (
                     target.get("request_hash") != target_key
@@ -765,6 +802,7 @@ def run_discovery_reuse(
         } if acceptance is not None else {}),
         "prepared_corpus_hash": run.prepared.prepared_hash,
         "domain_contract_hash": vocabulary.contract_hash,
+        **mapping_authority,
         "total_chunks": len(run.chunks), "reused_chunks": len(mapped_chunks) - targeted_calls,
         "mapped_chunks": len(mapped_chunks), "newly_extracted_chunks": targeted_calls,
         "mapping_complete_chunks": sum(not mapped.pending_reasons for _, mapped in mapped_chunks),
@@ -818,6 +856,7 @@ def run_discovery_reuse(
         "reuse_version": reuse_version, "discovery_hash": run.run_hash,
         "prepared_corpus_hash": run.prepared.prepared_hash, "domain_contract_hash": vocabulary.contract_hash,
         "approved_l1_receipt_hash": inputs.l1_receipt.receipt_hash,
+        **mapping_authority,
         "source_unit_rebindings": [{
             "source_unit_id": original.source_unit_id,
             "source_text_hash": original.text_content_hash,
