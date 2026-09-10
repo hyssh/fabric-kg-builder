@@ -1,6 +1,6 @@
 # Windowed working-schema operations
 
-Status: implementation specification, 2026-09-09.
+Status: locally implemented with deterministic full-corpus CLI replay, 2026-09-09.
 
 ## Goal and scope
 
@@ -104,6 +104,10 @@ concurrency; resource exhaustion leaves a partial run with an exact cursor.
 Completed windows replay without model calls. Interrupted work does not advance
 the committed schema/cursor, and received responses remain available for matching
 resume without unsafe duplicate calls.
+
+The completed run's authoritative bytes/hash do not change on resume. Per-call
+model/reuse counters are separate invocation diagnostics, so inspecting or
+resuming completed work cannot invalidate an accepted mapping review.
 
 Validate source, seed, model, prompt and window-policy bindings before any new
 dispatch. Reject tampered snapshots, reordered/missing log links, stale mapping

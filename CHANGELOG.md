@@ -2,6 +2,20 @@
 
 ## 0.2.6 (local development)
 
+- Add windowed common-schema alignment over saved discovery observations.
+  Each batch uses one frozen version; snapshots, proposals, decisions and final
+  mappings remain inspectable with `domain window-status` and `window-history`.
+  Explicit deterministic mode performs unique formatting normalization without
+  model calls; bounded model mode can propose semantic aliases or new working
+  concepts. Unresolved concepts remain visible instead of becoming facts.
+- Add target-domain-bound `domain review-window-mapping` and explicit
+  `enrich --window-state --mapping-review` replay. Working changes do not alter
+  an approved domain, source values or evidence requirements. A final working
+  schema can also inform `domain design --window-state`.
+- Document Foundry Agent orchestration of core ontology keys, scoped source
+  Search and SQL analytics, including source-index coverage and permissions.
+  Window operations do not add a new Search engine or automatically assert
+  retrieved details into the ontology.
 - Reorder the normal workflow to full-corpus source preparation and open
   candidate discovery, document/corpus consolidation, then discovery-bound
   ontology design. Bounded design now requires explicit `--sample-only`.

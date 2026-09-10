@@ -93,6 +93,9 @@ options work in Schema-2; follow the installed CLI's explicit capability checks.
 | Operation | Command | Boundary |
 |---|---|---|
 | Discover corpus | `fabric-kg domain discover --help` | Full source/chunk accounting and cached unapproved observations; explicit partial state |
+| Align windows | `fabric-kg domain window-align --help` | One working-schema version per batch; explicit deterministic/model mode; snapshots are not ontology approval |
+| Inspect window history | `fabric-kg domain window-status --state ...` / `domain window-history --state ...` | Read-only progress and version transitions through the last committed chunk |
+| Review mappings | `fabric-kg domain review-window-mapping --help` | Explicit target-domain-bound mapping acceptance before `enrich --mapping-review`; new concepts stay pending |
 | Explore design | `fabric-kg domain design --help` | Discovery-bound, seed-aware unapproved design; explicit sample-only compatibility |
 | Evaluate design | `fabric-kg domain evaluate-design --help` | Separate structural question report; not factual answer acceptance |
 | Inspect question context | `fabric-kg domain question-context --help` | Read-only routing and data-requirement handoff; not a query executor |
@@ -122,6 +125,33 @@ without DI calls. A cached-layout read is not proof OCR interpreted every fact
 correctly, and incomplete/unsupported OCR provenance must remain visible.
 
 ## Review, cost and replay
+
+For windowed alignment, keep the working schema in versioned CLI snapshots.
+Every worker in a batch uses one frozen version; aggregate and evaluate changes
+before committing the next. Preserve before/after hashes, original observations,
+mapping decisions, pending conflicts and model context. Conversation memory is
+not the registry. Inspect actual command availability before using window
+operations; do not imitate them with hand-edited candidate files.
+Use `domain window-schema` for exact artifact contracts. `window-align` plans by
+default; `--live` persists work. Deterministic mode makes no model calls and
+handles unique formatting equivalence only, not arbitrary synonyms. Model mode
+uses bounded alignment calls. Complete windows resume without repeated calls.
+Final replay uses the exact accepted mapping review and `--window-state`; changed
+mapping authority requires fresh L2 state rather than stale checkpoints.
+
+Ontology holds core concepts, relationships, procedure structure and retrieval
+keys, not necessarily every detail from the documents. Foundry Agent orchestration
+can use those keys to retrieve detailed text from AI Search. Preserve scope,
+document revision and permissions, and retrieve parent paragraphs/table rows and
+headers when the short hit does not establish an owner/value relationship.
+Similarity is not proof. Do not automatically write a retrieved answer back into
+the ontology or treat an optional unstructured detail as a mandatory graph field.
+
+See `docs/FOUNDRY-SEARCH-ORCHESTRATION.md` in the repository for integration
+prerequisites. In particular, the needed original content must actually be
+indexed; an asserted-evidence-only index is not assumed to contain omitted
+detail. Index expansion and runtime evidence adjudication are orchestrator
+integration work, not capabilities silently supplied by the window CLI.
 
 - `complete` assessment means window/file accounting, not perfect semantic recall.
 - Keep deferred windows, unsupported images, unread documents and remaining

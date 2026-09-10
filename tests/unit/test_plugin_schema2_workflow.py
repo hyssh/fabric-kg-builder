@@ -13,6 +13,7 @@ def test_plugin_schema2_operations_are_registered_and_not_legacy_default():
     skill = (ROOT / "plugins/fabric-kg/skills/fabric-kg-pipeline/SKILL.md").read_text()
     for operation in (
         "discover", "design", "evaluate-design", "compile-design", "question-context",
+        "window-align", "window-status", "window-history", "review-window-mapping",
         "assess", "review-assessment", "revise",
     ):
         assert operation in cli.commands["domain"].commands

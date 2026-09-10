@@ -52,7 +52,8 @@ Grounding-quality improvement and Fabric/SQL business acceptance remain open.
 
 ## E. Current priority: windowed working schema and mapping
 
-Status: implementation started, user-authorized 2026-09-09 19:27.
+Status: local implementation and full-corpus deterministic replay complete;
+semantic model-assisted alignment and Fabric business acceptance remain open.
 See [window operation contracts](specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md).
 
 Process saved discovery observations in deterministic windows. Every worker
@@ -72,6 +73,19 @@ need not become an ontology property, but asserted facts still require proof.
 Implementation order: freeze snapshot/transition/mapping contracts -> parallel
 core and CLI/replay work -> helper guidance -> targeted regression and public
 CLI checks on existing saved candidates. No full raw-corpus recollection.
+
+Actual public-CLI result over the retained 22-document corpus: 1,425/1,425 chunks
+processed in 23 windows of up to 64 chunks, with versions 0 through 23 and a final
+17-chunk window. All operations used zero model calls. Completed resume preserves
+the authoritative run bytes/hash and accepted mapping-review binding.
+
+Reviewed formatting mappings, replayed into fresh L2/L3/L4 state, changed
+asserted entities from 3,680 to 3,882 and properties from 1 to 15; relationships
+remain zero. All 11,951 grounded candidates reached the audit layer, and the
+original 6,676 quarantined candidates were not promoted. Processing completion
+does not mean semantic coverage: 233 grounded relationship candidates still need
+semantic/endpoint alignment, and evidence and identity requirements still apply.
+This result does not justify Fabric publication or claim all six questions work.
 
 ## D. Active release acceptance: full corpus and a user-facing Data Agent
 

@@ -51,3 +51,15 @@ and actual command help; do not reconstruct its implementation in chat.
    withdrawal, or unapproved identity changes.
 10. Use durable CLI artifacts rather than chat memory for resuming work. Never
     print or commit credentials or customer evidence.
+
+Window operations use one frozen working-schema version per batch and a single
+evaluated version transition before the next batch. Inspect the persisted
+snapshot/history, not an assumed conversational memory. Review final mappings
+before using them against an approved extraction contract.
+
+For detail retrieval, follow the pipeline skill's Foundry/Search guidance:
+Ontology/Graph supplies core structure and keys, Search supplies original
+passages with the correct scope/version, and Lakehouse SQL handles analytical
+questions. Do not force every detail into ontology properties or mistake vector
+similarity for owner/value proof. Search expansion is orchestrator work; verify
+index coverage and asking-user permissions rather than assume the CLI built them.

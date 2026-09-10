@@ -45,6 +45,7 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 - **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
 - **Corpus-first ontology design** — full chunk discovery and document/corpus consolidation before business/seed-driven design; separate question-gap evaluation and explicit approval
 - **Reusable observations** — preserve raw candidates and grounding diagnostics; reuse prepared sources after approval and target only missing/unmapped work for additional model calls
+- **Windowed common schema** — freeze one version per batch, persist schema snapshots and mapping decisions through the last chunk, and explicitly review final mappings before replay; see [window commands](docs/SCHEMA2-PROTOTYPE.md#windowed-common-schema-alignment-and-snapshots)
 - **Question execution context** — analytical questions retain Lakehouse SQL routing, scope, source needs and pending decisions through approval and serving; routing is not SQL execution
 - **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
 - **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  

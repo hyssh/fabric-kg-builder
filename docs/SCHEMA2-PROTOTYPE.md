@@ -12,6 +12,8 @@ fabric-kg --version
 fabric-kg domain discover --help
 fabric-kg domain design-schema
 fabric-kg domain question-context --help
+fabric-kg domain window-schema
+fabric-kg domain window-align --help
 fabric-kg domain design --help
 fabric-kg domain evaluate-design --help
 fabric-kg domain compile-design --help
@@ -219,6 +221,88 @@ Name matching ignores case and separators, but is only a review aid. It does not
 establish that differently named concepts are equivalent, or that a matching
 name has the same meaning. Review the actual endpoints and property ownership:
 model-written rationales can contradict the generated graph.
+
+## Windowed common-schema alignment and snapshots
+
+Align saved discovery observations before repeating any raw extraction. The
+current CLI requires a hash-verified, approved Schema-2 seed domain, used only
+as a working reference; its approval does not approve later working changes.
+Plan all windows without calls/writes:
+
+```bash
+fabric-kg domain window-align --discovery .fkg/discovery/run-1.json \
+  --seed-domain .fkg/l1-026/domain.yaml --out-state .fkg/windows \
+  --window-size 64 --concurrency 12 --proposal-mode deterministic --max-calls 0
+```
+
+Add `--live` to persist windows. Explicit `deterministic` mode uses no model and
+records unique formatting normalization only; unknown synonyms remain pending.
+Model mode uses the configured Foundry client and a bounded `--max-calls` budget
+for alignment proposals, not another raw-source extraction:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain window-align \
+  --discovery .fkg/discovery/run-1.json --seed-domain .fkg/l1-026/domain.yaml \
+  --out-state .fkg/model-windows --window-size 8 --concurrency 4 \
+  --proposal-mode model --max-calls 32 --live
+```
+
+Every chunk in a window receives the same schema snapshot. The coordinator
+evaluates proposals and commits one successor before the next window. Original
+observations remain immutable, and final mapping uses the final snapshot.
+An oversized context or exhausted budget remains partial instead of truncating
+the schema or claiming all chunks were processed.
+
+Use `--resume` with the same state and configuration to continue. Proposal mode
+is bound to the manifest; switching deterministic/model modes requires a new
+run. A complete deterministic run means complete processing, not complete
+semantic mapping. Inspect the actual state and all transitions:
+
+```bash
+fabric-kg domain window-status --state .fkg/windows
+fabric-kg domain window-history --state .fkg/windows
+```
+
+Snapshots/logs preserve before/after hashes, input chunk IDs, request/response
+identity, additions/rejections and pending choices. They are the durable record,
+not chat memory. `domain window-schema` exports the exact machine-readable
+contracts without requiring model credentials.
+
+Review the final mapping against the exact approved target domain:
+
+```bash
+fabric-kg domain review-window-mapping --state .fkg/windows \
+  --discovery .fkg/discovery/run-1.json --target-domain .fkg/l1-026/domain.yaml \
+  --actor reviewer --rationale "Reviewed compatible working-schema mappings" \
+  --out .fkg/window-mapping-review.json
+```
+
+Default review is read-only. Add `--accept` only after inspecting the proposed
+targets and unresolved concepts. The review binds the discovery bytes/hash,
+target-domain hash and final window run/snapshot/mapping hashes; it does not
+change the approved domain or authorize evidence.
+
+```bash
+fabric-kg enrich --input ./documents --domain-file .fkg/l1-026/domain.yaml \
+  --l1-state .fkg/l1-026 --l2-state .fkg/l2-window-mapped \
+  --discovery .fkg/discovery/run-1.json --window-state .fkg/windows \
+  --mapping-review .fkg/window-mapping-review.json --replay-only --dry-run
+```
+
+`--window-mapping` is an alias of `--mapping-review`. Use fresh L2 state for a
+changed mapping review. Values, source anchors and raw observations are not
+rewritten; unmatched/provisional concepts remain pending and existing L3 checks
+still apply.
+
+For a later ontology design, `domain design --window-state DIR` carries the final
+working schema as versioned reference context alongside the matching discovery.
+It does not automatically approve new working concepts.
+
+Detailed source text need not all become ontology properties. Follow
+[Foundry/Search orchestration guidance](FOUNDRY-SEARCH-ORCHESTRATION.md) for using
+core ontology keys to retrieve scoped original paragraphs/tables and for routing
+analytics to SQL. Index expansion and runtime source adjudication are not
+implemented by these window commands.
 
 ## Question routing and Lakehouse SQL context
 
