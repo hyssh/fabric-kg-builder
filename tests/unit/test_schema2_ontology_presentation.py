@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import uuid
 
 import pytest
@@ -736,3 +737,275 @@ def test_verifier_upgrade_transport_forbids_update_even_if_enabled(completed_old
     with pytest.raises(m.Error, match="forbids"):
         run.request("POST", run.update_url, json={"definition": {}})
     assert len(case.updates) == 1
+
+
+@pytest.fixture
+def hyphen_source(monkeypatch):
+    from tests.unit import test_l5a_structured_publication as fixtures
+
+    original = fixtures._l3_with_sealed_manifest
+
+    def source(*args, **kwargs):
+        kwargs = copy.deepcopy(kwargs)
+        for properties in kwargs["type_properties"].values():
+            for prop in properties:
+                prop["display_name"] = prop["display_name"].replace(" ", "-")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fixtures, "_l3_with_sealed_manifest", source)
+
+
+@pytest.fixture
+def historical_repair(hyphen_source, repair, monkeypatch):
+    from fabric_kg_builder.deploy import ontology_names as names
+
+    case = repair
+    monkeypatch.setattr(m, "_render", PRODUCTION_RENDER)
+    independent_diff = m.presentation_diff
+    with monkeypatch.context() as historical:
+        historical.setattr(names, "NATIVE_NAME_PATTERN", r"[A-Za-z][A-Za-z0-9_-]{0,127}")
+        historical.setattr(names, "_label_name", lambda metadata, *, prefix: m._historical_names(
+            {"test": metadata}, prefix, [],
+        )["test"])
+        historical.setattr(m, "presentation_diff", lambda before, after, **kwargs: independent_diff(
+            before, after, _name_policy=m._LEGACY_NAME_POLICY,
+        ))
+        planned = _plan(case)
+        old_plan = p._read_json(case.state / "plan.json")
+        old_plan.pop("name_validation_policy")
+        old_plan["plan_hash"] = canonical_sha256({k: v for k, v in old_plan.items() if k != "plan_hash"})
+        p._atomic_json(case.state / "plan.json", old_plan)
+        planned["plan_hash"] = old_plan["plan_hash"]
+        case.mode = "service-default"
+        case.previous_receipt = _live(case, planned)
+    case.previous_state = case.state
+    case.previous_plan = old_plan
+    case.frozen = {
+        path: path.read_bytes()
+        for root in (case.previous_state, case.args["materialize"], case.args["l4_run"])
+        for path in root.rglob("*") if path.is_file()
+    }
+    case.frozen.update({
+        path: path.read_bytes() for path in (case.args["plan_path"], case.args["journal_path"])
+    })
+    case.state = case.state.parent / "second-presentation"
+    case.args.update(state=case.state, previous_repair_state=case.previous_state)
+    case.mode = "200-empty"
+    case.updates.clear()
+    return case
+
+
+def test_public_second_repair_chains_verified_hyphen_baseline(historical_repair):
+    case = historical_repair
+    before = copy.deepcopy(case.backend.definitions[case.item_id])
+    assert any("-" in prop["name"] for part in m._decode(before).values() if "properties" in part for prop in part["properties"])
+    flags = ["app", "repair-ontology-names"]
+    aliases = {"plan_path": "publication-plan", "journal_path": "prototype-journal"}
+    for key, value in case.args.items():
+        flags += ["--" + aliases.get(key, key.replace("_", "-")), str(value)]
+    result = CliRunner().invoke(cli, flags)
+    assert result.exit_code == 0, result.output
+    planned = json.loads(result.output)
+    assert not case.updates
+    sealed = p._read_json(case.state / "plan.json")
+    assert sealed["before_hash"] == case.previous_receipt["definition_hash"]
+    assert sealed["name_validation_policy"] == m.NAME_POLICY
+    chain = sealed["lineage"]["previous_repair"]
+    assert chain["plan_hash"] == case.previous_plan["plan_hash"]
+    assert chain["plan_bytes_hash"] == m._digest(case.previous_state / "plan.json")
+    assert chain["receipt_bytes_hash"] == m._digest(case.previous_state / "receipt.json")
+    assert p._read_json(case.state / "backup.json")["definition"] == before
+    receipt = _live(case, planned)
+    assert len(case.updates) == 1
+    assert receipt["resources_created"] == receipt["resources_deleted"] == 0
+    assert receipt["scope"] == case.previous_receipt["scope"]
+    assert receipt["workspace_item_ids"] == case.previous_receipt["workspace_item_ids"]
+    assert receipt["metadata"] == case.previous_receipt["metadata"]
+    assert m._invariants(before) == m._invariants(case.backend.definitions[case.item_id])
+    assert all(path.read_bytes() == data for path, data in case.frozen.items())
+    assert _live(case, planned, resume=True) == receipt
+    assert len(case.updates) == 1
+    for path, payload in m._decode(case.backend.definitions[case.item_id]).items():
+        if re.fullmatch(r"(EntityTypes|RelationshipTypes)/[^/]+/definition\.json", path):
+            assert re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", payload["name"])
+            assert all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", prop["name"]) for prop in payload.get("properties", []))
+
+
+@pytest.mark.parametrize("artifact", [
+    "plan.json", "backup.json", "replacement.json", "mapping.json",
+    "update-intent.json", "update-response.json", "receipt.json", "verified-definition.json",
+])
+def test_second_repair_rejects_previous_artifact_tampering(historical_repair, artifact):
+    case = historical_repair
+    path = case.previous_state / artifact
+    value = p._read_json(path)
+    if artifact == "update-response.json":
+        value["raw_body_sha256"] = "f" * 64
+    else:
+        value["tampered"] = True
+    p._atomic_json(path, value)
+    with pytest.raises((m.Error, KeyError, ValueError)):
+        _plan(case)
+    assert not case.updates and not case.state.exists()
+
+
+@pytest.mark.parametrize("mutation", ["name", "property", "binding", "metadata", "source", "scope"])
+def test_second_repair_rejects_current_or_source_drift(historical_repair, mutation):
+    case = historical_repair
+    if mutation in ("name", "property", "binding"):
+        definition = case.backend.definitions[case.item_id]
+        index = next(
+            i for i, part in enumerate(definition["parts"])
+            if ("/DataBindings/" in part["path"]) == (mutation == "binding")
+            and part["path"].startswith("EntityTypes/")
+        )
+        part = definition["parts"][index]
+        payload = m._decode({"parts": [part]})[part["path"]]
+        if mutation == "property":
+            payload["properties"][0]["valueType"] = "Boolean"
+        else:
+            payload["name" if mutation == "name" else "source"] = "unauthorized"
+        definition["parts"][index] = _part(part["path"], payload)
+    elif mutation == "metadata":
+        case.backend.items[case.item_id]["sensitivityLabel"] = {"id": "changed"}
+    elif mutation == "source":
+        path = case.args["materialize"] / "definitions" / "ontology.json"
+        value = p._read_json(path)
+        value["changed"] = True
+        p._atomic_json(path, value)
+    else:
+        path = case.previous_state / "plan.json"
+        value = p._read_json(path)
+        value["scope"] = {"not": "approved"}
+        value["plan_hash"] = canonical_sha256({k: v for k, v in value.items() if k != "plan_hash"})
+        p._atomic_json(path, value)
+    with pytest.raises(m.Error):
+        _plan(case)
+    assert not case.updates and not case.state.exists()
+
+
+def test_second_repair_revalidates_prior_receipt_before_live(historical_repair):
+    case = historical_repair
+    planned = _plan(case)
+    path = case.previous_state / "receipt.json"
+    receipt = p._read_json(path)
+    receipt["resources_created"] = 1
+    p._atomic_json(path, receipt)
+    with pytest.raises(m.Error):
+        _live(case, planned)
+    assert not case.updates and not (case.state / "update-intent.json").exists()
+
+
+@pytest.mark.parametrize("directory", ["original-relative", "unrelated"])
+def test_second_repair_resolves_prior_receipt_relative_state(historical_repair, directory):
+    case = historical_repair
+    receipt = p._read_json(case.previous_state / "receipt.json")
+    name = case.previous_state.name if directory == "original-relative" else "not-the-approved-state"
+    receipt.update(backup=f"{name}/backup.json", mapping_sidecar=f"{name}/mapping.json")
+    p._atomic_json(case.previous_state / "receipt.json", receipt)
+    if directory == "original-relative":
+        planned = _plan(case)
+        assert _live(case, planned)["status"] == "presentation-verified-same-item"
+        assert len(case.updates) == 1
+    else:
+        with pytest.raises(m.Error, match="artifact path differs"):
+            _plan(case)
+        assert not case.updates
+
+
+def test_second_repair_rejects_self_signed_unknown_legacy_labels(historical_repair):
+    case = historical_repair
+    state = case.previous_state
+    plan = p._read_json(state / "plan.json")
+    backup = p._read_json(state / "backup.json")
+    replacement = p._read_json(state / "replacement.json")
+    mapping = p._read_json(state / "mapping.json")
+    observed = p._read_json(state / "verified-definition.json")
+    row = next(row for row in plan["mapping"] if row["kind"] == "relationship_type")
+    row["new_name"] = "Self-Signed-Unknown"
+    path = f"RelationshipTypes/{row['id']}/definition.json"
+    for definition in (replacement, observed):
+        index = next(i for i, part in enumerate(definition["parts"]) if part["path"] == path)
+        payload = m._decode(definition)[path]
+        payload["name"] = row["new_name"]
+        definition["parts"][index] = _part(path, payload)
+    plan["replacement_hash"] = canonical_sha256(replacement)
+    plan["after_hash"] = m._content_hash(replacement)
+    plan["allowed_field_diff"] = m.presentation_diff(
+        backup["definition"], replacement, _name_policy=m._LEGACY_NAME_POLICY,
+    )
+    mapping.update(mappings=plan["mapping"], allowed_field_diff=plan["allowed_field_diff"])
+    plan["mapping_sidecar_hash"] = canonical_sha256(mapping)
+    plan["plan_hash"] = canonical_sha256({k: v for k, v in plan.items() if k != "plan_hash"})
+    intent = p._read_json(state / "update-intent.json")
+    intent.update(plan_hash=plan["plan_hash"], request_hash=canonical_sha256({"definition": replacement}))
+    receipt = p._read_json(state / "receipt.json")
+    receipt.update(
+        plan_hash=plan["plan_hash"], definition_hash=m._content_hash(observed),
+        readback_equivalence=m._readback_equivalence(replacement, observed),
+    )
+    for name, value in {
+        "plan": plan, "replacement": replacement, "mapping": mapping,
+        "update-intent": intent, "receipt": receipt, "verified-definition": observed,
+    }.items():
+        p._atomic_json(state / f"{name}.json", value)
+    case.backend.definitions[case.item_id] = observed
+    with pytest.raises(m.Error, match="historical mapping differs"):
+        _plan(case)
+    assert not case.updates and not case.state.exists()
+
+
+def test_second_repair_rejects_new_naming_code_drift(historical_repair, monkeypatch):
+    case = historical_repair
+    planned = _plan(case)
+    codes = m._code_hashes()
+    monkeypatch.setattr(m, "_code_hashes", lambda: {**codes, "naming_policy_hash": "changed"})
+    with pytest.raises(m.Error, match="drift"):
+        _live(case, planned)
+    assert not case.updates and not (case.state / "update-intent.json").exists()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_second_repair_state_cannot_overlap_previous(historical_repair, nested):
+    case = historical_repair
+    case.args["state"] = case.previous_state / "nested" if nested else case.previous_state
+    with pytest.raises(m.Error, match="separate"):
+        _plan(case)
+    assert not case.updates
+
+
+def test_second_repair_ambiguous_intent_never_posts_again(historical_repair, monkeypatch):
+    case = historical_repair
+    planned = _plan(case)
+    original = m._exclusive
+
+    def interrupted(path, payload):
+        original(path, payload)
+        if path.name == "update-intent.json":
+            raise OSError("Crash after intent")
+
+    monkeypatch.setattr(m, "_exclusive", interrupted)
+    with pytest.raises(OSError, match="Crash"):
+        _live(case, planned)
+    monkeypatch.setattr(m, "_exclusive", original)
+    with pytest.raises(m.Error, match="NEVER repeat POST"):
+        _live(case, planned, resume=True)
+    assert not case.updates
+
+
+@pytest.mark.parametrize("kind", ["entity", "property", "relationship"])
+def test_independent_diff_rejects_hyphens_even_when_unchanged(kind):
+    if kind == "relationship":
+        definition = _relationship_definition({"description": "Approved"})
+        payload = m._decode(definition)["RelationshipTypes/7/definition.json"]
+        payload["name"] = "Not-Allowed"
+        definition["parts"][0] = _part("RelationshipTypes/7/definition.json", payload)
+    else:
+        definition = {"parts": [_part("EntityTypes/1/definition.json", {
+            "id": "1", "name": "Not-Allowed" if kind == "entity" else "Allowed",
+            "displayNamePropertyId": "2", "entityIdParts": ["2"],
+            "properties": [{"id": "2", "name": "Not-Allowed" if kind == "property" else "Allowed", "valueType": "String"}],
+        })]}
+    with pytest.raises(m.Error, match="readable identifier"):
+        m.presentation_diff(definition, definition)
+    assert m.presentation_diff(definition, definition, _name_policy=m._LEGACY_NAME_POLICY) == []

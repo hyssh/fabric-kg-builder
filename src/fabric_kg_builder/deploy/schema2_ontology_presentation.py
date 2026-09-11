@@ -10,6 +10,7 @@ import json
 import re
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ from fabric_kg_builder.deploy import schema2_prototype_reconcile as r
 Error = p.PrototypePublicationError
 POLICY = "ontology-presentation-only-same-item-nontransactional-v1"
 READBACK_POLICY = "pairwise-relationship-empty-customAttributes-only-v1"
+NAME_POLICY = "letters-digits-underscore-v1"
+_LEGACY_NAME_POLICY = "historical-letters-digits-underscore-hyphen-v1"
 MAX_RESPONSE_BYTES = 65536
 MAX_POLLS = 120
 
@@ -128,14 +131,22 @@ def _diff(before: Any, after: Any, pointer: str = "") -> list[dict[str, Any]]:
 
 def presentation_diff(
     before: dict[str, Any], after: dict[str, Any],
+    *, _name_policy: str = NAME_POLICY,
 ) -> list[dict[str, Any]]:
     """Independently enforce the narrow field allowlist, not renderer assertions."""
+    if _name_policy not in (NAME_POLICY, _LEGACY_NAME_POLICY):
+        raise Error("Unknown presentation name validation policy")
+    pattern = (
+        r"[A-Za-z][A-Za-z0-9_-]{0,127}" if _name_policy == _LEGACY_NAME_POLICY
+        else r"[A-Za-z][A-Za-z0-9_]{0,127}"
+    )
     old, new = _decode(before), _decode(after)
     if set(old) != set(new):
         raise Error("Presentation repair cannot change native part paths or counts")
     raw_before = {part["path"]: part for part in before["parts"]}
     raw_after = {part["path"]: part for part in after["parts"]}
     changes = []
+    names: dict[str, set[str]] = {"EntityTypes": set(), "RelationshipTypes": set()}
     for path in sorted(old):
         entity = re.fullmatch(r"EntityTypes/[^/]+/definition\.json", path)
         relationship = re.fullmatch(r"RelationshipTypes/[^/]+/definition\.json", path)
@@ -143,6 +154,18 @@ def presentation_diff(
             if raw_before[path] != raw_after[path]:
                 raise Error(f"Protected definition/binding part bytes changed: {path}")
             continue
+        kind = path.split("/", 1)[0]
+        name = new[path].get("name")
+        properties = new[path].get("properties", []) if entity else []
+        property_names = [prop.get("name") for prop in properties]
+        if (
+            not isinstance(name, str) or not re.fullmatch(pattern, name)
+            or name.casefold() in names[kind]
+            or any(not isinstance(value, str) or not re.fullmatch(pattern, value) for value in property_names)
+            or len({value.casefold() for value in property_names}) != len(property_names)
+        ):
+            raise Error(f"Native ontology name is not a valid readable identifier or collides: {path}")
+        names[kind].add(name.casefold())
         for change in _diff(old[path], new[path]):
             pointer = change["pointer"]
             allowed = pointer in ("/name", "/semanticEnrichment/description")
@@ -152,7 +175,7 @@ def presentation_diff(
                 )
             if not allowed or not isinstance(change["after"], str) or not change["after"].strip():
                 raise Error(f"Protected non-presentation field changed: {path}{pointer}")
-            if pointer.endswith("/name") and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,127}", change["after"]):
+            if pointer.endswith("/name") and not re.fullmatch(pattern, change["after"]):
                 raise Error(f"Native ontology name is not a valid readable identifier: {path}{pointer}")
             changes.append({"part": path, **change})
         if entity:
@@ -295,6 +318,92 @@ def _render(definition: dict[str, Any], compilation: Any, source: Any) -> tuple[
     return {"parts": list(rendered.parts)}, list(rendered.mapping_report)
 
 
+def _historical_names(metadata: dict[str, Any], prefix: str, reserved: list[str]) -> dict[str, str]:
+    """Frozen pre-underscore allocator, used ONLY to authenticate old approvals."""
+    names = {}
+    for key, value in sorted(metadata.items()):
+        candidates = [value["display_name"]]
+        if value.get("ascii_alias"):
+            candidates.append(value["ascii_alias"])
+        candidates.extend(value.get("aliases", ()))
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, str) or (index and not candidate.isascii()):
+                continue
+            name = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate).strip("_-")
+            if not re.search(r"[A-Za-z0-9]", name):
+                continue
+            if not re.match(r"[A-Za-z]", name):
+                name = prefix + "_" + name
+            if re.fullmatch(r"ws[_-][0-9a-f]{32,}", name, re.IGNORECASE):
+                raise Error("Opaque identifiers cannot authenticate historical labels")
+            names[key] = name[:128]
+            break
+        else:
+            raise Error("Historical label requires an approved ASCII alias")
+    reserved_keys = {value.casefold() for value in reserved}
+    counts = Counter(value.casefold() for value in names.values())
+    conflicted = {
+        key for key, name in names.items()
+        if counts[name.casefold()] > 1 or name.casefold() in reserved_keys
+    }
+    used = reserved_keys | {name.casefold() for key, name in names.items() if key not in conflicted}
+    for key in sorted(conflicted):
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        for length in range(8, 65, 4):
+            candidate = names[key][:127 - length] + "_" + digest[:length]
+            if candidate.casefold() not in used:
+                names[key] = candidate
+                used.add(candidate.casefold())
+                break
+        else:
+            raise Error("Historical name allocation collision")
+    return names
+
+
+def _historical_render(
+    before: dict[str, Any], context: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Reuse current authority/identity/description mapping, changing only old spelling."""
+    from fabric_kg_builder.deploy.ontology_names import readable_catalog_from_domain
+
+    rendered, mapping = _render(before, context["compilation"], context["source"])
+    catalog = readable_catalog_from_domain(context["evidence"]["approved_domain_contract"])
+    payloads = _decode(rendered)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in mapping:
+        if row["canonical_id"] is not None:
+            groups.setdefault((row["kind"], row.get("owner_id", "")), []).append(row)
+    for (kind, owner), rows in groups.items():
+        category = {"entity_type": "entity_types", "relationship_type": "relationship_types", "property": "properties"}[kind]
+        prefix = {"entity_type": "Type", "relationship_type": "Relationship", "property": "Property"}[kind]
+        reserved = []
+        if kind == "property":
+            item = payloads[f"EntityTypes/{owner}/definition.json"]
+            ids = {row["id"] for row in rows}
+            reserved = [prop["name"] for prop in item["properties"] if prop["id"] not in ids]
+        elif kind == "entity_type":
+            reserved = [row["new_name"] for row in mapping if row["kind"] == kind and row["canonical_id"] is None]
+        allocated = _historical_names(
+            {row["canonical_id"]: catalog[category][row["canonical_id"]] for row in rows},
+            prefix, reserved,
+        )
+        for row in rows:
+            row["new_name"] = allocated[row["canonical_id"]]
+            if kind == "property":
+                item = payloads[f"EntityTypes/{owner}/definition.json"]
+                next(prop for prop in item["properties"] if prop["id"] == row["id"])["name"] = row["new_name"]
+            else:
+                directory = "EntityTypes" if kind == "entity_type" else "RelationshipTypes"
+                payloads[f"{directory}/{row['id']}/definition.json"]["name"] = row["new_name"]
+    result = copy.deepcopy(rendered)
+    for part in result["parts"]:
+        if re.fullmatch(r"(EntityTypes|RelationshipTypes)/[^/]+/definition\.json", part["path"]):
+            part["payload"] = base64.b64encode(
+                json.dumps(payloads[part["path"]], indent=2, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+    return result, mapping
+
+
 def _code_hashes() -> dict[str, str]:
     from fabric_kg_builder.deploy import ontology_names
 
@@ -308,6 +417,7 @@ def _code_hashes() -> dict[str, str]:
 def _local(
     *, plan_path: Path, journal_path: Path, materialize: Path, l4_run: Path,
     l3_root: Path, workspace_id: str, ontology_id: str,
+    previous_repair_state: Path | None = None,
 ) -> dict[str, Any]:
     import pyarrow.parquet as pq
     from fabric_kg_builder.deploy.ontology_names import readable_catalog_from_domain
@@ -395,11 +505,20 @@ def _local(
         "publication_crosswalk": crosswalk.model_dump(mode="json"),
         **_code_hashes(),
     }
-    return {
+    context = {
         "plan": plan, "journal": journal, "original": original,
         "lakehouse_id": lakehouse_id, "reconciliation": receipt,
         "compilation": compilation, "source": source, "evidence": evidence,
     }
+    if previous_repair_state is not None:
+        previous = _previous_repair(previous_repair_state, context, {
+            "plan_path": plan_path, "journal_path": journal_path, "materialize": materialize,
+            "l4_run": l4_run, "l3_root": l3_root,
+            "workspace_id": workspace_id, "ontology_id": ontology_id,
+        })
+        context["previous_repair"] = previous
+        evidence["previous_repair"] = previous["chain"]
+    return context
 
 
 def _headers(response: Any) -> dict[str, str]:
@@ -537,18 +656,201 @@ class _PresentationRun(p._Run):
 
 
 def _snapshot(run: _PresentationRun, context: dict[str, Any]) -> dict[str, Any]:
+    previous = context.get("previous_repair")
     proof = r._proof(
-        run, "ontology", run.ontology_id, context["original"], context["lakehouse_id"],
+        run, "ontology", run.ontology_id,
+        previous["definition"] if previous else context["original"], context["lakehouse_id"],
     )
     receipt = context["reconciliation"]
-    if receipt and receipt["review"]["proof"] != proof:
+    if not previous and receipt and receipt["review"]["proof"] != proof:
         raise Error("Current original definition/metadata differs from exact reconciliation proof")
-    return {
+    snapshot = {
         "metadata": proof["metadata"], "lakehouse_metadata": proof["lakehouse_metadata"],
         "definition": copy.deepcopy(run.definitions["ontology", run.ontology_id]),
         "ownership_proof": proof,
         "workspace_item_ids": sorted(item["id"] for item in run.inventory),
     }
+    if previous and (
+        snapshot["metadata"] != previous["receipt"]["metadata"]
+        or snapshot["lakehouse_metadata"] != previous["receipt"]["lakehouse_metadata"]
+        or snapshot["workspace_item_ids"] != previous["receipt"]["workspace_item_ids"]
+        or canonical_sha256(snapshot["definition"]) != canonical_sha256(previous["definition"])
+        or _readback_equivalence(previous["replacement"], snapshot["definition"])
+        != previous["receipt"]["readback_equivalence"]
+    ):
+        raise Error("Fresh remote definition/metadata/inventory differs from verified previous repair")
+    return snapshot
+
+
+def _sealed(
+    state: Path, plan: dict[str, Any], *, _name_policy: str = NAME_POLICY,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        plan.get("policy") != POLICY
+        or canonical_sha256({key: value for key, value in plan.items() if key != "plan_hash"})
+        != plan.get("plan_hash")
+    ):
+        raise Error("Previous repair approval/immutable plan hash mismatch")
+    snapshot, replacement = p._read_json(state / "backup.json"), p._read_json(state / "replacement.json")
+    sidecar = p._read_json(state / "mapping.json")
+    if (
+        canonical_sha256(snapshot) != plan["backup_hash"]
+        or _content_hash(snapshot["definition"]) != plan["before_hash"]
+        or canonical_sha256(replacement) != plan["replacement_hash"]
+        or _content_hash(replacement) != plan["after_hash"]
+        or presentation_diff(snapshot["definition"], replacement, _name_policy=_name_policy) != plan["allowed_field_diff"]
+        or _invariants(replacement) != plan["unchanged_invariants"]
+        or _invariants(snapshot["definition"]) != plan["unchanged_invariants"]
+        or canonical_sha256(sidecar) != plan["mapping_sidecar_hash"]
+        or sidecar.get("mappings") != plan["mapping"]
+        or sidecar.get("allowed_field_diff") != plan["allowed_field_diff"]
+        or sidecar.get("policy") != POLICY
+        or sidecar.get("authority") != "sealed-L4-approved-Domain-and-publication-crosswalk"
+        or sidecar.get("domain_contract_hash") != plan["local_evidence"]["publication_authority"]["domain_contract_hash"]
+        or sidecar.get("crosswalk_hash") != plan["lineage"]["publication_plan"]["provenance"]["crosswalk_hash"]
+    ):
+        raise Error("Sealed backup/replacement/mapping changed")
+    return snapshot, replacement
+
+
+def _previous_repair(
+    state: Path, context: dict[str, Any], inputs: dict[str, Any],
+    seen: frozenset[Path] = frozenset(),
+) -> dict[str, Any]:
+    """Authenticate every historical transition back to the owned original artifact."""
+    target = state.resolve()
+    if target in seen or len(seen) >= 32 or state.is_symlink():
+        raise Error("Invalid/cyclic previous repair chain")
+    names = (
+        "plan.json", "backup.json", "replacement.json", "mapping.json",
+        "update-intent.json", "update-response.json", "receipt.json", "verified-definition.json",
+    )
+    if any(not (state / name).is_file() or (state / name).is_symlink() for name in names):
+        raise Error("Previous repair requires complete immutable plan/backup/mapping/intent/response/receipt")
+    hashes = {name: _digest(state / name) for name in names}
+    plan = p._read_json(state / "plan.json")
+    policy = plan.get("name_validation_policy", _LEGACY_NAME_POLICY)
+    snapshot, replacement = _sealed(state, plan, _name_policy=policy)
+    expected_inputs = _input_paths(inputs)
+    prior_inputs = dict(plan["inputs"])
+    ancestor_path = prior_inputs.pop("previous_repair_state", None)
+    if prior_inputs != expected_inputs:
+        raise Error("Previous repair source/run/workspace/ontology inputs differ")
+    ancestor = _previous_repair(Path(ancestor_path), context, inputs, seen | {target}) if ancestor_path else None
+    current_evidence = copy.deepcopy(context["evidence"])
+    current_evidence.pop("previous_repair", None)
+    if ancestor:
+        current_evidence["previous_repair"] = ancestor["chain"]
+    historical_evidence = plan["local_evidence"]
+    code_keys = set(_code_hashes())
+    if (
+        {key: value for key, value in historical_evidence.items() if key not in code_keys}
+        != {key: value for key, value in current_evidence.items() if key not in code_keys}
+        or any(not isinstance(historical_evidence.get(key), str) or not historical_evidence[key] for key in code_keys)
+        or plan["lineage"] != {
+            "publication_plan_hash": context["plan"]["plan_hash"],
+            "publication_plan": context["plan"], "prototype_journal": context["journal"],
+            "reconciliation": context["reconciliation"],
+            **({"previous_repair": ancestor["chain"]} if ancestor else {}),
+        }
+        or plan["workspace_id"] != inputs["workspace_id"]
+        or plan["ontology_id"] != inputs["ontology_id"]
+        or plan["lakehouse_id"] != context["lakehouse_id"]
+        or plan["scope"] != context["plan"]["provenance"].get("window_run_scope")
+        or plan["method"] != "POST"
+    ):
+        raise Error("Previous repair source/authority/lineage/scope changed")
+    for kind, item_id in (("ontology", inputs["ontology_id"]), ("lakehouse", context["lakehouse_id"])):
+        metadata = snapshot["metadata" if kind == "ontology" else "lakehouse_metadata"]
+        if (
+            metadata.get("id") != item_id
+            or metadata.get("workspaceId") != inputs["workspace_id"]
+            or metadata.get("type") != p.ITEM_TYPES[kind]
+            or metadata.get("displayName") != context["plan"]["names"][kind]
+            or metadata.get("description") != context["plan"]["description"]
+        ):
+            raise Error("Previous repair metadata does not identify the original owned item/run")
+    platform = r._platform_envelope(snapshot["definition"], context["plan"], "ontology")
+    proof = {
+        "metadata": snapshot["metadata"], "lakehouse_metadata": snapshot["lakehouse_metadata"],
+        "definition_hash": canonical_sha256(p._definition_payloads(snapshot["definition"])),
+        "lakehouse_id": context["lakehouse_id"],
+        "service_platform_hash": canonical_sha256(platform) if platform is not None else None,
+    }
+    if snapshot["ownership_proof"] != proof:
+        raise Error("Previous repair backup ownership proof changed")
+    if ancestor:
+        if (
+            snapshot["definition"] != ancestor["definition"]
+            or any(snapshot[key] != ancestor["receipt"][key] for key in (
+                "metadata", "lakehouse_metadata", "workspace_item_ids",
+            ))
+        ):
+            raise Error("Previous repair backup differs from its verified ancestor")
+    else:
+        if p._definition_payloads(snapshot["definition"]) != p._definition_payloads(context["original"]):
+            raise Error("Previous repair backup differs from owned original native definition")
+        original_platform = r._platform_envelope(context["original"], context["plan"], "ontology")
+        if original_platform is not None and platform != original_platform:
+            raise Error("Previous repair changed original platform metadata")
+        if context["reconciliation"] and context["reconciliation"]["review"]["proof"] != proof:
+            raise Error("Previous repair backup lacks exact original ownership proof")
+    rendered, mapping = _render(snapshot["definition"], context["compilation"], context["source"])
+    if _decode(rendered) != _decode(replacement) or mapping != plan["mapping"]:
+        if policy != _LEGACY_NAME_POLICY:
+            raise Error("Previous repair mapping differs from approved L4 catalog")
+        rendered, mapping = _historical_render(snapshot["definition"], context)
+        if _decode(rendered) != _decode(replacement) or mapping != plan["mapping"]:
+            raise Error("Previous repair historical mapping differs from approved L4 catalog")
+    _durable_update(state, plan, replacement)
+    observed = p._read_json(state / "verified-definition.json")
+    receipt = p._read_json(state / "receipt.json")
+    # Older commands recorded the operator's relative --state spelling. Bind
+    # those display paths to this exact directory, without assuming today's cwd.
+    for key, filename in (("backup", "backup.json"), ("mapping_sidecar", "mapping.json")):
+        value = receipt.get(key)
+        if not isinstance(value, str):
+            raise Error("Previous repair receipt artifact path is missing")
+        recorded = Path(value)
+        expected = target / filename
+        if (
+            recorded.is_absolute() and recorded != expected
+            or not recorded.is_absolute() and (
+                len(recorded.parts) < 2 or ".." in recorded.parts
+                or expected.parts[-len(recorded.parts):] != recorded.parts
+            )
+        ):
+            raise Error("Previous repair receipt artifact path differs from its immutable state")
+    if Path(receipt["backup"]).parent != Path(receipt["mapping_sidecar"]).parent:
+        raise Error("Previous repair receipt artifact directories differ")
+    equivalence = _readback_equivalence(replacement, observed)
+    upgrade = receipt.get("verifier_upgrade")
+    if upgrade is not None:
+        expected_upgrade = _upgrade_evidence(
+            state, plan, historical_evidence, upgrade.get("accepted_current_repair_code_hash"),
+        )
+        if upgrade != expected_upgrade:
+            raise Error("Previous repair verifier upgrade proof changed")
+    expected_receipt = _receipt_payload(
+        context, snapshot, plan, Path(receipt["backup"]).parent, observed, equivalence, upgrade,
+    )
+    if receipt != expected_receipt:
+        raise Error("Previous repair receipt/observed definition mismatch")
+    if hashes != {name: _digest(state / name) for name in names}:
+        raise Error("Previous repair evidence changed during validation")
+    return {
+        "definition": observed, "replacement": replacement, "receipt": receipt,
+        "chain": {
+            "state": str(target), "plan_hash": plan["plan_hash"],
+            "plan_bytes_hash": hashes["plan.json"], "receipt_bytes_hash": hashes["receipt.json"],
+            "artifact_bytes_hashes": hashes, "observed_definition_hash": _content_hash(observed),
+            "historical_name_validation_policy": policy,
+        },
+    }
+
+
+def _input_paths(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {key: str(value.resolve()) if isinstance(value, Path) else value for key, value in inputs.items()}
 
 
 def _exclusive(path: Path, payload: dict[str, Any]) -> None:
@@ -574,6 +876,11 @@ def _paths_safe(state: Path, inputs: dict[str, Any]) -> None:
             raise Error("Repair state cannot contain original plan/journal")
     if state.is_symlink():
         raise Error("Repair state must not be a symlink")
+    previous = inputs.get("previous_repair_state")
+    if previous is not None and (
+        target.is_relative_to(previous.resolve()) or previous.resolve().is_relative_to(target)
+    ):
+        raise Error("New repair state must be separate from immutable previous repair state")
 
 
 def repair_ontology_names(
@@ -582,6 +889,7 @@ def repair_ontology_names(
     live: bool = False, approve_plan: str | None = None,
     acknowledge_nontransactional: bool = False, resume: bool = False,
     accept_verifier_update: str | None = None,
+    previous_repair_state: Path | None = None,
 ) -> dict[str, Any]:
     """Snapshot/plan by default; explicitly approve one nontransactional update."""
     workspace_id, ontology_id = str(uuid.UUID(workspace_id)), str(uuid.UUID(ontology_id))
@@ -590,6 +898,8 @@ def repair_ontology_names(
         "l4_run": l4_run, "l3_root": l3_root,
         "workspace_id": workspace_id, "ontology_id": ontology_id,
     }
+    if previous_repair_state is not None:
+        inputs["previous_repair_state"] = previous_repair_state
     _paths_safe(state, inputs)
     if live != bool(approve_plan and acknowledge_nontransactional) or (
         not live and (approve_plan or acknowledge_nontransactional or resume)
@@ -625,18 +935,20 @@ def repair_ontology_names(
         }
         plan = {
             "policy": POLICY, "workspace_id": workspace_id, "ontology_id": ontology_id,
+            "name_validation_policy": NAME_POLICY,
             "lakehouse_id": context["lakehouse_id"],
             "operation": run.update_url, "method": "POST",
             "concurrency": "operator-approved-nontransactional; no CAS/ETag; residual race remains",
             "allowed_effect": "names/descriptions/instance-display-property only; no create/delete/data/type/scope changes",
             "rollback": "manual review of retained full backup only; never automatic overwrite",
-            "inputs": {key: str(value.resolve()) if isinstance(value, Path) else value for key, value in inputs.items()},
+            "inputs": _input_paths(inputs),
             "local_evidence": context["evidence"],
             "lineage": {
                 "publication_plan_hash": context["plan"]["plan_hash"],
                 "publication_plan": context["plan"],
                 "prototype_journal": context["journal"],
                 "reconciliation": context["reconciliation"],
+                **({"previous_repair": context["evidence"]["previous_repair"]} if previous_repair_state else {}),
             },
             "backup_hash": canonical_sha256(snapshot),
             "before_hash": _content_hash(snapshot["definition"]),
@@ -677,18 +989,7 @@ def repair_ontology_names(
             }
         ):
             raise Error("Exact repair approval/immutable plan/input identity mismatch")
-        snapshot, replacement = p._read_json(state / "backup.json"), p._read_json(state / "replacement.json")
-        if (
-            canonical_sha256(snapshot) != plan["backup_hash"]
-            or _content_hash(snapshot["definition"]) != plan["before_hash"]
-            or canonical_sha256(replacement) != plan["replacement_hash"]
-            or _content_hash(replacement) != plan["after_hash"]
-            or presentation_diff(snapshot["definition"], replacement) != plan["allowed_field_diff"]
-            or _invariants(replacement) != plan["unchanged_invariants"]
-            or _invariants(snapshot["definition"]) != plan["unchanged_invariants"]
-            or canonical_sha256(p._read_json(state / "mapping.json")) != plan["mapping_sidecar_hash"]
-        ):
-            raise Error("Sealed backup/replacement/mapping changed")
+        snapshot, replacement = _sealed(state, plan)
         context = _local(**inputs)
         verifier_upgrade = None
         if accept_verifier_update is not None:
@@ -770,11 +1071,18 @@ def _verifier_upgrade(
     comparison["repair_code_hash"] = previous
     if comparison != plan["local_evidence"]:
         raise Error("Verifier upgrade permits ONLY repair_code_hash drift; compiler/naming/source/journal must match")
+    _durable_update(state, plan, replacement)
+    return _upgrade_evidence(state, plan, comparison, accepted_hash)
+
+
+def _durable_update(state: Path, plan: dict[str, Any], replacement: dict[str, Any]) -> None:
     operation = (
         f"{p.API}/workspaces/{plan['workspace_id']}/ontologies/"
         f"{plan['ontology_id']}/updateDefinition?updateMetadata=false"
     )
     intent_path, response_path = state / "update-intent.json", state / "update-response.json"
+    if plan["operation"] != operation:
+        raise Error("Repair operation must be the exact same-item update without metadata changes")
     if not intent_path.is_file() or not response_path.is_file():
         raise Error("Readback-only verifier upgrade requires durable matching update intent AND response")
     if p._read_json(intent_path) != {
@@ -807,6 +1115,18 @@ def _verifier_upgrade(
         raise Error("Durable update response body evidence is inconsistent")
     if response["http_status"] == 202:
         _operation_url(response["headers"])
+
+
+def _upgrade_evidence(
+    state: Path, plan: dict[str, Any], comparison: dict[str, Any], accepted_hash: str,
+) -> dict[str, Any]:
+    previous = plan["local_evidence"]["repair_code_hash"]
+    if (
+        not isinstance(previous, str) or not re.fullmatch(r"[0-9a-f]{64}", previous)
+        or not isinstance(accepted_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", accepted_hash)
+        or previous == accepted_hash
+    ):
+        raise Error("Invalid historical read-only verifier approval")
     return {
         "authority": "explicit-operator-approved-readback-only-verifier-upgrade",
         "original_plan_hash": plan["plan_hash"],
@@ -816,8 +1136,8 @@ def _verifier_upgrade(
         "unchanged_non_verifier_evidence_hash": canonical_sha256({
             key: value for key, value in comparison.items() if key != "repair_code_hash"
         }),
-        "durable_intent_bytes_hash": _digest(intent_path),
-        "durable_response_bytes_hash": _digest(response_path),
+        "durable_intent_bytes_hash": _digest(state / "update-intent.json"),
+        "durable_response_bytes_hash": _digest(state / "update-response.json"),
         "update_post_authorized": False,
     }
 
@@ -856,26 +1176,7 @@ def _verify(
             or _digest(state / "update-response.json") != verifier_upgrade["durable_response_bytes_hash"]
         ):
             raise Error("Verifier/source/durable proof changed during readback; no receipt sealed")
-    receipt = {
-        "policy": POLICY, "status": "presentation-verified-same-item",
-        "plan_hash": plan["plan_hash"], "ontology_id": run.ontology_id,
-        "lakehouse_id": context["lakehouse_id"], "definition_hash": actual_hash,
-        "metadata": metadata, "lakehouse_metadata": lakehouse,
-        "readback_equivalence": equivalence, "verifier_upgrade": verifier_upgrade,
-        "publication_snapshot": {
-            "status": "SUPERSEDED",
-            "original_publication_plan_hash": context["plan"]["plan_hash"],
-            "original_definition_hash": plan["before_hash"],
-            "reason": "Presentation definition changed by separately approved same-item repair",
-            "old_readiness": "not-current; do not blindly resume original publisher",
-        },
-        "scope": plan["scope"], "companion_graph": plan["companion_graph"],
-        "resources_created": 0, "resources_deleted": 0,
-        "workspace_item_ids": inventory,
-        "backup": str(state / "backup.json"),
-        "mapping_sidecar": str(state / "mapping.json"),
-        "business_readiness": "not reassessed; source bounds and evidence obligations unchanged",
-    }
+    receipt = _receipt_payload(context, snapshot, plan, state, actual, equivalence, verifier_upgrade)
     if (state / "receipt.json").exists():
         if p._read_json(state / "receipt.json") != receipt:
             raise Error("Existing immutable repair receipt differs from verified readback")
@@ -888,3 +1189,29 @@ def _verify(
             _exclusive(verified_path, actual)
         _exclusive(state / "receipt.json", receipt)
     return receipt
+
+
+def _receipt_payload(
+    context: dict[str, Any], snapshot: dict[str, Any], plan: dict[str, Any], state: Path,
+    actual: dict[str, Any], equivalence: dict[str, Any], verifier_upgrade: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "policy": POLICY, "status": "presentation-verified-same-item",
+        "plan_hash": plan["plan_hash"], "ontology_id": plan["ontology_id"],
+        "lakehouse_id": context["lakehouse_id"], "definition_hash": _content_hash(actual),
+        "metadata": snapshot["metadata"], "lakehouse_metadata": snapshot["lakehouse_metadata"],
+        "readback_equivalence": equivalence, "verifier_upgrade": verifier_upgrade,
+        "publication_snapshot": {
+            "status": "SUPERSEDED",
+            "original_publication_plan_hash": context["plan"]["plan_hash"],
+            "original_definition_hash": plan["before_hash"],
+            "reason": "Presentation definition changed by separately approved same-item repair",
+            "old_readiness": "not-current; do not blindly resume original publisher",
+        },
+        "scope": plan["scope"], "companion_graph": plan["companion_graph"],
+        "resources_created": 0, "resources_deleted": 0,
+        "workspace_item_ids": snapshot["workspace_item_ids"],
+        "backup": str(state / "backup.json"),
+        "mapping_sidecar": str(state / "mapping.json"),
+        "business_readiness": "not reassessed; source bounds and evidence obligations unchanged",
+    }

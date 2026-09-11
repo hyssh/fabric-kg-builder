@@ -16,6 +16,8 @@ from fabric_kg_builder.contracts.base import canonical_json
 @click.option("--prototype-journal", "journal_path", type=click.Path(path_type=Path, exists=True), required=True)
 @click.option("--materialize", type=click.Path(path_type=Path, exists=True), required=True)
 @click.option("--state", type=click.Path(path_type=Path), required=True, help="NEW directory for immutable plan and backup.")
+@click.option("--previous-repair-state", type=click.Path(path_type=Path, exists=True, file_okay=False),
+              help="Completed prior repair directory; verify its full immutable chain before planning another same-item repair.")
 @click.option("--live", is_flag=True, help="Apply the exact approved presentation-only plan to the same ontology.")
 @click.option("--approve-plan", help="Exact repair plan hash (not the old publication plan hash).")
 @click.option("--acknowledge-nontransactional", is_flag=True, help="Accept that Fabric offers no CAS/ETag guard here.")
@@ -29,6 +31,7 @@ def repair_ontology_names_cmd(ctx: click.Context, **kwargs) -> None:
     Live requires exact approval and acknowledgement of the nontransactional
     same-item update. Retains full backup; never automatically rolls back.
     Original publication/readiness snapshots are superseded, not rewritten.
+    For an already repaired ontology, pass its completed --previous-repair-state.
     """
     root_options = ctx.find_root().obj
     if isinstance(root_options, dict) and root_options.get("dry_run"):

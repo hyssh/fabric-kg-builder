@@ -11,7 +11,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-NATIVE_NAME_PATTERN = r"[A-Za-z][A-Za-z0-9_-]{0,127}"
+# Ontology transport allows hyphens, but Graph node labels do not.
+NATIVE_NAME_PATTERN = r"[A-Za-z][A-Za-z0-9_]{0,127}"
 _DEFINITION_PATH = re.compile(r"(EntityTypes|RelationshipTypes)/([0-9]+)/definition\.json")
 _BASE_ID = "1000000"
 
@@ -62,7 +63,7 @@ def _label_name(metadata: Mapping[str, Any], *, prefix: str) -> str:
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, str) or (index and not candidate.isascii()):
             continue
-        normalized = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate).strip("_-")
+        normalized = re.sub(r"[^A-Za-z0-9_]+", "_", candidate).strip("_")
         if not re.search(r"[A-Za-z0-9]", normalized):
             continue
         if not re.match(r"[A-Za-z]", normalized):

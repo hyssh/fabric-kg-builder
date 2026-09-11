@@ -228,10 +228,15 @@ model-written rationales can contradict the generated graph.
 
 Canonical IDs are machine identities, not user-facing names. Native entity,
 relationship and property names should be derived from the approved readable
-catalog. Fabric requires a leading ASCII letter followed by letters, digits,
-underscores or hyphens (maximum 128 characters), so a label such as
+catalog. Use the shared Ontology/Graph-safe rule: a leading ASCII letter followed
+by letters, digits or underscores (maximum 128 characters). The Ontology
+transport schema permits hyphens, but Graph node labels do not; transport
+acceptance alone is not sufficient validation. A label such as
 `Battery Screw` becomes `Battery_Screw`. Keep original human labels and canonical
 IDs in the naming report; do not change canonical IDs or physical table names.
+For example, `local_environmental_or_e-waste_laws_and_guidelines` must become
+`local_environmental_or_e_waste_laws_and_guidelines`. Check collisions after
+normalization, including collisions with pre-existing underscore names.
 
 For an existing Ontology, prefer a reviewed presentation-only `updateDefinition`
 over deletion/recreation. Back up the complete current definition, retain every
@@ -269,6 +274,14 @@ An interrupted operation uses `--resume` for readback/LRO polling only, never
 another update POST. Keep the original publication snapshot and the new repair
 receipt separately; a successful naming repair does not retrospectively change
 the original publication definition hash.
+
+For a subsequent naming correction, use a **new** `--state` directory and pass
+`--previous-repair-state` pointing to the completed repair. The CLI validates its
+plan, backup, replacement, mapping, receipt and observed definition against the
+same sealed publication authority, then requires the current Fabric definition
+to match that predecessor. Historical hyphen-containing names are accepted only
+when validating the previous repair; every new replacement uses Graph-safe names.
+Do not reuse a completed plan or its readback-only resume to authorize a new update.
 
 Readback records Fabric's observed normalization of an absent relationship
 `semanticEnrichment.customAttributes` to an empty object separately. It never

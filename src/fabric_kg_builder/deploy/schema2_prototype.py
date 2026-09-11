@@ -33,6 +33,7 @@ from fabric_kg_builder.deploy.lakehouse_schema import (
     onelake_tables_path,
     resolve_lakehouse_schema,
 )
+from fabric_kg_builder.deploy.ontology_names import NATIVE_NAME_PATTERN
 from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
 from fabric_kg_builder.serving.graph_model import (
     build_graph_model_parts,
@@ -413,7 +414,7 @@ def _ontology_parts(
             for item in [payload, *payload.get("properties", [])]:
                 name_value = item.get("name")
                 if name_value is not None and not re.fullmatch(
-                    r"[A-Za-z][A-Za-z0-9_-]{0,127}", name_value
+                    NATIVE_NAME_PATTERN, name_value
                 ):
                     raise PrototypePublicationError(
                         f"Invalid native Ontology name {name_value!r}; "

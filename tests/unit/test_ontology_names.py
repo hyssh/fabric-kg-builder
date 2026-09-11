@@ -86,6 +86,45 @@ def test_names_are_bounded_collision_safe_and_order_independent():
     assert names["6"].startswith("id_")
 
 
+@pytest.mark.parametrize("label,expected", [
+    ("local_environmental_or_e-waste_laws_and_guidelines",
+     "local_environmental_or_e_waste_laws_and_guidelines"),
+    ("3IP (Torx-Plus) driver", "Type_3IP_Torx_Plus_driver"),
+    ("ESD-Safe mat", "ESD_Safe_mat"),
+    ("USB-C connector", "USB_C_connector"),
+])
+def test_names_obey_stricter_graph_label_rule(label, expected):
+    assert allocate_readable_names({"type:source": {"display_name": label}}) == {"type:source": expected}
+    assert re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", expected)
+
+
+def test_hyphen_normalization_collisions_remain_distinct_and_stable():
+    catalog = {
+        "a": {"display_name": "E-waste"},
+        "b": {"display_name": "E_waste"},
+        "c": {"display_name": "e waste"},
+    }
+    names = allocate_readable_names(catalog)
+    assert names == allocate_readable_names(dict(reversed(list(catalog.items()))))
+    assert len({name.casefold() for name in names.values()}) == 3
+    assert all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", name) for name in names.values())
+    assert all(name.lower().startswith("e_waste_") for name in names.values())
+
+
+@pytest.mark.parametrize("kind", ["entity", "property", "relationship"])
+def test_presentation_validation_rejects_graph_unsafe_hyphens(kind):
+    ontology, catalog = _fixtures()
+    parts = _compile(ontology, catalog=catalog).parts
+    path = ("RelationshipTypes/3000001/definition.json"
+            if kind == "relationship" else "EntityTypes/1000001/definition.json")
+    def edit(value):
+        target = value["properties"][2] if kind == "property" else value
+        target["name"] = "invalid-name"
+    changed = _replace(parts, path, edit)
+    with pytest.raises(ValueError, match="Invalid or colliding"):
+        validate_presentation_only(parts, changed)
+
+
 @pytest.mark.parametrize("label", ["", "   ", "!!!", "电池", "ws_" + "f" * 64])
 def test_missing_or_opaque_labels_fail_explicitly(label):
     with pytest.raises(ValueError):
