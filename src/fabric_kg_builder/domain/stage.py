@@ -2071,6 +2071,9 @@ def prepare_l1_stage(
     design_discovery_acceptance: Any = None,
     design_window_run: Any = None,
     design_window_run_acceptance: Any = None,
+    design_schema_projection: Any = None,
+    design_source_projection_draft: Any = None,
+    _window_validation: Any = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
     started = started_at_utc or _utc_now()
@@ -2085,6 +2088,24 @@ def prepare_l1_stage(
             or re.fullmatch(r"[0-9a-f]{64}", design_prompt_binding[1]) is None
         ):
             raise L1StageError("Invalid design-first prompt binding")
+    if design_schema_projection is not None and (
+        design_window_run is None or design_prompt_binding is None
+        or design_schema_projection.projection_hash != design_prompt_binding[1]
+    ):
+        raise L1StageError("Schema projection requires its exact model-free design/run binding")
+    if (
+        design_schema_projection is not None and design_schema_projection.required_retained_type_ids is not None
+        and design_source_projection_draft is None
+    ):
+        raise L1StageError("Required source type retention requires the full projected design proof")
+    if design_source_projection_draft is not None:
+        from .window_schema_projection import projection_contract_binding
+
+        if (
+            design_schema_projection is None or design_source_projection_draft.schema_projection is None
+            or projection_contract_binding(design_source_projection_draft) != design_schema_projection
+        ):
+            raise L1StageError("Source type retention requires its exact projected design proof")
     if design_description is not None:
         if design_prompt_binding is None or client is not None or candidates is None:
             raise L1StageError("Additional design description requires model-free design compilation")
@@ -2119,6 +2140,7 @@ def prepare_l1_stage(
 
         sample_manifest, profile, source_units, evidence_spans = window_run_design_artifacts(
             design_window_run, preflight=preflight, verified_at_utc=started, acceptance=design_window_run_acceptance,
+            _validation=_window_validation,
         )
     elif design_discovery is not None:
         if design_prompt_binding is None or client is not None or candidates is None or supplemental_design_locations:
@@ -2138,6 +2160,8 @@ def prepare_l1_stage(
             budget=preflight.budget,
     )
     if supplemental_design_locations:
+        if design_window_run_acceptance is not None and design_window_run_acceptance.authority == "limited_committed_prefix_only":
+            raise L1StageError("Committed-prefix design cannot add supplemental source support outside its exact scope")
         preflight, sample_manifest, profile, source_units, evidence_spans = (
             _supplement_design_artifacts(
                 preflight, sample_manifest, profile, source_units, evidence_spans,
@@ -2697,6 +2721,10 @@ def prepare_l1_stage(
             preflight.intake,
             candidates,
             known_evidence_span_ids=known_evidence_ids,
+            **({
+                "source_projection_draft": design_source_projection_draft,
+                "_window_validation": _window_validation,
+            } if design_source_projection_draft is not None else {}),
         )
         )
     except (ProposalSelectionError, ValidationError, ArithmeticError) as exc:
@@ -2945,9 +2973,15 @@ def prepare_l1_stage(
         from fabric_kg_builder.enrichment.window_run_reuse import window_run_binding
 
         payload = draft_contract.model_dump(mode="python")
-        payload["window_run_binding"] = window_run_binding(design_window_run, design_window_run_acceptance).model_dump(mode="python")
+        payload["window_run_binding"] = window_run_binding(
+            design_window_run, design_window_run_acceptance, _validation=_window_validation,
+        ).model_dump(mode="python")
         if design_window_run_acceptance is not None:
             payload["window_run_acceptance"] = design_window_run_acceptance.model_dump(mode="python")
+            if design_window_run_acceptance.authority == "limited_committed_prefix_only":
+                payload["business"]["organization_context"] += "\n\n" + design_window_run_acceptance.scope_notice
+        if design_schema_projection is not None:
+            payload["window_schema_projection"] = design_schema_projection.model_dump(mode="python")
         draft_contract = DomainContractV2.model_validate(payload)
     try:
         design_context = _build_design_context(

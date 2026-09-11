@@ -190,3 +190,78 @@ def test_large_conflict_registry_has_bounded_self_contained_representatives(inte
     assert selected["omitted_rows"] + selected["represented_rows"] == 400
     assert isinstance(selected["rows"][0]["reason"]["conflict_reason"], str)
     assert isinstance(selected["rows"][0]["scope"], dict)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_large_public_projection_evaluation_compilation_replays_once_per_command(large_runs, partial, tmp_path, monkeypatch):
+    from time import monotonic
+
+    from fabric_kg_builder.domain import window_run as engine
+    from fabric_kg_builder.domain.window_validation import WindowValidationOperation
+    from tests.unit.test_domain_discovery_cli import _invoke
+
+    preflight, incomplete, waiver, complete = large_runs
+    run, acceptance = (incomplete, waiver) if partial else (complete, None)
+    operation = WindowValidationOperation()
+    draft = design.generate_domain_design(
+        preflight, window_run=run, window_run_acceptance=acceptance,
+        client=IntegratedModel(), _validation=operation,
+    )
+    parent, projected, evaluation = (tmp_path / name for name in ("parent.json", "projected.json", "evaluation.json"))
+    design.save_design_artifact(parent, draft, _validation=operation)
+    parent_bytes = parent.read_bytes()
+    assert len(parent_bytes) > 1_000_000 and len(run.logs) >= 99
+    original, calls = engine._validate_exchanges, []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_validate_exchanges", counted)
+    timings = {}
+
+    def command(label, args):
+        before, started = len(calls), monotonic()
+        result = _invoke(args)
+        passes = (len(calls) - before) / len(run.logs)
+        timings[label] = {"full_replays": passes, "seconds": round(monotonic() - started, 3)}
+        assert passes == 1, timings
+        return result
+
+    command("retain", [
+        "domain", "retain-window-schema", "--file", str(parent), "--out", str(projected), "--apply",
+        "--prefer-window-definitions", "--actor", "performance-reviewer",
+        "--rationale", "Retain exact compatible source definitions without relaxing L1 review.",
+    ])
+    evaluated = command("evaluate", [
+        "domain", "evaluate-design", "--file", str(projected), "--out", str(evaluation),
+    ])
+    command("compile", [
+        "domain", "compile-design", "--input", str(preflight.source_path), "--file", str(projected),
+        "--evaluation", str(evaluation), "--accept-evaluation-hash", evaluated["result"]["evaluation_hash"],
+        "--out-state", str(tmp_path / "l1"), "--out-domain", str(tmp_path / "domain.yaml"),
+    ])
+    assert parent.read_bytes() == parent_bytes
+    assert json.loads(projected.read_text())["window_run"]["state"] == run.state
+    print({"partial": partial, "windows": len(run.logs), "draft_bytes": len(parent_bytes), "commands": timings})
+
+
+def test_different_valid_artifacts_in_one_operation_are_fully_replayed(large_runs, monkeypatch):
+    from fabric_kg_builder.domain import window_run as engine
+    from fabric_kg_builder.domain.window_run_acceptance import validate_window_run_acceptance
+    from fabric_kg_builder.domain.window_validation import WindowValidationOperation
+
+    _, partial, waiver, complete = large_runs
+    original, calls = engine._validate_exchanges, []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_validate_exchanges", counted)
+    operation = WindowValidationOperation()
+    validate_window_run_acceptance(waiver, partial, _validation=operation)
+    operation.run(complete)
+    assert len(calls) == len(partial.logs) + len(complete.logs)
+    with pytest.raises(ValueError, match="NOT_PARTIAL"):
+        validate_window_run_acceptance(waiver, complete, _validation=operation)

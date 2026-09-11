@@ -879,6 +879,7 @@ def query_schema2_prototype(
         checks = _graph_readback_checks(
             graph, compilation, plan["workspace_id"], ids["lakehouse"],
             companion=target == "ontology-companion",
+            native_ontology=ontology_readback,
         )
         del checks
         schema = _schema(graph, compilation)

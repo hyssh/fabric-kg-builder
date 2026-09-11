@@ -91,7 +91,7 @@ def _conflict_context(logs):
     }
 
 
-def window_design_context(run, acceptance=None):
+def window_design_context(run, acceptance=None, *, _validation=None):
     """No schema/intake truncation, synthetic discovery, or alteration of candidate values."""
     from fabric_kg_builder.enrichment.window_run_reuse import window_run_binding
 
@@ -171,7 +171,7 @@ def window_design_context(run, acceptance=None):
     return {
         "format_version": WINDOW_DESIGN_CONTEXT_VERSION,
         "authority": "representative_schema_design_reference_only",
-        "binding": window_run_binding(run, acceptance).model_dump(mode="json"),
+        "binding": window_run_binding(run, acceptance, _validation=_validation).model_dump(mode="json"),
         "context": {"intake_raw": run.context.intake_raw, "context_hash": run.context.artifact_hash,
                     "intake_text_hash": canonical_sha256(run.context.intake_text), "routing": run.context.routing},
         "final_snapshot": run.final_snapshot.model_dump(mode="json"),
@@ -186,7 +186,17 @@ def window_design_context(run, acceptance=None):
             "gap_count": len(acceptance.coverage.gaps),
             "gaps": _bounded_rows([gap.model_dump(mode="json") for gap in acceptance.coverage.gaps], 8_000),
             "authority": acceptance.authority,
-        }} if acceptance is not None else {}),
+        }} if acceptance is not None and acceptance.authority == "prototype_chunk_coverage_only" else {}),
+        **({"scope_acceptance": {
+            "acceptance_hash": acceptance.acceptance_hash, "actor": acceptance.actor,
+            "rationale": acceptance.rationale, "authority": acceptance.authority,
+            "cursor": acceptance.cursor, "selected_chunk_count": len(acceptance.selected_committed_chunk_ids),
+            "selected_chunk_ids_hash": canonical_sha256(acceptance.selected_committed_chunk_ids),
+            "omitted_chunk_count": len(acceptance.omitted_chunk_ids),
+            "omitted_chunk_ids_hash": canonical_sha256(acceptance.omitted_chunk_ids),
+            "coverage_hash": canonical_sha256(acceptance.coverage), "scope_notice": acceptance.scope_notice,
+            "gaps": _bounded_rows([gap.model_dump(mode="json") for gap in acceptance.coverage.gaps], 8_000),
+        }} if acceptance is not None and acceptance.authority == "limited_committed_prefix_only" else {}),
         "policy": (
             "All original candidates, quotations, values, rejected proposals and working annotations remain "
             "sealed in the draft's full window_run and local ledgers. These exact pattern/source counts and "

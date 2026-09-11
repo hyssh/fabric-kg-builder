@@ -35,6 +35,8 @@ from .domain_window_run_cmd import (
 )
 from .domain_window_run_review_cmd import domain_review_window_run_mapping_cmd
 from .domain_window_run_acceptance_cmd import domain_accept_window_run_partial_cmd
+from .domain_window_run_prefix_cmd import domain_accept_window_run_prefix_cmd
+from .domain_window_schema_projection_cmd import domain_retain_window_schema_cmd
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
     DomainContract,
@@ -201,6 +203,8 @@ domain_cmd.add_command(domain_window_run_history_cmd)
 domain_cmd.add_command(domain_window_run_schema_cmd)
 domain_cmd.add_command(domain_review_window_run_mapping_cmd)
 domain_cmd.add_command(domain_accept_window_run_partial_cmd)
+domain_cmd.add_command(domain_accept_window_run_prefix_cmd)
+domain_cmd.add_command(domain_retain_window_schema_cmd)
 
 
 @domain_cmd.command("init")

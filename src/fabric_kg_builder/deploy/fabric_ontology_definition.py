@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .lakehouse_schema import apply_source_schema, resolve_lakehouse_schema
+from .ontology_names import repair_ontology_presentation
 
 BASE_ENTITY_TYPE_ID = "1000000"
 BASE_ENTITY_TYPE_NAME = "surface_entity"
@@ -56,6 +57,7 @@ class FabricOntologyCompilation:
 
     parts: tuple[dict[str, str], ...]
     widened_relationships: tuple[str, ...] = field(default=())
+    presentation_mapping: tuple[dict[str, Any], ...] = field(default=())
 
 
 def _name(canonical_id: str) -> str:
@@ -119,6 +121,7 @@ def _entity_type_payload(
     *,
     identity_property_id: str,
     label_property_id: str | None = None,
+    legacy_names: bool = True,
 ) -> dict[str, Any]:
     properties = [
         {
@@ -140,7 +143,7 @@ def _entity_type_payload(
     properties.extend(
         _property_payload(prop) for prop in entity_type.get("properties", ())
     )
-    for key in ("id", "name"):
+    for key in (("id", "name") if legacy_names else ("id",)):
         values = [prop[key] for prop in properties]
         if len(set(values)) != len(values):
             raise ValueError(
@@ -225,6 +228,8 @@ def compile_fabric_ontology_definition(
     display_name: str,
     description: str,
     lakehouse: Any,
+    catalog: dict[str, Any] | None = None,
+    legacy_names: bool = False,
 ) -> FabricOntologyCompilation:
     """Translate the L5a ontology definition into Fabric item parts.
 
@@ -234,8 +239,20 @@ def compile_fabric_ontology_definition(
     mismatch produces a definition that imports and reads back cleanly while
     binding to a OneLake path that does not exist, which surfaces only later as
     an unrefreshable, empty graph.
+
+    Readable names require ``catalog`` or the sealed L5 ``presentation_catalog``.
+    ``legacy_names=True`` reproduces historical canonical-ID names only for
+    explicit compatibility; new public publications must not enable it.
+    Presentation changes preserve all numeric IDs and physical bindings.
     """
 
+    if not legacy_names:
+        catalog = catalog or l5a_ontology.get("presentation_catalog")
+        if catalog is None:
+            raise ValueError(
+                "Readable ontology compilation requires an approved presentation_catalog; "
+                "legacy_names=True is only for explicitly reproducing old artifacts"
+            )
     lakehouse_schema = resolve_lakehouse_schema(lakehouse)
     parts: list[dict[str, str]] = [_part("definition.json", {})]
     entity_types = list(l5a_ontology["entity_types"])
@@ -308,6 +325,7 @@ def compile_fabric_ontology_definition(
                     entity_type,
                     identity_property_id=identity_property_id,
                     label_property_id=label_property_id,
+                    legacy_names=legacy_names,
                 ),
             )
         )
@@ -437,7 +455,16 @@ def compile_fabric_ontology_definition(
             },
         )
     )
+    presentation_mapping: tuple[dict[str, Any], ...] = ()
+    if not legacy_names:
+        presentation = repair_ontology_presentation(
+            parts, l5a_ontology=l5a_ontology, catalog=catalog,
+            preserve_live_metadata=False,
+        )
+        parts = list(presentation.parts)
+        presentation_mapping = presentation.mapping_report
     return FabricOntologyCompilation(
         parts=tuple(parts),
         widened_relationships=tuple(sorted(set(widened))),
+        presentation_mapping=presentation_mapping,
     )

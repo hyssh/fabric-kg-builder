@@ -9,7 +9,7 @@ from pydantic_core import PydanticCustomError
 
 from .question_routing import QuestionRouting, is_sql_question
 from .discovery_acceptance import DiscoveryAcceptanceBinding
-from .window_run_acceptance import WindowRunCoverageAcceptance
+from .window_run_acceptance import WindowRunAcceptance, WindowRunPrefixAcceptance
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -973,13 +973,46 @@ class WindowRunBinding(V2StrictModel):
     snapshot_hash: Sha256Text
     final_mapping_hash: Sha256Text
     coverage_acceptance_hash: Sha256Text | None = None
+    scope_acceptance_hash: Sha256Text | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         values = handler(self)
         if self.coverage_acceptance_hash is None:
             values.pop("coverage_acceptance_hash", None)
+        if self.scope_acceptance_hash is None:
+            values.pop("scope_acceptance_hash", None)
         return values
+
+
+class WindowSchemaProjectionBinding(V2StrictModel):
+    projection_hash: Sha256Text
+    parent_draft_hash: Sha256Text
+    window_run_hash: Sha256Text
+    snapshot_hash: Sha256Text
+    retained_concept_keys: dict[V2RequiredText, V2RequiredText]
+    unsupported_concepts: dict[V2RequiredText, V2RequiredText]
+    required_retained_type_ids: list[V2RequiredText] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        values = handler(self)
+        if self.required_retained_type_ids is None:
+            values.pop("required_retained_type_ids", None)
+        return values
+
+    @model_validator(mode="after")
+    def _partition(self):
+        if set(self.retained_concept_keys) & set(self.unsupported_concepts):
+            raise ValueError("Projected concepts cannot be both retained and unsupported")
+        if self.required_retained_type_ids is not None and (
+            self.required_retained_type_ids != sorted(set(self.required_retained_type_ids))
+            or not set(self.required_retained_type_ids) <= {
+                "semantic-type:" + key for key in self.retained_concept_keys.values()
+            }
+        ):
+            raise ValueError("Required source type retention differs from projected schema keys")
+        return self
 
 
 class DomainContractV2(V2StrictModel):
@@ -989,7 +1022,8 @@ class DomainContractV2(V2StrictModel):
     discovery_run_hash: Sha256Text | None = None
     discovery_acceptance: DiscoveryAcceptanceBinding | None = None
     window_run_binding: WindowRunBinding | None = None
-    window_run_acceptance: WindowRunCoverageAcceptance | None = None
+    window_run_acceptance: WindowRunAcceptance | None = None
+    window_schema_projection: WindowSchemaProjectionBinding | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
@@ -1002,16 +1036,34 @@ class DomainContractV2(V2StrictModel):
             values.pop("window_run_binding", None)
         if self.window_run_acceptance is None:
             values.pop("window_run_acceptance", None)
+        if self.window_schema_projection is None:
+            values.pop("window_schema_projection", None)
         return values
 
     @model_validator(mode="after")
     def _discovery_acceptance_binding(self):
         binding = self.window_run_binding
         acceptance = self.window_run_acceptance
-        if (binding is not None and binding.coverage_acceptance_hash is not None) != (acceptance is not None):
-            raise ValueError("window-run coverage binding requires its exact attached acceptance")
+        projection = self.window_schema_projection
+        if projection is not None and (
+            binding is None or projection.window_run_hash != binding.window_run_hash
+            or projection.snapshot_hash != binding.snapshot_hash
+        ):
+            raise ValueError("Window schema projection differs from the exact run/snapshot binding")
+        if projection is not None and projection.required_retained_type_ids is not None and not set(
+            projection.required_retained_type_ids
+        ) <= {item.type_id for item in self.candidate_model.entity_types}:
+            raise ValueError("Required projected source types were dropped from the domain")
+        hashes = [] if binding is None else [
+            value for value in (binding.coverage_acceptance_hash, binding.scope_acceptance_hash) if value is not None
+        ]
+        if len(hashes) != int(acceptance is not None):
+            raise ValueError("window-run binding requires exactly its attached acceptance")
         if acceptance is not None and (
-            acceptance.acceptance_hash != binding.coverage_acceptance_hash
+            acceptance.acceptance_hash != (
+                binding.scope_acceptance_hash if isinstance(acceptance, WindowRunPrefixAcceptance)
+                else binding.coverage_acceptance_hash
+            )
             or any(getattr(acceptance, field) != getattr(binding, field) for field in (
                 "window_run_hash", "prepared_corpus_hash", "context_hash", "snapshot_hash", "final_mapping_hash",
             ))

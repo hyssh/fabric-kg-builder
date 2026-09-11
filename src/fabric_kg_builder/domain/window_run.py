@@ -650,7 +650,8 @@ def _effective_window(snapshot, items, exchanges, config):
         contexts.append({"chunk_id": chunk_id, "response_hash": exchange.response.artifact_hash,
                          "annotations": annotations if isinstance(annotations, dict) else {},
                          "schema_annotations": raw["schema_proposals"]})
-    _, initial_decisions, initial_diagnostics, _ = _barrier(snapshot, items, changes, pending, errors)
+    initial_barrier = _barrier(snapshot, items, changes, pending, errors)
+    _, initial_decisions, initial_diagnostics, _ = initial_barrier
     repairable = {item.chunk.chunk_id: _repairable(item, changes, initial_decisions, initial_diagnostics) for item in items}
     if len(exchanges) > len(items):
         # Repairing an entity must not resurrect an earlier rejected dependent
@@ -717,7 +718,8 @@ def _effective_window(snapshot, items, exchanges, config):
         changes.extend(entry for entry in batch if entry[1] in valid_repair_indexes)
         pending.extend(waiting)
         errors.extend(d for d in invalid if d.channel != "schema_proposals" or d.proposal_index in valid_repair_indexes)
-    next_snapshot, decisions, diagnostics, records = _barrier(snapshot, items, changes, pending, errors)
+    next_snapshot, decisions, diagnostics, records = (
+        _barrier(snapshot, items, changes, pending, errors) if len(exchanges) > len(items) else initial_barrier)
     return _WindowEvaluation(next_snapshot, decisions, diagnostics, records, pending, contexts,
                              initial_diagnostics, supersessions, repairable)
 
@@ -1017,6 +1019,7 @@ def _validate_exchanges(log, items, snapshot, *, prepared, context, manifest_has
         raise ValueError("window embedded request/response accounting mismatch")
     by_id = {item.chunk.chunk_id: item for item in items}
     units = {u.source_unit_id: u for u in prepared.source_units}
+    pending_by_format = {}
     for position, exchange in enumerate(log.exchanges):
         request, response = exchange.request, exchange.response
         chunk_id = request.payload.get("chunk_id")
@@ -1033,11 +1036,21 @@ def _validate_exchanges(log, items, snapshot, *, prepared, context, manifest_has
         if position < len(items) and item != items[position]:
             raise ValueError("window original request order differs")
         payload = json.loads(request.payload["request"]["user"])["input"]
+        stored_pending = payload.get("pending")
+        if isinstance(stored_pending, list):
+            pending_format = "legacy-list"
+        elif isinstance(stored_pending, dict) and stored_pending.get("format_version") in (
+                PENDING_CONTEXT_V1, PENDING_CONTEXT_VERSION):
+            pending_format = stored_pending["format_version"]
+        else:
+            raise ValueError("unsupported pending context representation")
+        if pending_format not in pending_by_format:
+            pending_by_format[pending_format] = _expected_pending(stored_pending, history)
         expected_payload = {
             **_source_payload(prepared, item.chunk), "context": context.model_dump(mode="json"),
             "context_hash": context.artifact_hash, "schema": snapshot.model_dump(mode="json"),
             "schema_hash": snapshot.artifact_hash, "schema_version": snapshot.version,
-            "pending": _expected_pending(payload.get("pending"), history),
+            "pending": pending_by_format[pending_format],
         }
         if position >= len(items):
             expected_payload["repair"] = payload.get("repair")

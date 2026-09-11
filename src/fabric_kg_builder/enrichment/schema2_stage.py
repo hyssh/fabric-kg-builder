@@ -62,7 +62,6 @@ from .schema2_work_units import (
     CandidateModelService,
     WorkUnitCheckpoint,
     execute_work_manifest,
-    plan_work_units,
 )
 
 L2_LEGACY_RESPONSE_SCHEMA_HASH = canonical_sha256(
@@ -696,8 +695,11 @@ def run_l2(
             / f"{source_unit.source_unit_id.replace(':', '-', 1)}.json",
             source_unit,
         )
-    roots = plan_work_units(
+    from .window_prefix import plan_approved_work_units, validate_prefix_candidate_anchors
+
+    roots = plan_approved_work_units(
         materialized.source_units,
+        contract=inputs.domain_contract,
         pass_name="schema-constrained-extraction",
         authority_fingerprint=fingerprint,
     )
@@ -738,6 +740,9 @@ def run_l2(
             extractor_version=extractor_version,
             occurred_at_utc=inputs.l1_receipt.completed_at_utc,
         )
+        validate_prefix_candidate_anchors(
+            (leaf,), contract=inputs.domain_contract, source_units=materialized.source_units,
+        )
         return extraction_leaf_to_dict(leaf)
 
     executions = execute_work_manifest(
@@ -756,6 +761,9 @@ def run_l2(
         extraction_leaf_from_dict(result)
         for execution in executions
         for result in execution.leaf_results
+    )
+    validate_prefix_candidate_anchors(
+        leaves, contract=inputs.domain_contract, source_units=materialized.source_units,
     )
     fragments = derive_collection_member_fragments(
         leaves,

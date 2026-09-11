@@ -145,3 +145,31 @@ def test_completed_zero_call_resume_and_drift_check_before_client(tmp_path, monk
     assert result.exit_code == 1
     assert "binding changed" in result.output
     assert (state / "run.json").read_bytes() == before
+
+
+def test_zero_window_resume_freezes_the_current_prefix(tmp_path, monkeypatch):
+    from fabric_kg_builder.cli import domain_design_cmd
+    from fabric_kg_builder.domain.window_run import RunBudget, run_windowed
+    from tests.unit.test_window_run import Client, inputs
+
+    data = inputs(tmp_path)
+    state = tmp_path / "state"
+    prior = run_windowed(
+        inputs=data, output_dir=state, budget=RunBudget(max_calls=100, max_windows=1),
+        client=Client(), model_version="offline-test",
+    )
+    assert prior.state == "partial"
+    before = {path: path.read_bytes() for path in (state / "windows").glob("*.json")}
+    monkeypatch.setattr(domain_design_cmd, "_build_client",
+                        lambda *_: pytest.fail("Freezing a prefix must not build a model"))
+    result = CliRunner().invoke(cli, [
+        "domain", "window-run", "--prepared", str(tmp_path / "prepared.json"),
+        "--intake", str(tmp_path / "intake.json"), "--out-state", str(state),
+        "--resume", "--live", "--max-calls", "0", "--max-windows", "0",
+    ])
+    assert result.exit_code == 0, result.output
+    frozen = json.loads(result.output)
+    assert frozen["model_calls"] == 0
+    assert frozen["result"]["cursor"] == prior.cursor
+    assert frozen["result"]["final_snapshot"]["artifact_hash"] == prior.final_snapshot.artifact_hash
+    assert before == {path: path.read_bytes() for path in (state / "windows").glob("*.json")}

@@ -105,6 +105,15 @@ def _handoff(
     plan, journal = _strict_json(prototype_plan), _strict_json(prototype_journal)
     if not isinstance(plan, dict) or not isinstance(journal, dict):
         raise Error("Prototype plan/journal must be JSON objects")
+    if journal.get("runtime_repair") or any(
+        action.get("ownership") == "operator-reconciled"
+        for action in journal.get("actions", {}).values()
+    ):
+        raise Error(
+            "DataAgent handoff is incompatible with operator-reconciled/runtime-repaired "
+            "prototype ownership; it currently requires original compiler and returned-ID "
+            "ownership. Do not remove the receipt or rewrite the immutable plan."
+        )
     if (
         plan.get("plan_version") != publication.FORMAT_VERSION
         or plan.get("mode") != "prototype-create-only"
@@ -166,13 +175,14 @@ def _handoff(
         ):
             raise Error(f"Journal does not prove exact created {kind} ownership")
         ids[kind] = item_id
-    ontology = {"parts": publication._ontology_parts(
+    expected_ontology = {"parts": publication._ontology_parts(
         compilation, workspace_id, ids["lakehouse"], plan["names"]["ontology"], plan["description"],
     )}
+    ontology = _strict_json(materialize / "native-bound" / "ontology.json")
     ontology_hash = canonical_sha256(publication._definition_payloads(ontology))
     if (
-        publication._definition_payloads(ontology)
-        != publication._definition_payloads(_strict_json(materialize / "native-bound" / "ontology.json"))
+        publication._definition_payloads(expected_ontology)
+        != publication._definition_payloads(ontology)
         or journal["actions"]["create:ontology"].get("definition_readback_hash") != ontology_hash
     ):
         raise Error("Native Ontology differs from the sealed-source compilation/readback")
@@ -377,6 +387,8 @@ def _selection_id(lakehouse_id: str, path: str) -> str:
 
 def _definition(handoff: _Handoff, name: str, search: dict[str, Any] | None) -> dict[str, Any]:
     context = handoff.context
+    window_scope = context.get("window_run_scope")
+    scope_warning = window_scope["scope_notice"] + "\n\n" if window_scope is not None else ""
     coverage_warning = (
         "This prototype uses explicitly accepted partial discovery coverage. The sealed acceptance "
         "records residual missing-source, quarantine and summary gaps. Acceptance does not make unknown "
@@ -384,7 +396,7 @@ def _definition(handoff: _Handoff, name: str, search: dict[str, Any] | None) -> 
         "of business-critical evidence. Describe aggregates as covering the available validated subset, "
         "not the full source population; disclose these gaps and do not infer absence from missing records.\n\n"
     ) if context.get("discovery_acceptance") is not None else ""
-    instruction = coverage_warning + (
+    instruction = scope_warning + coverage_warning + (
         "Use the attached Ontology first for canonical entity meanings, relationships, and semantic navigation. "
         "For SQL-routed questions, counts, joins, filters, and analytics, use only the attached Lakehouse's "
         "SQL analytics endpoint and its selected dbo tables. Never silently substitute GQL for a SQL-required "
@@ -624,6 +636,7 @@ class _AgentRun(publication._Run):
         publication._graph_readback_checks(
             actual_graph, handoff.compilation, self.plan["workspace_id"],
             handoff.ids["lakehouse"], companion=True,
+            native_ontology=actual_ontology,
         )
         widened = any(
             value.startswith("ontology.endpoint-widening:") for value in handoff.plan["limitations"]

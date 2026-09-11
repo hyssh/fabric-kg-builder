@@ -1458,6 +1458,7 @@ def _validate_leaf(
             source_unit=source_unit,
             anchor=anchor,
             occurred_at_utc=occurred_at_utc,
+            domain_contract=inputs.domain_contract,
         )
         reasons.update(outcome.reason_codes)
         evidence_ids: tuple[str, ...] = ()
@@ -1659,13 +1660,30 @@ def _mint_evidence(
     source_unit: SourceUnit,
     anchor: ProposedOccurrenceAnchor | None,
     occurred_at_utc: datetime,
+    domain_contract: DomainContractV2,
 ):
     return verify_and_mint_extraction_span(
         source_unit=source_unit,
         anchor=anchor,
         verified_at_utc=occurred_at_utc,
         expected_source_text_hash=source_unit.text_content_hash,
+        domain_contract=domain_contract,
     )
+
+
+def _validate_prefix_evidence_spans(inputs, spans):
+    from .window_prefix import prefix_span_allowed
+
+    for span in spans:
+        if not prefix_span_allowed(
+            inputs.domain_contract, source_unit_id=span.source_unit_id,
+            span_start=span.span_start, span_end=span.span_end,
+            source_text_hash=span.source_text_content_hash,
+        ):
+            raise L3StageError(
+                "L3_EVIDENCE_OUTSIDE_APPROVED_PREFIX",
+                f"fresh or cached evidence {span.evidence_span_id} is outside the exact approved prefix",
+            )
 
 
 def _property_reasons(
@@ -2776,6 +2794,7 @@ def _reconcile(
         span.evidence_span_id: span for leaf in leaves for span in leaf.evidence_spans
     }
     for span in spans.values():
+        _validate_prefix_evidence_spans(inputs, (span,))
         require_extraction_evidence(span)
         try:
             span.verify_against(inputs.source_units.require(span.source_unit_id))
@@ -3414,6 +3433,7 @@ def run_l3(
             recomputed += 1
         else:
             reused += 1
+        _validate_prefix_evidence_spans(inputs, leaf.evidence_spans)
         leaves.append(leaf)
 
     outcomes = _validate_required_member_sets(

@@ -12,7 +12,7 @@ from fabric_kg_builder.domain.discovery import _Hashed, _seal, _write, prepared_
 from fabric_kg_builder.domain.models import DomainContractV2, WindowRunBinding
 from fabric_kg_builder.domain.service import compute_contract_hash, load_domain_contract
 from fabric_kg_builder.domain import window_schema
-from fabric_kg_builder.domain.window_run_acceptance import WindowRunCoverageAcceptance, validate_window_run_acceptance
+from fabric_kg_builder.domain.window_run_acceptance import WindowRunCoverageAcceptance, WindowRunPrefixAcceptance, validate_window_run_acceptance
 from fabric_kg_builder.sources.corpus import validate_corpus_manifest_against_source
 
 from .window_mapping import ReplayMapping
@@ -22,15 +22,44 @@ class WindowRunReuseError(ValueError):
     """The integrated source, design or human review does not authorize replay."""
 
 
-def checked_window_run(run, acceptance=None):
-    from fabric_kg_builder.domain.window_run import WindowedRun, _verify_chunks
+def projected_id_only_relationship_aliases(contract):
+    """Keep scoped canonical IDs, never resolve an ambiguous human label."""
+    from fabric_kg_builder.contracts.base import normalize_nfc
 
-    checked = WindowedRun.model_validate(run.model_dump(mode="python"))
-    _verify_chunks(checked.prepared, checked.chunk_plan)
+    if contract.window_schema_projection is None:
+        return set()
+    groups, reserved = {}, set()
+    for relation in contract.candidate_model.relationship_types:
+        groups.setdefault(normalize_nfc(relation.display_name).casefold(), []).append(relation)
+        reserved.update(normalize_nfc(value).casefold() for value in (
+            relation.relationship_type_id, relation.predicate_id,
+        ))
+    closure = contract.hierarchy_closure
+    sources = closure.compatible_source_type_ids_by_relationship
+    targets = closure.compatible_target_type_ids_by_relationship
+    result = set()
+    for alias, relations in groups.items():
+        if len(relations) < 2 or alias in reserved or len({item.display_name for item in relations}) != 1:
+            continue
+        if any(
+            set(sources[left.relationship_type_id]) & set(sources[right.relationship_type_id])
+            and set(targets[left.relationship_type_id]) & set(targets[right.relationship_type_id])
+            for index, left in enumerate(relations) for right in relations[index + 1:]
+        ):
+            continue
+        result.add(alias)
+    return result
+
+
+def checked_window_run(run, acceptance=None, *, _validation=None):
+    from fabric_kg_builder.domain.window_validation import WindowValidationOperation
+
+    operation = _validation or WindowValidationOperation()
+    checked = operation.run(run)
     if acceptance is not None:
-        validate_window_run_acceptance(acceptance, checked)
+        validate_window_run_acceptance(acceptance, checked, _validation=operation)
     elif checked.state != "complete":
-        raise WindowRunReuseError("WINDOW_RUN_INCOMPLETE: finish the entire prepared corpus or supply its exact reviewed >=99% processing acceptance")
+        raise WindowRunReuseError("WINDOW_RUN_INCOMPLETE: finish the corpus or explicitly review >=99% coverage or a limited committed-prefix scope")
     if (acceptance is None and any(item.response is None for item in checked.chunks)) or any(
         item.status not in {"processed", "no_candidates"} for item in checked.prepared.sources
     ):
@@ -38,20 +67,21 @@ def checked_window_run(run, acceptance=None):
     return checked
 
 
-def window_run_binding(run, acceptance=None) -> WindowRunBinding:
-    run = checked_window_run(run, acceptance)
+def window_run_binding(run, acceptance=None, *, _validation=None) -> WindowRunBinding:
+    run = checked_window_run(run, acceptance, _validation=_validation)
     return WindowRunBinding(
         window_run_hash=run.artifact_hash,
         prepared_corpus_hash=run.prepared.prepared_hash,
         context_hash=run.context.artifact_hash,
         snapshot_hash=run.final_snapshot.artifact_hash,
         final_mapping_hash=run.final_mapping.artifact_hash,
-        coverage_acceptance_hash=acceptance.acceptance_hash if acceptance is not None else None,
+        coverage_acceptance_hash=acceptance.acceptance_hash if isinstance(acceptance, WindowRunCoverageAcceptance) else None,
+        scope_acceptance_hash=acceptance.acceptance_hash if isinstance(acceptance, WindowRunPrefixAcceptance) else None,
     )
 
 
-def window_run_design_artifacts(run, *, preflight, verified_at_utc, acceptance=None):
-    run = checked_window_run(run, acceptance)
+def window_run_design_artifacts(run, *, preflight, verified_at_utc, acceptance=None, _validation=None):
+    run = checked_window_run(run, acceptance, _validation=_validation)
     if window_run_intake(run, preflight.base_identity).intake_hash != preflight.intake.intake_hash:
         raise WindowRunReuseError("WINDOW_RUN_CONTEXT_DRIFT: design must retain the original full intake")
     validate_corpus_manifest_against_source(
@@ -59,6 +89,8 @@ def window_run_design_artifacts(run, *, preflight, verified_at_utc, acceptance=N
     )
     return prepared_design_artifacts(
         run.prepared, preflight=preflight, verified_at_utc=verified_at_utc,
+        **({"selected_chunks": acceptance.selected_chunks, "scope_notice": acceptance.scope_notice}
+           if isinstance(acceptance, WindowRunPrefixAcceptance) else {}),
     )
 
 
@@ -83,12 +115,15 @@ class WindowRunMappingReview(_Hashed):
     ontology_approved: Literal[False] = False
     evidence_approved: Literal[False] = False
     coverage_acceptance: WindowRunCoverageAcceptance | None = None
+    scope_acceptance: WindowRunPrefixAcceptance | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         values = handler(self)
         if self.coverage_acceptance is None:
             values.pop("coverage_acceptance", None)
+        if self.scope_acceptance is None:
+            values.pop("scope_acceptance", None)
         return values
 
 
@@ -105,12 +140,15 @@ class WindowRunMappingPreview(ContractModel):
     ontology_approved: Literal[False] = False
     evidence_approved: Literal[False] = False
     coverage_acceptance: WindowRunCoverageAcceptance | None = None
+    scope_acceptance: WindowRunPrefixAcceptance | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         values = handler(self)
         if self.coverage_acceptance is None:
             values.pop("coverage_acceptance", None)
+        if self.scope_acceptance is None:
+            values.pop("scope_acceptance", None)
         return values
 
 
@@ -154,6 +192,20 @@ def _concept_targets(snapshot, contract):
         ]
         if len(matches) == 1:
             targets[concept.concept_id] = matches[0].concept_id
+    projection = contract.window_schema_projection
+    if projection is not None:
+        source = {concept.concept_id: concept for concept in snapshot.concepts}
+        declared = set(projection.retained_concept_keys) | set(projection.unsupported_concepts)
+        if declared != set(source):
+            raise WindowRunReuseError("WINDOW_PROJECTION_CONCEPT_ACCOUNTING_DRIFT")
+        approved_by_id = {concept.concept_id: concept for concept in approved}
+        prefixes = {"entity": "semantic-type:", "relationship": "relationship-type:", "property": "property:"}
+        targets = {
+            key: target for key, target in targets.items()
+            if key in projection.retained_concept_keys
+            and target == prefixes[source[key].kind] + projection.retained_concept_keys[key]
+            and (source[key].kind == "property" or approved_by_id[target].definition == source[key].definition)
+        }
     return targets
 
 
@@ -172,7 +224,8 @@ def _bindings(window_run_path, domain_path):
     targets = _concept_targets(run.final_snapshot, contract)
     return run, contract, {
         "binding": binding,
-        "coverage_acceptance": contract.window_run_acceptance,
+        "coverage_acceptance": contract.window_run_acceptance if isinstance(contract.window_run_acceptance, WindowRunCoverageAcceptance) else None,
+        "scope_acceptance": contract.window_run_acceptance if isinstance(contract.window_run_acceptance, WindowRunPrefixAcceptance) else None,
         "domain_contract_hash": compute_contract_hash(contract),
         "concept_targets": targets,
         "pending_concept_ids": sorted(

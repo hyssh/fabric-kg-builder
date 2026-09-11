@@ -99,6 +99,7 @@ REJECTION_REASONS = frozenset(
         "DIRECTION_MISMATCH",
         "ENDPOINT_EVIDENCE_UNGROUNDED",
         "EVIDENCE_QUOTE_MISMATCH",
+        "EVIDENCE_OUTSIDE_APPROVED_PREFIX",
         "EVIDENCE_SOURCE_MISMATCH",
         "EVIDENCE_SPAN_INVALID",
         "HIERARCHY_CONCEPT_MISSING",
@@ -321,6 +322,7 @@ def verify_and_mint_extraction_span(
     verifier_name: str = L3_EXTRACTION_VERIFIER_NAME,
     verifier_version: str = L3_EXTRACTION_VERIFIER_VERSION,
     verifier_purpose_version: str = L3_EXTRACTION_PURPOSE_VERSION,
+    domain_contract=None,
 ) -> EvidenceOutcome:
     """Verify an untrusted anchor exactly, then mint one C0 1.1 span.
 
@@ -379,6 +381,13 @@ def verify_and_mint_extraction_span(
             )
         span_start, span_end = located
         reasons.add("EVIDENCE_ANCHOR_RELOCATED")
+    from .window_prefix import prefix_span_allowed
+
+    if not prefix_span_allowed(
+        domain_contract, source_unit_id=source_unit.source_unit_id,
+        span_start=span_start, span_end=span_end, source_text_hash=source_unit.text_content_hash,
+    ):
+        reasons.add("EVIDENCE_OUTSIDE_APPROVED_PREFIX")
     if reasons - INFORMATIONAL_REASONS:
         return EvidenceOutcome(
             span=None,

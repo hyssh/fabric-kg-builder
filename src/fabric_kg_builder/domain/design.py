@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import yaml
-from pydantic import Field, model_serializer, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_serializer, model_validator
 
 from fabric_kg_builder.contracts.base import ContractModel, RequiredText, Sha256, canonical_json, canonical_sha256, deterministic_contract_id
 from fabric_kg_builder.contracts.evidence import EvidenceSpan, SourceUnit
@@ -45,8 +45,9 @@ from .discovery_acceptance import (
     discovery_partial_design_context, validate_discovery_acceptance,
 )
 from .window_run import WindowedRun
-from .window_run_acceptance import WindowRunCoverageAcceptance
+from .window_run_acceptance import WindowRunAcceptance, WindowRunPrefixAcceptance
 from .window_design_context import WINDOW_DESIGN_CONTEXT_VERSION, window_design_context
+from .window_validation import WindowValidationOperation, operation_from_info, validation_context
 
 DESIGN_PROMPT_VERSION = "domain-design/1.6.0"
 DESIGN_EVALUATOR_VERSION = "domain-design-evaluator/1.4.0"
@@ -148,6 +149,101 @@ class DomainDesignSketch(CompactDesignSketch):
     review_concerns: list[DesignFinding] = Field(default_factory=list)
 
 
+class WindowProjectionFinding(ContractModel):
+    concept_id: RequiredText
+    concept_name: RequiredText
+    kind: Literal["entity", "relationship", "property"]
+    code: RequiredText
+    message: RequiredText
+
+
+class WindowDesignCorrections(ContractModel):
+    correction_version: Literal["window-design-corrections/1.0.0"] = "window-design-corrections/1.0.0"
+    authority: Literal["explicit_unapproved_schema_corrections"] = "explicit_unapproved_schema_corrections"
+    actor: RequiredText
+    rationale: RequiredText
+    route_targets: dict[str, str]
+    completeness: list[DesignCompleteness]
+    prefer_window_definitions: bool = False
+    correction_hash: Sha256
+
+    @model_validator(mode="after")
+    def _hash(self):
+        if not self.route_targets and not self.completeness and not self.prefer_window_definitions:
+            raise DomainDesignError("Schema corrections require explicit operations")
+        if canonical_sha256(self.model_dump(mode="json", exclude={"correction_hash"})) != self.correction_hash:
+            raise DomainDesignError("WINDOW_DESIGN_CORRECTION_HASH_MISMATCH")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        values = handler(self)
+        if not self.prefer_window_definitions:
+            values.pop("prefer_window_definitions", None)
+        return values
+
+
+class WindowDefinitionPrecedence(ContractModel):
+    concept_id: RequiredText
+    kind: Literal["entity", "relationship"]
+    schema_key: RequiredText
+    parent_definition: RequiredText
+    parent_definition_hash: Sha256
+    source_definition: RequiredText
+    source_definition_hash: Sha256
+
+    @model_validator(mode="after")
+    def _hashes(self):
+        if (
+            canonical_sha256(self.parent_definition) != self.parent_definition_hash
+            or canonical_sha256(self.source_definition) != self.source_definition_hash
+        ):
+            raise DomainDesignError("WINDOW_DEFINITION_PRECEDENCE_HASH_MISMATCH")
+        return self
+
+
+class WindowSchemaProjection(ContractModel):
+    projection_version: Literal["window-schema-projection/1.0.0", "window-schema-projection/1.1.0", "window-schema-projection/1.2.0"] = "window-schema-projection/1.0.0"
+    authority: Literal["deterministic_schema_projection_unapproved"] = "deterministic_schema_projection_unapproved"
+    classification_policy: Literal["domain_scope_proposal_pending_l1_review"] = "domain_scope_proposal_pending_l1_review"
+    parent_draft_hash: Sha256
+    parent_model_call_count: Literal[1] = 1
+    parent_artifact_version: Literal["4.0.0", "5.0.0", "6.0.0", "7.0.0"]
+    parent_sketch: DomainDesignSketch
+    window_run_hash: Sha256
+    snapshot_hash: Sha256
+    scope_acceptance_hash: Sha256 | None
+    coverage_acceptance_hash: Sha256 | None
+    retained_concept_keys: dict[str, str]
+    derived_concept_ids: list[str]
+    unsupported_findings: list[WindowProjectionFinding]
+    operator_corrections: WindowDesignCorrections | None = None
+    definition_precedence: list[WindowDefinitionPrecedence] = Field(default_factory=list)
+    source_identity_policies: dict[str, dict[str, Any]] | None = None
+    model_call_count: Literal[0] = 0
+    approval_inherited: Literal[False] = False
+    projection_hash: Sha256
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        values = handler(self)
+        if self.operator_corrections is None:
+            values.pop("operator_corrections", None)
+        if not self.definition_precedence:
+            values.pop("definition_precedence", None)
+        if self.source_identity_policies is None:
+            values.pop("source_identity_policies", None)
+        return values
+
+    @model_validator(mode="after")
+    def _hash(self):
+        if (self.projection_version != "window-schema-projection/1.0.0") != (self.source_identity_policies is not None):
+            raise DomainDesignError("WINDOW_SCHEMA_PROJECTION_POLICY_PROVENANCE_VERSION_MISMATCH")
+        if canonical_sha256(self.model_dump(mode="json", exclude={"projection_hash"})) != self.projection_hash:
+            raise DomainDesignError("WINDOW_SCHEMA_PROJECTION_HASH_MISMATCH")
+        return self
+
+
 DESIGN_PROMPT_HASH = canonical_sha256(
     {"version": DESIGN_PROMPT_VERSION, "system": DESIGN_SYSTEM_PROMPT,
      "schema": DomainDesignSketch.model_json_schema()}
@@ -224,6 +320,17 @@ WINDOW_REPRESENTATIVE_DESIGN_PROMPT_HASH = canonical_sha256({
     "version": WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION, "system": WINDOW_REPRESENTATIVE_DESIGN_SYSTEM,
     "schema": DomainDesignSketch.model_json_schema(), "context_version": WINDOW_DESIGN_CONTEXT_VERSION,
 })
+WINDOW_PREFIX_DESIGN_PROMPT_VERSION = "domain-design/7.0.0"
+WINDOW_PREFIX_DESIGN_SYSTEM = WINDOW_REPRESENTATIVE_DESIGN_SYSTEM + """
+This is an explicitly authorized LIMITED COMMITTED-PREFIX prototype, not a >=99%
+coverage waiver. Only the exact selected committed chunks inform this design.
+Keep the original full intake, source universe, omitted chunks and scope notice.
+Do not imply full-corpus ontology coverage, empty omitted sources or verified answers.
+Final domain approval approves only this explicitly scoped prototype."""
+WINDOW_PREFIX_DESIGN_PROMPT_HASH = canonical_sha256({
+    "version": WINDOW_PREFIX_DESIGN_PROMPT_VERSION, "system": WINDOW_PREFIX_DESIGN_SYSTEM,
+    "schema": DomainDesignSketch.model_json_schema(),
+})
 
 
 class DesignSeedReference(ContractModel):
@@ -275,7 +382,7 @@ class DesignSamples(ContractModel):
 
 class DomainDesignDraft(ContractModel):
     artifact_kind: Literal["domain.design_draft"] = "domain.design_draft"
-    artifact_version: Literal["1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "6.0.0"] = "1.0.0"
+    artifact_version: Literal["1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "6.0.0", "7.0.0", "8.0.0"] = "1.0.0"
     draft_id: RequiredText
     draft_hash: Sha256
     created_at_utc: datetime
@@ -283,16 +390,25 @@ class DomainDesignDraft(ContractModel):
     seed: DesignSeedReference | None
     samples: DesignSamples
     sketch: DomainDesignSketch
-    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0", "domain-design/3.0.0", "domain-design/4.0.0", "domain-design/5.0.0", "domain-design/6.0.0"] = DESIGN_PROMPT_VERSION
+    prompt_version: Literal["domain-design/1.6.0", "domain-design/2.0.0", "domain-design/3.0.0", "domain-design/4.0.0", "domain-design/5.0.0", "domain-design/6.0.0", "domain-design/7.0.0"] = DESIGN_PROMPT_VERSION
     prompt_hash: Sha256
     request_hash: Sha256
-    model_call_count: Literal[1] = 1
+    model_call_count: Literal[0, 1] = 1
     discovery: DiscoveryRun | None = None
     discovery_node_ids: list[str] | None = None
     discovery_acceptance: DiscoveryPartialAcceptance | None = None
     window_run: WindowedRun | None = None
-    window_run_acceptance: WindowRunCoverageAcceptance | None = None
+    window_run_acceptance: WindowRunAcceptance | None = None
     window_context_version: Literal["window-design-context/1.0.0"] | None = None
+    schema_projection: WindowSchemaProjection | None = None
+
+    @field_validator("window_run", mode="wrap")
+    @classmethod
+    def _validated_window_field(cls, value, handler, info: ValidationInfo):
+        operation = operation_from_info(info)
+        if value is not None and operation is not None:
+            return operation.hydrate(value, handler, mode=info.mode)
+        return handler(value)
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
@@ -309,10 +425,15 @@ class DomainDesignDraft(ContractModel):
             values.pop("window_run_acceptance", None)
         if self.window_context_version is None:
             values.pop("window_context_version", None)
+        if self.schema_projection is None:
+            values.pop("schema_projection", None)
         return values
 
     @model_validator(mode="after")
-    def _binding(self) -> "DomainDesignDraft":
+    def _binding(self, info: ValidationInfo) -> "DomainDesignDraft":
+        operation = operation_from_info(info) or WindowValidationOperation()
+        if self.model_call_count != (0 if self.schema_projection is not None else 1):
+            raise DomainDesignError("Design generation method differs from its model-call provenance")
         if self.window_context_version is not None and self.window_run is None:
             raise DomainDesignError("Representative window context requires its integrated run")
         if self.window_run_acceptance is not None and self.window_run is None:
@@ -320,7 +441,7 @@ class DomainDesignDraft(ContractModel):
         if self.window_run is not None:
             from fabric_kg_builder.enrichment.window_run_reuse import checked_window_run, window_run_intake
 
-            checked_window_run(self.window_run, self.window_run_acceptance)
+            checked_window_run(self.window_run, self.window_run_acceptance, _validation=operation)
             if (
                 self.discovery is not None
                 or self.window_run.prepared.corpus.corpus_hash != self.inputs.corpus.corpus_hash
@@ -328,6 +449,21 @@ class DomainDesignDraft(ContractModel):
                 or window_run_intake(self.window_run, self.inputs.base_identity).intake_hash != self.inputs.intake.intake_hash
             ):
                 raise DomainDesignError("Window design input authority differs from frozen source/context")
+        if isinstance(self.window_run_acceptance, WindowRunPrefixAcceptance):
+            selected = self.window_run_acceptance.selected_chunks
+            ranges = {(chunk.source_unit_id, chunk.slice_start, chunk.slice_end) for chunk in selected}
+            samples = self.samples
+            if (
+                {unit.source_unit_id for unit in samples.source_units} != {chunk.source_unit_id for chunk in selected}
+                or {(span.source_unit_id, span.span_start, span.span_end) for span in samples.evidence_spans} != ranges
+                or samples.source_profile.observed_schema_fields or samples.source_profile.inferred_suggestions
+                or not any(
+                    warning.warning_type == "limited_committed_prefix_scope"
+                    and self.window_run_acceptance.scope_notice in warning.message
+                    for warning in samples.source_profile.warnings
+                )
+            ):
+                raise DomainDesignError("WINDOW_PREFIX_DESIGN_SUPPORT_OUTSIDE_SCOPE")
         expected_hash = DISCOVERY_DESIGN_PROMPT_HASH if self.discovery is not None else DESIGN_PROMPT_HASH
         expected_version = DISCOVERY_DESIGN_PROMPT_VERSION if self.discovery is not None else DESIGN_PROMPT_VERSION
         if self.window_run is not None:
@@ -341,9 +477,13 @@ class DomainDesignDraft(ContractModel):
             expected_hash, expected_version = PARTIAL_DESIGN_PROMPT_HASH, PARTIAL_DESIGN_PROMPT_VERSION
         if self.window_context_version is not None:
             expected_hash, expected_version = WINDOW_REPRESENTATIVE_DESIGN_PROMPT_HASH, WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION
+        if isinstance(self.window_run_acceptance, WindowRunPrefixAcceptance):
+            if self.window_context_version is None:
+                raise ValueError("prefix design requires the representative scoped formatter")
+            expected_hash, expected_version = WINDOW_PREFIX_DESIGN_PROMPT_HASH, WINDOW_PREFIX_DESIGN_PROMPT_VERSION
         if self.prompt_hash != expected_hash or self.prompt_version != expected_version:
             raise ValueError("design prompt binding is unsupported")
-        if self.artifact_version != ("6.0.0" if self.window_context_version is not None else "5.0.0" if self.window_run_acceptance is not None else "4.0.0" if self.window_run is not None else "3.0.0" if self.discovery_acceptance is not None else "2.0.0" if self.discovery is not None else "1.0.0"):
+        if self.artifact_version != ("8.0.0" if self.schema_projection is not None else "7.0.0" if isinstance(self.window_run_acceptance, WindowRunPrefixAcceptance) else "6.0.0" if self.window_context_version is not None else "5.0.0" if self.window_run_acceptance is not None else "4.0.0" if self.window_run is not None else "3.0.0" if self.discovery_acceptance is not None else "2.0.0" if self.discovery is not None else "1.0.0"):
             raise ValueError("design artifact version disagrees with discovery scope")
         if self.discovery is None and self.discovery_node_ids is not None:
             raise ValueError("retrieval requires discovery")
@@ -358,8 +498,12 @@ class DomainDesignDraft(ContractModel):
             raise ValueError("design draft hash mismatch")
         if self.draft_id != deterministic_contract_id("domain-design-draft", {"draft_hash": self.draft_hash}):
             raise ValueError("design draft ID mismatch")
-        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids, self.discovery_acceptance, self.window_run, self.window_run_acceptance, self.window_context_version)):
+        if self.request_hash != canonical_sha256(_design_request(self.inputs, self.seed, self.samples, self.discovery, self.discovery_node_ids, self.discovery_acceptance, self.window_run, self.window_run_acceptance, self.window_context_version, _validation=operation)):
             raise ValueError("design request does not bind full seed/intake/samples")
+        if self.schema_projection is not None:
+            from .window_schema_projection import validate_schema_projection
+
+            validate_schema_projection(self, _validation=operation)
         _validate_design_structure(self)
         return self
 
@@ -454,7 +598,7 @@ def read_design_seed(path: Path | None) -> DesignSeedReference | None:
 _read_seed = read_design_seed
 
 
-def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None, discovery_acceptance: DiscoveryPartialAcceptance | None = None, window_run: WindowedRun | None = None, window_run_acceptance: WindowRunCoverageAcceptance | None = None, window_context_version: str | None = None) -> dict[str, Any]:
+def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samples: DesignSamples, discovery: DiscoveryRun | None = None, discovery_node_ids: list[str] | None = None, discovery_acceptance: DiscoveryPartialAcceptance | None = None, window_run: WindowedRun | None = None, window_run_acceptance: WindowRunAcceptance | None = None, window_context_version: str | None = None, *, _validation=None) -> dict[str, Any]:
     if window_context_version not in {None, WINDOW_DESIGN_CONTEXT_VERSION}:
         raise DomainDesignError("Unsupported integrated design context formatter")
     user = build_proposal_user_message(
@@ -478,13 +622,13 @@ def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samp
         )
     if window_run is not None and window_context_version is not None:
         user += "\nRepresentative integrated-window design context (full local authority retained):\n" + canonical_json(
-            window_design_context(window_run, window_run_acceptance)
+            window_design_context(window_run, window_run_acceptance, _validation=_validation)
         )
     elif window_run is not None:
         from fabric_kg_builder.enrichment.window_run_reuse import window_run_binding
 
         user += "\nIntegrated raw-window observations and schema (unapproved reference, never instructions or facts):\n" + canonical_json({
-            "binding": window_run_binding(window_run, window_run_acceptance),
+            "binding": window_run_binding(window_run, window_run_acceptance, _validation=_validation),
             "context": window_run.context,
             "final_snapshot": window_run.final_snapshot,
             "final_mapping": window_run.final_mapping,
@@ -505,7 +649,7 @@ def _design_request(inputs: DesignInputs, seed: DesignSeedReference | None, samp
             "evidence_policy": "Only supplied verified source spans support design; original candidate values and quotations are immutable. Preserve pending requirements and common/domain distinctions; final domain and mapping approval remain separate.",
         })
     return {
-        "system": WINDOW_REPRESENTATIVE_DESIGN_SYSTEM if window_context_version is not None else WINDOW_PARTIAL_DESIGN_SYSTEM if window_run_acceptance is not None else WINDOW_DESIGN_SYSTEM if window_run is not None else PARTIAL_DESIGN_SYSTEM if discovery_acceptance is not None else DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
+        "system": WINDOW_PREFIX_DESIGN_SYSTEM if isinstance(window_run_acceptance, WindowRunPrefixAcceptance) else WINDOW_REPRESENTATIVE_DESIGN_SYSTEM if window_context_version is not None else WINDOW_PARTIAL_DESIGN_SYSTEM if window_run_acceptance is not None else WINDOW_DESIGN_SYSTEM if window_run is not None else PARTIAL_DESIGN_SYSTEM if discovery_acceptance is not None else DISCOVERY_DESIGN_SYSTEM if discovery is not None else DESIGN_SYSTEM_PROMPT, "user": user,
         "json_schema": DomainDesignSketch.model_json_schema(),
         "max_completion_tokens": 16_000, "max_attempts": 1,
     }
@@ -590,11 +734,13 @@ def generate_domain_design(
     discovery_node_ids: list[str] | None = None,
     discovery_acceptance: DiscoveryPartialAcceptance | None = None,
     window_run: WindowedRun | None = None,
-    window_run_acceptance: WindowRunCoverageAcceptance | None = None,
+    window_run_acceptance: WindowRunAcceptance | None = None,
     proposal_trace_callback: Callable[[dict[str, Any]], None] | None = None,
     max_prompt_chars: int = 192_000,
+    _validation=None,
 ) -> DomainDesignDraft:
     """One model call creates a separate draft; no Schema-2 compilation occurs."""
+    operation = _validation or WindowValidationOperation()
     if discovery is None and window_run is None and not sample_only:
         raise DomainDesignError("Complete discovery is required by default; use explicit sample_only=True for legacy bounded sampling")
     if discovery is not None and sample_only:
@@ -613,7 +759,7 @@ def generate_domain_design(
         from fabric_kg_builder.enrichment.window_run_reuse import window_run_design_artifacts
 
         sample, profile, units, spans = window_run_design_artifacts(
-            window_run, preflight=preflight, verified_at_utc=created, acceptance=window_run_acceptance,
+            window_run, preflight=preflight, verified_at_utc=created, acceptance=window_run_acceptance, _validation=operation,
         )
     elif discovery is not None:
         validate_discovery(discovery, source_path=preflight.source_path, reparse=False)
@@ -633,7 +779,7 @@ def generate_domain_design(
     samples = DesignSamples(sample_manifest=sample, source_profile=profile, source_units=units, evidence_spans=spans)
     seed = read_design_seed(seed_path)
     context_version = WINDOW_DESIGN_CONTEXT_VERSION if window_run is not None else None
-    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids, discovery_acceptance, window_run, window_run_acceptance, context_version)
+    request = _design_request(inputs, seed, samples, discovery, discovery_node_ids, discovery_acceptance, window_run, window_run_acceptance, context_version, _validation=operation)
     if max_prompt_chars < 256 or len(canonical_json(request)) > max_prompt_chars:
         raise DomainDesignError(
             f"Full seed/intake/schema request requires {len(canonical_json(request))} characters, exceeding "
@@ -663,6 +809,9 @@ def generate_domain_design(
         values.update(window_context_version=context_version, artifact_version="6.0.0",
                       prompt_version=WINDOW_REPRESENTATIVE_DESIGN_PROMPT_VERSION,
                       prompt_hash=WINDOW_REPRESENTATIVE_DESIGN_PROMPT_HASH)
+        if isinstance(window_run_acceptance, WindowRunPrefixAcceptance):
+            values.update(artifact_version="7.0.0", prompt_version=WINDOW_PREFIX_DESIGN_PROMPT_VERSION,
+                          prompt_hash=WINDOW_PREFIX_DESIGN_PROMPT_HASH)
     if discovery_node_ids is not None:
         values["discovery_node_ids"] = discovery_node_ids
     if discovery_acceptance is not None:
@@ -671,14 +820,16 @@ def generate_domain_design(
             prompt_version=PARTIAL_DESIGN_PROMPT_VERSION, prompt_hash=PARTIAL_DESIGN_PROMPT_HASH,
         )
     digest = canonical_sha256(values)
-    return DomainDesignDraft(
-        **values, draft_hash=digest,
-        draft_id=deterministic_contract_id("domain-design-draft", {"draft_hash": digest}),
+    return DomainDesignDraft.model_validate({
+        **values, "draft_hash": digest,
+        "draft_id": deterministic_contract_id("domain-design-draft", {"draft_hash": digest}),
+    }, context=validation_context(operation))
+
+
+def _checked_draft(draft: DomainDesignDraft, *, _validation=None) -> DomainDesignDraft:
+    return DomainDesignDraft.model_validate(
+        draft.model_dump(mode="python"), context=validation_context(_validation or WindowValidationOperation()),
     )
-
-
-def _checked_draft(draft: DomainDesignDraft) -> DomainDesignDraft:
-    return DomainDesignDraft.model_validate(draft.model_dump(mode="python"))
 
 
 def _path(sketch: DomainDesignSketch, source: str, target: str, question_id: str | None = None) -> list[str] | None:
@@ -775,9 +926,9 @@ def _seed_concerns(draft: DomainDesignDraft) -> list[DesignFinding]:
     return concerns
 
 
-def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
+def evaluate_domain_design(draft: DomainDesignDraft, *, _validation=None) -> DomainDesignEvaluation:
     """Evaluate structural support and implementation limits, not instance answers."""
-    draft = _checked_draft(draft)
+    draft = _checked_draft(draft, _validation=_validation)
     sketch = draft.sketch
     routes = {item.question_id: item for item in sketch.question_routes}
     types = {item.key: item for item in sketch.types}
@@ -820,6 +971,19 @@ def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
     if len(sketch.relationships) > 24:
         limits.append(DesignFinding(code="compiler_relationship_limit", message=f"Design retains {len(sketch.relationships)} relationships; current compiler supports at most 24."))
     used = {key for rel in sketch.relationships for key in (rel.source_key, rel.target_key)}
+    if draft.schema_projection is not None:
+        from .window_schema_projection import projected_type_keys
+
+        retained_types = projected_type_keys(draft)
+        used.update(retained_types)
+        findings.append(DesignFinding(
+            code="source_projection_required_type_retention",
+            message=(
+                f"Retain {len(retained_types)} explicitly projected source entity types independently of CQ/edge participation. "
+                f"Required type-key set hash: {canonical_sha256(sorted(retained_types))}. "
+                "No edges, CQ tags, instance facts or evidence approval were added."
+            ),
+        ))
     for key in list(used):
         parent = types[key].parent_key
         while parent is not None:
@@ -942,8 +1106,8 @@ def evaluate_domain_design(draft: DomainDesignDraft) -> DomainDesignEvaluation:
     )
 
 
-def design_preflight(draft: DomainDesignDraft, source_path: Path) -> L1Preflight:
-    draft = _checked_draft(draft)
+def design_preflight(draft: DomainDesignDraft, source_path: Path, *, _validation=None) -> L1Preflight:
+    draft = _checked_draft(draft, _validation=_validation)
     inputs = draft.inputs
     if str(source_path.resolve()) != inputs.source_path:
         raise DomainDesignError("Compilation source path differs from frozen design input")
@@ -958,16 +1122,18 @@ def design_preflight(draft: DomainDesignDraft, source_path: Path) -> L1Preflight
 
 def compile_domain_design(
     draft: DomainDesignDraft, evaluation: DomainDesignEvaluation, *, preflight: L1Preflight,
+    _validation=None,
 ) -> L1PreparedStage:
     """Model-free compilation; capability failures never mutate the design."""
-    draft = _checked_draft(draft)
+    operation = _validation or WindowValidationOperation()
+    draft = _checked_draft(draft, _validation=operation)
     evaluation = DomainDesignEvaluation.model_validate(evaluation.model_dump(mode="python"))
-    actual = evaluate_domain_design(draft)
+    actual = evaluate_domain_design(draft, _validation=operation)
     if evaluation != actual:
         raise DomainDesignError("Evaluation is stale, altered, or belongs to another draft")
     if actual.compiler_limitations:
         raise DesignCapabilityError(actual.compiler_limitations)
-    expected_preflight = design_preflight(draft, preflight.source_path)
+    expected_preflight = design_preflight(draft, preflight.source_path, _validation=operation)
     if preflight != expected_preflight:
         raise DomainDesignError("Compilation preflight differs from frozen design bindings")
     try:
@@ -976,6 +1142,10 @@ def compile_domain_design(
             known_evidence_ids={item.evidence_span_id for item in draft.samples.evidence_spans},
             derive_route_metadata=False,
         )
+        if draft.schema_projection is not None:
+            from .window_schema_projection import project_compiler_policies, projection_contract_binding
+
+            candidates = project_compiler_policies(draft, candidates)
         assumptions = (
             *candidates.assumptions,
             "Design-first compilation: " + canonical_json({
@@ -984,18 +1154,30 @@ def compile_domain_design(
                 "seed_hash": draft.seed.content_sha256 if draft.seed else None,
                 "findings": [item.model_dump(mode="json") for item in actual.findings],
                 "approval_inherited": False, "answer_verification": "not_performed",
+                **({"schema_projection": draft.schema_projection.model_dump(
+                    mode="json", exclude={"parent_sketch"},
+                )} if draft.schema_projection is not None else {}),
             }),
         )
         candidates = candidates.model_copy(update={"assumptions": assumptions})
         prepared = prepare_l1_stage(
             preflight, candidates=candidates, client=None,
             started_at_utc=draft.created_at_utc,
-            design_prompt_binding=(draft.prompt_version, draft.prompt_hash),
+            design_prompt_binding=(
+                ("domain-design/" + draft.schema_projection.projection_version, draft.schema_projection.projection_hash)
+                if draft.schema_projection is not None else (draft.prompt_version, draft.prompt_hash)
+            ),
             design_description=draft.inputs.description,
             design_discovery=draft.discovery,
             design_discovery_acceptance=draft.discovery_acceptance,
             design_window_run=draft.window_run,
             design_window_run_acceptance=draft.window_run_acceptance,
+            _window_validation=operation,
+            design_schema_projection=(
+                projection_contract_binding(draft)
+                if draft.schema_projection is not None else None
+            ),
+            design_source_projection_draft=draft if draft.schema_projection is not None else None,
         )
     except L1ProposalSchemaRepairError as exc:
         raise DesignCapabilityError([
@@ -1045,8 +1227,10 @@ def compile_domain_design(
     return prepared
 
 
-def save_design_artifact(path: Path, artifact: DomainDesignDraft | DomainDesignEvaluation) -> None:
-    validated = type(artifact).model_validate(artifact.model_dump(mode="python"))
+def save_design_artifact(path: Path, artifact: DomainDesignDraft | DomainDesignEvaluation, *, _validation=None) -> None:
+    validated = type(artifact).model_validate(
+        artifact.model_dump(mode="python"), context=validation_context(_validation or WindowValidationOperation()),
+    )
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -1055,8 +1239,10 @@ def save_design_artifact(path: Path, artifact: DomainDesignDraft | DomainDesignE
         os.fsync(stream.fileno())
 
 
-def load_domain_design(path: Path) -> DomainDesignDraft:
-    return DomainDesignDraft.model_validate_json(path.read_text(encoding="utf-8"))
+def load_domain_design(path: Path, *, _validation=None) -> DomainDesignDraft:
+    return DomainDesignDraft.model_validate_json(
+        path.read_text(encoding="utf-8"), context=validation_context(_validation or WindowValidationOperation()),
+    )
 
 
 def load_design_evaluation(path: Path) -> DomainDesignEvaluation:

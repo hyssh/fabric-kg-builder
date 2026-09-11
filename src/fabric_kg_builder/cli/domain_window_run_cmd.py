@@ -41,6 +41,8 @@ def _core():
               help="Optional conservative aggregate token reservation cap; zero leaves call caps in force.")
 @click.option("--stop-after-document", type=click.IntRange(1),
               help="Pause after this many documents in the recorded scope; resume retains the schema.")
+@click.option("--max-windows", type=click.IntRange(0),
+              help="Commit at most this many additional windows; zero freezes the existing committed prefix.")
 @click.option("--live", is_flag=True, help="Persist windows and permit bounded model calls.")
 @click.option("--dry-run", is_flag=True, help="Read-only plan, with no model calls or state writes.")
 @click.option("--resume", is_flag=True, help="Continue the exact context/source/schema-bound run.")
@@ -52,7 +54,7 @@ def _core():
 def domain_window_run_cmd(
     ctx, prepared, discovery, intake, out_state, window_size, concurrency,
     max_request_chars, request_char_budget, max_completion_tokens, max_chunk_chars, max_calls,
-    max_repair_calls, max_tokens, stop_after_document, live, dry_run, resume,
+    max_repair_calls, max_tokens, stop_after_document, max_windows, live, dry_run, resume,
     retry_uncertain, retry_invalid_response,
 ):
     """Bootstrap, extract, evaluate and evolve a working schema over raw chunks.
@@ -97,6 +99,7 @@ def domain_window_run_cmd(
         budget = core.RunBudget(
             max_calls=max_calls, max_repair_calls=max_repair_calls,
             max_tokens=max_tokens, stop_after_document=stop_after_document,
+            max_windows=max_windows,
             retry_uncertain=retry_uncertain, retry_invalid_response=retry_invalid_response,
             request_char_budget=request_char_budget,
         )

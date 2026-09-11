@@ -224,6 +224,61 @@ model-written rationales can contradict the generated graph.
 
 ## Windowed common-schema alignment and snapshots
 
+### Human-readable Fabric presentation
+
+Canonical IDs are machine identities, not user-facing names. Native entity,
+relationship and property names should be derived from the approved readable
+catalog. Fabric requires a leading ASCII letter followed by letters, digits,
+underscores or hyphens (maximum 128 characters), so a label such as
+`Battery Screw` becomes `Battery_Screw`. Keep original human labels and canonical
+IDs in the naming report; do not change canonical IDs or physical table names.
+
+For an existing Ontology, prefer a reviewed presentation-only `updateDefinition`
+over deletion/recreation. Back up the complete current definition, retain every
+part and binding, and permit only names, source-backed descriptions and an
+existing label-property display selector to change. Identity properties,
+numeric IDs, relation endpoints, data types, source scope, data and sensitivity
+labels stay unchanged. Existing synonyms/custom attributes are preserved during
+the live repair.
+
+The API replaces the full definition and has no assumed transactional/CAS
+guarantee. Re-read before updating, reject unexpected drift, persist the update
+intent and operation reference, and verify the complete after-definition.
+Never blindly repeat an uncertain POST or automatically roll back over another
+editor's changes. Old publication snapshots remain immutable and must not be
+mistaken for the current presentation after repair.
+
+Renamed types/properties can change GQL names; retain the before/after map for
+query updates. This repair does not consolidate entity types or turn types into
+instances. Those are separate reviewed modelling changes, not cosmetic edits.
+
+Use the explicit repair path, not the original create-only publisher:
+
+```bash
+fabric-kg app repair-ontology-names \
+  --workspace-id WORKSPACE_ID --ontology-id EXISTING_ONTOLOGY_ID \
+  --l4-run L4_RUN --l3-root L3_STATE \
+  --publication-plan ORIGINAL_PLAN --prototype-journal ORIGINAL_JOURNAL \
+  --materialize ORIGINAL_MATERIALIZATION --state NEW_REPAIR_DIRECTORY
+```
+
+This performs remote reads and creates a new local backup, naming map and plan.
+It does not mutate Fabric. Inspect the complete change plan, then repeat the
+same command with `--live --approve-plan HASH --acknowledge-nontransactional`.
+An interrupted operation uses `--resume` for readback/LRO polling only, never
+another update POST. Keep the original publication snapshot and the new repair
+receipt separately; a successful naming repair does not retrospectively change
+the original publication definition hash.
+
+Readback records Fabric's observed normalization of an absent relationship
+`semanticEnrichment.customAttributes` to an empty object separately. It never
+permits nonempty attributes, changed synonyms or different presentation fields.
+If a verifier fix is needed after the single update was dispatched,
+`--resume --accept-verifier-update CURRENT_REPAIR_CODE_HASH` explicitly approves
+readback-only verification with that code. It cannot authorize another update
+POST; source/compiler/naming bindings and the original approved plan still
+must match.
+
 ### Integrated raw-text windows
 
 `domain window-run` connects raw source chunks, the complete intake, evolving
@@ -293,6 +348,26 @@ is unknown. For an accepted partial run, supply
 domain and replay; original partial status and grounding quarantine are not
 cleared. A first-document stop far below 99% cannot use this exception.
 
+An operator may instead explicitly authorize a **limited committed-prefix
+prototype**. This is a different scope decision, not a lowered coverage
+threshold. Stop the active extraction process first, then use the same run
+configuration with `--resume --live --max-calls 0 --max-windows 0` to seal
+exactly the current committed prefix without consuming later cached responses.
+
+```bash
+fabric-kg domain accept-window-run-prefix --window-run .fkg/window-run \
+  --actor reviewer --rationale "Deploy only the current committed prefix" \
+  --out .fkg/prefix-scope.json
+```
+
+Inspect the preview before adding `--accept`. Pass this exact scope artifact to
+`domain design --window-run-acceptance .fkg/prefix-scope.json`. The original
+corpus remains partial; omitted chunks and in-flight responses remain excluded,
+not observed-empty. Prefix boundaries apply to model evidence, L2 proposals,
+L3 quote relocation/caches and publication evidence. Full SourceUnits remain
+unchanged for provenance. Prefix-scoped Fabric descriptions and agent
+instructions disclose the included/total counts and scope acceptance hash.
+
 For a complete run, the design path consumes its actual context, prepared source
 identity, final schema and candidate ledger:
 
@@ -303,6 +378,26 @@ fabric-kg --config fabric-kg.yaml domain design \
 ```
 
 Use the existing `evaluate-design`, `compile-design` and `domain approve` steps.
+If the model draft omitted source-supported working types or relationships, use
+the model-free source-retention step before evaluation:
+
+```bash
+fabric-kg domain retain-window-schema --file .fkg/window-design.json \
+  --out .fkg/window-design-retained.json
+```
+
+The default is a read-only plan; `--apply` writes a new unapproved derived draft.
+It preserves the original model draft and records source/projection hashes.
+Unsupported endpoint multiplicity, identity conflicts and definition conflicts
+remain explicit findings, not silently narrowed or merged.
+`--prefer-window-definitions --actor REVIEWER --rationale TEXT` explicitly
+chooses exact source definitions over different model descriptions only where
+names, scopes and identities otherwise match. Existing graph route targets may
+be corrected with `--route-target QUESTION=TYPE`, and typed collection
+requirements appended with `--completeness FILE`; both require actor/rationale
+and cannot alter source facts, observed counts or authoritative SQL routing.
+Evaluate the resulting draft afresh; the parent's evaluation cannot approve it.
+
 Then explicitly review the working-to-approved mappings:
 
 ```bash

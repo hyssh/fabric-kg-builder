@@ -17,6 +17,7 @@ from openai import APIError
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.domain.proposal import compute_model_hash, load_domain_intake
 from fabric_kg_builder.domain.stage import finalize_l1_stage, preflight_l1_inputs
+from fabric_kg_builder.domain.window_validation import WindowValidationOperation
 
 from .domain_assessment_cmd import _model_failure
 
@@ -25,6 +26,11 @@ def _design_core():
     from fabric_kg_builder.domain import design
 
     return design
+
+
+def _validation_options(core, operation):
+    # Legacy adapters remain valid without the optional reuse interface.
+    return {"_validation": operation} if getattr(core, "WindowValidationOperation", None) is WindowValidationOperation else {}
 
 
 def _discovery_core():
@@ -506,7 +512,7 @@ def domain_accept_discovery_partial_cmd(
               help="Completed integrated raw-text run, bound to its exact original intake and prepared sources.")
 @click.option("--window-run-acceptance", "window_run_acceptance_file",
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="Exact explicit >=99% processing waiver for a partial --window-run; not semantic approval.")
+              help="Exact reviewed >=99% coverage waiver OR explicit limited committed-prefix scope; never semantic approval.")
 @click.option("--description", help="Additional design context; does not replace the full seed.")
 @click.option("--discovery", "discovery_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Immutable discovery; complete by default, or explicitly reviewed partial coverage.")
@@ -568,6 +574,8 @@ def domain_design_cmd(
     try:
         intake_raw = load_domain_intake(intake)
         core = _design_core()
+        operation = WindowValidationOperation()
+        validation_options = _validation_options(core, operation)
         discovery = _discovery_core().load_discovery(discovery_file) if discovery_file else None
         integrated = None
         window_acceptance = None
@@ -579,7 +587,7 @@ def domain_design_cmd(
                 from fabric_kg_builder.domain.window_run_acceptance import load_window_run_acceptance
 
                 window_acceptance = load_window_run_acceptance(window_run_acceptance_file)
-            integrated = checked_window_run(load_windowed_run(window_run), window_acceptance)
+            integrated = checked_window_run(load_windowed_run(window_run), window_acceptance, _validation=operation)
             if integrated.context.intake_raw != intake_raw:
                 raise ValueError("WINDOW_RUN_CONTEXT_DRIFT: use the original full intake")
         window_context = None
@@ -687,6 +695,7 @@ def domain_design_cmd(
         else:
             result = core.generate_domain_design(
                 preflight, client=client, seed_path=seed_domain,
+                **validation_options,
                 max_prompt_chars=max_prompt_chars,
                 **({"window_run": integrated} if integrated is not None else
                    {"discovery": discovery} if discovery is not None else {"sample_only": True}),
@@ -701,7 +710,7 @@ def domain_design_cmd(
             if not isinstance(result, core.DomainDesignDraft):
                 raise ValueError("Design generation did not return an unapproved DesignDraft")
             seed_hash = result.seed.content_sha256 if result.seed else None
-            core.save_design_artifact(out, result)
+            core.save_design_artifact(out, result, **validation_options)
     except (APIError, ClientAuthenticationError) as exc:
         failure = _model_failure(exc)
         if failure.message.startswith("MODEL_REQUEST_FAILED:"):
@@ -740,10 +749,12 @@ def domain_evaluate_design_cmd(
         raise click.ClickException(f"Refusing to overwrite design evaluation: {out}")
     try:
         core = _design_core()
-        draft = core.load_domain_design(draft_file)
-        evaluation = core.evaluate_domain_design(draft)
+        operation = WindowValidationOperation()
+        validation_options = _validation_options(core, operation)
+        draft = core.load_domain_design(draft_file, **validation_options)
+        evaluation = core.evaluate_domain_design(draft, **validation_options)
         if not planning:
-            core.save_design_artifact(out, evaluation)
+            core.save_design_artifact(out, evaluation, **validation_options)
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(canonical_json({
@@ -783,12 +794,14 @@ def domain_compile_design_cmd(
         raise click.UsageError("--out-state and --out-domain must be different paths")
     try:
         core = _design_core()
-        draft = core.load_domain_design(draft_file)
+        operation = WindowValidationOperation()
+        validation_options = _validation_options(core, operation)
+        draft = core.load_domain_design(draft_file, **validation_options)
         evaluation = core.load_design_evaluation(evaluation_file)
         if accept_evaluation_hash != evaluation.evaluation_hash:
             raise ValueError("DESIGN_EVALUATION_REVIEW_MISMATCH")
-        preflight = core.design_preflight(draft, source)
-        prepared = core.compile_domain_design(draft, evaluation, preflight=preflight)
+        preflight = core.design_preflight(draft, source, **validation_options)
+        prepared = core.compile_domain_design(draft, evaluation, preflight=preflight, **validation_options)
         result = {
             "project_id": preflight.base_identity.project_id,
             "run_id": preflight.run_id,

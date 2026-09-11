@@ -827,6 +827,8 @@ def build_draft_contract_from_candidates(
     candidates: DomainProposalCandidatesV2,
     *,
     known_evidence_span_ids: set[str],
+    source_projection_draft: Any = None,
+    _window_validation: Any = None,
 ) -> tuple[DomainContractV2, dict[str, tuple[str, ...]], set[str]]:
     """Apply deterministic local authority to untrusted model candidates."""
     from .hierarchy import build_type_hierarchy_closure
@@ -836,6 +838,13 @@ def build_draft_contract_from_candidates(
         candidates,
         known_evidence_span_ids=known_evidence_span_ids,
     )
+    projected_type_ids: set[str] = set()
+    if source_projection_draft is not None:
+        from .window_schema_projection import validated_projection_type_ids
+
+        projected_type_ids = validated_projection_type_ids(
+            source_projection_draft, intake=intake, candidates=candidates, _validation=_window_validation,
+        )
     question_ids = {item.id for item in intake.competency_questions}
     route_ids = [item.question_id for item in candidates.question_routes]
     if set(route_ids) != question_ids or len(route_ids) != len(set(route_ids)):
@@ -911,7 +920,7 @@ def build_draft_contract_from_candidates(
         eligible_type_ids=eligible_semantic_type_ids,
     )
     selected_relationship_candidates = list(selection.relationships)
-    selected_type_ids = set(required_type_ids)
+    selected_type_ids = set(required_type_ids) | projected_type_ids
     for relationship in selected_relationship_candidates:
         selected_type_ids.update(relationship.source_type_ids)
         selected_type_ids.update(relationship.target_type_ids)

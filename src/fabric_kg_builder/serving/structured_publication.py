@@ -58,7 +58,7 @@ from fabric_kg_builder.semantic.source_tables import (
 
 L5A_STAGE_NAME = "schema2-structured-publication"
 L5A_STAGE_CONTRACT_VERSION = "1.0.0"
-L5A_PUBLICATION_CODE_VERSION = "l5a-publication/1.1.0"
+L5A_PUBLICATION_CODE_VERSION = "l5a-publication/1.2.0"
 L5A_STATE_DIR = Path(".fkg") / "l5a"
 L5A_TARGET_VERSION = "1.0.0"
 L5A_TARGET_ORDER = ("parquet", "semantic_model", "ontology", "graph")
@@ -946,6 +946,35 @@ def discovery_coverage_context(acceptance) -> dict[str, Any]:
     }
 
 
+def _window_run_scope_context(contract: DomainContractV2) -> dict[str, Any] | None:
+    acceptance = getattr(contract, "window_run_acceptance", None)
+    if acceptance is None:
+        return None
+    is_prefix = acceptance.authority == "limited_committed_prefix_only"
+    selected = (
+        len(acceptance.selected_committed_chunk_ids)
+        if is_prefix else acceptance.coverage.processed_chunks
+    )
+    total = acceptance.coverage.total_chunks
+    notice = acceptance.scope_notice if is_prefix else (
+        f"PARTIAL WINDOW-RUN COVERAGE: only {selected} of {total} full-corpus planned chunks "
+        f"were processed; {total - selected} chunks remain excluded, not observed empty. "
+        "The original run remains partial. This is a processing-coverage waiver, not a committed-prefix "
+        "scope, full-corpus ontology coverage, semantic recall, evidence approval or verified answers. "
+        "Answer only from cited validated evidence; identify scope gaps and abstain from full-corpus claims."
+    )
+    return {
+        "kind": acceptance.artifact_kind,
+        "authority": acceptance.authority,
+        "domain_contract_hash": compute_contract_hash(contract),
+        "acceptance_hash": acceptance.acceptance_hash,
+        "scope_notice": notice,
+        "selected_chunk_count": selected,
+        "total_chunk_count": total,
+        "omitted_chunk_count": total - selected,
+    }
+
+
 def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, Any]:
     """Read question intentions from existing sealed authority, not new serving rows."""
     from fabric_kg_builder.domain.question_routing import question_routing_context
@@ -977,6 +1006,9 @@ def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, 
     if acceptance is not None:
         values["discovery_acceptance"] = acceptance.model_dump(mode="json")
         values["discovery_coverage"] = discovery_coverage_context(acceptance)
+    window_scope = _window_run_scope_context(contract)
+    if window_scope is not None:
+        values["window_run_scope"] = window_scope
     return {**values, "export_hash": canonical_sha256(values)}
 
 
@@ -1845,6 +1877,8 @@ def _definitions(
     target_ids: Mapping[L5ATargetKind, str],
     access_policy: AccessPolicy,
 ) -> dict[L5ATargetKind, dict[str, Any]]:
+    from fabric_kg_builder.deploy.ontology_names import readable_catalog_from_domain
+
     crosswalk = _canonical_crosswalk(crosswalks)
     authorities = [
         item.authority.model_dump(mode="json")
@@ -2083,6 +2117,7 @@ def _definitions(
             "target_kind": "ontology",
             "target_id": target_ids["ontology"],
             "native_inheritance_assumed": False,
+            "presentation_catalog": readable_catalog_from_domain(contract),
             "entity_types": [
                 {
                     "id": str(item.ontology_bigint_id),

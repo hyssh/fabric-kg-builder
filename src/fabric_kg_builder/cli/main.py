@@ -43,6 +43,8 @@ from fabric_kg_builder.cli.lineage_cmd import assets_cmd, lineage_cmd, trace_cmd
 from fabric_kg_builder.cli.infra_cmd import infra_cmd
 from fabric_kg_builder.cli.knowledge_cmd import knowledge_group
 from fabric_kg_builder.cli.app_cmd import app_cmd
+from fabric_kg_builder.cli.prototype_reconcile_cmd import reconcile_prototype_create_cmd
+from fabric_kg_builder.cli.ontology_presentation_cmd import repair_ontology_names_cmd
 from fabric_kg_builder.cli.runtime_cmd import (
     collect_evidence_cmd,
     evaluate_cmd,
@@ -241,6 +243,8 @@ cli.add_command(lineage_cmd, name="lineage")
 cli.add_command(trace_cmd, name="trace")
 cli.add_command(infra_cmd, name="infra")
 cli.add_command(knowledge_group, name="knowledge")
+app_cmd.add_command(reconcile_prototype_create_cmd)
+app_cmd.add_command(repair_ontology_names_cmd)
 cli.add_command(app_cmd, name="app")  # M8: Foundry agent + reference app
 cli.add_command(validate_deployment_cmd, name="validate-deployment")
 cli.add_command(collect_evidence_cmd, name="collect-evidence")

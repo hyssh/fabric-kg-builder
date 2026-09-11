@@ -1521,9 +1521,9 @@ the complete consolidation tree are separately bound by DiscoveryRun.
     return prepared_design_artifacts(run.prepared, preflight=preflight, verified_at_utc=verified_at_utc)
 
 
-def prepared_design_artifacts(prepared: PreparedCorpus, *, preflight, verified_at_utc):
-    """Build verified L1 support from immutable prepared units, without sampling."""
-    from fabric_kg_builder.domain.contexts import DomainSourceProfile
+def prepared_design_artifacts(prepared: PreparedCorpus, *, preflight, verified_at_utc, selected_chunks=None, scope_notice=None):
+    """Build L1 support; explicit ranges restrict evidence, never corpus identity."""
+    from fabric_kg_builder.domain.contexts import DomainSourceProfile, SourceProfileWarning
     from fabric_kg_builder.sources.corpus import DesignSampleEntry, build_design_sample_manifest
     from fabric_kg_builder.sources.evidence_verifier import mint_verified_span
 
@@ -1532,18 +1532,41 @@ def prepared_design_artifacts(prepared: PreparedCorpus, *, preflight, verified_a
         or prepared.base_identity.project_id != preflight.base_identity.project_id
     ):
         raise ValueError("Prepared design sources differ from the compilation corpus")
-    units = tuple(_rebind_prepared_units(prepared.source_units, preflight))
+    selected_ids = None if selected_chunks is None else {chunk.source_unit_id for chunk in selected_chunks}
+    units = tuple(_rebind_prepared_units(
+        prepared.source_units if selected_ids is None else [
+            unit for unit in prepared.source_units if unit.source_unit_id in selected_ids
+        ], preflight,
+    ))
+    by_id = {unit.source_unit_id: unit for unit in units}
+    if selected_chunks is not None and (
+        not selected_chunks or not scope_notice
+        or any(
+            chunk.source_unit_id not in by_id
+            or chunk.source_text_hash != by_id[chunk.source_unit_id].text_content_hash
+            or chunk.source_file_id != by_id[chunk.source_unit_id].source_file_id
+            or not 0 <= chunk.slice_start < chunk.slice_end <= by_id[chunk.source_unit_id].codepoint_count
+            for chunk in selected_chunks
+        )
+    ):
+        raise ValueError("Prepared design selected support differs from immutable source ranges")
+    ranges = (
+        [(by_id[chunk.source_unit_id], chunk.slice_start, chunk.slice_end) for chunk in selected_chunks]
+        if selected_chunks is not None else [(unit, 0, unit.codepoint_count) for unit in units if unit.codepoint_count]
+    )
     spans = tuple(
         mint_verified_span(
-            source_unit=unit, span_start=0, span_end=unit.codepoint_count,
+            source_unit=unit, span_start=start, span_end=end,
             purpose="domain_design", verified_at_utc=verified_at_utc,
         )
-        for unit in units if unit.codepoint_count
+        for unit, start, end in ranges
     )
-    spans_by_unit = {span.source_unit_id: span for span in spans}
+    spans_by_unit = {}
+    for span in spans:
+        spans_by_unit.setdefault(span.source_unit_id, []).append(span.evidence_span_id)
     entries = tuple(DesignSampleEntry(
         source_file_id=unit.source_file_id, source_unit_ids=(unit.source_unit_id,),
-        evidence_span_ids=(spans_by_unit[unit.source_unit_id].evidence_span_id,),
+        evidence_span_ids=tuple(spans_by_unit[unit.source_unit_id]),
         sample_kind=unit.unit_kind if unit.unit_kind in {"heading", "table", "visual_description"} else "text",
         sample_order=index,
     ) for index, unit in enumerate(units) if unit.source_unit_id in spans_by_unit)
@@ -1563,7 +1586,19 @@ def prepared_design_artifacts(prepared: PreparedCorpus, *, preflight, verified_a
         "excluded_source_count": preflight.corpus.excluded_entry_count,
         "blocked_source_count": preflight.corpus.blocked_entry_count,
         "observed_media_types": tuple(sorted({entry.media_type for entry in preflight.corpus.entries})),
-        "observed_schema_fields": (), "inferred_suggestions": (), "warnings": (),
+        "observed_schema_fields": (), "inferred_suggestions": (),
+        "warnings": () if selected_chunks is None else (SourceProfileWarning(
+            warning_id=deterministic_contract_id("window-prefix-design-scope", {
+                "chunks": selected_chunks, "scope_notice": scope_notice,
+            }),
+            warning_type="limited_committed_prefix_scope",
+            message=(
+                "Source counts describe the full indexed inventory, not processing or observed facts. "
+                "Design evidence includes only exact committed-prefix ranges. "
+                "The full original intake and questions remain schema intent, not additional observed source facts. "
+                + scope_notice
+            ),
+        ),),
         "completeness_disclaimer": "design samples are bounded proposal support, not the complete source universe",
     }
     digest = canonical_sha256(values)

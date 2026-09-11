@@ -81,6 +81,135 @@ def pending_scope(registry, row):
     return dict(zip(registry["scope_columns"], registry["catalogs"]["scopes"][row["scope"]]))
 
 
+@pytest.mark.parametrize("formats", [("list",), ("v1.0",), ("v1.1",), ("list", "v1.0", "v1.1")])
+def test_pending_validation_reconstructs_once_per_format_per_window_and_checks_every_request(
+        tmp_path, monkeypatch, formats):
+    import fabric_kg_builder.domain.window_run as engine
+    from collections import Counter
+
+    data = inputs(tmp_path, files=1, paragraphs=11)
+    config = RunConfig(window_size=6)
+    result = run_windowed(inputs=data, output_dir=tmp_path / "windows", config=config,
+                          budget=budget(), client=Client(lambda p: response(p, invalid=True)))
+    history, log = result.logs[:1], result.logs[1]
+    snapshot = engine._effective_window(
+        engine.seed_snapshot(), result.chunks[:6], history[0].exchanges, config).snapshot
+    assert len(log.exchanges) == 6
+    rendered = {"list": engine._pending_ledger(history), "v1.0": engine._pending_context_v1(history),
+                "v1.1": engine._pending_context(history)}
+    values = [rendered[formats[i % len(formats)]] for i in range(6)]
+    units = {u.source_unit_id: u for u in result.prepared.source_units}
+
+    def rewritten(pending_values):
+        exchanges, items = [], []
+        for original, item, pending in zip(log.exchanges, result.chunks[6:12], pending_values):
+            payload = original.request.model_dump(mode="json")["payload"]
+            user = json.loads(payload["request"]["user"])
+            user["input"]["pending"] = pending
+            payload["request"]["user"] = canonical_json(user)
+            request = engine._seal(engine._Ledger, kind="request", payload=payload)
+            received = engine._seal(engine._Ledger, kind="response", payload={
+                **original.response.payload, "request_hash": request.artifact_hash})
+            exchanges.append(engine.WindowedExchange(request=request, response=received))
+            items.append(engine._grounded_observation(
+                item.chunk, request.artifact_hash,
+                {"candidates": received.payload["response"]["candidates"]},
+                units[item.chunk.source_unit_id], request_prompt_version=None))
+        updated = engine._seal(engine.WindowedLog, **{
+            **{name: getattr(log, name) for name in type(log).model_fields if name != "artifact_hash"},
+            "request_hashes": [e.request.artifact_hash for e in exchanges],
+            "response_hashes": [e.response.artifact_hash for e in exchanges], "exchanges": exchanges})
+        return updated, items
+
+    calls = Counter()
+    expected_pending = engine._expected_pending
+
+    def counted(stored, actual_history):
+        assert actual_history is history
+        calls["list" if isinstance(stored, list) else stored["format_version"]] += 1
+        return expected_pending(stored, actual_history)
+
+    monkeypatch.setattr(engine, "_expected_pending", counted)
+
+    def validate(pending_values):
+        updated, items = rewritten(pending_values)
+        engine._validate_exchanges(
+            updated, items, snapshot, prepared=result.prepared, context=result.context,
+            manifest_hash=result.manifest_hash, model_hash=result.model_hash, config=config, history=history)
+
+    keys = {"list": "list", "v1.0": engine.PENDING_CONTEXT_V1, "v1.1": engine.PENDING_CONTEXT_VERSION}
+    expected_counts = Counter({keys[fmt]: 1 for fmt in formats})
+    validate(values)
+    assert calls == expected_counts
+    validate(values)
+    assert calls == Counter({key: 2 for key in expected_counts})
+
+    tampered = copy.deepcopy(values)
+    if isinstance(tampered[-1], list):
+        tampered[-1][-1]["reason"] = "tampered later request"
+    else:
+        tampered[-1]["ledger_entry_count"] += 1
+    with pytest.raises(ValueError, match="source/context/schema drift"):
+        validate(tampered)
+    assert calls == Counter({key: 3 for key in expected_counts})
+    for unsupported in ({"format_version": "legacy-list"}, {"format_version": ["unknown"]}, None):
+        with pytest.raises(ValueError, match="unsupported pending context"):
+            validate([*values[:-1], unsupported])
+
+
+@pytest.mark.parametrize("repair_mode", ["none", "valid", "invalid", "empty"])
+def test_effective_window_reuses_initial_barrier_only_without_repair_exchanges(tmp_path, monkeypatch, repair_mode):
+    import fabric_kg_builder.domain.window_run as engine
+
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    config = RunConfig(window_size=8)
+
+    def draft(payload):
+        if repair_mode == "none":
+            return response(payload, invalid=True)
+        if repair_mode == "invalid" and "repair" in payload:
+            return {"schema_proposals": []}
+        if repair_mode == "empty" and "repair" in payload:
+            return {"candidates": [], "schema_proposals": []}
+        return _identity_property_repair(payload)
+
+    result = run_windowed(inputs=data, output_dir=tmp_path / "windows", config=config,
+                          budget=budget(max_repair_calls=0 if repair_mode == "none" else 1), client=Client(draft))
+    log, seed = result.logs[0], engine.seed_snapshot()
+    barrier, calls = engine._barrier, []
+
+    def counted(*args):
+        evaluated = barrier(*args)
+        calls.append(((args[0], *(list(value) for value in args[1:])), evaluated))
+        return evaluated
+
+    monkeypatch.setattr(engine, "_barrier", counted)
+    evaluated = engine._effective_window(seed, result.chunks, log.exchanges, config)
+    assert len(calls) == (1 if repair_mode == "none" else 2)
+    engine._validate_evaluation(log, evaluated, seed)
+    assert evaluated.original_diagnostics == calls[0][1][2]
+    # Independently repeat the final pure evaluation used before the optimization.
+    repeated = barrier(*calls[-1][0])
+    assert canonical_json(repeated) == canonical_json((
+        evaluated.snapshot, evaluated.decisions, evaluated.diagnostics, evaluated.records))
+    assert evaluated.snapshot.artifact_hash == result.final_snapshot.artifact_hash
+    assert bool(evaluated.supersessions) == (repair_mode == "valid")
+    if repair_mode == "none":
+        assert evaluated.snapshot is calls[0][1][0]
+        assert evaluated.records is calls[0][1][3]
+    pending_calls, expected_pending = [], engine._expected_pending
+
+    def counted_pending(stored, history):
+        pending_calls.append(stored)
+        return expected_pending(stored, history)
+
+    monkeypatch.setattr(engine, "_expected_pending", counted_pending)
+    engine._validate_exchanges(
+        log, result.chunks, seed, prepared=result.prepared, context=result.context,
+        manifest_hash=result.manifest_hash, model_hash=result.model_hash, config=config, history=[])
+    assert len(pending_calls) == 1
+
+
 def test_raw_windows_full_context_empty_seed_frozen_barrier_and_completed_resume(tmp_path):
     data = inputs(tmp_path)
     config = RunConfig(window_size=2, max_chunk_chars=128)

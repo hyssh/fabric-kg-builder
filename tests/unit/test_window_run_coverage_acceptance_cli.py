@@ -40,8 +40,7 @@ def _run(prepared, intake, windows, calls):
 
 @pytest.fixture(scope="module")
 def partial_case(tmp_path_factory):
-    root = tmp_path_factory.getbasetemp() / "integrated-partial-coverage"
-    root.mkdir()
+    root = tmp_path_factory.mktemp("integrated-partial-coverage")
     source, intake, _, _, _ = _paths(root, count=1)
     source_file = next(source.glob("*.html"))
     source_file.write_text("".join(

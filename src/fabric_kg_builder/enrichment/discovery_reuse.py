@@ -524,7 +524,9 @@ def run_discovery_reuse(
         build_candidate_batch, compile_closed_vocabulary, extraction_leaf_to_dict,
         render_extraction_prompt, raw_candidate_response_schema,
     )
-    from .schema2_work_units import WorkUnitCheckpoint, plan_work_units, split_work_unit
+    from .schema2_work_units import WorkUnitCheckpoint, split_work_unit
+    from .window_prefix import WindowPrefixScopeError, plan_approved_work_units
+    from fabric_kg_builder.domain.window_run_acceptance import WindowRunPrefixAcceptance
 
     reviewed_mapping = None
     mapping_authority = {}
@@ -589,6 +591,9 @@ def run_discovery_reuse(
         "run_issues": acceptance.run_issues,
     } if acceptance is not None else None
     window_coverage_authority = {}
+    prefix_scope = isinstance(window_acceptance, WindowRunPrefixAcceptance)
+    gap_disposition = "excluded_outside_approved_prefix" if prefix_scope else "unprocessed_accepted_coverage"
+    acceptance_hash_field = "scope_acceptance_hash" if prefix_scope else "coverage_acceptance_hash"
     if window_acceptance is not None:
         waived_missing = {gap.chunk_id for gap in window_acceptance.coverage.gaps}
         coverage_gaps = window_acceptance.coverage.model_dump(mode="json")
@@ -596,12 +601,20 @@ def run_discovery_reuse(
             "window_run_acceptance": window_acceptance.model_dump(mode="json"),
             "coverage_gaps": coverage_gaps,
             "full_corpus_design_ready": False,
-            "coverage_authority": "reviewed_available_subset_only",
+            "coverage_authority": "limited_committed_prefix_only" if prefix_scope else "reviewed_available_subset_only",
             "processing_coverage": {
                 "processed_chunks": window_acceptance.coverage.processed_chunks,
                 "total_chunks": window_acceptance.coverage.total_chunks,
-                "min_chunk_coverage": str(window_acceptance.min_chunk_coverage),
+                **({} if prefix_scope else {"min_chunk_coverage": str(window_acceptance.min_chunk_coverage)}),
             },
+            **({
+                "extraction_scope": "limited_committed_prefix_only",
+                "excluded_chunk_count": len(window_acceptance.omitted_chunk_ids),
+                "excluded_chunk_ids": window_acceptance.omitted_chunk_ids,
+                "selected_committed_chunk_ids": window_acceptance.selected_committed_chunk_ids,
+                "agent_scope_notice": window_acceptance.scope_notice,
+                "omitted_work_disposition": "excluded_not_empty_success",
+            } if prefix_scope else {}),
         }
     vocabulary = compile_closed_vocabulary(inputs.domain_contract)
     units = {item.source_unit_id: item for item in materialized.source_units}
@@ -628,14 +641,14 @@ def run_discovery_reuse(
                 missing.append(gap.chunk_id)
                 pending.append({
                     **gap.model_dump(mode="json"),
-                    "reasons": ["unprocessed_accepted_coverage"],
-                    "coverage_acceptance_hash": window_acceptance.acceptance_hash,
+                    "reasons": [gap_disposition],
+                    acceptance_hash_field: window_acceptance.acceptance_hash,
                 })
                 provenance.append({
                     "chunk_id": gap.chunk_id, "source_unit_id": gap.source_unit_id,
                     "original_observation_hash": None, "raw_response_hash": None,
-                    "disposition": "unprocessed_accepted_coverage", "mapped_response_hash": None,
-                    "coverage_acceptance_hash": window_acceptance.acceptance_hash,
+                    "disposition": gap_disposition, "mapped_response_hash": None,
+                    acceptance_hash_field: window_acceptance.acceptance_hash,
                 })
     original_dispositions, targeted_dispositions, targeted_grounding = [], [], []
     original_envelopes, targeted_envelopes, targeted_response_issues = [], [], []
@@ -1012,10 +1025,24 @@ def run_discovery_reuse(
             ])))
         checkpoint.record_leaf(work, extraction_leaf_to_dict(leaf))
 
-    for root in plan_work_units(
+    scoped_candidates = {
+        (chunk.source_unit_id, chunk.slice_start, chunk.slice_end): mapped.response["candidates"]
+        for chunk, mapped in mapped_chunks
+    } if prefix_scope else {}
+    for root in plan_approved_work_units(
         materialized.source_units, pass_name="schema-constrained-extraction", authority_fingerprint=fingerprint,
+        contract=inputs.domain_contract,
     ):
-        persist_leaf(root, positioned[root.source_unit_id])
+        items = positioned[root.source_unit_id]
+        if prefix_scope:
+            key = (root.source_unit_id, root.slice_start, root.slice_end)
+            if key not in scoped_candidates:
+                raise WindowPrefixScopeError("WINDOW_PREFIX_COMMITTED_RESPONSE_MISSING")
+            items = [
+                (candidate, (candidate.get("anchor") or next(iter(candidate.get("anchors", [])), {})).get("span_start", root.slice_start))
+                for candidate in scoped_candidates[key]
+            ]
+        persist_leaf(root, items)
 
     class NoImplicitModel:
         def complete(self, **_kwargs):

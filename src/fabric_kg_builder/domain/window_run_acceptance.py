@@ -1,4 +1,4 @@
-"""Exact >=99% processing waivers for genuine partial integrated runs."""
+"""Distinct >=99% processing waivers and explicit limited committed-prefix scopes."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from collections import Counter
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from fabric_kg_builder.contracts.base import ContractModel, RequiredText, Sha256, canonical_sha256
 
@@ -116,12 +116,96 @@ class WindowRunCoverageAcceptance(_CoverageReview):
         return self
 
 
-def _values(run, *, actor, rationale, minimum):
+class WindowRunPrefixChunk(ContractModel):
+    chunk_id: str
+    source_file_id: str
+    source_unit_id: str
+    source_text_hash: Sha256
+    slice_start: int = Field(ge=0)
+    slice_end: int = Field(gt=0)
+
+
+class _PrefixReview(ContractModel):
+    window_run_hash: Sha256
+    prepared_corpus_hash: Sha256
+    corpus_hash: Sha256
+    context_hash: Sha256
+    snapshot_hash: Sha256
+    final_mapping_hash: Sha256
+    coverage: WindowRunCoverage
+    cursor: int = Field(gt=0)
+    selected_committed_chunk_ids: list[str]
+    selected_chunks: list[WindowRunPrefixChunk]
+    omitted_chunk_ids: list[str]
+    actor: RequiredText
+    rationale: RequiredText
+    scope_notice: RequiredText
+    authority: Literal["limited_committed_prefix_only"] = "limited_committed_prefix_only"
+    ontology_approved: Literal[False] = False
+    evidence_approved: Literal[False] = False
+    full_corpus_coverage: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _scope(self):
+        selected = self.selected_committed_chunk_ids
+        if (
+            self.coverage.source_preparation_errors
+            or self.cursor != len(selected) or self.cursor != self.coverage.processed_chunks
+            or len(set(selected)) != len(selected)
+            or [chunk.chunk_id for chunk in self.selected_chunks] != selected
+            or self.omitted_chunk_ids != [gap.chunk_id for gap in self.coverage.gaps]
+            or set(selected) & set(self.omitted_chunk_ids)
+            or self.cursor + len(self.omitted_chunk_ids) != self.coverage.total_chunks
+            or not self.omitted_chunk_ids
+            or any(chunk.slice_end <= chunk.slice_start for chunk in self.selected_chunks)
+            or self.scope_notice != prefix_scope_notice(self.cursor, self.coverage.total_chunks)
+        ):
+            raise WindowRunAcceptanceError("WINDOW_RUN_PREFIX_SCOPE_MISMATCH")
+        return self
+
+
+class WindowRunPrefixPreview(_PrefixReview):
+    artifact_kind: Literal["domain.window_run_prefix_preview"] = "domain.window_run_prefix_preview"
+    accepted: Literal[False] = False
+
+
+class WindowRunPrefixAcceptance(_PrefixReview):
+    artifact_kind: Literal["domain.window_run_prefix_acceptance"] = "domain.window_run_prefix_acceptance"
+    artifact_version: Literal["1.0.0"] = "1.0.0"
+    accepted: Literal[True] = True
+    acceptance_hash: Sha256
+
+    @model_validator(mode="after")
+    def _digest(self):
+        if self.acceptance_hash != canonical_sha256(self.model_dump(mode="json", exclude={"acceptance_hash"})):
+            raise WindowRunAcceptanceError("WINDOW_RUN_PREFIX_ACCEPTANCE_HASH_MISMATCH")
+        return self
+
+
+WindowRunAcceptance = Annotated[
+    WindowRunCoverageAcceptance | WindowRunPrefixAcceptance, Field(discriminator="artifact_kind"),
+]
+
+
+def prefix_scope_notice(selected, total):
+    return (
+        f"LIMITED COMMITTED-PREFIX PROTOTYPE: only {selected} of {total} full-corpus planned chunks "
+        f"are in the approved extraction scope; {total - selected} chunks are excluded, not observed empty. "
+        "The original run remains partial. Cached in-flight responses outside the committed cursor are not included. "
+        "This is not a >=99% coverage waiver, full-corpus ontology coverage, evidence approval or verified answers. "
+        "Answer only from cited validated evidence in this prefix; identify scope gaps and abstain from full-corpus claims."
+    )
+
+
+def _run_values(run, *, actor, rationale, _validation=None):
     from .window_run import WindowedRun, _verify_chunks, _verify_prepared
 
-    run = WindowedRun.model_validate(run.model_dump(mode="python"))
-    _verify_chunks(run.prepared, run.chunk_plan)
-    _verify_prepared(run.prepared)
+    if _validation is None:
+        run = WindowedRun.model_validate(run.model_dump(mode="python"))
+        _verify_chunks(run.prepared, run.chunk_plan)
+        _verify_prepared(run.prepared)
+    else:
+        run = _validation.run(run)
     if run.state != "partial":
         raise WindowRunAcceptanceError("WINDOW_RUN_NOT_PARTIAL: complete runs need no coverage waiver")
     if not run.final_snapshot.concepts:
@@ -163,16 +247,20 @@ def _values(run, *, actor, rationale, minimum):
         window_run_hash=run.artifact_hash, prepared_corpus_hash=run.prepared.artifact_hash,
         corpus_hash=run.prepared.corpus.corpus_hash, context_hash=run.context.artifact_hash,
         snapshot_hash=run.final_snapshot.artifact_hash, final_mapping_hash=run.final_mapping.artifact_hash,
-        coverage=coverage, actor=actor, rationale=rationale, min_chunk_coverage=Decimal(str(minimum)),
+        coverage=coverage, actor=actor, rationale=rationale,
     )
 
 
-def preview_window_run_partial(run, *, actor, rationale, min_chunk_coverage=Decimal("0.99")):
-    return WindowRunCoveragePreview(**_values(run, actor=actor, rationale=rationale, minimum=min_chunk_coverage))
+def _values(run, *, actor, rationale, minimum, _validation=None):
+    return {**_run_values(run, actor=actor, rationale=rationale, _validation=_validation), "min_chunk_coverage": Decimal(str(minimum))}
 
 
-def accept_window_run_partial(run, *, actor, rationale, min_chunk_coverage=Decimal("0.99")):
-    values = _values(run, actor=actor, rationale=rationale, minimum=min_chunk_coverage)
+def preview_window_run_partial(run, *, actor, rationale, min_chunk_coverage=Decimal("0.99"), _validation=None):
+    return WindowRunCoveragePreview(**_values(run, actor=actor, rationale=rationale, minimum=min_chunk_coverage, _validation=_validation))
+
+
+def accept_window_run_partial(run, *, actor, rationale, min_chunk_coverage=Decimal("0.99"), _validation=None):
+    values = _values(run, actor=actor, rationale=rationale, minimum=min_chunk_coverage, _validation=_validation)
     preview = WindowRunCoveragePreview(**values)
     values = preview.model_dump(mode="python", exclude={"artifact_kind", "accepted"})
     values["coverage"] = preview.coverage
@@ -181,16 +269,59 @@ def accept_window_run_partial(run, *, actor, rationale, min_chunk_coverage=Decim
     return WindowRunCoverageAcceptance(**values, acceptance_hash=digest)
 
 
-def validate_window_run_acceptance(acceptance, run):
+def validate_window_run_acceptance(acceptance, run, *, _validation=None):
+    from .window_validation import WindowValidationOperation
+
+    operation = _validation or WindowValidationOperation()
+    if operation.acceptance_validated(acceptance, run):
+        return acceptance
+    if isinstance(acceptance, WindowRunPrefixAcceptance):
+        acceptance = WindowRunPrefixAcceptance.model_validate(acceptance.model_dump(mode="python"))
+        expected = accept_window_run_prefix(run, actor=acceptance.actor, rationale=acceptance.rationale, _validation=operation)
+        if acceptance != expected:
+            raise WindowRunAcceptanceError("WINDOW_RUN_PREFIX_ACCEPTANCE_BINDING_DRIFT")
+        operation.remember_acceptance(acceptance, run)
+        return acceptance
     acceptance = WindowRunCoverageAcceptance.model_validate(acceptance.model_dump(mode="python"))
     expected = accept_window_run_partial(
         run, actor=acceptance.actor, rationale=acceptance.rationale,
         min_chunk_coverage=acceptance.min_chunk_coverage,
+        _validation=operation,
     )
     if acceptance != expected:
         raise WindowRunAcceptanceError("WINDOW_RUN_ACCEPTANCE_BINDING_DRIFT: run, source, context, snapshot or coverage differs")
+    operation.remember_acceptance(acceptance, run)
     return acceptance
 
 
 def load_window_run_acceptance(path):
-    return WindowRunCoverageAcceptance.model_validate_json(Path(path).read_text(encoding="utf-8"))
+    return TypeAdapter(WindowRunAcceptance).validate_json(Path(path).read_text(encoding="utf-8"))
+
+
+def _prefix_values(run, *, actor, rationale, _validation=None):
+    values = _run_values(run, actor=actor, rationale=rationale, _validation=_validation)
+    selected = run.chunk_plan[:run.cursor]
+    if [item.chunk for item in run.chunks] != selected:
+        raise WindowRunAcceptanceError("WINDOW_RUN_PREFIX_NOT_COMMITTED")
+    return {
+        **values, "cursor": run.cursor,
+        "selected_committed_chunk_ids": [chunk.chunk_id for chunk in selected],
+        "selected_chunks": [WindowRunPrefixChunk(**{
+            key: getattr(chunk, key) for key in WindowRunPrefixChunk.model_fields
+        }) for chunk in selected],
+        "omitted_chunk_ids": [chunk.chunk_id for chunk in run.chunk_plan[run.cursor:]],
+        "scope_notice": prefix_scope_notice(run.cursor, len(run.chunk_plan)),
+    }
+
+
+def preview_window_run_prefix(run, *, actor, rationale, _validation=None):
+    return WindowRunPrefixPreview(**_prefix_values(run, actor=actor, rationale=rationale, _validation=_validation))
+
+
+def accept_window_run_prefix(run, *, actor, rationale, _validation=None):
+    preview = preview_window_run_prefix(run, actor=actor, rationale=rationale, _validation=_validation)
+    values = preview.model_dump(mode="python", exclude={"artifact_kind", "accepted"})
+    values.update(coverage=preview.coverage, selected_chunks=preview.selected_chunks)
+    draft = WindowRunPrefixAcceptance.model_construct(acceptance_hash="0" * 64, **values)
+    digest = canonical_sha256(draft.model_dump(mode="json", exclude={"acceptance_hash"}))
+    return WindowRunPrefixAcceptance(**values, acceptance_hash=digest)

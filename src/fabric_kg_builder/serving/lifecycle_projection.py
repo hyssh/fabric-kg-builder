@@ -1123,8 +1123,19 @@ def _audit_rows_and_dispositions(
 
 
 def _verified_evidence(source: L3StageResult) -> dict[str, Any]:
+    from fabric_kg_builder.enrichment.window_prefix import prefix_span_allowed
+
     spans: dict[str, Any] = {}
     for span in source.evidence_spans:
+        if not prefix_span_allowed(
+            source.inputs.domain_contract, source_unit_id=span.source_unit_id,
+            span_start=span.span_start, span_end=span.span_end,
+            source_text_hash=span.source_text_content_hash,
+        ):
+            raise L4ProjectionError(
+                "L4_EVIDENCE_OUTSIDE_APPROVED_PREFIX",
+                f"evidence span {span.evidence_span_id} exceeds the approved committed-prefix scope",
+            )
         if span.evidence_span_id in spans:
             raise L4ProjectionError(
                 "L4_EVIDENCE_INVALID",

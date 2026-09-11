@@ -48,6 +48,7 @@ from fabric_kg_builder.serving.structured_publication import (
     _typed_fingerprint_scalar,
     _typed_table_fingerprint_rows,
     compile_l5a_publication,
+    export_serving_question_context,
 )
 
 FORMAT_VERSION = "1.0.0"
@@ -215,6 +216,7 @@ def _compile(
         source, crosswalks=(crosswalk,), access_policy=policy,
         governed_assets=assets, target_ids=targets,
     )
+    window_scope = export_serving_question_context(source).get("window_run_scope")
     tables = dict(compiled.tables)
     if tables["l4_semantic_asserted_entities"].num_rows == 0:
         raise PrototypePublicationError("Empty asserted semantic entity data is not publishable")
@@ -353,6 +355,7 @@ def _compile(
         },
         limitations=limitations, blockers=blockers,
         provenance={
+            **({"window_run_scope": window_scope} if window_scope is not None else {}),
             "source_projection_id": compiled.definitions["parquet"]["source_projection_id"],
             "source_projection_hash": compiled.definitions["parquet"]["source_projection_hash"],
             "crosswalk_hash": crosswalk.crosswalk_hash,
@@ -366,14 +369,33 @@ def _compile(
     )
 
 
+def _prototype_description(run_id: str, window_scope: dict[str, Any] | None = None) -> str:
+    if window_scope is None:
+        return f"Schema2 create-only prototype run {run_id}; retain partial items"
+    label = (
+        "LIMITED PREFIX" if window_scope["authority"] == "limited_committed_prefix_only"
+        else "PARTIAL COVERAGE"
+    )
+    description = (
+        f"{label} {window_scope['selected_chunk_count']}/{window_scope['total_chunk_count']} "
+        f"({window_scope['omitted_chunk_count']} excluded); NOT full coverage; "
+        f"scope={window_scope['acceptance_hash']}; "
+        f"Schema2 create-only prototype run {run_id}; retain partial items"
+    )
+    if len(description) > 256:
+        raise PrototypePublicationError("Scoped prototype description exceeds 256 characters; no content was truncated")
+    return description
+
+
 def _ontology_parts(
     compilation: _Compilation, workspace_id: str, lakehouse_id: str,
     name: str, description: str,
+    *, legacy_names: bool = False,
 ) -> list[dict[str, str]]:
     native = compile_fabric_ontology_definition(
         compilation.definitions["ontology"], workspace_id=workspace_id,
         lakehouse_id=lakehouse_id, display_name=name, description=description,
-        lakehouse="dbo",
+        lakehouse="dbo", legacy_names=legacy_names,
     )
     parts = [part for part in native.parts if part["path"] != ".platform"]
     if len({part["path"] for part in parts}) != len(parts):
@@ -462,16 +484,22 @@ def _native_definitions(
 
 def _compiler_hash() -> str:
     from fabric_kg_builder.deploy import fabric_ontology_definition
+    from fabric_kg_builder.deploy import ontology_names
     from fabric_kg_builder.deploy import fabric_semantic_model_definition
     from fabric_kg_builder.serving import graph_model, structured_publication
 
     return canonical_sha256({
         module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
         for module in (
-            fabric_ontology_definition, fabric_semantic_model_definition,
+            fabric_ontology_definition, ontology_names, fabric_semantic_model_definition,
             graph_model, structured_publication,
         )
-    } | {"prototype": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
+    } | {
+        "prototype": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "prototype_reconciliation": hashlib.sha256(
+            Path(__file__).with_name("schema2_prototype_reconcile.py").read_bytes()
+        ).hexdigest(),
+    })
 
 
 class _Run:
@@ -522,7 +550,12 @@ class _Run:
             raise PrototypePublicationError(
                 f"Fabric HTTP {response.status_code}; errorCode={str(code)[:120]}"
             )
-        return response.json() if response.content else {}
+        body = response.json() if response.content else {}
+        if body is None and response.status_code == 202:
+            return {}
+        if not isinstance(body, dict):
+            raise PrototypePublicationError("Fabric response body must be an object (or null for HTTP 202)")
+        return body
 
     def items(self) -> list[dict[str, Any]]:
         url = f"{API}/workspaces/{self.plan['workspace_id']}/items"
@@ -540,16 +573,26 @@ class _Run:
         return items
 
     def _receive(self, response: Any, action: dict[str, Any]) -> dict[str, Any]:
-        try:
-            body = response.json() if response.content else {}
-        except ValueError:
-            body = {}
+        # Persist the transport evidence before decoding an untrusted response.
         action.update({
             "status": "response_received", "http_status": response.status_code,
             "operation_id": response.headers.get("x-ms-operation-id"),
             "location": response.headers.get("Location"),
-            "returned_item_id": body.get("id"),
+            "response_headers": dict(response.headers),
         })
+        self.save()
+        try:
+            body = response.json() if response.content else {}
+        except ValueError as error:
+            action["response_body_error"] = "invalid-json"
+            action["response_body_text"] = response.text
+            self.save()
+            raise PrototypePublicationError("Invalid Fabric JSON response; operation evidence retained") from error
+        action["response_body"] = body
+        if isinstance(body, dict):
+            action["returned_item_id"] = body.get("id")
+        elif body is not None or response.status_code != 202:
+            action["response_body_error"] = "non-object"
         self.save()
         return self.checked(response)
 
@@ -617,6 +660,10 @@ class _Run:
         else:
             if action.get("request_hash") != request_hash:
                 raise PrototypePublicationError(f"Create request changed: {key}")
+            if action.get("ownership") == "operator-reconciled":
+                from fabric_kg_builder.deploy.schema2_prototype_reconcile import validate_reconciled_create
+
+                return validate_reconciled_create(self, kind, definition)
             body = {}
             if action["status"] == "intent":
                 raise PrototypePublicationError(
@@ -724,13 +771,14 @@ class _Run:
     def observe_new_items(self) -> None:
         baseline = set(self.data.get("baseline_item_ids", []))
         primary = {
-            action.get("item_id") for action in self.data["actions"].values()
+            action.get("item_id"): action.get("ownership", "journal-returned-id")
+            for action in self.data["actions"].values()
             if action.get("kind") in COLLECTIONS
         }
         self.data["observed_new_items"] = [
             {
                 "metadata": item,
-                "ownership": "journal-returned-id" if item.get("id") in primary
+                "ownership": primary[item["id"]] if item.get("id") in primary
                 else "unattributed-new-item-or-service-companion-retained",
             }
             for item in self.items() if item.get("id") not in baseline
@@ -766,10 +814,11 @@ class _Run:
     def graph_content(
         self, graph_id: str, definition: dict[str, Any], compilation: _Compilation,
         lakehouse_id: str, *, companion: bool = False,
+        native_ontology: dict[str, Any] | None = None,
     ) -> None:
         checks = _graph_readback_checks(
             definition, compilation, self.plan["workspace_id"], lakehouse_id,
-            companion=companion,
+            companion=companion, native_ontology=native_ontology,
         )
         evidence = self.data.setdefault("graph_content_readbacks", {})
         evidence[graph_id] = {"status": "verifying", "checks": []}
@@ -858,7 +907,7 @@ class _Run:
         self.observe_new_items()
         candidates = [
             item["metadata"] for item in self.data["observed_new_items"]
-            if item["ownership"] != "journal-returned-id"
+            if item["ownership"] not in ("journal-returned-id", "operator-reconciled")
             and ontology_id.replace("-", "") in item["metadata"].get("displayName", "")
         ]
         self.data["service_companion_candidates"] = candidates
@@ -905,7 +954,8 @@ class _Run:
                 self.save()
                 self.graph_counts(graph_id, expected)
                 self.graph_content(
-                    graph_id, native, compilation, lakehouse_id, companion=True
+                    graph_id, native, compilation, lakehouse_id, companion=True,
+                    native_ontology=self.definition("ontology", ontology_id),
                 )
                 self.data["verified_service_companions"][graph_id]["readiness"] = (
                     "scalars-and-endpoint-pairs-verified"
@@ -951,6 +1001,7 @@ def _graph_row_fingerprint(
 def _graph_readback_checks(
     definition: dict[str, Any], compilation: _Compilation,
     workspace_id: str, lakehouse_id: str, *, companion: bool,
+    native_ontology: dict[str, Any] | None = None,
 ) -> list[_GraphReadbackCheck]:
     import pyarrow as pa
 
@@ -1000,12 +1051,14 @@ def _graph_readback_checks(
     ontology_node_bindings: dict[str, tuple[str, dict[str, str]]] = {}
     ontology_edge_labels: dict[str, str] = {}
     if companion:
-        native_ontology = _definition_payloads({"parts": _ontology_parts(
-            compilation, workspace_id, lakehouse_id, "schema2_readback", "Readback compilation"
-        )})
-        for path, part in native_ontology.items():
+        ontology_payloads = _definition_payloads(
+            native_ontology if native_ontology is not None else {"parts": _ontology_parts(
+                compilation, workspace_id, lakehouse_id, "schema2_readback", "Readback compilation"
+            )}
+        )
+        for path, part in ontology_payloads.items():
             if "/DataBindings/" in path:
-                entity = native_ontology[f"EntityTypes/{path.split('/')[1]}/definition.json"]
+                entity = ontology_payloads[f"EntityTypes/{path.split('/')[1]}/definition.json"]
                 names_by_id = {prop["id"]: prop["name"] for prop in entity["properties"]}
                 configuration = part["dataBindingConfiguration"]
                 ontology_node_bindings[configuration["sourceTableProperties"]["sourceTableName"]] = (
@@ -1016,7 +1069,7 @@ def _graph_readback_checks(
                     },
                 )
             elif "/Contextualizations/" in path:
-                relationship = native_ontology[
+                relationship = ontology_payloads[
                     f"RelationshipTypes/{path.split('/')[1]}/definition.json"
                 ]
                 ontology_edge_labels[part["dataBindingTable"]["sourceTableName"]] = relationship["name"]
@@ -1206,6 +1259,7 @@ def publish_schema2_prototype(
     approved_limitations: tuple[str, ...] = (), semantic_model: bool = False,
     readback_page_size: int = MAX_GRAPH_READBACK_ROWS,
     readback_total_rows: int = DEFAULT_GRAPH_READBACK_TOTAL_ROWS,
+    _candidate_only: bool = False,
 ) -> dict[str, Any]:
     """Plan, or execute exactly that plan, without invoking transactional L5a."""
     workspace_id = str(uuid.UUID(workspace_id))
@@ -1222,13 +1276,25 @@ def publish_schema2_prototype(
         raise PrototypePublicationError("Prototype requires explicit --materialize and --prototype-journal")
     if len({plan_path.resolve(), journal_path.resolve()}) != 2:
         raise PrototypePublicationError("Plan and journal paths must be distinct")
-    journal_path.parent.mkdir(parents=True, exist_ok=True)
-    with journal_path.with_suffix(journal_path.suffix + ".lock").open("a") as lock:
+    from contextlib import nullcontext
+
+    if not _candidate_only:
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_context = (
+        nullcontext(None) if _candidate_only
+        else journal_path.with_suffix(journal_path.suffix + ".lock").open("a")
+    )
+    with lock_context as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if lock is not None:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise PrototypePublicationError("This prototype journal is already active") from None
         previous = _read_json(plan_path) if plan_path.exists() else None
+        if previous is not None and previous.get("plan_hash") != canonical_sha256({
+            key: value for key, value in previous.items() if key != "plan_hash"
+        }):
+            raise PrototypePublicationError("Immutable plan hash mismatch")
         if not dry_run and previous is None:
             raise PrototypePublicationError("Live execution requires an existing immutable dry-run plan")
         run_id = previous["run_id"] if previous else uuid.uuid4().hex
@@ -1236,8 +1302,8 @@ def publish_schema2_prototype(
         if semantic_model:
             kinds.append("semantic_model")
         names = {kind: f"{name_prefix}_{run_id[:12]}_{kind}" for kind in kinds}
-        description = f"Schema2 create-only prototype run {run_id}; retain partial items"
         compilation = _compile(l4_run, l3_root, workspace_id, name_prefix)
+        description = _prototype_description(run_id, compilation.provenance.get("window_run_scope"))
         ontology = compilation.definitions["ontology"]
         widened = any(
             len(item["allowed_source_semantic_type_ids"]) > 1
@@ -1256,7 +1322,8 @@ def publish_schema2_prototype(
             compilation.blockers.append(
                 f"Complete readback needs {expected_readback_rows} rows; approved total cap is {readback_total_rows}"
             )
-        _materialize(compilation, materialize_dir)
+        if not _candidate_only:
+            _materialize(compilation, materialize_dir)
         native: dict[str, Any] = {}
         try:
             native, exclusions = _native_definitions(
@@ -1324,11 +1391,28 @@ def publish_schema2_prototype(
             "business_acceptance": "requires-six-deployed-source-cited-question-results",
         }
         plan["plan_hash"] = canonical_sha256(plan)
+        if _candidate_only:
+            return plan
         if previous is not None and previous != plan:
-            raise PrototypePublicationError(
-                "Immutable plan changed (inputs/compiler/options); use a new plan path and review it"
+            from fabric_kg_builder.deploy.schema2_prototype_reconcile import validate_runtime_repair
+
+            if not journal_path.exists():
+                raise PrototypePublicationError(
+                    "Immutable plan changed; an existing journal and accepted operator runtime-repair review are required"
+                )
+            validate_runtime_repair(
+                previous, plan, _read_json(journal_path),
+                plan_bytes=plan_path.read_bytes(),
             )
-        _atomic_json(plan_path, plan, create=True)
+            plan = previous
+        elif previous is not None and journal_path.exists():
+            journal = _read_json(journal_path)
+            if journal.get("runtime_repair"):
+                from fabric_kg_builder.deploy.schema2_prototype_reconcile import validate_runtime_repair
+
+                validate_runtime_repair(previous, plan, journal, plan_bytes=plan_path.read_bytes())
+        if previous is None:
+            _atomic_json(plan_path, plan, create=True)
         for kind, definition in native.items():
             _atomic_json(
                 materialize_dir / "native-templates" / f"{kind}.json",

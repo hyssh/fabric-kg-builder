@@ -364,6 +364,9 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
                 label="entity",
             )
 
+    from .window_run_reuse import projected_id_only_relationship_aliases
+
+    id_only_relationship_aliases = projected_id_only_relationship_aliases(contract)
     relationships_by_alias: dict[str, DomainRelationshipTypeV2] = {}
     for relationship in contract.candidate_model.relationship_types:
         for alias in (
@@ -371,6 +374,8 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             relationship.predicate_id,
             relationship.display_name,
         ):
+            if normalize_nfc(alias).casefold() in id_only_relationship_aliases:
+                continue
             _add_unique_alias(
                 relationships_by_alias,
                 alias=alias,
@@ -481,6 +486,12 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
     }
     from fabric_kg_builder.domain.question_routing import question_routing_context
 
+    if id_only_relationship_aliases:
+        prompt_payload["id_only_relationship_display_names"] = sorted(id_only_relationship_aliases)
+        prompt_payload["rules"].append(
+            "Shared relationship display names in id_only_relationship_display_names are not aliases. "
+            "Use the exact approved relationship_type_id with its declared endpoints; ambiguous bare names remain unresolved."
+        )
     routing_context = question_routing_context(contract)
     if routing_context is not None:
         prompt_payload["question_routing_context"] = routing_context

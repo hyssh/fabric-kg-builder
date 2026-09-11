@@ -94,6 +94,7 @@ def _compile(lakehouse=None):
         display_name="fabric_kg_024_ontology",
         description="test",
         lakehouse=lakehouse,
+        legacy_names=True,
     )
 
 
