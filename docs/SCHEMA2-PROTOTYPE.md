@@ -296,14 +296,32 @@ must match.
 
 `domain window-run` connects raw source chunks, the complete intake, evolving
 working schemas and candidate extraction. Unlike `window-align`, it starts from
-an empty schema and makes new bounded extraction calls. Existing discovery is
+an empty schema or an explicit provisional reference and makes new bounded extraction calls. Existing discovery is
 used only as a verified source cache, not as a substitute for those new results.
+
+For a shared business vocabulary from window zero, first infer a reference from
+the complete first cached document and original intake:
+
+```bash
+fabric-kg --config fabric-kg.yaml domain window-bootstrap \
+  --discovery .fkg/discovery/run-1.json --intake intake.json \
+  --out-state .fkg/concept-reference
+```
+
+This is a zero-call plan; add `--live` for one bounded model call. With `--intake`,
+the model selects exact indexed source paragraphs instead of retyping quotations.
+Separate typed entity, relationship and property arrays are compiled into the
+provisional reference with unresolved identities. Inspect the reference and its
+evidence; record any refinement in a separate copy, never edit sealed responses.
+The inferred file is `.fkg/concept-reference/schema-reference.json`.
 
 ```bash
 fabric-kg --config fabric-kg.yaml domain window-run \
   --discovery .fkg/discovery/run-1.json --intake intake.json \
+  --seed-reference .fkg/concept-reference/schema-reference.json \
   --out-state .fkg/window-run --window-size 8 --concurrency 4 \
-  --max-calls 96 --max-repair-calls 2 --stop-after-document 1
+  --schema-policy reviewed-concepts \
+  --max-calls 160 --max-repair-calls 80 --stop-after-document 1
 ```
 
 Default is a read-only plan. Alternatively use `--prepared PREPARED.json` instead
@@ -311,9 +329,29 @@ of `--discovery`. Add `--live` to execute. Each chunk request produces raw
 candidates and schema proposals together. Domain context, all example questions
 and the frozen input schema accompany every extraction and repair request.
 Only the coordinator evaluates proposals and commits the successor schema.
+Omit `--seed-reference` for the empty-schema path. Reference contents are frozen
+inside the run; all reference concepts remain provisional. Resume inherits the
+saved reference when the flag is omitted and rejects a changed reference before
+inference. Bootstrap resume requires repeating the original `--intake` option.
 
-`--max-calls` includes repair calls for the current invocation;
-`--max-repair-calls` is a run-wide repair ceiling. `--max-tokens` optionally caps
+Fresh runs default to `reviewed-concepts`: reusable business types are separate
+from source-labelled instances. New schema concepts require a separate, compact
+model admission decision before working acceptance. Codes, dates and descriptions
+belong in properties rather than value-specific entity types; named parts and
+numbered instructions remain instances. Containment, applicability and sequence
+use source-supported relationships, not invented subclass chains.
+
+`--schema-policy concepts` selects the self-assessment-only policy;
+`observed-terms` preserves legacy behavior. Omitting the option on resume inherits
+the saved policy, never silently migrates an old schema. A policy change needs a
+fresh state. Status reports include type/instance diagnostics, not semantic-recall
+claims. See the [assessment, plan and experiments](specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md#concept-first-assessment-and-bounded-comparison).
+
+`--max-calls` includes repair and semantic-admission calls for this invocation;
+`--max-repair-calls` is their run-wide ceiling (default 16). The example allows
+78 extraction calls plus up to 80 reviews, not a guaranteed document size.
+Review-budget exhaustion leaves unreviewed proposals unresolved; an empty accepted
+initial schema is bootstrap-blocked. `--max-tokens` optionally caps
 conservative token reservations, not measured provider token usage. Input,
 completion and prepared-source chunk bounds are available through
 `--max-request-chars`, `--max-completion-tokens` and `--max-chunk-chars`.

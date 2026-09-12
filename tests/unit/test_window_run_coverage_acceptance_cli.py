@@ -33,6 +33,7 @@ class CoverageModel(IntegratedModel):
 def _run(prepared, intake, windows, calls):
     return _invoke([
         "domain", "window-run", "--prepared", str(prepared), "--intake", str(intake),
+        "--schema-policy", "concepts",
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
         "--max-calls", str(calls), "--max-repair-calls", "0", "--max-tokens", "10000000", "--live",
     ], model=CoverageModel())

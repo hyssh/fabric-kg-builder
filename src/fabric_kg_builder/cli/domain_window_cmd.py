@@ -33,10 +33,12 @@ def _emit(value):
 @click.option("--discovery", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--out-state", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--source-file-id", help="Select an eligible source; default: first prepared corpus entry.")
+@click.option("--intake", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Optional original business intake for focused provisional concept inference; repeat on resume.")
 @click.option("--live", is_flag=True, help="Write provisional schema 1 using one bounded model request.")
 @click.option("--resume", is_flag=True, help="Hash-check durable results without another model call.")
 @click.pass_context
-def domain_window_bootstrap_cmd(ctx, discovery, out_state, source_file_id, live, resume):
+def domain_window_bootstrap_cmd(ctx, discovery, out_state, source_file_id, intake, live, resume):
     """Infer an initial schema from ALL cached slices of ONE document.
 
     Read-only plan by default. No OCR, prior candidates, seeds or approval.
@@ -55,7 +57,7 @@ def domain_window_bootstrap_cmd(ctx, discovery, out_state, source_file_id, live,
 
     try:
         result = bootstrap(discovery=discovery, out_state=out_state,
-                           source_file_id=source_file_id, live=live, resume=resume,
+                           source_file_id=source_file_id, intake=intake, live=live, resume=resume,
                            client_factory=client_factory)
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc

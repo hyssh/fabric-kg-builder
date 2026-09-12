@@ -243,6 +243,12 @@ def test_prefix_schedules_only_selected_ranges_inside_a_long_source_unit(tmp_pat
                 }],
                 "schema_proposals": [{
                     "action": "add_concept", "candidate_indices": [0], "reason": "A source reading record.",
+                    "abstraction": {
+                        "level": "reusable_type", "rationale": "A reusable reading record role.",
+                        "reuse_assessment": "The schema is empty; no existing reading record class.",
+                        "representation": "entity_type",
+                        "independent_identity_rationale": "A reading record can be identified independently of its value.",
+                    },
                     "concept": {"concept_id": "working:record", "kind": "entity", "name": "Service Record",
                                 "definition": "A source reading record.", "identity_policy": {"mode": "unresolved"}},
                 }],
@@ -266,6 +272,7 @@ def test_prefix_schedules_only_selected_ranges_inside_a_long_source_unit(tmp_pat
     prepared_path.write_text(canonical_json(prepared))
     _invoke([
         "domain", "window-run", "--prepared", str(prepared_path), "--intake", str(intake),
+        "--schema-policy", "concepts",
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
         "--max-chunk-chars", "512", "--max-calls", "2", "--max-repair-calls", "0", "--live",
     ], model=LongUnitModel())

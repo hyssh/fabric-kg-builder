@@ -14,6 +14,13 @@ from tests.unit.test_window_mapping_replay import ObservedModel
 
 class IntegratedModel(ObservedModel):
     def complete_json(self, **request):
+        if "decisions" in request["json_schema"]["properties"]:
+            payload = json.loads(request["user"])["input"]
+            return {"decisions": [
+                {"proposal_index": item["proposal_index"], "verdict": "admit",
+                 "reason": "Independently reviewed reusable business role."}
+                for item in payload["repair"]["failed_proposals"]
+            ]}
         result = super().complete_json(**request)
         if "types" in result:
             result["question_routes"][-1]["unresolved_answer_requirements"] = [
@@ -42,19 +49,37 @@ class IntegratedModel(ObservedModel):
                  "definition": "Subject voltage.",
                  "owner_type_ids": ["working:subject"], "value_type": "number"}),
         ]
-        return {
+        response = {
             "candidates": result["candidates"],
             "schema_proposals": [
                 {"action": "add_concept", "concept": concept, "candidate_indices": [index],
-                 "reason": "Retain a directly observed concept with its exact owner/endpoints."}
+                 "reason": "Retain a directly observed concept with its exact owner/endpoints.",
+                 **({"abstraction": {
+                     "level": "reusable_type",
+                     "rationale": "Reusable service role or attribute independent of instance labels.",
+                     "reuse_assessment": "No existing concept has this business role and scope.",
+                     **({
+                         "representation": {"entity": "entity_type", "relationship": "relationship_type",
+                                            "property": "property"}[concept["kind"]],
+                         "independent_identity_rationale": "Independently identifiable service business role.",
+                     } if "CORE BUSINESS MODEL ADMISSION" in request["system"] else {}),
+                 }} if "CONCEPT-FIRST ONTOLOGY POLICY" in request["system"] else {})}
                 for index, concept in concepts if concept["concept_id"] not in present
             ],
             "pending": [], "working_context": {"common_concepts": ["working:subject"]},
         }
+        if "repair" in payload:
+            response["candidates"] = []
+            for proposal in response["schema_proposals"]:
+                proposal["replaces_proposal_index"] = next(
+                    item["proposal_index"] for item in payload["repair"]["failed_proposals"]
+                    if item["proposal"]["concept"]["concept_id"] == proposal["concept"]["concept_id"])
+                proposal["reason"] = "Independent review confirms the reusable business role and scope."
+        return response
 
 
-@pytest.fixture
-def integrated_case(tmp_path):
+@pytest.fixture(params=["concepts", "reviewed-concepts"])
+def integrated_case(tmp_path, request):
     from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
     from fabric_kg_builder.domain.discovery import prepare_discovery_corpus
     from fabric_kg_builder.domain.stage import preflight_l1_inputs
@@ -77,10 +102,13 @@ def integrated_case(tmp_path):
     model = IntegratedModel()
     result = _invoke([
         "domain", "window-run", "--prepared", str(prepared_path), "--intake", str(intake),
+        "--schema-policy", request.param,
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
-        "--max-tokens", "1000000", "--max-calls", "8", "--max-repair-calls", "0", "--live",
+        "--max-tokens", "1000000", "--max-calls", "8", "--max-repair-calls", "8", "--live",
     ], model=model)
     assert result["status"] == "complete"
+    assert result["result"]["prompt_version"] == (
+        "raw-working-window/1.3.0" if request.param == "concepts" else "raw-working-window/1.5.0")
     l1, domain, draft = _approve_integrated(tmp_path, source, intake, windows, model)
     return tmp_path, source, intake, windows, model, l1, domain, draft
 

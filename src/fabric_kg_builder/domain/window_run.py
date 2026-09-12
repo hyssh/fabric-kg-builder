@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, model_serializer, model_validator
 
 from fabric_kg_builder.contracts.base import Sha256, canonical_json, canonical_sha256
 from fabric_kg_builder.enrichment.schema2_extraction import RawCandidateResponse
@@ -27,8 +27,15 @@ from .discovery import (
     _reader_binding, _save_provider_diagnostic, _seal, _write, load_discovery, plan_discovery_chunks,
 )
 from .question_routing import question_routing_context
+from .concept_policy import (
+    CONCEPT_POLICY, CONCEPT_PROMPT_VERSION, CONCEPT_PROMPT_VERSIONS, CORE_POLICY, CORE_PROMPT_VERSION,
+    CORE_PROMPT_VERSIONS, REVIEWED_PROMPT_VERSION, SEMANTIC_REVIEW_POLICY,
+    COMPACT_REVIEW_PROMPT_VERSION, REVIEWED_PROMPT_VERSIONS, CRITIC_SYSTEM,
+    SemanticAdmissionResponse, apply_semantic_admission,
+    ConceptAbstraction, CoreConceptAbstraction, concept_metrics, validate_abstraction,
+)
 from .window_schema import (
-    ChangeDecision, ObservationMapping, PendingProposal, SchemaChange,
+    ChangeDecision, DesignReference, ObservationMapping, PendingProposal, SchemaChange,
     WindowProposal, WorkingConcept, WorkingSchemaSnapshot, _WindowArtifact, _WindowModel,
     _coordinator_lock, _evaluate, map_chunk, seed_snapshot,
 )
@@ -77,7 +84,49 @@ class RunConfig(_WindowModel):
     max_request_chars: int = Field(default=96_000, ge=1024)
     max_completion_tokens: int = Field(default=8192, ge=128, le=32_768)
     max_chunk_chars: int = Field(default=8000, ge=128, le=64_000)
-    prompt_version: Literal["raw-working-window/1.1.0"] = RUN_PROMPT_VERSION
+    prompt_version: Literal[
+        "raw-working-window/1.1.0", "raw-working-window/1.2.0", "raw-working-window/1.3.0",
+        "raw-working-window/1.4.0", "raw-working-window/1.5.0",
+    ] = RUN_PROMPT_VERSION
+    seed_reference: DesignReference | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_serialization(self, handler):
+        data = handler(self)
+        if self.seed_reference is None:
+            data.pop("seed_reference", None)
+        return data
+
+    @model_validator(mode="after")
+    def _provisional_reference(self):
+        if self.seed_reference is None:
+            return self
+        for concept in self.seed_reference.concepts:
+            policy = concept.identity_policy
+            if concept.kind == "entity":
+                if policy != {"mode": "unresolved"}:
+                    raise ValueError("Seed entity identity_policy must be exactly unresolved")
+            elif concept.kind == "relationship":
+                if (policy.get("mode", "unresolved") != "unresolved"
+                        or set(policy) - {"mode", "context_policy"}
+                        or not isinstance(policy.get("context_policy"), str)
+                        or not policy["context_policy"].strip()):
+                    raise ValueError("Seed relationship needs an unresolved nonempty context_policy")
+            elif policy not in ({}, {"mode": "unresolved"}):
+                raise ValueError("Seed property identity_policy must remain unresolved")
+        return self
+
+
+def initial_snapshot(config: RunConfig) -> WorkingSchemaSnapshot:
+    """Version-zero vocabulary guidance carries no observation or approval authority."""
+    snapshot = seed_snapshot(config.seed_reference)
+    if config.seed_reference is None:
+        return snapshot
+    return _seal(
+        WorkingSchemaSnapshot, version=0, seed_hash=snapshot.seed_hash,
+        concepts=snapshot.concepts,
+        provisional_concept_ids=[concept.concept_id for concept in snapshot.concepts],
+    )
 
 
 class RunBudget(_WindowModel):
@@ -133,6 +182,42 @@ class _ProposedChange(_WindowModel):
     alias: str | None = None
     layer: Literal["common", "domain"] | None = None
     replaces_proposal_index: int | None = Field(default=None, ge=0)
+
+
+class _ConceptProposedChange(_ProposedChange):
+    abstraction: ConceptAbstraction | None = None
+
+
+class _CoreConceptProposedChange(_ProposedChange):
+    abstraction: CoreConceptAbstraction | None = None
+
+
+def _system(config, *, repair=False):
+    if config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION and repair:
+        return CRITIC_SYSTEM
+    system = RUN_SYSTEM
+    if config.seed_reference is not None:
+        system = system.replace(
+            "At version zero it is empty.",
+            "At version zero it contains an optional provisional working reference. "
+            "Use its reusable roles as vocabulary guidance, not observed instances or evidence. "
+            "Every candidate still requires its own primary-source grounding; do not fabricate "
+            "observations to fit the reference. New concepts still require the configured "
+            "admission policy. Neither reference concepts nor working acceptance approve a domain or facts.",
+        )
+    if config.prompt_version in CONCEPT_PROMPT_VERSIONS:
+        return system.replace(
+            "New concepts\nmust use their observed name; propose aliases separately.",
+            "New concepts\nmust use the reusable class/predicate/property name assigned to candidates.",
+        ) + CONCEPT_POLICY + (CORE_POLICY if config.prompt_version in CORE_PROMPT_VERSIONS else "") + (
+            SEMANTIC_REVIEW_POLICY if config.prompt_version in REVIEWED_PROMPT_VERSIONS else "")
+    return system
+
+
+def _proposal_model(config):
+    if config.prompt_version in CORE_PROMPT_VERSIONS:
+        return _CoreConceptProposedChange
+    return _ConceptProposedChange if config.prompt_version == CONCEPT_PROMPT_VERSION else _ProposedChange
 
 
 class ProposalDiagnostic(_WindowModel):
@@ -226,7 +311,10 @@ class WindowedRun(_WindowArtifact):
     manifest_hash: Sha256
     model_version: str
     model_hash: Sha256
-    prompt_version: Literal["raw-working-window/1.1.0"] = RUN_PROMPT_VERSION
+    prompt_version: Literal[
+        "raw-working-window/1.1.0", "raw-working-window/1.2.0", "raw-working-window/1.3.0",
+        "raw-working-window/1.4.0", "raw-working-window/1.5.0",
+    ] = RUN_PROMPT_VERSION
     prompt_hash: Sha256
     chunks: list[ChunkObservation]
     final_snapshot: WorkingSchemaSnapshot
@@ -252,6 +340,8 @@ class WindowedRun(_WindowArtifact):
 
     @model_validator(mode="after")
     def _accounting(self):
+        if self.prompt_version != self.config.prompt_version:
+            raise ValueError("window run prompt version differs from configured policy")
         ids = [c.chunk_id for c in self.chunk_plan]
         if len(set(ids)) != len(ids) or [c.chunk.chunk_id for c in self.chunks] != ids[:self.cursor]:
             raise ValueError("windowed chunk accounting mismatch")
@@ -259,7 +349,7 @@ class WindowedRun(_WindowArtifact):
             raise ValueError("windowed cursor differs from committed chunks")
         if [cid for log in self.logs for cid in log.chunk_ids] != ids[:self.cursor]:
             raise ValueError("windowed logs omit or reorder chunks")
-        prior = seed_snapshot()
+        prior = initial_snapshot(self.config)
         last = None
         offset = 0
         for index, log in enumerate(self.logs):
@@ -402,6 +492,7 @@ def _plan(inputs, config):
 
 def plan_window_run(inputs, config=RunConfig()):
     chunks, windows = _plan(inputs, config)
+    seed = initial_snapshot(config)
     return {
         "prepared_hash": inputs.prepared.artifact_hash, "context_hash": inputs.context.artifact_hash,
         "config": config.model_dump(mode="json"), "document_count": len(inputs.prepared.sources),
@@ -410,6 +501,10 @@ def plan_window_run(inputs, config=RunConfig()):
         "primary_codepoint_count": sum(c.slice_end - c.slice_start for c in chunks),
         "scope": "full_prepared_corpus", "initial_schema_version": 0,
         "source_statuses": [s.model_dump(mode="json") for s in inputs.prepared.sources],
+        "seed_hash": seed.seed_hash,
+        "seed_concept_counts": dict(Counter(concept.kind for concept in seed.concepts)),
+        **({"seed_reference_authority": "provisional_working_only"}
+           if config.seed_reference is not None else {}),
     }
 
 
@@ -449,11 +544,13 @@ def _request(manifest, snapshot, chunk, pending, *, repair=None):
     candidate_schema = RawCandidateResponse.model_json_schema()
     schema.setdefault("$defs", {}).update(candidate_schema.get("$defs", {}))
     schema["properties"]["candidates"] = candidate_schema["properties"]["candidates"]
-    proposal_schema = _ProposedChange.model_json_schema()
+    proposal_schema = _proposal_model(manifest.config).model_json_schema()
     schema["$defs"].update(proposal_schema.pop("$defs", {}))
     schema["properties"]["schema_proposals"] = {"type": "array", "items": proposal_schema}
+    if manifest.config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION and repair is not None:
+        schema = SemanticAdmissionResponse.model_json_schema()
     request = {
-        "system": RUN_SYSTEM, "user": canonical_json({"input": payload}),
+        "system": _system(manifest.config, repair=repair is not None), "user": canonical_json({"input": payload}),
         "json_schema": schema, "max_completion_tokens": manifest.config.max_completion_tokens,
         "max_attempts": 1,
     }
@@ -487,6 +584,16 @@ def _decode(response, config):
     return raw
 
 
+def _decode_admission(response, config, failed):
+    raw = response.payload["response"]
+    size = len(raw) if isinstance(raw, str) else len(canonical_json(raw))
+    if size > config.max_completion_tokens * 16:
+        raise ValueError("admission response exceeds explicit output character bound")
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return apply_semantic_admission(raw, failed)
+
+
 def _error_text(exc):
     if isinstance(exc, ValidationError):
         return canonical_json([{"type": e["type"], "loc": list(e["loc"]), "message": e["msg"]}
@@ -494,7 +601,8 @@ def _error_text(exc):
     return str(exc)
 
 
-def _proposals(raw, observation, response_hash, *, repair=False):
+def _proposals(raw, observation, response_hash, *, repair=False, concept_policy=False, core_policy=False,
+               semantic_review=False):
     changes, pending, errors = [], [], []
     raw_pending = raw.get("pending", [])
     if raw.get("pending") == {}:
@@ -525,6 +633,8 @@ def _proposals(raw, observation, response_hash, *, repair=False):
         try:
             if not isinstance(proposal, dict):
                 raise ValueError("schema proposal must be an object")
+            if concept_policy:
+                (_CoreConceptProposedChange if core_policy else _ConceptProposedChange).model_validate(proposal)
             item = dict(proposal)
             replacement = item.pop("replaces_proposal_index", None)
             if replacement is not None and not repair:
@@ -535,9 +645,18 @@ def _proposals(raw, observation, response_hash, *, repair=False):
                 if not isinstance(indices, list) or any(type(i) is not int or i not in eligible for i in indices):
                     raise ValueError("proposal support references missing/quarantined primary candidates")
                 item["observation_ids"] = [eligible[i] for i in indices]
+            if concept_policy:
+                if observation.raw_response is None:
+                    raise ValueError("concept policy requires the original candidate response")
+                validate_abstraction(proposal, observation.raw_response["candidates"], indices, core_policy=core_policy)
+                item.pop("abstraction", None)
             change = SchemaChange.model_validate(item)
             if not set(change.observation_ids) <= known_ids:
                 raise ValueError("proposal support is outside this primary response")
+            if semantic_review and not repair and change.action == "add_concept":
+                raise ValueError("concept_policy: independent semantic admission required; "
+                                 "review the business role, scalar/instance distinction and existing type fit; "
+                                 "veto inappropriate proposals rather than repairing them into acceptance")
             changes.append((change, index, proposal, response_hash, observation.chunk.chunk_id))
         except (TypeError, ValueError) as exc:
             errors.append(ProposalDiagnostic(chunk_id=observation.chunk.chunk_id, proposal_index=index,
@@ -642,7 +761,11 @@ def _effective_window(snapshot, items, exchanges, config):
         chunk_id = item.chunk.chunk_id
         originals[chunk_id] = raw
         original_hashes[chunk_id] = exchange.response.artifact_hash
-        batch, waiting, invalid = _proposals(raw, item, exchange.response.artifact_hash)
+        batch, waiting, invalid = _proposals(
+            raw, item, exchange.response.artifact_hash,
+            concept_policy=config.prompt_version in CONCEPT_PROMPT_VERSIONS,
+            core_policy=config.prompt_version in CORE_PROMPT_VERSIONS,
+            semantic_review=config.prompt_version in REVIEWED_PROMPT_VERSIONS)
         changes.extend(batch)
         pending.extend(waiting)
         errors.extend(invalid)
@@ -682,7 +805,9 @@ def _effective_window(snapshot, items, exchanges, config):
         if not failed or actual_repair != expected_repair:
             raise ValueError("repair original proposal/index linkage differs from evaluated failures")
         try:
-            repaired = _decode(response, config)
+            repaired = (
+                _decode_admission(response, config, expected_repair["failed_proposals"])
+                if config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION else _decode(response, config))
             if repaired["candidates"] not in ([], originals[chunk_id]["candidates"]):
                 raise ValueError("repair must not replace original observations")
         except (TypeError, ValueError) as exc:
@@ -714,7 +839,11 @@ def _effective_window(snapshot, items, exchanges, config):
                    if not (entry[4] == chunk_id and entry[3] == original_hashes[chunk_id] and entry[1] in replaced)]
         errors = [d for d in errors if not (d.chunk_id == chunk_id and d.response_hash == original_hashes[chunk_id]
                                           and d.channel == "schema_proposals" and d.proposal_index in replaced)]
-        batch, waiting, invalid = _proposals(repaired, item, response.artifact_hash, repair=True)
+        batch, waiting, invalid = _proposals(
+            repaired, item, response.artifact_hash, repair=True,
+            concept_policy=config.prompt_version in CONCEPT_PROMPT_VERSIONS,
+            core_policy=config.prompt_version in CORE_PROMPT_VERSIONS,
+            semantic_review=config.prompt_version in REVIEWED_PROMPT_VERSIONS)
         changes.extend(entry for entry in batch if entry[1] in valid_repair_indexes)
         pending.extend(waiting)
         errors.extend(d for d in invalid if d.channel != "schema_proposals" or d.proposal_index in valid_repair_indexes)
@@ -1032,6 +1161,9 @@ def _validate_exchanges(log, items, snapshot, *, prepared, context, manifest_has
                 or request.payload.get("prompt_version") != config.prompt_version
                 or request.payload.get("repair") != (position >= len(items))):
             raise ValueError("window embedded request/response identity mismatch")
+        if (config.prompt_version in CONCEPT_PROMPT_VERSIONS
+                and request.payload["request"].get("system") != _system(config, repair=position >= len(items))):
+            raise ValueError("window concept policy prompt drift")
         item = by_id[chunk_id]
         if position < len(items) and item != items[position]:
             raise ValueError("window original request order differs")
@@ -1159,6 +1291,7 @@ def _publish(root, manifest, snapshot, logs, observations, reason, counters):
         config=manifest.config, chunk_plan=manifest.chunk_plan,
         source_cache_hash=manifest.inputs.source_cache_hash, manifest_hash=manifest.artifact_hash,
         model_version=manifest.model_version, model_hash=manifest.model_hash, prompt_hash=manifest.prompt_hash,
+        prompt_version=manifest.config.prompt_version,
         chunks=observations, final_snapshot=snapshot, final_mapping=mapping,
         state="complete" if complete else "partial",
         reason=None if complete else (
@@ -1192,11 +1325,14 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
     _verify_prepared(inputs.prepared)
     chunks, windows = _plan(inputs, config)
     manifest = _seal(_Manifest, inputs=inputs, config=config, chunk_plan=chunks, windows=windows,
-                     seed=seed_snapshot(), model_version=model_version,
+                     seed=initial_snapshot(config), model_version=model_version,
                      model_hash=model_hash or canonical_sha256({"model_version": model_version}),
-                     prompt_hash=canonical_sha256({"system": RUN_SYSTEM, "response": WorkingResponse.model_json_schema(),
-                                                  "proposals": _ProposedChange.model_json_schema(),
-                                                  "candidates": RawCandidateResponse.model_json_schema()}))
+                     prompt_hash=canonical_sha256({"system": _system(config), "response": WorkingResponse.model_json_schema(),
+                                                  "proposals": _proposal_model(config).model_json_schema(),
+                                                  "candidates": RawCandidateResponse.model_json_schema(),
+                                                  **({"admission_system": CRITIC_SYSTEM,
+                                                      "admission_response": SemanticAdmissionResponse.model_json_schema()}
+                                                     if config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION else {})}))
     _write(root / "manifest.json", manifest)
     snapshot, logs, observations = _load_commits(root, manifest)
     counters = dict(model_call_count=0, repair_call_count=0, reserved_tokens=0,
@@ -1559,6 +1695,7 @@ def windowed_status(path):
         "source_statuses": [s.model_dump(mode="json") for s in prepared.sources],
         "accepted_changes": sum(d.status == "accepted_working" for log in logs for d in log.decisions),
         "rejected_changes": sum(len(log.diagnostics) for log in logs),
+        "concept_metrics": concept_metrics(snapshot, chunks, records),
         "authority": "working_only", "semantic_recall": "not_claimed",
     }
 

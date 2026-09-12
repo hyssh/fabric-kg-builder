@@ -3,6 +3,7 @@
 from collections import Counter
 
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
+from .concept_policy import CONCEPT_PROMPT_VERSIONS
 
 WINDOW_DESIGN_CONTEXT_VERSION = "window-design-context/1.0.0"
 PATTERN_CHARS = 48_000
@@ -175,6 +176,17 @@ def window_design_context(run, acceptance=None, *, _validation=None):
         "context": {"intake_raw": run.context.intake_raw, "context_hash": run.context.artifact_hash,
                     "intake_text_hash": canonical_sha256(run.context.intake_text), "routing": run.context.routing},
         "final_snapshot": run.final_snapshot.model_dump(mode="json"),
+        **({"concept_policy": {
+            "prompt_version": run.config.prompt_version,
+            "guidance": (
+                "Keep reusable business classes separate from source-labelled instances. "
+                "Do not promote component names, product codes, numbered instructions or values to types. "
+                "Preserve distinct domain roles and evidence-backed typed relationships; use parent types "
+                "only for IS-A, never containment, location or sequence. Do not invent missing hierarchy links. "
+                "Specific labels, exact quotations and scalar detail remain in the observation/retrieval ledger. "
+                "No automatic merging of instance identities or approval of facts."
+            ),
+        }} if run.config.prompt_version in CONCEPT_PROMPT_VERSIONS else {}),
         "coverage": coverage,
         "patterns": _bounded_rows(rows, PATTERN_CHARS),
         "schema_review": conflicts,
