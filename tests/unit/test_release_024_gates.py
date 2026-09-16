@@ -296,9 +296,11 @@ def _create_inputs(
 
 
 @pytest.mark.unit
-def test_release_version_and_38_top_level_commands() -> None:
+def test_release_version_and_40_top_level_commands() -> None:
     assert __version__ == "0.2.6"
-    assert len(cli.commands) == 38
+    assert len(cli.commands) == 40
+    assert "assess-business-quality" in cli.commands
+    assert "handoff-partial" in cli.commands
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
     # L5a publication is CLI-activated in 0.2.4 for compile and dry-run

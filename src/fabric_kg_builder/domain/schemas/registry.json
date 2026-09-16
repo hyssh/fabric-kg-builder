@@ -22,7 +22,7 @@
     },
     "l1.domain_proposal": {
       "schema": "l1-domain-proposal-1.0.0.schema.json",
-      "schema_hash": "d8c615c8c23cb8b59fa1c814fe513a2eaf82647ca18c55d51752fb172d99e254",
+      "schema_hash": "fdba66889e0d7b236d9daebd388126f140fc95e74345808644fdfd175f6aa8dd",
       "version": "1.0.0"
     },
     "l1.domain_source_profile": {

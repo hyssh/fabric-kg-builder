@@ -22,7 +22,7 @@ import click
 )
 @click.option("--exclusion-rationale", help="Required global reason when excluding completed roots.")
 @click.option(
-    "--qualify-local-identifiers", is_flag=True,
+    "--qualify-local-identifiers", is_flag=True, default=False,
     help="Scope opaque local references to their verified source slice (source-span modes only). "
     "Preserve native/business identities; bind the projection and helper hash to exact plan approval.",
 )

@@ -160,7 +160,9 @@ def test_root_help_prefers_discovery_bound_design_and_explicit_compatibility():
     assert "--discovery <discovery.json>" in default
     assert "domain evaluate-design" in default
     assert "domain compile-design" in default
-    assert "domain approve -> enrich --discovery" in default
+    assert "domain approve -> enrich --reextract-approved" in default
+    assert "--discovery <approved-discovery.json>" in default
+    assert "--l2-state <fresh-state>" in default
     assert "init-domain" not in default
     assert "Schema-2 local prototype" not in result.output
     assert "domain design --sample-only" in result.output[end:]
