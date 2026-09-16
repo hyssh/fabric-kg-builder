@@ -39,6 +39,7 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.0",
     "pytest-timeout>=2.3",
+    "httpx>=0.27",
 ]
 agent = [
     "azure-ai-projects>=2.3.0",
