@@ -10,6 +10,7 @@ from pydantic_core import PydanticCustomError
 from .question_routing import QuestionRouting, is_sql_question
 from .discovery_acceptance import DiscoveryAcceptanceBinding
 from .window_run_acceptance import WindowRunAcceptance, WindowRunPrefixAcceptance
+from .compiler_capacity import CompilerCapability, relationship_capacity
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -587,13 +588,14 @@ class K4RationaleV2(V2StrictModel):
 
 
 class ReasoningPolicyV2(V2StrictModel):
-    relationship_type_count: int = Field(ge=1, le=24)
+    relationship_type_count: int = Field(ge=1, le=64)
     recommended_relationship_type_range: list[int] = Field(
         default_factory=lambda: [8, 20],
         min_length=2,
         max_length=2,
     )
-    max_relationship_types: Literal[24] = 24
+    max_relationship_types: Literal[24, 64] = 24
+    compiler_capability: CompilerCapability | None = None
     retained_type_rationales: dict[RelationshipTypeId, list[V2RequiredText]] = Field(
         default_factory=dict
     )
@@ -608,12 +610,13 @@ class ReasoningPolicyV2(V2StrictModel):
         if not isinstance(data, dict):
             return data
         relationship_count = data.get("relationship_type_count")
+        capacity = relationship_capacity(data.get("compiler_capability"))
         if (
             isinstance(relationship_count, int)
             and not isinstance(relationship_count, bool)
-            and not 1 <= relationship_count <= 24
+            and not 1 <= relationship_count <= capacity
         ):
-            raise ValueError("[DOM-103] N must be between 1 and 24")
+            raise ValueError(f"[DOM-103] N must be between 1 and {capacity}")
         max_hops = data.get("max_hops")
         if (
             isinstance(max_hops, int)
@@ -623,14 +626,24 @@ class ReasoningPolicyV2(V2StrictModel):
             raise ValueError("[DOM-105] K must be between 1 and 4")
         return data
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.compiler_capability is None:
+            values.pop("compiler_capability", None)
+        return values
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> "ReasoningPolicyV2":
+        capacity = relationship_capacity(self.compiler_capability)
+        if self.max_relationship_types != capacity:
+            raise ValueError("[DOM-103] max_relationship_types must match compiler capability")
         if self.recommended_relationship_type_range != [8, 20]:
             raise ValueError("recommended relationship range must remain [8, 20]")
         if self.relationship_type_count <= 20 and self.retained_type_rationales:
-            raise ValueError("retained_type_rationales are only used for N=21..24")
+            raise ValueError(f"retained_type_rationales are only used for N=21..{capacity}")
         if self.relationship_type_count > 20 and not self.retained_type_rationales:
-            raise ValueError("[DOM-103] N=21..24 requires per-type rationales")
+            raise ValueError(f"[DOM-103] N=21..{capacity} requires per-type rationales")
         if self.max_hops == 4 and not self.k4_rationales:
             raise ValueError("[DOM-105] K=4 requires exact cited rationale")
         if self.max_hops < 4 and self.k4_rationales:
@@ -1299,7 +1312,9 @@ class DomainContractV2(V2StrictModel):
         if len(relationships) > 20 and set(
             self.reasoning_policy.retained_type_rationales
         ) != known_relationships:
-            raise ValueError("[DOM-103] N=21..24 requires rationale for every type")
+            raise ValueError(
+                f"[DOM-103] N=21..{self.reasoning_policy.max_relationship_types} requires rationale for every type"
+            )
         if derived_k == 4:
             rationale_by_question = {
                 item.question_id: item for item in self.reasoning_policy.k4_rationales

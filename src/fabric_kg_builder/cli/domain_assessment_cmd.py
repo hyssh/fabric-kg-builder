@@ -86,7 +86,8 @@ def domain_assessment_schema_cmd() -> None:
 @click.option("--dry-run", is_flag=True, help="Plan windows without calls or writes (default mode).")
 @click.option("--max-calls", default=4, show_default=True, type=click.IntRange(0, 1000))
 @click.option("--window-chars", default=8000, show_default=True, type=click.IntRange(256, 32000))
-@click.option("--max-output-tokens", default=1600, show_default=True, type=click.IntRange(256, 8000))
+@click.option("--max-output-tokens", type=click.IntRange(256, 128000),
+              help="Output/reasoning allowance; new runs default to 32768, checkpoints inherit their recorded budget.")
 @click.option("--max-prompt-chars", default=64000, show_default=True, type=click.IntRange(256))
 @click.option("--checkpoint", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Prior assessment with exactly matching contract/corpus/model inputs.")
@@ -140,7 +141,9 @@ def domain_assess_cmd(
         report = assess_documents(
             source, contract, client=client, responses=fixtures,
             model_identity=model_identity, window_chars=window_chars,
-            max_calls=max_calls, max_output_tokens=max_output_tokens,
+            max_calls=max_calls,
+            max_output_tokens=(max_output_tokens if max_output_tokens is not None else
+                               prior.max_output_tokens if prior is not None else 32768),
             max_prompt_chars=max_prompt_chars, dry_run=planning,
             checkpoint=prior,
             response_cache=(response_cache or out.parent / "responses") if live else None,

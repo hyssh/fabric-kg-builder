@@ -28,6 +28,315 @@ fabric-kg enrich --help
 `assessment-schema` prints the actual versioned JSON schemas. Package version
 alone is insufficient to identify a prototype build; record the source commit.
 
+### Independent Graph native identifiers
+
+Node and relationship **labels** come from the sealed domain's approved
+presentation catalog, not internal L5 crosswalk labels or physical table names.
+For example, `Part Number` becomes `Part_Number`; pipeline prefixes such as
+`L5_Type_...` are not added. The shared readable-name allocator enforces
+letter-first ASCII names, underscores, a 128-character bound, and deterministic
+case-insensitive collision handling. Edge labels reserve node labels too.
+Relationships expanded into several endpoint pairs use readable source and
+target concept names to distinguish the pairs.
+
+Aliases, physical tables/columns, keys and canonical IDs remain unchanged.
+The Graph catalog and generated readback queries use the same native labels.
+This does not automatically rename an already-deployed Graph, and an old sealed
+publication plan must not be resumed with different labels.
+
+The independent Graph compiler separates exposed property identifiers from
+Lakehouse column names. Valid letter-first ASCII identifiers remain unchanged.
+Other columns (including `__canonical_id`, `__label` and asserted-edge internal
+columns) use the existing deterministic Graph alias sanitizer: sanitized stem
+(up to 96 characters), `_`, then eight SHA-256 hex characters. The allocator
+reserves existing valid column names first and resolves collisions with numeric
+suffixes in sorted source-column order, across the complete Graph.
+
+Only `properties[].name`, `primaryKeyProperties` and
+`propertyMappings[].propertyName` use those transport names.
+`propertyMappings[].sourceColumn`, edge endpoint source-key columns, Lakehouse
+schemas, canonical identity **values**, semantic authority and topology remain
+unchanged. Native integers use `INT`, not `INTEGER`. Scalar types are selected
+through the source-column mapping, not by assuming exposed names equal columns.
+Readback builds MATCH/RETURN/keyset expressions from native labels and mapped
+properties and still compares every typed scalar and actual endpoint-pair
+multiset, including duplicates. No evidence or schema-identity gate is relaxed.
+
+Native validation rejects invalid contract-owned labels, duplicate aliases,
+missing key mappings, conflicting types for a shared property name, unsupported
+type tokens and published 1,000-item array limits before creation. This is
+transport compatibility, not an ontology meaning change; it introduces no new
+semantic limitation approval.
+
+First-party references, checked **2026-09-12**:
+
+- [Graph limitations](https://learn.microsoft.com/en-us/fabric/graph/limitations):
+  identifiers cannot start with underscore. The catalog's 128-character naming
+  recommendation is not documented as an enforced maximum.
+- [Graph property types](https://learn.microsoft.com/en-us/fabric/graph/gql-graph-types#supported-property-types):
+  `INT`/`INT64`, `STRING`, `BOOL`/`BOOLEAN`, `DOUBLE`/`FLOAT64`/`FLOAT`;
+  shared property names must have consistent types.
+- [Native definition structure](https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/definitions/graph-model-definition)
+  and [schema design](https://learn.microsoft.com/en-us/fabric/graph/design-graph-schema).
+
+The complete available first-party JSON schemas (four Graph parts and three
+transitive shared schemas), exact-byte SHA-256 hashes and source URLs are
+captured in `tests/fixtures/fabric_graph_schema/`. The referenced
+`graphIndex/common/identifiers/1.0.0/schema.json` returns **404** and is not
+fabricated locally. Thus offline checks are not a claim of exhaustive live
+service validation. The failed service response exposed only its top errors,
+not all 106 diagnostics. `INTEGER` occurred twice in that failed definition;
+its replacement uses documented native tokens rather than assuming those
+unreported diagnostics.
+
+**Existing sealed plans are incompatible with this compiler change.** Use the
+public `app publish-structured --prototype-create-only --dry-run` path to create
+a new plan/materialization and obtain approval for its exact hash before
+deployment. Never rewrite an old
+plan/journal, substitute corrected parts into its request, or blind-retry a
+failed create. Preserve prior receipts and perform any authorized cleanup
+separately. A native create/readback must still succeed before readiness or
+business acceptance is claimed.
+
+### Existing independent Graph labels-only repair
+
+For an already-published, content-verified independent Graph, use a separately
+reviewed repair rather than changing or resuming its original publication plan:
+Pass `--naming-review COPILOT_NAMES.json` to use the exact same reviewed canonical
+type names as the Ontology repair (see **Copilot semantic naming authority** below).
+
+```bash
+fabric-kg app repair-graph-labels \
+  --workspace-id "$WORKSPACE_ID" --graph-id "$INDEPENDENT_GRAPH_ID" \
+  --l4-run "$SEALED_L4_RUN" --l3-root "$SEALED_L3_ROOT" \
+  --publication-plan "$ORIGINAL_PLAN" --prototype-journal "$ORIGINAL_JOURNAL" \
+  --materialize "$ORIGINAL_MATERIALIZATION" \
+  --state "$NEW_REPAIR_STATE" --dry-run
+```
+
+Planning performs live **reads** and writes a new local backup, approved catalog
+mapping, full scalar/topology proof, exact label-field delta and hash-bound plan.
+Review `plan.json` and `replacement.json` in the state directory. Apply by
+repeating the same input arguments, replacing `--dry-run` with
+`--live --approve-plan "$REPAIR_PLAN_HASH" --acknowledge-nontransactional`.
+The hash is the new repair plan's hash, not the original publication approval.
+Fabric has no atomic compare-and-swap guard here; the acknowledgement accepts
+the residual concurrency risk despite fresh before/after drift checks.
+
+The command changes only single labels in `graphType.json` on the original,
+returned-ID-owned independent Graph. It preserves aliases, keys, properties,
+endpoint mappings, source bindings, all other definition parts and data.
+It does not create/delete items, refresh data, modify the managed Graph,
+Ontology or Lakehouse, resume publication, or approve business facts.
+Both planning and final verification compare all expected scalar values and
+canonical endpoint-pair multisets, not merely node/edge totals.
+
+The repair state retains an immutable update intent before the one permitted
+update request. After an uncertain or failed response, inspect its evidence;
+the same arguments with `--live`, the exact approval, acknowledgement and
+`--resume` can only read/poll and verify, never repeat the update. A completed
+`receipt.json` records `verified-labels-only`. An accepted definition without
+successful runtime queries is **not** success; service loading requirements
+remain a separate concern. Never overwrite the original plan, journal or
+repair evidence.
+
+### Independent Graph getDefinition defaults
+
+The subsequent native create succeeded. Its service readback preserved all
+Graph types, labels, properties, keys, source references/mappings and endpoints.
+It added `edgeIdMapping: null` to edge bindings, `visualFormat: null` to styling,
+and a schema-only `graphSettings.json`; layout coordinates and zoom were
+serialized as floating-point numbers. These serialization differences caused
+the full-definition gate to stop after the returned Graph ID was recorded.
+
+Publication and reconciliation now share a narrowly scoped comparison:
+
+- Only the exact `graphSettings/1.0.0` schema-only object is equivalent to an
+  absent settings part. Additional fields, even null, or different versions fail.
+- Only null `edgeIdMapping` on edge bindings and null top-level `visualFormat`
+  are equivalent to absence, under their exact `1.0.0` part schemas. Empty
+  arrays/objects, configured values, or dropped mappings still fail.
+- Only `modelLayout` position/pan coordinates and `zoomLevel` treat numerically
+  identical integer/float JSON representations as equivalent. Booleans are not
+  numbers; changed coordinates still fail.
+- Every other field, part, array order, key and type is compared without
+  normalization. Unknown extras are not discarded.
+
+The captured first-party schemas define `edgeIdMapping` as an optional string
+array and layout values as numbers. Their styling schema requires an object
+`visualFormat`, whereas the service accepts its absence and emits null; the
+REST documentation's styling example also omits it. Therefore null handling is
+an explicit, observed service-serialization compatibility rule, not a claim
+that null conforms to the published schema. The service's
+`graphSettings/1.0.0/schema.json` URL returns 404 (checked 2026-09-12); no
+nonempty settings behavior is inferred from that missing schema.
+
+Raw getDefinition artifacts and receipt hashes remain unchanged and exact.
+This is a **readback-only repair**: compiler output, native templates, plan
+semantics and source/table proofs do not change. No template replacement or
+Graph recreation is necessary to address this drift. The runtime compiler
+fingerprint nevertheless changes, so a blind old-plan resume remains blocked.
+The existing `reconcile-prototype-create` command handles **unresolved creates
+without returned IDs**, not this `identity-verified`, returned-ID-owned Graph.
+Do not reclassify its ownership or edit its plan/journal to force that path.
+Use the explicit returned-ID runtime-repair mode below before resuming retained
+items with the repaired runtime.
+
+### Reviewed runtime repair of a returned-ID-owned Graph
+
+`app reconcile-prototype-create --returned-id-runtime-repair --kind graph`
+is a separate policy from ambiguous-create reconciliation. It accepts only an
+`identity-verified` Graph with equal `item_id` and `returned_item_id`, no
+operator-reconciled ownership, and successful original HTTP 200/201/202 create
+evidence. Metadata must match the exact workspace, type, name and run
+description. Synchronous creates require the original response's returned ID;
+HTTP 202 requires the recorded successful operation, matching response headers,
+and fresh successful operation/result reads confirming that same ID.
+
+Preview is read-only and non-authorizing. Acceptance requires the exact review
+hash, actor and rationale, and repeats all live proofs. It adds only a
+`runtime_repair` receipt to the existing journal: the original action, ownership
+and plan bytes are unchanged. An existing runtime-repair receipt cannot be
+replaced or chained through this mode.
+
+The receipt binds the original plan bytes/hash, complete journal snapshot hash,
+journal identity/baseline, entire selected create action, current compiler,
+full native proof (including raw definition and its actual hashes), and
+materialized artifact byte digests. Recompilation must preserve every plan
+field except compiler hash and the derived plan hash, including templates,
+tables, identities, scope, approvals, limits and ordering. Changes requiring
+new templates are still rejected.
+
+Resume checks immutable artifact digests before materialization can restore
+missing files, revalidates the receipt and selected action, then repeats live
+read-only native/identity/create-operation proofs before any publication
+mutation. It permits newly appended readback evidence and the exact verified
+definition hash, not altered original evidence. Expired/unreadable operation
+results or changed metadata fail closed; neither IDs nor ownership are inferred.
+The repair command itself never performs Fabric create/update/delete or Delta
+writes. Publication subsequently runs the existing full scalar/topology gates.
+
+For a retained Graph, the public command sequence is below.
+Preview does not accept the repair. Review its output and replace
+`REVIEW_HASH_FROM_PREVIEW` before running acceptance. The final live command is
+the existing public acceptance/resume path, not another create plan.
+
+```bash
+ROOT=/path/to/publication-artifacts
+PLAN="$ROOT/prototype-plan.json"
+JOURNAL="$ROOT/prototype-journal.json"
+MATERIALIZE="$ROOT/materialized"
+L4=/path/to/sealed/l4/run
+L3=/path/to/sealed/l3
+REVIEW="$ROOT/returned-id-review.json"
+# Set these to the exact original plan/journal values, not replacement IDs.
+WORKSPACE_ID=WORKSPACE_UUID
+GRAPH_ID=RETURNED_GRAPH_UUID
+NAME_PREFIX=ORIGINAL_NAME_PREFIX
+PLAN_HASH=ORIGINAL_PLAN_HASH
+
+# Read-only review (repair dry-run).
+.venv/bin/fabric-kg app reconcile-prototype-create \
+  --returned-id-runtime-repair --kind graph \
+  --item-id "$GRAPH_ID" \
+  --plan "$PLAN" --prototype-journal "$JOURNAL" --materialize "$MATERIALIZE" \
+  --l4-run "$L4" --l3-root "$L3" --review "$REVIEW"
+
+# Explicit acceptance; reads Fabric again and appends the local receipt only.
+.venv/bin/fabric-kg app reconcile-prototype-create \
+  --returned-id-runtime-repair --kind graph \
+  --item-id "$GRAPH_ID" \
+  --plan "$PLAN" --prototype-journal "$JOURNAL" --materialize "$MATERIALIZE" \
+  --l4-run "$L4" --l3-root "$L3" --review "$REVIEW" \
+  --accept-review REVIEW_HASH_FROM_PREVIEW --actor operator \
+  --rationale "Reviewed successful returned Graph create and exact readback-only runtime repair"
+
+# Verify the original plan under its accepted runtime receipt.
+.venv/bin/fabric-kg app publish-structured --prototype-create-only --dry-run \
+  --l4-run "$L4" --l3-root "$L3" \
+  --workspace-id "$WORKSPACE_ID" --name-prefix "$NAME_PREFIX" \
+  --plan "$PLAN" --prototype-journal "$JOURNAL" --materialize "$MATERIALIZE" \
+  --prototype-approve-limitation ontology.property-relationship-aliases-metadata-only \
+  --prototype-readback-page-size 1000 --prototype-readback-total-rows 1000000
+
+# Resume the same owned IDs; retain the original plan hash and approvals.
+.venv/bin/fabric-kg app publish-structured --prototype-create-only --live \
+  --l4-run "$L4" --l3-root "$L3" \
+  --workspace-id "$WORKSPACE_ID" --name-prefix "$NAME_PREFIX" \
+  --plan "$PLAN" --prototype-journal "$JOURNAL" --materialize "$MATERIALIZE" \
+  --prototype-approve-limitation ontology.property-relationship-aliases-metadata-only \
+  --prototype-readback-page-size 1000 --prototype-readback-total-rows 1000000 \
+  --approve-live "$PLAN_HASH"
+```
+
+### Native managed companion Graphs and subsequent read-only proof
+
+The companion adapter supports the native
+`graphInstance/definition/dataSources/1.0.0` dialect separately from the
+independent Graph's `graphIndex/definition/dataSources/1.1.0` item references.
+Native `DeltaTable` sources must have exactly
+`abfss://<workspace-guid>@onelake.pbidedicated.windows.net/<lakehouse-guid>/Tables/dbo/<compiled-table>`.
+The exact host, scheme, canonical GUIDs, workspace, Lakehouse and compiled table
+must match. Encoding, traversal, credentials, ports, query/fragment components,
+other schemas/hosts, duplicate or unused sources and arbitrary source properties
+are rejected. Source URIs and physical columns are never rewritten.
+
+Native graph type/definition schemas, opaque numeric aliases, mapped properties,
+canonical keys, relationship endpoints, null `edgeIdMapping`, Ontology styling
+and schema-only settings are checked explicitly. The service `.platform` metadata
+is checked against live metadata; its valid zero logical UUID is not treated as
+an item ID or ownership evidence. Unknown fields/defaults fail closed. All mapped
+scalars and the complete endpoint-pair **multiset**, including duplicate edges
+and empty relationship types, are verified with the existing typed keyset queries.
+
+An already accepted repair cannot be silently replaced to authorize another
+runtime. Instead, `app verify-prototype-companion` produces a **separate**
+hash-bound read-only plan and proof. It supports the retained partial prototype
+whose independent Graph is already verified and whose original returned-ID
+repair remains intact; Semantic Model publication is outside this path.
+
+```bash
+# Reuse the exact original PLAN/JOURNAL/MATERIALIZE/L4/L3 variables above.
+# COMPANION_ID is explicit; the snapshot is a previously retrieved getDefinition response.
+COMPANION_ID=MANAGED_COMPANION_UUID
+SNAPSHOT="$ROOT/companion-native-readback.json"
+VERIFICATION_PLAN="$ROOT/companion-verification-plan.json"
+PROOF="$ROOT/companion-verification-proof.json"
+
+# Local-only preview: compile all readback windows; no Fabric calls.
+.venv/bin/fabric-kg app verify-prototype-companion \
+  --plan "$PLAN" --prototype-journal "$JOURNAL" --materialize "$MATERIALIZE" \
+  --l4-run "$L4" --l3-root "$L3" --companion-id "$COMPANION_ID" \
+  --companion-definition "$SNAPSHOT" --verification-plan "$VERIFICATION_PLAN" \
+  --proof "$PROOF"
+
+# Review the new plan, then explicitly approve only these read operations.
+.venv/bin/fabric-kg app verify-prototype-companion \
+  --plan "$PLAN" --prototype-journal "$JOURNAL" --materialize "$MATERIALIZE" \
+  --l4-run "$L4" --l3-root "$L3" --companion-id "$COMPANION_ID" \
+  --companion-definition "$SNAPSHOT" --verification-plan "$VERIFICATION_PLAN" \
+  --proof "$PROOF" --approve-readback VERIFICATION_PLAN_HASH_FROM_PREVIEW
+```
+
+The verification plan binds exact original plan/journal/snapshot bytes, the
+complete previous receipt, artifact digests, current verifier/compiler, selected
+IDs, expected query windows and unchanged original limits. Execution repeats
+native definition/metadata/returned-create proofs and checks **both** independent
+and companion Graph counts, scalars and endpoint multisets. Live definitions,
+metadata and local inputs must remain unchanged through the final check.
+Only GET, getDefinition and the planned executeQuery reads are permitted.
+Raw responses and their actual hashes are retained in the separate proof,
+including failures; use new output paths for a new review or retry.
+
+Neither preview nor execution rewrites the original plan, journal, receipt,
+ownership or managed Graph. Historical `last_error`, companion errors and the
+original partial status remain untouched and are explicitly labeled historical
+in the new proof; its fresh verification status is separate. This path does not
+authorize publication/resume under a changed compiler, does not bypass the
+existing Data Agent handoff gate, and performs no refresh/create/update/delete
+or Delta writes. Expired operation provenance and any changed evidence fail
+closed, without resource churn.
+
 ## Corpus first: discover, consolidate, then design
 
 The normal sequence is `domain discover` -> `domain design --discovery` ->
@@ -238,6 +547,45 @@ For example, `local_environmental_or_e-waste_laws_and_guidelines` must become
 `local_environmental_or_e_waste_laws_and_guidelines`. Check collisions after
 normalization, including collisions with pre-existing underscore names.
 
+Fresh compilation follows the [Fabric Ontology semantic enrichment schema](https://learn.microsoft.com/rest/api/fabric/articles/item-management/definitions/ontology-definition):
+only entity types support native `synonyms`. Properties and relationships support
+`description` and `customAttributes`, not `synonyms`. Their approved display label,
+aliases and ASCII alias are retained losslessly as a JSON string in
+`semanticEnrichment.customAttributes.fabric_kg_presentation`. This is custom
+metadata, **not native synonym/search behavior**. Missing descriptions are emitted
+as empty strings. Prototype plans require explicit approval of
+`ontology.property-relationship-aliases-metadata-only`; entity synonyms are unchanged.
+Definition readback still compares every non-platform decoded field exactly.
+
+A publication stopped after Fabric discarded unsupported synonyms cannot resume
+as successful. Retain its immutable plan, journal and artifacts. The
+`reconcile-prototype-create` command only handles unresolved creates with no
+returned item ID, and only compiler changes that preserve the entire semantic
+plan, including native templates. It cannot reconcile this serialization change
+or an already returned-ID-owned Ontology. Naming repair also cannot add custom
+attributes or retrospectively amend the publication proof. Review a fresh
+create-only dry run in new artifact paths, explicitly approve the metadata-only
+limitation, and obtain approval/capacity for new items before any live publication.
+Reusing the partial existing estate would require a separately designed and
+approved migration; never hand-edit ownership, hashes or immutable definitions.
+
+For a local-only review, use the same sealed source paths and fresh output paths:
+
+```bash
+fabric-kg app publish-structured --prototype-create-only --dry-run \
+  --l4-run L4_RUN --l3-root L3_STATE --workspace-id WORKSPACE_ID \
+  --name-prefix enrichment_review \
+  --plan NEW_REVIEW_PLAN --materialize NEW_REVIEW_MATERIALIZATION \
+  --prototype-journal NEW_REVIEW_JOURNAL
+```
+
+This preview is intentionally blocked on the metadata-only limitation. After
+explicit approval, generate another **new** plan/materialization/journal with
+`--prototype-approve-limitation ontology.property-relationship-aliases-metadata-only`
+(and any other reviewed limitations). Do not add approvals to an existing
+immutable plan. A fresh estate needs two available GraphModel slots, including
+its automatic Ontology companion; retaining the partial estate consumes capacity.
+
 For an existing Ontology, prefer a reviewed presentation-only `updateDefinition`
 over deletion/recreation. Back up the complete current definition, retain every
 part and binding, and permit only names, source-backed descriptions and an
@@ -291,6 +639,144 @@ If a verifier fix is needed after the single update was dispatched,
 readback-only verification with that code. It cannot authorize another update
 POST; source/compiler/naming bindings and the original approved plan still
 must match.
+
+### Copilot semantic naming authority
+
+Both `app repair-ontology-names` and `app repair-graph-labels` accept
+`--naming-review FILE`. This is a separate, versioned operator authority produced
+by a Copilot semantic review, **not** a rewritten approved Domain and **not**
+an automatic model call made by the repair command. Review predicates,
+direction and endpoint roles with Copilot before accepting the catalog:
+
+```json
+{
+  "version": "copilot-semantic-names/1.0.0",
+  "domain_contract_hash": "<exact sealed Domain contract SHA256>",
+  "author": "GitHub Copilot semantic review",
+  "entity_types": {
+    "semantic-type:device_model": {
+      "native_name": "DeviceModel",
+      "display_name": "Device model",
+      "reason": "Reviewed business noun for the existing model type."
+    }
+  },
+  "relationship_types": {
+    "relationship-type:example": {
+      "native_name": "ReferencesDeviceModel",
+      "display_name": "References device model",
+      "verb": "References",
+      "source_type_ids": ["semantic-type:device_model"],
+      "target_type_ids": ["semantic-type:device_model"],
+      "reason": "Example only: review the actual existing predicate and endpoints."
+    }
+  }
+}
+```
+
+The example is a schema illustration, not a deployable partial catalog. The
+file must contain **every** canonical entity and relationship ID from the sealed
+Domain and publication crosswalk, with no extras (12 types / 38 typed pairs for
+the current rollout). Endpoint ID sets and Domain hash must match exactly.
+Independent Graph review requires one canonical relationship per typed pair;
+multi-endpoint canonical relationships are rejected rather than inventing
+disambiguating verbs. Entity native names are noun PascalCase. Relationship
+native names and display labels must start with their declared verb:
+`Has`, `Includes`, `Specifies`, `Applies`, `Replaces`, `References`, `Targets`, or
+`Is`. Native names must match `[A-Za-z][A-Za-z0-9_]{0,127}` and be casefold-unique
+across the catalog. Invalid names, duplicate JSON keys, opaque digest suffixes,
+unknown fields and missing review reasons fail closed. Explicit business digits
+such as `M365Connector` are allowed. There is no hash/counter fallback or inferred
+verb selection in reviewed mode.
+
+Add the **same** review file to each command shown above, using separate new
+repair state directories and separate exact repair-hash approvals. Plan Ontology
+first, apply only after approval, verify it, then separately plan/approve/verify
+the **owned independent Graph**, never its managed companion. For a previously
+repaired Ontology, retain and pass its complete `--previous-repair-state`.
+Do not substitute a current repair into the original publication plan/journal.
+
+Reviewed Ontology repair changes only native entity/relationship `name` values;
+it does not rename properties, change descriptions/display-property selectors,
+or add synonyms/custom attributes. Reviewed Graph repair changes actual
+node/edge labels while preserving internal aliases, keys, endpoints, scalars and
+all source binding bytes. Mapping reports include canonical ID, old/new names,
+endpoint IDs for relationships, display label and Copilot reason. Display labels
+remain review evidence, not unsupported relationship synonym fields.
+
+The repair plan retains the original review bytes (base64), SHA256, parsed
+payload, and naming implementation bytes/hash. Keep the external review file:
+apply/resume require the same path and unchanged bytes, including whitespace.
+Deleted, replaced, omitted or changed reviews block before any update; completed
+Ontology donor chains revalidate each ancestor's own review, not the newest
+catalog. Fresh final readback also rechecks local authority. All existing full
+backups, exact new-hash approvals, allowlist diffs, one-update intent and
+resume-without-repost safeguards still apply. Original publication readiness
+remains superseded; a naming repair does not establish managed-Graph queryability.
+
+**Fresh-publication gap:** `publish-structured` does not yet accept this naming
+review hook or reject every collision requiring legacy digest disambiguation.
+Default compilation/naming is intentionally unchanged so original publication
+plans remain reproducible for ownership and proof checks. Do not claim that
+fresh publication is Copilot-named or collision-proof. Until a separately
+reviewed publisher integration exists, inspect public labels before provisioning
+and use these explicitly approved same-item repair paths for existing items.
+
+### Explicit current Ontology baseline review
+
+`repair-ontology-names --current-definition-review FILE` is an optional alternative
+to `--previous-repair-state`, not a fabricated prior repair receipt. Without it,
+the original strict baseline checks are unchanged. Use it only for independently
+reviewed pre-existing type names or relationship-local contextualization UUIDs:
+
+```json
+{
+  "version": "ontology-current-definition-review/1.0.0",
+  "policy": "ontology-current-type-names-contextualization-local-id-only-v1",
+  "workspace_id": "<original workspace UUID>",
+  "ontology_id": "<original returned/owned Ontology UUID>",
+  "domain_contract_hash": "<sealed Domain SHA256>",
+  "publication_plan_hash": "<original publication plan hash>",
+  "original_definition_hash": "<decoded original definition content hash>",
+  "current_definition_hash": "<decoded current definition content hash>",
+  "current_definition_file": "captured-current-definition.json",
+  "current_definition_file_sha256": "<SHA256 of the complete captured file bytes>",
+  "actor": "<reviewing actor>",
+  "rationale": "<explicit reason for accepting the pre-existing changes>"
+}
+```
+
+All fields are required; unknown fields and duplicate JSON keys are rejected.
+The captured file contains the complete `{"parts": [...]}` definition, not a
+getDefinition response wrapper. Its path is absolute or relative to the review
+file. Content hashes use the repair's `_content_hash`, including `.platform`;
+the original/current equivalence check excludes only that separately validated
+service envelope.
+
+The validator permits only native type `name` changes and one-to-one local
+contextualization ID/path substitutions **within the same relationship**, with
+every other binding field identical. Path UUIDs must match payload IDs. Duplicate
+or ambiguous bindings, changed part order, endpoints, properties, key relations,
+cardinality, source tables/columns/schema/workspace/Lakehouse, and added/removed
+semantic bindings fail closed. Original ownership, sealed source/provenance and
+table proofs are still required. Fresh reads must match the explicit current
+hash before the full ownership proof is run against that exact definition.
+
+The plan retains review bytes, parsed policy, validator bytes/hash, complete
+captured file bytes and the original-to-current diff separately from the update
+diff. Apply/resume revalidate them; edits including whitespace block execution.
+Replacement invariants compare the **current backup** to the new names, retaining
+current binding and `.platform` bytes, never restoring old contextualization IDs.
+Completed reviewed-baseline repairs may subsequently be supplied as
+`--previous-repair-state`; their review and captured file must remain unchanged.
+Existing receipts are not rewritten. The existing explicitly approved
+readback-only verifier upgrade remains the sole repair-code-drift exception;
+it cannot permit review/validator drift or another POST.
+
+Ontology LRO polling accepts a matching `x-ms-operation-id` and trusted
+`https://wabi-*-redirect.analysis.windows.net/v1/operations/<same UUID>` Location
+(optionally `/result`). It always sends GETs to `api.fabric.microsoft.com`,
+never credentials to the regional hostname. Non-HTTPS, credentials, ports,
+queries, fragments, mismatched IDs and other origins are rejected.
 
 ### Integrated raw-text windows
 
@@ -449,6 +935,41 @@ requirements appended with `--completeness FILE`; both require actor/rationale
 and cannot alter source facts, observed counts or authoritative SQL routing.
 Evaluate the resulting draft afresh; the parent's evaluation cannot approve it.
 
+If final design incorrectly promotes a descriptive field into a natural identity,
+repeat `--source-scoped-type EXACT_NAME` for each reviewed type, with actor/rationale.
+For example, `--source-scoped-type Model --source-scoped-type Procedure` clears
+only those unapproved draft identity claims, leaving optional variant properties
+intact. Each selection must uniquely match an exact working entity name whose
+identity is unresolved; selected types must still be retainable with their exact
+definitions and hierarchy. Affected descendants also require explicit selection.
+The original identity claims remain in the hash-bound parent draft. This cannot
+downgrade an approved contract, establish cross-document identity, or approve facts.
+
+Compact ordered collections compile to an explicit C0 1.1 requirement for
+ascending, unique, contiguous zero-based member positions. This is a schema
+requirement, not evidence of observed order or completeness: cardinality remains
+unknown, and source ordinals must not be renumbered or gaps filled to satisfy it.
+Missing or incompatible ordering evidence cannot establish a complete collection.
+Contracts compiled before `compact-to-schema2-1.8.0` must be freshly compiled and
+approved to adopt this requirement; existing sealed artifacts are not upgraded.
+
+An approved contract that already declares this policy needs **no schema change**
+to replay partial observations. The L2 collection-partition successor preserves
+one-based, gapped, duplicate or missing positions in an immutable
+`l2.collection_deferral@1.0.0`, instead of trying to mint an invalid C0 collection.
+It never renumbers members, fills gaps or changes an approved requirement. Bad
+roles, references, conflicting member identities and incompatible approved
+ordering policies still fail; they are not treated as partial ordering.
+
+L3 rederives the complete proposal-or-deferral partition from the persisted
+atomic observations. Deferred scopes receive an explicit unresolved,
+readiness-blocked `l3.required_member_outcome@1.1.0`, and **no collection manifest**.
+Atomic entities, relationships and properties still pass their ordinary evidence
+and lifecycle validation; L4 may serve only those that independently assert.
+The approved requirement and its question bindings remain in force. A successful
+stage receipt means processing/accounting succeeded, **not** that a procedure is
+complete or ready for execution.
+
 Then explicitly review the working-to-approved mappings:
 
 ```bash
@@ -472,6 +993,22 @@ fabric-kg enrich --input ./documents --domain-file .fkg/l1/domain.yaml \
 Remove `--dry-run` to execute the reviewed zero-call replay. Continue with
 unchanged `validate-evidence` and `project-serving`. Working schema acceptance
 does not approve evidence, invent identities or assert graph edges.
+
+Use a **new L2 state directory** when adopting the collection-partition successor,
+even if a previous replay failed after writing atomic checkpoints. Its fingerprint
+differs from the old policy. Within the new state, interrupted collection writes
+and repeated replay reuse the exact atomic checkpoints without model calls.
+Historical successful handoffs remain readable; historical invalid/omitted
+collections are not retroactively accepted. Inspect `collection-deferrals/`, the
+L3 run's `required-member-outcomes/`, and the CLI's blocked-scope count before
+making any completeness claim.
+
+Partition implementation `l2-collection-partition/1.0.1` validates C0 member
+role syntax and prohibited sentinel roles before deciding whether observed order
+can be deferred. This changes the replay fingerprint: use fresh L2 state after
+upgrading from `1.0.0`, without recompiling or reapproving the unchanged domain.
+The deferral carrier remains `1.0.0`; existing valid handoffs remain readable,
+but malformed-role deferrals fail deterministic L3 revalidation.
 
 ### Align previously received candidates
 
@@ -802,6 +1339,106 @@ After inspecting the actual plan, live creation requires the same arguments plus
 This creates one new **draft** Data Agent with the actual owned Ontology and
 same-Lakehouse SQL source. It does not adopt, update, publish or delete an
 existing agent. A ready SQL endpoint binding is required.
+
+#### Reviewed publication runtime repair
+
+An accepted `returned-id-owned-exact-runtime-repair-v1` receipt in the original
+publication journal is supported without another CLI switch. Offline planning
+recompiles the exact semantic publication plan and validates the original plan
+bytes, current publication compiler, accepted review, successful original Graph
+create evidence and immutable artifact digests using the reconciliation validators.
+It makes no remote calls. Operator-reconciled creates, unbound compiler drift,
+unsupported repair kinds and missing/tampered receipts remain rejected.
+
+Only repaired-source agent plans add `publication_runtime_repair`, binding the
+complete receipt hash, review hash, original/current compiler identities,
+candidate plan hash, original plan bytes and immutable artifact authority.
+Existing unrepaired plan fields are unchanged; changed agent code still requires
+a fresh agent plan and approval, not a legacy compiler-identity alias.
+Live execution revalidates these bindings and obtains fresh exact returned-ID,
+create-LRO (when applicable) and native-definition proof before any agent create.
+The original publication plan, journal and repair receipt are never rewritten.
+
+This compatibility does **not** bypass Ontology companion readiness, source
+ownership, Delta/readback validation or the independent create budget. A
+`GraphNotQueryable` companion still blocks the handoff. A valid local repair
+receipt is not evidence of Data Agent question accuracy or complete source scope.
+`--runtime-context-review` below reviews instructions only; it cannot authorize
+a publication runtime repair.
+
+#### Explicit runtime organization-context review
+
+Fabric global instructions have a **15,000-character hard limit**, including
+safety instructions, routing, scope notices and exported context. Oversize plans
+fail offline; the publisher never truncates context or raises this limit.
+When the approved organization context contains obsolete compiler-editing
+directions, an operator may explicitly review a replacement using
+`--runtime-context-review FILE`:
+
+```json
+{
+  "version": "schema2-runtime-context-review/1.0.0",
+  "domain_contract_hash": "<exact approved sealed DomainContract hash>",
+  "actor": "<reviewer identity>",
+  "rationale": "<why this replacement preserves business meaning and scope>",
+  "organization_context": "<complete reviewed runtime organization context>"
+}
+```
+
+These fields are required; each must be a nonempty string. The only optional
+field is `"routing_encoding": "columns-v1"` (described below). Duplicate
+keys, unknown versions and mismatched/unapproved contract hashes are rejected.
+The file is bounded to 128,000 UTF-8 bytes and replacement text to 15,000
+characters; the **complete global instruction** must still fit 15,000 characters.
+No model summarizes or edits the text. The reviewer must retain true business
+context and scope, rather than interpreting this feature as permission to remove
+constraints to make a plan fit.
+
+Only the value of `business_context.organization_context` in the global runtime view changes.
+Question routing, pending requirements, users, decisions, problem, scope,
+source notices and all IDs remain unchanged. The original full context remains
+in `plan.json.question_context`, the original handoff and Lakehouse source
+metadata `schema2_question_context`. The retained `export_hash` identifies that
+original source export, not the reviewed runtime view; global instructions
+explicitly disclose this distinction.
+
+When replacing organization text alone does not fit, the reviewer may explicitly
+add `"routing_encoding": "columns-v1"` to the same JSON. This lossless encoding
+stores homogeneous question keys once in `columns`, homogeneous routing keys
+once in `routing_columns`, and questions as value rows. Zip each question row
+with `columns`; its `routing` value is a row zipped with `routing_columns`.
+Every value, nested list/object, null, pending constraint, question ID and array
+order is preserved. The original routing `context_hash` identifies the expanded
+content, not its encoded representation. A short decoding explanation is
+included in global instructions. Nonhomogeneous keys and reserved encoding-key
+collisions fail closed rather than dropping data. Source metadata and the plan's
+full `question_context` retain the original object representation.
+
+Omitting `routing_encoding` preserves object encoding; no automatic compression
+or fallback occurs. Adding/removing/changing this choice changes the review and
+plan identity. Even explicitly encoded instructions must pass the same complete
+15,000-character check.
+
+The optional offline sizing regression accepts the approved Surface demo contract
+via `FKG_TEST_APPROVED_DOMAIN_CONTRACT=/path/to/domain.yaml` when running
+`pytest tests/unit/test_schema2_prototype_agent.py -k actual_approved_contract_columns_instruction_size -s`.
+It uses 64-character source/projection hash placeholders only in memory, never
+as deployment facts or saved publication artifacts. It checks the complete
+instruction, expanded routing equality and unchanged source metadata.
+
+The plan and CLI output disclose the review content, resolved file path,
+canonical review hash and exact-byte file SHA-256. Use the **same file and flag**
+for live execution and resume: changing its text, actor, rationale, path or even
+formatting, removing the flag, or editing the plan requires a new state directory
+and explicit plan approval. Exact native definition readback checks the reviewed
+instructions and the preserved full source metadata. No other content is
+automatically reduced if the result remains too long.
+
+Without this option the native definition and plan fields are unchanged. This
+backward-compatible publisher revision preserves its predecessor's no-review
+compiler identity through a revision-hash guard; subsequent code changes still
+invalidate that compatibility alias. Review-enabled plans bind the actual new
+compiler fingerprint and never share legacy approval identity.
 
 Lakehouse SQL endpoint provisioning may finish after initial Lakehouse creation.
 If the saved metadata is not ready, resume the exact approved

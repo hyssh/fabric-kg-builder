@@ -28,6 +28,7 @@ from pydantic import Field, StringConstraints, ValidationError, model_serializer
 
 from fabric_kg_builder.contracts.base import ContractModel, RequiredText, canonical_json, canonical_sha256
 
+from .compiler_capacity import CompilerCapability, relationship_capacity
 from .contexts import DomainIntake
 from .proposal import DomainProposalCandidatesV2
 from .scoring import CandidateScoreInputsV2, SCORER_HASH, score_candidate
@@ -36,7 +37,7 @@ from .question_routing import (
     routed_question_copies, QUESTION_ROUTING_PROMPT,
 )
 
-COMPACT_TRANSFORMATION_VERSION = "compact-to-schema2-1.7.0"
+COMPACT_TRANSFORMATION_VERSION = "compact-to-schema2-1.8.0"
 COMPACT_PROMPT_VERSION = "domain-compact-proposal-1.10.0"
 REVIEWED_IDENTITY_ASSUMPTION_PREFIX = "Reviewed source identity policy: "
 COMPACT_SYSTEM_PROMPT = """Design a task-driven ontology, returning only the compact
@@ -210,6 +211,10 @@ class CompactDesignSketch(ContractModel):
     completeness: list[CompactCompleteness]
 
 
+class ReviewedCompactDesignSketch(CompactDesignSketch):
+    relationships: list[CompactRelationship] = Field(max_length=64)
+
+
 class CompactDesignError(ValueError):
     def __init__(self, location: str, message: str) -> None:
         self.location = location
@@ -279,9 +284,10 @@ def reviewed_source_identity_policy(
     }
 
 
-def compact_design_schema() -> dict[str, Any]:
+def compact_design_schema(*, compiler_capability: CompilerCapability | None = None) -> dict[str, Any]:
     """Keep the model-facing schema below the strict 100-property/depth limits."""
-    schema = CompactDesignSketch.model_json_schema()
+    capacity = relationship_capacity(compiler_capability)
+    schema = (ReviewedCompactDesignSketch if capacity == 64 else CompactDesignSketch).model_json_schema()
     definitions = schema.get("$defs", {})
     count = len(schema["properties"]) + sum(
         len(value.get("properties", {})) for value in definitions.values()
@@ -372,8 +378,12 @@ def expand_compact_design(
     identity_policy_actor: str | None = None,
     identity_policy_rationale: str | None = None,
     derive_route_metadata: bool = True,
+    compiler_capability: CompilerCapability | None = None,
 ) -> DomainProposalCandidatesV2:
     """Expand semantic choices only; unknown references always fail closed."""
+    capacity = relationship_capacity(compiler_capability)
+    if len(sketch.relationships) > capacity:
+        raise CompactDesignError("relationships", f"[DOM-103] relationship count exceeds {capacity}")
     known_questions = {question.id for question in intake.competency_questions}
 
     def index(items: list[Any], field: str, location: str) -> dict[str, Any]:
@@ -840,7 +850,7 @@ def expand_compact_design(
                     "ordinal_value_type": "integer" if item.ordered else None,
                     "direction": "ascending" if item.ordered else None,
                     "unique_ordinals": True if item.ordered else None,
-                    "contiguous": None,
+                    "contiguous": True if item.ordered else None,
                 },
                 "cardinality": None,
                 "collection_identity_policy": {
@@ -925,6 +935,16 @@ def expand_compact_design(
                 "Typed IDs are key-derived; scores count trusted references and generated "
                 "schema capabilities, not instance-answer proofs. "
                 "Collections assert schema requirements only, with unknown cardinality.",
+                *(
+                    [
+                        "Compact ordered collections require ascending unique contiguous zero-based "
+                        "member positions for C0 1.1. This is an approval-reviewed full-sequence "
+                        "requirement, not observed order, cardinality or proof of completeness. "
+                        "Preserve source ordinals; never renumber or fill missing positions. "
+                        "Absent, partial or invalid ordering evidence cannot establish completeness."
+                    ]
+                    if any(item.ordered for item in declared_checks.values()) else []
+                ),
                 *[
                     f"Compact capability {route.question_id}: properties={sorted(route.answer_property_keys)}; "
                     f"rationale={route.rationale}"

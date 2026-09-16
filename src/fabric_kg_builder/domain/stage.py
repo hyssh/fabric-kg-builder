@@ -18,6 +18,8 @@ from typing import Any, Callable, Literal, Mapping
 
 from pydantic import ValidationError
 
+from .compiler_capacity import CompilerCapability, relationship_capacity
+
 from fabric_kg_builder.contracts.base import (
     ContractModel,
     canonical_json,
@@ -622,8 +624,11 @@ class _TracedProposalClient:
         try:
             response = self.client.complete_json(**request)
         except Exception as exc:
+            from fabric_kg_builder.enrichment.foundry_client import FoundryJSONResponseError
+
             self.callback(
-                {**binding, "event": "request_failed", "exception_type": type(exc).__name__}
+                {**binding, "event": "request_failed", "exception_type": type(exc).__name__,
+                 **({"diagnostics": exc.diagnostics} if isinstance(exc, FoundryJSONResponseError) else {})}
             )
             raise
         self.callback(
@@ -1749,14 +1754,16 @@ def preflight_l1_inputs(
     )
 
 
-def _selector_hash() -> str:
+def _selector_hash(compiler_capability: CompilerCapability | None = None) -> str:
+    capacity = relationship_capacity(compiler_capability)
     return canonical_sha256(
         {
             "selector_version": SELECTOR_VERSION,
             "policy": (
                 "minimum-cq-path-union-plus-mandatory-relationships;"
-                "n-advisory-8-20-hard-24;k-shortest-max-4"
+                f"n-advisory-8-20-hard-{capacity};k-shortest-max-4"
             ),
+            **({"compiler_capability": compiler_capability} if compiler_capability is not None else {}),
         }
     )
 
@@ -1832,7 +1839,7 @@ def _build_design_context(
         "model_version": preflight.model_version,
         "model_hash": preflight.model_hash,
         "selector_version": SELECTOR_VERSION,
-        "selector_hash": _selector_hash(),
+        "selector_hash": _selector_hash(draft_contract.reasoning_policy.compiler_capability),
         "scorer_version": SCORER_VERSION,
         "scorer_hash": SCORER_HASH,
         "budget_snapshot_hash": preflight.budget.budget_snapshot_hash,
@@ -2073,9 +2080,15 @@ def prepare_l1_stage(
     design_window_run_acceptance: Any = None,
     design_schema_projection: Any = None,
     design_source_projection_draft: Any = None,
+    compiler_capability: CompilerCapability | None = None,
     _window_validation: Any = None,
 ) -> L1PreparedStage:
     """Build a complete proposal in memory; this function never persists artifacts."""
+    relationship_capacity(compiler_capability)
+    if compiler_capability is not None and (
+        design_prompt_binding is None or client is not None or candidates is None
+    ):
+        raise L1StageError("Compiler capability requires model-free reviewed design compilation")
     started = started_at_utc or _utc_now()
     if proposal_format not in ("verbose", "compact"):
         raise L1StageError("proposal_format must be verbose or compact")
@@ -2721,6 +2734,7 @@ def prepare_l1_stage(
             preflight.intake,
             candidates,
             known_evidence_span_ids=known_evidence_ids,
+            **({"compiler_capability": compiler_capability} if compiler_capability is not None else {}),
             **({
                 "source_projection_draft": design_source_projection_draft,
                 "_window_validation": _window_validation,
@@ -3622,7 +3636,7 @@ def _skip_key(prepared: L1PreparedStage) -> str:
                 else DOMAIN_PROPOSAL_PROMPT_HASH
             ),
             "model_hash": prepared.preflight.model_hash,
-            "selector_hash": _selector_hash(),
+            "selector_hash": _selector_hash(contract.reasoning_policy.compiler_capability),
             "scorer_hash": SCORER_HASH,
             "domain_schema_hash": canonical_sha256(
                 DomainContractV2.model_json_schema()

@@ -31,15 +31,17 @@ def _unique_json_fields(pairs):
 @click.option("--rationale", help="Required when supplying explicit schema corrections.")
 @click.option("--prefer-window-definitions", is_flag=True,
               help="Explicitly prefer exact source definitions only for otherwise compatible names/scopes/identities; requires actor/rationale.")
+@click.option("--source-scoped-type", multiple=True, metavar="EXACT_NAME",
+              help="Review an unapproved draft type as source-scoped before retention; requires an exact unresolved working entity and actor/rationale. Repeat per type.")
 @click.pass_context
-def domain_retain_window_schema_cmd(ctx, draft_file, out, apply_projection, route_target, completeness_file, actor, rationale, prefer_window_definitions):
+def domain_retain_window_schema_cmd(ctx, draft_file, out, apply_projection, route_target, completeness_file, actor, rationale, prefer_window_definitions, source_scoped_type):
     """Retain representable source concepts without another model call or inherited approval."""
     if apply_projection and (ctx.obj or {}).get("dry_run", False):
         raise click.UsageError("--apply conflicts with --dry-run")
     if draft_file.resolve() == out.resolve():
         raise click.UsageError("Projection must not overwrite its original model draft")
-    correcting = bool(route_target or completeness_file is not None or prefer_window_definitions)
-    if correcting and (not actor or not rationale):
+    correcting = bool(route_target or completeness_file is not None or prefer_window_definitions or source_scoped_type)
+    if correcting and (not actor or not actor.strip() or not rationale or not rationale.strip()):
         raise click.UsageError("Explicit corrections require --actor and --rationale")
     if not correcting and (actor is not None or rationale is not None):
         raise click.UsageError("--actor/--rationale require explicit correction operations")
@@ -59,6 +61,7 @@ def domain_retain_window_schema_cmd(ctx, draft_file, out, apply_projection, rout
         corrections = build_design_corrections(
             actor=actor, rationale=rationale, route_targets=targets, completeness=completeness,
             prefer_window_definitions=prefer_window_definitions,
+            source_scoped_types=source_scoped_type,
         ) if correcting else None
         result = retain_window_schema(
             load_domain_design(draft_file, _validation=operation), corrections=corrections, _validation=operation,

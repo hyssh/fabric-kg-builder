@@ -164,7 +164,7 @@ def test_design_cli_explicit_operational_bound_never_truncates_mandatory_inputs(
     succeeded = CliRunner().invoke(cli, args, obj={"_design_client": client})
     assert succeeded.exit_code == 0, succeeded.output
     assert len(client.calls) == 1
-    assert client.calls[0]["max_completion_tokens"] == 16_000
+    assert client.calls[0]["max_completion_tokens"] == 32_768
 
 
 def test_large_conflict_registry_has_bounded_self_contained_representatives(integrated_case):

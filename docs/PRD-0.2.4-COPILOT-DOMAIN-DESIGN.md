@@ -6,6 +6,99 @@ Status: Draft for product approval
 Owner: Fabric KG Builder  
 Applies to: New projects created with 0.2.4
 
+## Current workflow amendment: auditable whole-document evolution (2026-09-13)
+
+For new whole-document runs, this amendment supersedes the representative-sample
+discovery flow below. Historical sample-only and explicitly approved partial
+prototype scopes remain supported; neither establishes full-corpus completion.
+The implementation contract is
+[Windowed working-schema operations](specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md).
+
+### Discussion decision and change scope
+
+GPT-5.4 can compare each complete document with the accumulated schema and propose
+progressively reusable abstractions. This is the chosen approach for the
+22-document demonstration, not an unsupported capability. "Cannot guarantee
+zero bias or complete recall" must not be interpreted as "cannot reduce bias" or
+used to prohibit working-schema correction. The optimization target is the
+smallest sufficient reusable vocabulary that preserves meaningful distinctions
+and competency-question coverage, not maximum abstraction or forced growth.
+
+The scope of this change covers this PRD and the original PRD's superseding
+notice, the current window technical specification, versioned model instructions
+and response contracts, runtime mutation/audit validation, CLI history/status and
+the design handoff. The execution report must distinguish actual document
+coverage, content revisions, accepted/rejected changes and semantic observations
+from unproven recall claims. Existing final approval, bounded instance extraction,
+source-evidence validation and optional publication quality policy are retained.
+A final cross-corpus review complements sequential refinement; it is not an
+argument against performing it.
+
+### Required workflow
+
+Prompt version 1.3.0 makes business normalization explicit in every whole-document
+window: compare definitions by meaning, consolidate equivalent types and
+relationships, and introduce useful higher-level concepts while retaining
+business-relevant subtypes. Retarget dependent relationships, property owners
+and child types together, retaining useful aliases and explaining how prior
+definitions map to the resulting model. Prefer the smallest sufficient vocabulary,
+not the fewest types; do not merge on name resemblance or erase earlier supported
+meanings. Uncertain mappings remain pending. This is a model instruction, not a
+claim that normalization quality improves monotonically. Existing runs retain
+their original prompt version; new-prompt evaluation starts at document one.
+
+1. Compare the first complete cached document with the domain, all competency
+   questions and an optional provisional seed. Produce working schema revision 1
+   when definitions first change. Compare that accumulated schema with the second
+   complete document, then the third, and so on. Carry earlier change evidence and
+   unresolved decisions forward, not just the latest document's vocabulary.
+2. Permit explicit additions, updates and deletions of working entity types,
+   relationships and property definitions. Prefer reusable nouns and predicates;
+   named products, SKUs and instructions remain instance/property values.
+   Generalization is not the intersection of concepts mentioned in every document.
+   Absence from a later document alone never justifies deletion. A correction,
+   duplicate, instance-as-type mistake or superseded definition requires a stated
+   reason and an assessment of its impact on earlier schema meanings and questions.
+   Update dependent endpoints, owners and parents explicitly in the same atomic
+   proposal batch; never cascade-delete them or leave dangling references.
+3. Retain an immutable change record with the action, affected stable concept ID
+   and kind, rationale, generalization rationale, prior-schema impact, source
+   document, section/page locator, exact example text and offsets, and the full
+   definition before and after. Addition has a null before; deletion has a null
+   after. Record rejected attempts and their rejection reasons without pretending
+   that they changed the schema. Earlier versions and source evidence are never
+   rewritten. A deleted ID cannot be reused for another concept in the same run.
+4. Advance the content revision only when the working definitions or their layer
+   assignments change. A confirming document keeps the current revision but still
+   receives an immutable processing checkpoint. Expose both counters in CLI output
+   so document progress is not confused with schema improvement.
+5. Review the final accumulated schema against the authorized document scope and
+   competency questions before the existing L1 approval. Sequential comparison
+   reduces independent naming but cannot prove semantic completeness, remove
+   document-order bias, or prove that a deletion preserved earlier requirements.
+   Working changes are proposals, not approved facts.
+6. After approval, re-extract all cached units in that approved scope using the
+   same frozen contract, including earlier documents. Instance lineage starts
+   here; schema change history is separate. Preserve existing evidence validation
+   and asserted-serving gates.
+7. Business-quality policy remains an **optional** publication input. When supplied,
+   bind and recompute it before writes; do not downgrade an already policy-bound
+   plan. This amendment does not introduce mandatory quality-policy approval,
+   automatic semantic repair or automatic deployment.
+
+Example: document A leads to a mistaken `Aster 7` class in revision 1. Document B
+supports the reusable `Product Model` class. An explicit batch may add that class,
+retarget a relationship and delete the mistaken class, with separate reasons and
+before/after evidence for each action, producing revision 2. Document C can confirm
+revision 2 without producing revision 3. Deletion affects the provisional schema,
+not historical source text, approved contracts or extracted instance records.
+
+Acceptance requirements: serial prior-schema comparison; source-grounded
+add/update/delete history; atomic dependency validation; unchanged revision for
+confirming documents; rejection of unsupported witnesses and retired-ID reuse;
+exact replay of prior prompt versions; and post-approval extraction under the
+frozen schema. These are mechanical guarantees, not semantic-recall claims.
+
 ## 1. Executive Summary
 
 `fabric-kg` 0.2.4 will make domain design a guided, evidence-based product
@@ -41,7 +134,8 @@ The initial product defaults are:
 ```text
 Recommended N range:       8-20 relationship types when scope requires it
 Default N target:          Copilot-selected minimum covering the questions
-Hard N limit:              24 relationship types per domain contract
+Default hard N limit:      24 relationship types per domain contract
+Reviewed design capacity:  64 explicit relationships with reviewed-design-64/v1
 Default K:                 3 hops
 Maximum K:                 4 hops with explicit rationale
 Work-unit relation budget: 25 candidates; split input rather than truncate
@@ -215,9 +309,24 @@ For 0.2.4, Copilot must solve a bounded coverage problem:
 4. Select the smallest set that covers the approved questions.
 5. Use 8-20 as an advisory range, never as a reason to pad a smaller complete
    vocabulary.
-6. If coverage requires 21-24, provide a complexity warning and rationale.
-7. If more than 24 are required, propose domain modules or narrower scope and
-   block approval until the user resolves the issue.
+6. If coverage requires more than 20, provide a complexity warning and rationale
+   for every retained relationship.
+7. The default compiler limit remains 24. A reviewed design may explicitly select
+   `reviewed-design-64/v1` at evaluation, permitting at most 64 relationships.
+   Compilation consumes that hash-bound evaluation; ordinary proposal generation
+   retains the default limit. Overflow still blocks compilation, never truncates
+   the schema or silently removes concepts.
+
+Concept normalization and compiler expansion measure different things. A
+polymorphic relationship concept can require several explicit source/target
+pairs, including permitted subtype endpoints, in the compact compiler. Revision
+9's 12 entity, 13 relationship and 14 property concepts expand to **38 explicit
+relationship pairs**; that is not 38 normalized relationship concepts. Count
+concepts for ontology design and explicit compiled definitions for capacity.
+Do not weaken normalization, remove valid concepts or alter endpoint semantics
+merely to fit the legacy limit. The explicit capability changes capacity only:
+source/evidence, identity, hierarchy, CQ/completeness, four-hop reasoning,
+losslessness, approval and publication-quality gates still apply.
 
 ### 8.3 K rationale
 
@@ -716,7 +825,7 @@ New gates:
 |---|---|
 | DOM-101 | Five to ten competency questions are present |
 | DOM-102 | Every approved relationship type supports a question or governance rule |
-| DOM-103 | `N` is between 1 and 24; 21-24 includes rationale |
+| DOM-103 | `N` is 1-24 by default, or 1-64 under explicit `reviewed-design-64/v1`; every retained type has rationale when N > 20 |
 | DOM-104 | Every required question has a valid path or is explicitly unsupported |
 | DOM-105 | No approved path exceeds `K`; `K` is at most 4 |
 | DOM-106 | Relationship type names, directions, and endpoints are unique and unambiguous |
@@ -744,8 +853,9 @@ New gates:
   editing in internal evaluations.
 - At least 90% of required competency questions covered by an approved path of
   three or fewer hops.
-- No approved domain exceeds 24 relationship types; a complete vocabulary
-  below eight is accepted without padding.
+- Default domains do not exceed 24 relationship types; explicitly reviewed
+  `reviewed-design-64/v1` contracts do not exceed 64. A complete vocabulary below
+  eight is accepted without padding.
 
 ### 17.2 Quality invariants
 
@@ -884,7 +994,7 @@ Using an isolated installed CLI:
 |---|---|
 | Copilot proposes a plausible but unsupported predicate | Require proposal evidence or explicit business justification |
 | N is too small and misses business questions | Coverage report blocks approval for critical unsupported questions |
-| N is too large and harms usability | Minimal set selection, warning above 20, hard limit 24 |
+| N is too large and harms usability | Minimal set selection, rationale above 20, default cap 24; reviewed versioned capability caps explicit endpoint definitions at 64 |
 | K is too small for one complex question | Allow justified K=4 or decompose the question |
 | K is too large and expands noisy context | Hard limit 4 and shortest-path planning |
 | Model omits evidence | Abstain; audit; never publish |
@@ -929,7 +1039,7 @@ and measurable iteration.
 | Decision | Selected option |
 |---|---|
 | Approval model | One summary approval |
-| N policy | Recommended 8-20, hard maximum 24 |
+| N policy | Recommended 8-20, default maximum 24; explicit reviewed-design-64/v1 maximum 64 |
 | K policy | Default 3, maximum 4 |
 | K enforcement | Domain design, extraction validation, and Graph queries |
 | Unsupported relation handling | Exclude from Ontology; retain in audit queue |

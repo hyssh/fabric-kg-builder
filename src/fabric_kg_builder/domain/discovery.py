@@ -105,12 +105,12 @@ class DiscoveryBudget(ContractModel):
     fan_in: int = Field(default=6, ge=2, le=16)
     max_summary_chars: int = Field(default=6_000, ge=128, le=16_000)
     max_request_chars: int = Field(default=96_000, ge=4_096, le=256_000)
-    max_completion_tokens: int = Field(default=4_096, ge=128, le=16_000)
+    max_completion_tokens: int = Field(default=4_096, ge=128, le=128_000)
 
 
 class DiscoveryMissingRetry(ContractModel):
     operation_version: Literal["discovery-missing-retry/1.0.0"] = "discovery-missing-retry/1.0.0"
-    max_completion_tokens: int = Field(default=16_384, ge=256, le=32_768)
+    max_completion_tokens: int = Field(default=16_384, ge=256, le=128_000)
 
 
 class _Hashed(ContractModel):
@@ -231,7 +231,7 @@ class ChunkObservation(_Hashed):
     candidate_grounding_scope: Literal["raw_response.candidates"] | None = None
     envelope_anomalies: list[EnvelopeAnomaly] = Field(default_factory=list)
     origin_artifact_hash: Sha256 | None = None
-    request_max_completion_tokens: int | None = Field(default=None, ge=256, le=32_768)
+    request_max_completion_tokens: int | None = Field(default=None, ge=256, le=128_000)
     retry_operation_version: Literal["discovery-missing-retry/1.0.0"] | None = None
     retry_of_artifact_hash: Sha256 | None = None
     provider_diagnostic_hash: Sha256 | None = None

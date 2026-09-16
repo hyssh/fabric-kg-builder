@@ -62,7 +62,7 @@ class SuffixClient:
         assert SUFFIX not in request["user"]
         return {"candidates": [{
             "candidate_kind": "entity", "local_id": "outside", "observed_type": "Service Record",
-            "label": "Excluded record", "anchors": [{"span_start": 0, "span_end": 8, "quote": SUFFIX}],
+            "label": "EXCLUDED_SUFFIX", "anchors": [{"span_start": 0, "span_end": 8, "quote": SUFFIX}],
         }]}
 
 
@@ -82,6 +82,7 @@ def approved_prefix(tmp_path):
     prepared_path.write_text(canonical_json(prepared))
     _invoke([
         "domain", "window-run", "--prepared", str(prepared_path), "--intake", str(intake),
+        "--discovery-mode", "chunked", "--schema-policy", "observed-terms",
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
         "--max-chunk-chars", "512", "--max-calls", "1", "--max-repair-calls", "0", "--live",
     ], model=PrefixModel())

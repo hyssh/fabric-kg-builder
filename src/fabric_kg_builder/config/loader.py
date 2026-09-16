@@ -30,6 +30,7 @@ from .schema import (
     EnrichmentConfig,
     FabricConfig,
     FoundryConfig,
+    RECOMMENDED_CHAT_DEPLOYMENT,
 )
 
 # Matches ${VAR} and ${VAR:-default}
@@ -265,10 +266,16 @@ def _build_config(env: str, raw_yaml: dict, env_cfg: dict) -> Config:
         openai_endpoint=openai_endpoint,
         project=foundry_env.get("project") or foundry_yaml.get("project", "example-project"),
         chat_deployment=(
-            os.environ.get("AZURE_AI_CHAT_DEPLOYMENT")
-            or foundry_env.get("chat_deployment")
-            or foundry_yaml.get("chat_deployment")
-            or enrichment_yaml.get("chat_deployment", "gpt-5-4-mini")
+            _resolved(os.environ.get("AZURE_AI_CHAT_DEPLOYMENT"))
+            or _resolved(foundry_env.get("chat_deployment"))
+            or _resolved(foundry_yaml.get("chat_deployment"))
+            or _resolved(enrichment_yaml.get("chat_deployment"))
+            or RECOMMENDED_CHAT_DEPLOYMENT
+        ),
+        chat_model=(
+            _resolved(os.environ.get("AZURE_AI_CHAT_MODEL"))
+            or _resolved(foundry_env.get("chat_model"))
+            or _resolved(foundry_yaml.get("chat_model"))
         ),
         embedding_deployment=(
             foundry_env.get("embedding_deployment")

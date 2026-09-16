@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,13 +17,14 @@ from fabric_kg_builder.cli import cli
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.deploy import schema2_prototype as publication
 from fabric_kg_builder.deploy import schema2_prototype_agent as agent
+from fabric_kg_builder.deploy import schema2_prototype_reconcile as reconcile
 from fabric_kg_builder.knowledge.data_agent import (
     DataAgentSpec, DataSourceSpec, build_definition_parts, decode_stage_snapshot,
 )
 from fabric_kg_builder.knowledge.transport import HttpRequest
 from tests.unit.test_l5a_structured_publication import _inputs
 
-WORKSPACE = "9802a28a-fc89-48b8-b7ae-798d1cf2463f"
+WORKSPACE = "11111111-1111-4111-8111-111111111111"
 PREFIX = "kg20260908"
 
 
@@ -52,6 +54,10 @@ class _Backend:
         self.agent_id = None
         self.definition_drift = False
         self.source_denied = False
+        self.graph_lro = False
+        self.graph_id = None
+        self.graph_operation_id = str(uuid.uuid4())
+        self.graph_operation_status = "Succeeded"
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, copy.deepcopy(kwargs.get("json"))))
@@ -59,6 +65,11 @@ class _Backend:
         if path.endswith("/items") and method == "GET":
             return _Response({"value": list(self.items.values())})
         if "/operations/" in path:
+            if self.graph_operation_id in path:
+                return _Response(
+                    {"id": self.graph_id} if path.endswith("/result")
+                    else {"status": self.graph_operation_status}
+                )
             if self.operation_timeout_once:
                 self.operation_timeout_once = False
                 raise TimeoutError("fixture LRO read timed out")
@@ -70,6 +81,7 @@ class _Backend:
             graph_id = path.split("/")[-2]
             key = "edges" if "[e]" in kwargs["json"]["query"] else "nodes"
             return _Response({"status": {"code": "00000"}, "result": {
+                "kind": "TABLE",
                 "data": [{"observed_count": self.counts[graph_id][key]}],
             }})
         if path.endswith("/getDefinition"):
@@ -88,6 +100,7 @@ class _Backend:
             item_id = str(uuid.uuid4())
             metadata = {
                 "id": item_id, "displayName": body["displayName"],
+                "workspaceId": WORKSPACE, "description": body["description"],
                 "type": {"lakehouses": "Lakehouse", "ontologies": "Ontology",
                          "graphModels": "GraphModel", "dataAgents": "DataAgent"}[collection],
             }
@@ -99,6 +112,13 @@ class _Backend:
             self.items[item_id] = metadata
             if "definition" in body:
                 self.definitions[item_id] = body["definition"]
+            if collection == "graphModels":
+                self.graph_id = item_id
+                if self.graph_lro:
+                    return _Response({}, 202, {
+                        "x-ms-operation-id": self.graph_operation_id,
+                        "Location": f"{publication.API}/operations/{self.graph_operation_id}",
+                    })
             if collection == "dataAgents":
                 self.agent_id = item_id
                 if self.create_mode == "timeout":
@@ -120,7 +140,7 @@ class _Backend:
 
 
 @pytest.fixture
-def published(tmp_path, monkeypatch):
+def published(tmp_path, monkeypatch, publication_graph_lro):
     source = _inputs(tmp_path / "sealed")["source"]
     # The existing helper returns its final sealed L3 manifest in memory.
     # Persist that exact manifest for the public path-based source reader.
@@ -129,6 +149,7 @@ def published(tmp_path, monkeypatch):
         canonical_json(source.input_manifest.model_dump(mode="json")) + "\n",
     )
     backend = _Backend()
+    backend.graph_lro = publication_graph_lro
     original_run = publication._Run
     monkeypatch.setattr(
         original_run, "request",
@@ -150,6 +171,7 @@ def published(tmp_path, monkeypatch):
             }
             self.data["actions"][key] = {
                 "status": "verified", "path": path, "table_proof": proof, "delta_version": 0,
+                "readback": proof,
             }
             backend.tables[path] = {"table": table, "history": history, "version": 0}
             self.save()
@@ -187,6 +209,7 @@ def published(tmp_path, monkeypatch):
         "l4_run": source.root, "l3_root": l3_root,
         "workspace_id": WORKSPACE, "name_prefix": PREFIX,
         "plan_path": plan_path, "materialize_dir": materialize, "journal_path": journal_path,
+        "approved_limitations": (publication.METADATA_ONLY_ALIASES_LIMITATION,),
     }
     plan = publication.publish_schema2_prototype(**publication_kwargs, dry_run=True, approve_live=None)
     assert not plan["blockers"], plan["blockers"]
@@ -254,6 +277,7 @@ def test_public_cli_sealed_publication_to_plan_create_readback(published):
     plan = json.loads(Path(report["plan"]).read_text())
     assert report["plan_hash"] == plan["plan_hash"]
     assert published.backend.calls == []
+    assert "publication_runtime_repair" not in plan
     assert plan["cost_scope"]["created_graphs"] == 0
     assert plan["cost_scope"]["model_calls"] == 0
     snapshot = decode_stage_snapshot(plan["create_request"]["definition"], "draft")
@@ -782,3 +806,529 @@ def test_instruction_boundary_exact_limit_and_oversize_offline_rejection(publish
     assert not (published.kwargs["out_state"] / "plan.json").exists()
     assert not (published.kwargs["out_state"] / "journal.json").exists()
     assert published.backend.calls == []
+
+
+@pytest.fixture
+def reviewed_context(published, monkeypatch):
+    handoff = agent._handoff(**{
+        key: value for key, value in published.kwargs.items() if key != "out_state"
+    })
+    context = copy.deepcopy(handoff.context)
+    context["business_context"]["organization_context"] = "Original business and obsolete design instructions"
+    context["window_run_scope"] = {"scope_notice": "Only the approved two-document prefix is represented."}
+    context["question_routing_context"] = {"questions": [{
+        "question_id": "q:sql-count", "question": "How many approved records?",
+        "preferred_execution_surface": "sql",
+        "routing": {"backend": "sql", "filters": [], "grain": None},
+        "pending_requirements": ["Preserve canonical count grain; unresolved physical binding."],
+    }]}
+    context["export_hash"] = canonical_sha256({
+        key: value for key, value in context.items() if key != "export_hash"
+    })
+    handoff = dataclasses.replace(handoff, context=context)
+    monkeypatch.setattr(agent, "_handoff", lambda **_kwargs: handoff)
+    path = published.kwargs["out_state"].parent / "runtime-context-review.json"
+    value = {
+        "version": agent.RUNTIME_CONTEXT_REVIEW_VERSION,
+        "domain_contract_hash": context["domain_contract_hash"],
+        "actor": "reviewer@example.test",
+        "rationale": "Keep business meaning; exclude obsolete compiler-editing directions.",
+        "organization_context": "Support grounded business answers for the approved two-document prefix.",
+    }
+    path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+    published.kwargs["runtime_context_review"] = path
+    return SimpleNamespace(published=published, handoff=handoff, path=path, value=value)
+
+
+def test_runtime_review_changes_only_global_organization_context(reviewed_context):
+    fixture = reviewed_context
+    original = copy.deepcopy(fixture.handoff.context)
+    original_definition = agent._definition(fixture.handoff, "fixture", None)
+    review = agent._runtime_context_review(fixture.path, original)
+    definition = agent._definition(fixture.handoff, "fixture", None, review)
+    before = decode_stage_snapshot(original_definition, "draft")
+    after = decode_stage_snapshot(definition, "draft")
+    runtime = json.loads(after.instruction.split("(export_hash identifies", 1)[1].split(":\n", 1)[1])
+    expected = copy.deepcopy(original)
+    expected["business_context"]["organization_context"] = fixture.value["organization_context"]
+    assert runtime == expected
+    assert fixture.handoff.context == original
+    assert before.sources == after.sources
+    source = next(item for item in after.sources if item["type"] == "lakehouse_tables")
+    assert json.loads(source["metadata"]["schema2_question_context"]) == original
+    assert before.instruction.split("Exact sealed domain")[0] == after.instruction.split("Explicitly reviewed")[0]
+    assert "Never silently substitute GQL" in after.instruction
+    assert "cite only retrieved quotes" in after.instruction
+
+
+@pytest.mark.parametrize("change", [
+    "wrong-contract", "wrong-version", "blank-actor", "blank-rationale", "blank-text",
+    "unknown-field", "missing-field", "nonstring", "malformed", "duplicate",
+    "nonfinite", "array", "oversized-file", "oversized-text", "unapproved",
+    "unknown-encoding", "null-encoding", "object-encoding",
+])
+def test_runtime_review_rejects_invalid_inputs_before_plan(reviewed_context, change):
+    fixture = reviewed_context
+    value = copy.deepcopy(fixture.value)
+    if change == "wrong-contract":
+        value["domain_contract_hash"] = "0" * 64
+    elif change == "wrong-version":
+        value["version"] = "2"
+    elif change.startswith("blank-"):
+        key = {"actor": "actor", "rationale": "rationale", "text": "organization_context"}[change[6:]]
+        value[key] = " \n\t"
+    elif change == "unknown-field":
+        value["question_routing_context"] = {}
+    elif change == "missing-field":
+        del value["rationale"]
+    elif change == "nonstring":
+        value["organization_context"] = ["not text"]
+    elif change == "oversized-text":
+        value["organization_context"] = "x" * 15_001
+    elif change == "unapproved":
+        fixture.handoff.context["approval_status"] = "draft"
+    elif change.endswith("-encoding"):
+        value["routing_encoding"] = {
+            "unknown-encoding": "columns-v2", "null-encoding": None, "object-encoding": {},
+        }[change]
+    raw = canonical_json(value)
+    raw = {
+        "malformed": "{", "duplicate": raw[:-1] + ',"actor":"another"}',
+        "nonfinite": raw.replace('"actor":', '"actor":NaN,"unused":', 1),
+        "array": "[]", "oversized-file": " " * (agent.MAX_RUNTIME_CONTEXT_REVIEW_BYTES + 1),
+    }.get(change, raw)
+    fixture.path.write_text(raw, encoding="utf-8")
+    with pytest.raises(agent.Error):
+        _plan(fixture.published)
+    assert not fixture.published.kwargs["out_state"].exists()
+    assert fixture.published.backend.calls == []
+
+
+@pytest.mark.parametrize("columns", [False, True])
+def test_runtime_review_cli_discloses_binding_and_preserves_source(reviewed_context, columns):
+    fixture = reviewed_context
+    if columns:
+        fixture.value["routing_encoding"] = "columns-v1"
+        fixture.path.write_text(canonical_json(fixture.value))
+    result = CliRunner().invoke(cli, _cli_args(fixture.published))
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    plan = json.loads(Path(report["plan"]).read_text())
+    review = report["runtime_context_review"]
+    assert review == plan["runtime_context_review"]
+    assert review["content"] == fixture.value
+    assert review["path"] == str(fixture.path.resolve())
+    assert review["review_hash"] == canonical_sha256(fixture.value)
+    assert review["file_sha256"] == agent.hashlib.sha256(fixture.path.read_bytes()).hexdigest()
+    assert plan["question_context"] == fixture.handoff.context
+    assert plan["plan_hash"] == canonical_sha256({
+        key: value for key, value in plan.items() if key != "plan_hash"
+    })
+    assert fixture.published.backend.calls == []
+
+
+@pytest.mark.parametrize("change", [
+    "text", "actor", "rationale", "path", "format", "removed", "plan", "encoding",
+])
+def test_review_drift_blocks_live_before_any_requests(reviewed_context, change):
+    fixture = reviewed_context
+    plan = _plan(fixture.published)
+    if change == "removed":
+        fixture.published.kwargs.pop("runtime_context_review")
+    elif change == "path":
+        other = fixture.path.with_name("another-review.json")
+        other.write_bytes(fixture.path.read_bytes())
+        fixture.published.kwargs["runtime_context_review"] = other
+    elif change == "format":
+        fixture.path.write_text(json.dumps(fixture.value, indent=2), encoding="utf-8")
+    elif change == "plan":
+        plan_path = fixture.published.kwargs["out_state"] / "plan.json"
+        altered = json.loads(plan_path.read_text())
+        altered["runtime_context_review"]["content"]["actor"] = "changed"
+        altered["plan_hash"] = canonical_sha256({
+            key: value for key, value in altered.items() if key != "plan_hash"
+        })
+        plan_path.write_text(canonical_json(altered))
+    elif change == "encoding":
+        fixture.path.write_text(canonical_json({**fixture.value, "routing_encoding": "columns-v1"}))
+    else:
+        value = {**fixture.value, "organization_context" if change == "text" else change: "changed"}
+        fixture.path.write_text(canonical_json(value), encoding="utf-8")
+    with pytest.raises(agent.Error, match="plan or its publication/source bindings changed"):
+        _live(fixture.published, plan)
+    assert fixture.published.backend.calls == []
+
+
+@pytest.mark.parametrize("columns", [False, True])
+def test_review_definition_drift_and_exact_resume(reviewed_context, columns):
+    fixture = reviewed_context
+    if columns:
+        fixture.value["routing_encoding"] = "columns-v1"
+        fixture.path.write_text(canonical_json(fixture.value))
+    plan = _plan(fixture.published)
+    _live(fixture.published, plan)
+    assert fixture.published.backend.agent_creates == 1
+    backend = fixture.published.backend
+    expected = copy.deepcopy(backend.definitions[backend.agent_id])
+    unencoded_review = {"content": {
+        key: value for key, value in fixture.value.items() if key != "routing_encoding"
+    }} if columns else None
+    backend.definitions[backend.agent_id] = agent._definition(
+        fixture.handoff, plan["create_request"]["displayName"], None, unencoded_review,
+    )
+    backend.calls.clear()
+    with pytest.raises(agent.Error, match="definition/source selection readback mismatch"):
+        _live(fixture.published, plan)
+    assert backend.agent_creates == 1
+    backend.definitions[backend.agent_id] = expected
+    assert _live(fixture.published, plan)["runtime_context_review"] == plan["runtime_context_review"]
+    assert backend.agent_creates == 1
+    fixture.path.write_text(canonical_json({**fixture.value, "actor": "another"}))
+    backend.calls.clear()
+    with pytest.raises(agent.Error, match="bindings changed"):
+        _live(fixture.published, plan)
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("columns", [False, True])
+def test_runtime_review_never_reduces_remaining_context_to_fit(reviewed_context, columns):
+    fixture = reviewed_context
+    if columns:
+        fixture.path.write_text(canonical_json({**fixture.value, "routing_encoding": "columns-v1"}))
+    fixture.handoff.context["question_routing_context"]["questions"][0]["pending_requirements"] = ["x" * 15_000]
+    original = copy.deepcopy(fixture.handoff.context)
+    with pytest.raises(agent.Error, match="limit is 15000.*no content was truncated"):
+        _plan(fixture.published)
+    assert fixture.handoff.context == original
+    assert not (fixture.published.kwargs["out_state"] / "plan.json").exists()
+    assert fixture.published.backend.calls == []
+
+
+def test_review_can_fit_oversized_original_without_losing_source_text(reviewed_context):
+    fixture = reviewed_context
+    fixture.handoff.context["business_context"]["organization_context"] = "Original context. " * 1000
+    original = copy.deepcopy(fixture.handoff.context)
+    with pytest.raises(agent.Error, match="limit is 15000"):
+        agent._definition(fixture.handoff, "fixture", None)
+    plan = _plan(fixture.published)
+    snapshot = decode_stage_snapshot(plan["create_request"]["definition"], "draft")
+    assert len(snapshot.instruction) <= 15_000
+    assert fixture.value["organization_context"] in snapshot.instruction
+    source = next(item for item in snapshot.sources if item["type"] == "lakehouse_tables")
+    assert json.loads(source["metadata"]["schema2_question_context"]) == original
+    assert plan["question_context"] == original == fixture.handoff.context
+    assert fixture.published.backend.calls == []
+
+
+def test_default_plan_has_no_review_and_replays_unchanged(published):
+    plan = _plan(published)
+    assert "runtime_context_review" not in plan
+    published.kwargs["runtime_context_review"] = None
+    assert _plan(published) == plan
+    snapshot = decode_stage_snapshot(plan["create_request"]["definition"], "draft")
+    assert "Explicitly reviewed" not in snapshot.instruction
+    assert canonical_json(plan["question_context"]) in snapshot.instruction
+
+
+def _expand_routing_columns(encoded):
+    routing = copy.deepcopy(encoded)
+    assert routing.pop("encoding") == "columns-v1"
+    columns = routing.pop("columns")
+    routing_columns = routing.pop("routing_columns")
+    routing["questions"] = [dict(zip(columns, row, strict=True)) for row in routing["questions"]]
+    for question in routing["questions"]:
+        question["routing"] = dict(zip(routing_columns, question["routing"], strict=True))
+    return routing
+
+
+@pytest.mark.parametrize("questions", [[], [
+    {
+        "question_id": "cq:2", "question": "Second?", "business_critical": False,
+        "routing": {"backend": "sql", "filters": [None, {"ids": ["z", "a"]}], "grain": None},
+        "pending_requirements": [None, "", {"requirement_id": "r:2", "required": True}],
+    },
+    {
+        "pending_requirements": [], "business_critical": True, "question": "First?",
+        "question_id": "cq:1", "routing": {"grain": "", "filters": [], "backend": "sql"},
+    },
+]])
+def test_routing_columns_lossless_roundtrip(questions):
+    original = {"context_version": "1.0", "context_hash": "a" * 64, "questions": questions}
+    before = copy.deepcopy(original)
+    encoded = json.loads(canonical_json(agent._routing_columns(original)))
+    assert _expand_routing_columns(encoded) == before
+    assert original == before
+    assert encoded["context_hash"] == original["context_hash"]
+
+
+@pytest.mark.parametrize("context", [
+    None, {}, {"questions": None}, {"questions": [None]},
+    {"questions": [{"routing": None}]},
+    {"questions": [], "columns": []},
+    {"questions": [{"routing": {}}, {"routing": {}, "extra": None}]},
+    {"questions": [{"routing": {}}, {"routing": {"extra": None}}]},
+])
+def test_routing_columns_rejects_nonhomogeneous_or_ambiguous_input(context):
+    with pytest.raises(agent.Error, match="columns-v1"):
+        agent._routing_columns(context)
+
+
+def test_columns_review_preserves_expanded_global_and_original_source(reviewed_context):
+    fixture = reviewed_context
+    original = copy.deepcopy(fixture.handoff.context)
+    fixture.value["routing_encoding"] = "columns-v1"
+    fixture.path.write_text(canonical_json(fixture.value))
+    plan = _plan(fixture.published)
+    snapshot = decode_stage_snapshot(plan["create_request"]["definition"], "draft")
+    runtime = json.loads(snapshot.instruction.split("(export_hash identifies", 1)[1].split(":\n", 1)[1])
+    assert runtime["question_routing_context"]["encoding"] == "columns-v1"
+    runtime["question_routing_context"] = _expand_routing_columns(runtime["question_routing_context"])
+    expected = copy.deepcopy(original)
+    expected["business_context"]["organization_context"] = fixture.value["organization_context"]
+    assert runtime == expected
+    assert "context_hash identifies expanded content" in snapshot.instruction
+    source = next(item for item in snapshot.sources if item["type"] == "lakehouse_tables")
+    assert json.loads(source["metadata"]["schema2_question_context"]) == original
+    assert plan["question_context"] == original == fixture.handoff.context
+    assert plan["runtime_context_review"]["content"]["routing_encoding"] == "columns-v1"
+    assert _plan(fixture.published) == plan
+    fixture.path.write_text(canonical_json({
+        key: value for key, value in fixture.value.items() if key != "routing_encoding"
+    }))
+    with pytest.raises(agent.Error, match="bindings changed"):
+        _live(fixture.published, plan)
+    assert fixture.published.backend.calls == []
+
+
+@pytest.mark.skipif(
+    not os.environ.get("FKG_TEST_APPROVED_DOMAIN_CONTRACT"),
+    reason="Optional actual-contract sizing: set FKG_TEST_APPROVED_DOMAIN_CONTRACT",
+)
+def test_actual_approved_contract_columns_instruction_size(published, monkeypatch):
+    """Sizing only: no sealed source or deployment is asserted by placeholder hashes."""
+    from fabric_kg_builder.domain.service import load_domain_contract
+    from fabric_kg_builder.serving import structured_publication as serving
+
+    contract = load_domain_contract(Path(os.environ["FKG_TEST_APPROVED_DOMAIN_CONTRACT"]))
+    assert contract.approval.status == "approved"
+    contract_hash = serving.compute_contract_hash(contract)
+    source = SimpleNamespace(
+        root=published.source.root,
+        projection=SimpleNamespace(sealed_domain_contract_hash=contract_hash, projection_hash="0" * 64),
+        manifest=published.source.manifest,
+    )
+    handoff = agent._handoff(**{
+        key: value for key, value in published.kwargs.items() if key != "out_state"
+    })
+    with monkeypatch.context() as sizing:
+        sizing.setattr(serving, "_load_source_tables", lambda _source: None)
+        sizing.setattr(
+            serving, "_publication_authority",
+            lambda _tables: (contract, {"domain_contract_hash": contract_hash}),
+        )
+        context = serving.export_serving_question_context(source)
+    handoff = dataclasses.replace(handoff, context=context)
+    text = (
+        "Microsoft Surface servicing from supplied official guides. Isolated prototype for "
+        "qualified technicians; not production maintenance authorization."
+    )
+    review = {"content": {"organization_context": text}}
+    with pytest.raises(agent.Error, match="limit is 15000"):
+        agent._definition(handoff, "offline-sizing-only", None, review)
+    review["content"]["routing_encoding"] = "columns-v1"
+    snapshot = decode_stage_snapshot(agent._definition(handoff, "offline-sizing-only", None, review), "draft")
+    runtime = json.loads(snapshot.instruction.split("(export_hash identifies", 1)[1].split(":\n", 1)[1])
+    encoded = runtime["question_routing_context"]
+    runtime["question_routing_context"] = _expand_routing_columns(encoded)
+    expected = copy.deepcopy(context)
+    expected["business_context"]["organization_context"] = text
+    assert runtime == expected
+    source_metadata = next(item for item in snapshot.sources if item["type"] == "lakehouse_tables")
+    assert source_metadata["metadata"]["schema2_question_context"] == canonical_json(context)
+    assert len(snapshot.instruction) <= 15_000
+    assert published.backend.calls == []
+    print(
+        f"Sizing only: contract={contract_hash}; organization={len(text)}; "
+        f"routing={len(canonical_json(context['question_routing_context']))}"
+        f"->{len(canonical_json(encoded))}; global={len(snapshot.instruction)}"
+    )
+
+
+def test_new_agent_revision_does_not_alias_legacy_compiler_identity(monkeypatch):
+    identity = {
+        "prototype_publication": publication._compiler_hash(),
+        "agent_publisher": agent._LEGACY_AGENT_PUBLISHER_HASH,
+        "agent_definition": agent.hashlib.sha256(Path(agent.data_agent.__file__).read_bytes()).hexdigest(),
+    }
+    legacy = canonical_sha256(identity)
+    identity["agent_publisher"] = agent.hashlib.sha256(Path(agent.__file__).read_bytes()).hexdigest()
+    expected = canonical_sha256(identity)
+    assert expected != legacy
+    assert agent._compiler_hash() == expected
+    assert agent._compiler_hash(runtime_review=True) == expected
+    read_bytes = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda path: (
+        read_bytes(path) + b"\n" if path == Path(agent.__file__) else read_bytes(path)
+    ))
+    assert agent._compiler_hash() != expected
+
+
+@pytest.fixture
+def repaired_publication(published, monkeypatch):
+    monkeypatch.setattr(publication, "_compiler_hash", lambda: "reviewed-runtime")
+    kwargs = published.kwargs
+    recovery = {
+        "plan_path": kwargs["prototype_plan"], "journal_path": kwargs["prototype_journal"],
+        "materialize": kwargs["materialize"], "l4_run": kwargs["l4_run"], "l3_root": kwargs["l3_root"],
+        "kind": "graph", "item_id": published.backend.graph_id,
+        "review_path": kwargs["out_state"].parent / "publication-runtime-review.json",
+        "returned_id_runtime_repair": True,
+    }
+    preview = reconcile.reconcile_prototype_create(**recovery)
+    reconcile.reconcile_prototype_create(
+        **recovery, accept_review=preview["review_hash"],
+        actor="fixture reviewer", rationale="Reviewed exact returned-ID readback runtime repair",
+    )
+    published.backend.calls.clear()
+    return published
+
+
+@pytest.mark.parametrize("publication_graph_lro", [False, True], indirect=True)
+def test_reviewed_returned_repair_offline_binding_and_fresh_live_proof(repaired_publication):
+    case = repaired_publication
+    original_plan = case.kwargs["prototype_plan"].read_bytes()
+    original_journal = case.kwargs["prototype_journal"].read_bytes()
+    artifacts = reconcile._artifact_digests(case.kwargs["materialize"])
+    receipt = json.loads(original_journal)["runtime_repair"]
+    plan = _plan(case)
+    binding = plan["publication_runtime_repair"]
+    assert binding["policy"] == reconcile.RETURNED_ID_POLICY
+    assert binding["receipt_hash"] == canonical_sha256(receipt)
+    assert binding["review_hash"] == receipt["review_hash"]
+    assert binding["original_plan_hash"] == case.publication_plan["plan_hash"]
+    assert binding["original_plan_bytes_hash"] == agent.hashlib.sha256(original_plan).hexdigest()
+    assert binding["original_compiler_hash"] == case.publication_plan["compiler_hash"]
+    assert binding["current_compiler_hash"] == "reviewed-runtime"
+    assert binding["candidate_plan_hash"] != case.publication_plan["plan_hash"]
+    candidate = reconcile.recompile_plan(
+        case.kwargs["prototype_plan"], case.kwargs["prototype_journal"],
+        case.kwargs["materialize"], case.kwargs["l4_run"], case.kwargs["l3_root"],
+    )
+    assert binding["candidate_plan_hash"] == candidate["plan_hash"]
+    assert binding["semantic_comparison_hash"] == canonical_sha256(reconcile._semantic(candidate))
+    assert reconcile._semantic(candidate) == reconcile._semantic(case.publication_plan)
+    assert binding["artifact_digests_hash"] == canonical_sha256(artifacts)
+    assert binding["item_id"] == case.backend.graph_id
+    assert plan["question_context"]["execution_verified"] is False
+    assert case.backend.calls == []
+    assert _plan(case) == plan
+
+    result = _live(case, plan)
+    assert result["status"] == "draft-definition-verified-user-test-pending"
+    assert case.backend.agent_creates == 1
+    create = next(i for i, (method, url, _) in enumerate(case.backend.calls)
+                  if method == "POST" and url.endswith("/dataAgents"))
+    reads = [(method, url) for method, url, _ in case.backend.calls[:create]]
+    assert ("GET", f"{publication.API}/workspaces/{WORKSPACE}/graphModels/{case.backend.graph_id}") in reads
+    assert ("POST", f"{publication.API}/workspaces/{WORKSPACE}/graphModels/{case.backend.graph_id}/getDefinition") in reads
+    if case.backend.graph_lro:
+        assert ("GET", f"{publication.API}/operations/{case.backend.graph_operation_id}") in reads
+        assert ("GET", f"{publication.API}/operations/{case.backend.graph_operation_id}/result") in reads
+    assert all(method == "GET" or method == "POST" and (
+        url.split("?", 1)[0].endswith("/getDefinition")
+        or url.split("?", 1)[0].endswith("/executeQuery")
+    ) for method, url in reads)
+    assert case.kwargs["prototype_plan"].read_bytes() == original_plan
+    assert case.kwargs["prototype_journal"].read_bytes() == original_journal
+    assert reconcile._artifact_digests(case.kwargs["materialize"]) == artifacts
+
+
+@pytest.mark.parametrize("change", [
+    "missing-receipt", "unaccepted", "tampered-review", "wrong-bound-compiler",
+    "changed-current-code", "changed-agent-code", "wrong-plan-bytes", "wrong-source",
+    "wrong-materialized", "unsupported-kind", "unsupported-policy", "operator-owned",
+    "changed-create-evidence", "unready-companion", "changed-receipt-after-plan",
+    "tampered-agent-plan",
+])
+def test_repaired_agent_rejects_drift_before_network(repaired_publication, monkeypatch, change):
+    case = repaired_publication
+    plan = _plan(case)
+    journal_path = case.kwargs["prototype_journal"]
+    journal = json.loads(journal_path.read_text())
+    receipt = journal["runtime_repair"]
+    if change == "missing-receipt":
+        del journal["runtime_repair"]
+    elif change == "unaccepted":
+        receipt["status"] = "unaccepted"
+    elif change == "tampered-review":
+        receipt["review"]["item_id"] = str(uuid.uuid4())
+    elif change == "wrong-bound-compiler":
+        receipt["review"]["current_compiler_hash"] = "foreign"
+        receipt["review_hash"] = canonical_sha256(receipt["review"])
+    elif change == "changed-current-code":
+        monkeypatch.setattr(publication, "_compiler_hash", lambda: "unreviewed-runtime")
+    elif change == "changed-agent-code":
+        monkeypatch.setattr(agent, "_compiler_hash", lambda **_kwargs: "unreviewed-agent")
+    elif change == "wrong-plan-bytes":
+        path = case.kwargs["prototype_plan"]
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif change == "wrong-source":
+        (case.kwargs["l4_run"] / "semantic-serving-projection.json").write_text("{}")
+    elif change == "wrong-materialized":
+        next((case.kwargs["materialize"] / "tables").glob("*.parquet")).unlink()
+    elif change == "unsupported-kind":
+        receipt["review"]["kind"] = "ontology"
+        receipt["review_hash"] = canonical_sha256(receipt["review"])
+    elif change == "unsupported-policy":
+        receipt["policy"] = reconcile.POLICY
+    elif change == "operator-owned":
+        journal["actions"]["create:ontology"]["ownership"] = "operator-reconciled"
+    elif change == "changed-create-evidence":
+        journal["actions"]["create:graph"]["returned_item_id"] = str(uuid.uuid4())
+    elif change == "unready-companion":
+        journal["ontology_readiness"] = "GraphNotQueryable"
+    elif change == "changed-receipt-after-plan":
+        receipt["rationale"] += " Updated after agent approval."
+    elif change == "tampered-agent-plan":
+        path = case.kwargs["out_state"] / "plan.json"
+        value = json.loads(path.read_text())
+        value["publication_runtime_repair"]["current_compiler_hash"] = "foreign"
+        value["plan_hash"] = canonical_sha256({k: v for k, v in value.items() if k != "plan_hash"})
+        path.write_text(canonical_json(value))
+    journal_path.write_text(canonical_json(journal))
+    with pytest.raises((ValueError, OSError)):
+        _live(case, plan)
+    assert case.backend.calls == []
+    assert case.backend.agent_creates == 0
+    assert not (case.kwargs["out_state"] / "journal.json").exists()
+
+
+@pytest.mark.parametrize("publication_graph_lro", [True], indirect=True)
+@pytest.mark.parametrize("change", ["definition", "operation", "receipt-during-proof"])
+def test_repaired_agent_failed_fresh_proof_prevents_create(repaired_publication, monkeypatch, change):
+    case = repaired_publication
+    plan = _plan(case)
+    if change == "definition":
+        case.backend.definitions[case.backend.graph_id]["parts"].pop()
+    elif change == "operation":
+        case.backend.graph_operation_status = "Failed"
+    elif change == "receipt-during-proof":
+        request = case.backend.request
+
+        def changed(method, url, **kwargs):
+            response = request(method, url, **kwargs)
+            if url.endswith("/getDefinition"):
+                path = case.kwargs["prototype_journal"]
+                journal = json.loads(path.read_text())
+                journal["runtime_repair"]["rationale"] += " Changed during proof."
+                path.write_text(canonical_json(journal))
+            return response
+
+        monkeypatch.setattr(case.backend, "request", changed)
+    with pytest.raises(agent.Error):
+        _live(case, plan)
+    assert case.backend.calls
+    assert case.backend.agent_creates == 0
+    assert all(method == "GET" or method == "POST" and url.endswith("/getDefinition")
+               for method, url, _ in case.backend.calls)
+    assert not (case.kwargs["out_state"] / "journal.json").exists()

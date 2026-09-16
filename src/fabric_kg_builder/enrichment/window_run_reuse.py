@@ -26,7 +26,9 @@ def projected_id_only_relationship_aliases(contract):
     """Keep scoped canonical IDs, never resolve an ambiguous human label."""
     from fabric_kg_builder.contracts.base import normalize_nfc
 
-    if contract.window_schema_projection is None:
+    # Native window designs also expand polymorphic relations into disjoint
+    # endpoint pairs; they need the same canonical-ID-only label handling.
+    if contract.window_schema_projection is None and contract.window_run_binding is None:
         return set()
     groups, reserved = {}, set()
     for relation in contract.candidate_model.relationship_types:
@@ -268,6 +270,10 @@ def prepare_window_run_reuse(window_run_path, source_path, l1_state_root, domain
 
     inputs = load_l2_inputs(l1_state_root=l1_state_root, domain_path=domain_path)
     run, _, _ = _bindings(window_run_path, domain_path)
+    if run.config.discovery_mode == "whole-document":
+        raise WindowRunReuseError(
+            "WHOLE_DOCUMENT_SCHEMA_REQUIRES_REEXTRACTION: schema discovery contains no instance candidates; "
+            "use --reextract-approved after L1 approval")
     if (
         inputs.corpus_manifest.corpus_hash != run.prepared.corpus.corpus_hash
         or inputs.l1_receipt.identity.project_id != run.prepared.base_identity.project_id

@@ -1,19 +1,41 @@
 # Windowed working-schema operations
 
-Status, 2026-09-11: cached-candidate alignment/replay is implemented. The
+Update, 2026-09-13 (normalization): fresh runs select version 1.3.0, adding
+the explicit "BUSINESS CONCEPT MODELING AND SCHEMA NORMALIZATION" instruction.
+Each complete document must compare meanings, consolidate equivalent entity types
+and predicates, and introduce meaningful higher abstractions where justified.
+Retain business-relevant subtypes, scopes and roles; retarget dependent endpoints,
+owners and parents explicitly and explain prior-to-result mappings. This uses
+the existing atomic add/update/delete/alias contract, not automatic merging.
+The full block is `NORMALIZATION_POLICY` in `document_schema_evolution.py`.
+Version 1.2.0 prompts, response contracts and retained runs remain unchanged;
+evaluating the new prompt requires a fresh run from document one.
+
+Update, 2026-09-13: version 1.2.0 enables audited additions, corrections and
+deletions in provisional whole-document discovery. Local mutation and downstream
+regressions exercise the new contract and preserve historical replay. Provider
+throttling can interrupt a run; a processed prefix does not establish full-corpus
+acceptance, final schema approval or deployment readiness.
+
+Status, 2026-09-12: cached-candidate alignment/replay is implemented. The
 standalone first-document bootstrap is experimental. The integrated raw-text
-coordinator and approval/replay bridge are implemented locally. Bounded live
-execution covered the first document and continuation into the second;
-full-corpus semantic acceptance is not complete. Fresh integrated runs now default
-to core-business concept proposals. The first same-source experiment below
-completed, exposed residual issues, and prompted a versioned refinement;
-full semantic acceptance is not claimed.
+coordinator and approval/replay bridge are implemented locally. Fresh integrated
+CLI runs default to complete-document, generalized schema discovery. Local
+implementation does not establish full-corpus semantic acceptance.
 
 ## Goal and scope
 
-Replace independent naming across discovery chunks with a common, evolving
-working vocabulary and mapping registry. Carry its identity through the last
-chunk, persist each batch transition locally, and reuse existing observations.
+Replace independent naming across documents with a common, evolving, reusable
+type schema. Give each complete document the prior schema, persist its schema
+transition, review/freeze the accumulated schema once, then perform bounded
+instance extraction across all authorized documents and construct lineage.
+Legacy chunked observation discovery and replay remain explicitly available.
+
+Sequential GPT-5.4 generalization is the chosen mechanism to reduce
+document-specific bias across an authorized document collection. Lack of a guarantee
+of perfect recall is not a reason to prohibit corrections. Prefer the smallest
+sufficient reusable vocabulary, retaining useful domain distinctions rather than
+forcing all types into a generic Thing or all predicates into relates_to.
 
 The existing change implements CLI state, alignment and handoff. Detailed source
 retrieval, multi-span answer adjudication and Search index construction remain
@@ -22,58 +44,651 @@ Foundry Agent orchestration guidance, not new engines in this release.
 An evolving working schema is not a published ontology. An accepted working
 change is not an asserted source fact or final mapping/domain approval.
 
+## Default whole-document schema discovery
+
+Fresh `domain window-run` invocations default to `--discovery-mode whole-document`
+and select `whole-document-schema/1.3.0`, not the legacy chunked observation prompt. It uses
+the **same** immutable manifest, request/response ledger, document barriers,
+working-schema history, design/projection review, and L1 approval bridge.
+Select `--discovery-mode chunked` explicitly for legacy observation discovery.
+Old manifests and serialized config hashes are unchanged: `RunConfig` retains
+its legacy defaults, and resume inherits the recorded mode and prompt, including
+`whole-document-schema/1.0.0`, `1.1.0` and `1.2.0`. A chunked run cannot be resumed as a whole-document
+run, nor can an old prompt be silently upgraded in place.
+
+1. Supply prepared sources (or a discovery cache, whose old candidates are
+   ignored), complete intake/domain/questions, and optional `--seed-reference`.
+   Every request contains all intake questions, the entire current schema, all
+   cached text sections of exactly one document, and unresolved earlier decisions.
+2. Propose reusable entity, directional relationship and owner-scoped scalar
+   property **definitions**, not exhaustive instances. `add_concept`,
+   `add_alias`, `update_concept`, and `delete_concept` reconcile the same working schema. Each
+   definition has one or two exact, short source witnesses. Generalize from the
+   document's evidence into types reusable across documents: model/SKU/part names,
+   serial numbers and document titles are instance values, not new type names or
+   type aliases. Reuse/update existing concepts before adding genuinely distinct
+   types; preserve justified distinctions and leave unsupported merges/splits
+   pending rather than collapsing everything into a generic type. Version 1.1.0
+   proposals declare `layer` (`common`/`domain`), `generalization_reason`, and
+   `scope_change` (`additive`/`broadening`/`narrowing`/`incompatible`); narrowing
+   and incompatible changes require explicit correction rationale in 1.2.0
+   (see below), otherwise they are rejected for review. A confirming document
+   may propose no changes: schema growth is not required in every window. Unknown owners,
+   endpoints, ambiguous updates and non-provisional identity policies are rejected;
+   unresolved merge/split decisions remain pending for review.
+3. Documents run serially, one logical schema request and one schema barrier per document.
+   Transient transport failures may require separately budgeted physical attempts.
+   `--window-size` and `--concurrency` do not split or batch documents in this mode.
+   `--stop-after-document` and `--max-windows` retain their pause/resume controls.
+   The schema evolves across documents without resetting after each one.
+   Review/freeze the accumulated schema once through existing `domain design
+   --window-run`, optional schema projection/corrections, `evaluate-design`,
+   `compile-design`, and `approve`; discovery never grants approval.
+4. After L1 approval, use `enrich --reextract-approved --window-run ...` to revisit
+   **every authorized cached chunk, including earlier documents**, using the
+   frozen schema. See the two-pass commands below. A deliberately accepted prefix
+   remains limited to its exact committed chunks; it never authorizes later text.
+   Build instance/evidence lineage only after this freeze and approved extraction,
+   never from schema proposals treated as extracted facts. Do not alternate
+   per-document schema discovery with authoritative instance extraction.
+
+### Auditable additions, updates and deletions (1.2.0)
+
+This implements the [current PRD amendment](../PRD-0.2.4-COPILOT-DOMAIN-DESIGN.md#current-workflow-amendment-auditable-whole-document-evolution-2026-09-13).
+The first document evolves the provisional seed; the second compares with that
+result; the third compares with the second result. Every request includes the
+entire current schema, questions, prior transition history and unresolved context.
+Prior history is not silently truncated; the existing complete-request token and
+character admission gates still apply before every dispatch.
+
+`delete_concept` specifies an existing `concept_id`, with no `concept` or `alias`.
+`update_concept` supplies the complete replacement with the same ID and kind.
+Both affect only working definitions. Every deletion requires `change_basis`
+(`correction`, `duplicate`, `instance_as_type`, `superseded`) and nonempty
+`prior_schema_impact`. Updates that remove/change earlier scope, aliases, parent,
+layer, scalar type or identity context require these fields too. The prompt
+requires reconciliation of earlier document evidence, dependent definitions and
+questions. Mere absence from the latest document is not a valid reason.
+Source-grounded rationale does not mechanically prove semantic safety; final
+human review remains necessary.
+
+All changes in a document are atomic: any invalid proposal or dangling
+endpoint/owner/parent rejects the entire batch. Dependents must be explicitly
+retargeted, corrected or deleted in that batch. There is no cascade deletion.
+Repeated mutations of one ID and reuse of a retired ID are rejected. Existing
+entity/relationship provisional identity and scalar-property shape rules remain.
+Historical 1.0.0/1.1.0 requests, decisions, responses and replay remain unchanged.
+
+Each committed `working_context.annotations.schema_transition` contains:
+
+- Document reference and source-file ID, response hash and checkpoint/hash chain.
+- `schema_revision_before` / `schema_revision_after`, status and `changed`.
+- Each attempted action, target ID/kind, reason, generalization reason, change
+  basis, prior-schema impact and full proposed mutation.
+- Actual definition and layer before/after; addition starts at null, deletion
+  ends at null. Rejected attempts retain the prior actual definition and record
+  the proposed change separately.
+- Exact source quotation, section/page locator, source-unit/text hash and offsets.
+  Invalid witness attempts are retained as proposals, not verified evidence.
+
+The existing snapshot `version` is still the immutable document-checkpoint
+counter. `schema_revision` advances only when definitions or accepted layers
+change. A confirming or rejected document leaves that revision unchanged while
+retaining its checkpoint. The optional seed is revision 0; the first actual
+change produces revision 1. The final design context carries this history too.
+Use the public read-only controls:
+
+```bash
+fabric-kg domain window-run-status --state build/windows
+fabric-kg domain window-run-history --state build/windows --changes-only
+```
+
+The history option is for new 1.2.0 runs; old runs require the original full
+history view and are never retroactively assigned new audit records.
+For example, adding `Product Model`, retargeting an existing relationship and
+deleting an accidental named-model class can yield revision 2 in one batch.
+A third document confirming that schema retains revision 2. This reduces
+independent naming but cannot prove full coverage or eliminate document-order
+bias. Review all authorized documents and questions before L1 approval.
+Approved re-extraction and instance lineage are unchanged; business-quality
+publication policy remains optional, as described below.
+
+### Historical 1.1.0 generalization safeguards
+
+The 1.1.0 prompt includes formatted few-shot examples distinguishing a reusable
+type from a named model instance, then showing a later document reusing that type
+without expanding the schema. Accepted common/domain classifications accompany
+the current schema as `schema_layers` in subsequent document requests.
+
+In addition to exact-witness and schema validation, the 1.1.0 runtime blocks automatic:
+
+- Declared `narrowing` or `incompatible` changes.
+- Loss of existing owners, relationship endpoints, aliases, or subtype scope.
+- A `common` to `domain` layer change.
+- Incompatible scalar-type changes; `integer` to `number` is the permitted widening.
+- Any parent change, including parent removal, or changes to relationship context.
+
+These guards preserve specific structural invariants; they do **not** establish
+semantic equivalence or prove that a model-proposed generalization is correct.
+Reusable meaning remains model-proposed and human-reviewed before the accumulated
+schema is frozen. A declared `broadening` is not a substitute for that review.
+Recorded `whole-document-schema/1.0.0` runs retain their legacy prompt and response
+contract on replay/resume; the new metadata and safeguards belong to version 1.1.0,
+not a silent migration of historical runs.
+
+Example operator-supplied `model-capability.json` (replace all deployment facts
+and limits with reviewed values for the actual deployment):
+
+```json
+{
+  "deployment": "your-gpt54-deployment",
+  "model_name": "gpt-5.4",
+  "model_version": "2026-03-05",
+  "deployment_sku": "GlobalStandard",
+  "endpoint": "https://your-resource.openai.azure.com",
+  "context_tokens": 128000,
+  "max_input_tokens": 128000,
+  "max_output_tokens": 32768,
+  "source": "operator-reviewed deployment capability evidence"
+}
+```
+
+The example is **not** a live capability attestation or a universal model
+capacity promise. Profiles fail closed for unknown model/version combinations
+and inconsistent limits. The profile, transport and prompt are sealed in the
+new mode's configuration. Live Foundry endpoint/deployment and transport must
+match. TPM quota is not a context-window limit.
+
+Supported profiles include GPT-4.1, GPT-4.1-mini and GPT-4.1-nano version
+`2025-04-14`, and GPT-5.4 version `2026-03-05`, subject to the helper's supported
+deployment SKU and limit checks. Default input/context limits remain 128,000;
+higher declarations require reviewed deployment-specific evidence. For an alias,
+set the Foundry configuration's `chat_model` to the profile's actual model name:
+deployment aliases alone do not identify a model family.
+
+### Generation token allowances
+
+New whole-document CLI runs and `domain design` now default to **32768 output
+tokens**, including reasoning. Fresh GPT-5.4 approved extraction also defaults
+to 32768, including deployment aliases with `chat_model: gpt-5.4`. Explicit
+generation ceilings can be raised to **128000**; a smaller reviewed capability
+profile or total-context limit still wins. No explicit request is silently reduced.
+Generic GPT-5.4 JSON calls use 32768 when no output allowance is supplied.
+
+The Microsoft GPT-5.4 model/version table documents **1050000 total context,
+922000 maximum input, and 128000 maximum output** for the supported model.
+Use those values only with a reviewed compatible deployment/SKU profile; the
+128000-context example above is conservative, not the model's universal ceiling.
+Input, framing, safety headroom and reserved output must fit together. TPM/RPM
+remain separate deployment-throughput limits: increasing an output reservation
+can trigger more throttling, not eliminate it.
+
+Historical core constructor defaults and old sealed requests are preserved.
+Window resume inherits its recorded output budget; approved extraction inherits
+omitted output/context budgets and enforces code/authority compatibility.
+An incompatible or exhausted donor requires explicit fresh-state continuation,
+not editing its ledger. Legacy chunked discovery keeps its 4096 default but
+now accepts an explicit `--max-completion-tokens` up to 128000; missing-response
+retry ceilings support the same maximum. Assessment CLI runs default to 32768
+with checkpoint inheritance, while legacy core defaults remain unchanged.
+
+Larger limits reduce truncation risk but do not guarantee completeness. Incomplete
+JSON remains invalid; source text is never cut to force a successful-looking
+response. Private response diagnostics retain the failed output and provider
+finish reason rather than treating partial data as approved facts.
+
+GPT-5.4 uses `reasoning_effort: medium` for chat completions, or
+`reasoning: {"effort": "medium"}` for project Responses, and omits temperature
+and seed. GPT-4.1 keeps its existing deterministic transport settings. The same
+generation-parameter helper supplies actual dispatch and preflight accounting;
+offline document preflight also binds `chat_model` to the profile's model name.
+
+The Foundry configuration's `request_timeout_seconds` controls the per-request
+timeout (default: 120 seconds; maximum: 1800 seconds). Long GPT-5.4 whole-document
+requests may require an explicitly larger, bounded timeout; increasing it does
+not guarantee completion. The timeout is part of the sealed execution identity:
+changing it requires a new run state, not resuming or overwriting the old state.
+Retain the failed run and its request ledger when retrying with a different timeout.
+
+For GPT-5.4, response schemas containing open-ended object maps select JSON-object
+mode before dispatch rather than sending an unsupported strict JSON schema.
+The full response schema remains in the instructions and local response validation
+is unchanged. Legacy model request construction is retained for immutable donor
+reconstruction. Provider API errors are persisted alongside physical request
+records before an attempted fallback is blocked; retries require explicit action.
+
+New live configuration loaded through `load_config` and the recommended
+`fabric-kg.yaml`/`.env.example` select GPT-5.4 unless an explicit deployment
+setting wins. Existing GPT-4 settings and historical request/donor identities are
+not retargeted. The low-level `FoundryConfig` constructor retains its legacy
+default for compatibility; it is not the recommended live configuration entrypoint.
+`chat_model` has no inferred default: for a custom deployment alias, explicitly
+set `AZURE_AI_CHAT_MODEL` to the verified underlying model (and update or unset
+it when changing deployments). No capability profile is generated from these defaults.
+
+```bash
+fabric-kg --config fabric-kg.yaml domain window-run \
+  --prepared build/prepared.json --intake intake.json \
+  --discovery-mode whole-document --model-capabilities model-capability.json \
+  --model-transport chat_completions \
+  --out-state build/document-schema \
+  --max-request-chars 2000000 --max-completion-tokens 8192 \
+  --max-calls 2 --dry-run
+```
+
+The call budget is illustrative for two documents. Replace `--dry-run` with
+`--live` only when authorized. For project Responses deployments use
+`--model-transport project_responses` and the matching project endpoint/profile.
+On resume use the original immutable size/config options and `--resume`;
+mode, prompt version, profile contents, transport and seed are inherited when omitted.
+Changing the profile or transport requires a fresh state, not an edited manifest.
+
+Dry-run counts each complete document with the initial schema. Before **each**
+live dispatch, the complete accumulated-schema request is tokenized again,
+including transport instructions, response-schema copies and output reservation.
+The actual SDK keyword arguments are checked again before a physical attempt
+is reserved or sent, including any wrapper-added instructions and schema copies.
+Tokenizer accounting uses the complete serialized SDK envelope with explicit
+framing/safety reserves; it is an estimate, not provider-authoritative usage.
+The character ceiling is an additional admission guard, not a truncation rule.
+Overflow fails closed: no truncation, summarization, cross-document batching, or
+silent fallback to chunked mode. Use a reviewed adequate profile/deployment or
+start an explicitly chunked run. A growing schema can make a later document exceed
+the limit even when its initial-schema dry-run fitted.
+
+Whole-document inference reuses the authenticated Foundry SDK with SDK retries
+disabled and `max_attempts=1`. Each durable coordinator dispatch permits at most
+one physical request. Wrapper-level transport retries and strict-format fallbacks
+are disabled at this boundary; the coordinator owns any additional attempt.
+Retrying does not silently downgrade the format.
+Every authorized retry receives a new durable dispatch reservation and consumes
+the invocation's call and token budgets; insufficient remaining budget sends
+no request. Cumulative run accounting retains earlier failed attempts as well.
+The actual request hash/accounting are recorded under `physical-requests/`.
+
+The whole-document CLI defaults to `--max-transport-retries 3` (up to four attempts
+per logical document request) and `--max-transport-retry-wait-seconds 900` (total
+sleep allowance per document, excluding the separately bounded request timeouts).
+Set retries to zero to disable automatic retries. These are invocation controls,
+not sealed schema/model settings; changing them does not invalidate historical
+requests. The Python `RunBudget` defaults to zero retries for legacy callers;
+explicit chunked mode retains its existing behavior.
+
+Only observed transient API failures (429, 408, 5xx, connection errors and timeouts)
+are automatically retried within the active invocation. Honor `retry-after-ms`,
+`x-ms-retry-after-ms`, and `Retry-After` seconds/HTTP dates, adding positive jitter.
+Without a usable provider hint, throttling waits start at 60 seconds; other
+transient failures start at one second. Exponential fallback caps at 300 seconds,
+but provider-requested waits are never shortened to that cap. If the remaining
+sleep allowance cannot honor a delay, stop with
+`transport_retry_wait_budget_exhausted` instead of retrying early.
+
+Every attempt, including a failed or throttled one, consumes `--max-calls` and
+`--max-tokens`. For example, a two-document invocation with three retries per
+document needs `--max-calls 8` to allow all eight attempts; a smaller call budget
+still wins. `physical-errors/` preserves provider errors and cooldowns; `retries/`
+records the delay and failed-dispatch linkage. Retries resend the same request,
+not a shortened document or a modified schema.
+
+Authentication/configuration errors and invalid JSON/model responses are not
+transport-retried. A previously uncertain dispatch (including a process crash
+during a reserved retry wait) still requires `--resume --retry-uncertain`; invalid
+responses retain their separate `--retry-invalid-response` gate. Timeout retries
+can repeat remotely completed work, so no attempt is refunded or treated as
+exactly-once execution.
+
+TPM is a possible cause of throttling, not a diagnosis for timeout/connection
+errors. Azure admission estimates include prompt size and the output-token
+reservation, not only billed tokens. Backoff cannot fix a single request that
+exceeds deployment quota or persistent capacity problems. Inspect deployment
+limits and response metadata rather than silently reducing the approved request.
+See [Azure OpenAI rate-limit guidance](https://learn.microsoft.com/azure/foundry/openai/how-to/quota#understanding-rate-limits).
+
+Before accepting any schema response, the provider's `response.model` must exactly
+match the profile's model name and version. A missing or different model is a
+received-invalid response, with diagnostics and no schema commit; after correcting
+the deployment, resumption requires `--retry-invalid-response`. Successful response
+model identity is persisted and rechecked on replay. This detects retargeted aliases;
+it does not turn the operator-supplied context profile into a live capacity attestation.
+
+Prompt references are compact `s1`, `s2`, etc., with page/section hints when
+available. The request ledger's `source_references` maps them to full immutable
+source-unit IDs, text hashes and locators; verbose source metadata is not copied
+into the model prompt. Witnesses are stored as `schema-witness:` supports in
+schema history, not instance evidence. Existing chunk envelopes contain empty
+candidate arrays solely to retain the exact extraction scope: **they do not
+claim that the source contains no instances**. Whole-document authority is explicit
+in the config and design context. Zero-call candidate replay is rejected for
+this mode; instance lifecycle records and lineage start only in approved fresh L2
+extraction. No extra service, deployment or lineage process is introduced.
+
+Scope: “complete document” means every text SourceUnit in the verified prepared
+cache. It does not attest OCR completeness, hidden image content, semantic recall,
+or approval of model-proposed definitions. Schema conflicts are reviewed through
+the existing approval workflow; this mode does not run chunk-level candidate
+repair/admission calls.
+
+## Placement of instance-data quality
+
+Window discovery answers **which business concepts and relationships are useful**.
+It does not guarantee that every property required by a later design was extracted.
+Keep the following boundaries explicit:
+
+| Boundary | Responsibility |
+|---|---|
+| Window discovery -> L1 design/approval | Reconcile concept definitions, property owners, essential fields and contextual identity. Freeze one reviewed contract. Adding a property to the design does not populate it. |
+| Approved L1 -> L2 extraction | An explicit bounded re-extraction uses the accepted cached source units and the final closed vocabulary. Extract names, full content, scalar values and relationships separately, each with source evidence. No new OCR or automatic expansion of an accepted prefix. |
+| L2 -> L3 validation | Ground proposed names independently from their supporting quotations. Validate field ownership, values, identities and endpoints. Source presence alone is not semantic entailment. |
+| L3 -> L4 serving | Preserve validated names and full evidence independently. Never replace a name with a supporting paragraph or use a quotation-length limit to decide whether a name exists. Retain unresolved observations outside the asserted serving data. |
+| L4 -> L5/publication | Assess required-field population, labels, evidence and governed relationship coverage before remote writes. Bind strict publication policy and its report to the exact inputs. A structurally deployable graph is not necessarily useful or complete. |
+| Evaluation | Compare immutable runs over the same cached scope and reviewed contract. Model selection follows measured field/identity/relationship quality, not schema validity or node count alone. |
+
+The default discovery-replay path remains distinct from explicit re-extraction.
+Replay can align existing observations but cannot create values for newly declared
+fields. A new contract or extraction prompt requires new run authority; do not
+rewrite the original discovery, approval, source spans or deployment evidence.
+
+Approved window-bound designs may represent one polymorphic relationship using
+several endpoint-specific types with the same display name. As with retained
+schema projections, disjoint endpoint scopes require canonical relationship IDs
+in extraction; ambiguous human labels are excluded and listed explicitly in the
+prompt. Overlapping scopes, case-only collisions and labels colliding with
+reserved IDs still fail closed. This does not merge relations or guess an alias.
+
+### Data lineage starts after schema freeze
+
+Schema discovery history and instance-data lineage are separate. Continue recording
+window schema changes with `domain window-run-history` before approval. Instance
+lineage starts automatically with L2 extraction **after** the exact L1 approval
+chain has passed validation. There is no extra tracing daemon or opt-in flag:
+candidate lifecycle records, source manifests and contract hashes are the trace.
+
+Read those artifacts through the public command:
+
+```bash
+fabric-kg lineage trace CANDIDATE_ID \
+  --l1-state build/l1 --domain approved-domain.yaml \
+  --l2-state build/reextracted-l2 --format json
+```
+
+Draft, changed, missing or stale approval is rejected before reading data records.
+To include validated lifecycle state, evidence IDs and serving values, add
+`--l4-run build/serving-l4/runs/EXACT_RUN_HASH --l3-root build/validated-l3`.
+The L4 and L3 inputs must belong to the exact L2 handoff, not merely a matching
+schema. Canonical entity, relationship and property assertion IDs can be traced
+as well as candidate IDs. Reads do not run validation, make model calls, write a
+registry or mutate historical runs. L2 anchors remain explicitly unverified
+proposals; L4 evidence links and mechanical acceptance do not attest semantic
+accuracy. The older registry-backed trace remains a separate compatibility path.
+
+The exact previous and current approved-extraction system prompts, their dynamic
+context and schema layers, and prompt-version compatibility rules are documented
+in [Approved extraction prompt](SPEC-APPROVED-EXTRACTION-PROMPT.md).
+
+The separate `domain design` conversion accepts `--max-completion-tokens`
+(new CLI default 32768, maximum 128000) for large retained schemas. Reasoning consumes part
+of this provider output allowance. A nondefault value is sealed in the design
+inputs/request and checked on reload; historical default requests are unchanged.
+This does not bypass evaluation or automatically regenerate malformed output.
+With opt-in `--proposal-trace-dir`, failed JSON responses now retain private raw
+output, finish/incomplete reasons and usage diagnostics for review before a new
+attempt. Do not treat a truncated draft as an approved contract or a replay cache.
+
+Keep policy generic in the pipeline and scenario-specific in reviewed runtime
+design input. Product names and industry catalogs are not repository allowlists.
+For example, a count attached to a part-use occurrence must not be reassigned to
+a step just because an old schema allowed only Step-owned `quantity`. Conditional
+values must remain unresolved unless their scope is supported. Concise titles,
+complete instructions/warnings and exact supporting quotes are different data.
+
+Publication reports must distinguish mechanical checks from human-reviewed
+semantic accuracy and answer completeness. Passing non-null and evidence-link
+checks is necessary, not proof that a phrase is the right product or that all
+steps were extracted. Model evaluation must include those semantic cases.
+
+### Two-pass contract and public commands
+
+Pass 1 carries the domain hypothesis, example questions, previous working schema
+and unresolved decisions through each document. Its extracted observations are
+provisional design evidence. Reconcile definitions, ownership, identity and
+document-order effects before approving the final schema. The approved schema
+already defines the conceptual ontology; Lakehouse, Fabric Ontology and Graph
+must use that same contract rather than redesign it independently.
+
+Pass 2 revisits **all cached source units in the approved scope** under the frozen
+schema. Earlier documents also need this extraction: their provisional values
+cannot supply fields introduced later. A genuine schema gap creates a new
+reviewed version and an explicitly scoped rerun, never an in-place schema change.
+An accepted one-document prefix is not acceptance of the whole corpus.
+
+For an approved window prefix, use a fresh L2 state and inspect the plan first:
+
+```bash
+fabric-kg enrich --reextract-approved \
+  --input source-assets --domain-file approved-domain.yaml --l1-state build/l1 \
+  --window-run build/windows --l2-state build/reextracted-l2 \
+  --max-calls 10 --max-physical-calls 20 --max-output-tokens 16384 --dry-run
+```
+
+The budgets above are a synthetic example for ten chunks, not a corpus-size default.
+Remove `--dry-run` only for authorized model execution. No OCR or original PDF
+read is required. Retries consume the physical budget and overflow splits consume
+logical calls. `--resume` requires identical sealed inputs, configuration, code
+and budgets; it does not reset allowances. Default replay remains available.
+
+If a run exhausts its sealed allowance, explicit donor continuation can reuse
+verified raw responses in a **fresh** child state without modifying the donor:
+
+```bash
+fabric-kg enrich --reextract-approved \
+  --reuse-approved-run build/reextracted-l2 \
+  --input source-assets --domain-file approved-domain.yaml --l1-state build/l1 \
+  --window-run build/windows --l2-state build/reextracted-continuation-l2 \
+  --max-calls 4 --max-physical-calls 8 --max-output-tokens 16384 --dry-run
+```
+
+This synthetic example assumes six reusable responses and four remaining units. Inspect the
+actual plan instead of inferring those counts from file count alone. Child
+budgets are **additional** allowances; the plan separately reports prior spending
+and cumulative lineage ceilings, including failed attempts. Reused raw responses
+are processed again, not imported as asserted facts. Donors must be inactive,
+sealed and compatible with the exact approved source, contract, request semantics
+and model configuration. Changed semantics require fresh extraction, not cache
+reuse. Resume the child with identical options, including `--reuse-approved-run`,
+plus `--resume`. Use the completed child's L2 path in all downstream commands.
+
+```bash
+fabric-kg validate-evidence --domain approved-domain.yaml --l1-state build/l1 \
+  --l2-state build/reextracted-l2 --state build/validated-l3
+fabric-kg project-serving --domain approved-domain.yaml --l1-state build/l1 \
+  --l2-state build/reextracted-l2 --l3-state build/validated-l3 --state build/serving-l4
+fabric-kg assess-business-quality --l4-run build/serving-l4/runs/EXACT_RUN_HASH \
+  --l3-root build/validated-l3 --quality-policy reviewed-quality-policy.json \
+  --output build/reports/business-quality.json
+```
+
+Assessment writes a new report; exit 5 means blockers, not a missing report.
+Omitting `--quality-policy` permits historical diagnostics but does not enforce
+a reviewed business-name rule. A strict policy binds `domain_contract_hash`,
+per-type `label_rules` (`property_ids`, `allow_evidence_mention`, `display_templates`) and any approved
+`endpoint_coverage` requirements. Name properties and labels must be independently
+grounded on the same entity and agree after NFC/whitespace normalization; their
+supporting quotation spans need not have identical IDs. Full instruction or rule
+text remains separate from its short label.
+
+#### Reviewed display templates and structural path readiness
+
+Default display matching remains strict equality to a grounded name property
+(NFC/whitespace normalized), or an explicitly approved evidence-mention rule.
+An optional `display_templates` list adds reviewed alternatives without generating
+or updating labels, source assertions, required facts, or entity identities.
+For this synthetic device-maintenance contract, the effective property IDs are
+`property:service_part.part_number` and `property:service_part.name`, not `domain.*`.
+Add this rule separately for `semantic-type:service_part` and
+`semantic-type:fastener` (the latter inherits those properties), retaining all
+other reviewed type rules:
+
+```json
+{
+  "property_ids": ["property:service_part.name", "property:service_part.part_number"],
+  "allow_evidence_mention": false,
+  "display_templates": [
+    "{property:service_part.part_number} {property:service_part.name}"
+  ]
+}
+```
+
+Each placeholder must exactly identify a declared effective property for that
+type. Unknown properties, empty/literal-only templates, malformed braces,
+format specifiers, conversions, and attribute/index expressions fail closed.
+Literal separators/text are part of the reviewed policy. There is no Python
+format-string evaluation or missing-value substitution. Every referenced value
+must be a populated, unambiguous, correctly typed, evidence-linked scalar asserted
+on that same entity. Independent property evidence spans are allowed; the entity
+label still needs its own linked evidence. Missing/non-scalar values never produce
+a partial display string. Boolean/numeric scalars use JSON spelling (`false`, `0`);
+dates/timestamps use ISO format (timestamps normalized to UTC). Templates are
+alternatives, not required-property waivers.
+
+`presentation_coverage.display_template_assessments` records each entity/template,
+rendered candidate (or null), match status, unavailable property IDs, assertion IDs,
+and evidence-span IDs. Nonempty feature configuration is included in the normalized
+`policy_hash`, and its assessment is included in `report_hash`. Empty
+`display_templates` and `requirement_paths` fields are omitted during serialization
+to preserve historical version `1.0.0` policy hashes. Corresponding report sections
+are absent unless that feature is configured, preserving historical report shape
+and hashes when neither feature is enabled. After opting in, review and recompute
+the changed policy hash and publication plan; never edit a frozen plan to bypass
+recomputation.
+
+**Derived instance displays (separate opt-in).** Add
+`"derive_display_from_properties": true` to an explicitly reviewed `label_rules`
+entry to publish a separate instance display from existing asserted naming
+properties. For ServicePart/Fastener use the rule above with this flag; for Tool
+use `property_ids: ["property:tool.name"]`. The flag defaults to false and is
+omitted when false, preserving historical normalized policy/report hashes.
+
+Derivation chooses the first fully grounded supported template, then the first
+supported property in `property_ids` order. It never fills missing template
+placeholders. Synthetic device-maintenance examples:
+
+| Original L4 mention | Existing asserted values | Derived instance display |
+|---|---|---|
+| `DEMO-101 Screws` | SKU `DEMO-101`, no name | `DEMO-101` |
+| `DEMO-202 Foam x 1 (Shield Foam #2)` | SKU `DEMO-202`, name `Foam` | `DEMO-202 Foam` |
+| `Inspection strap` | name `Inspection strap (demo accessory)` | Full asserted name |
+
+This is not a mismatch waiver: original-mention evidence and unambiguous,
+same-owner, evidence-linked string properties are required. Accepted syntax is
+equality to an asserted naming value, a reviewed display prefix followed only by
+quantity/parenthetical qualifiers, a whole-token SKU with an agreeing asserted
+name when present, or a full asserted name whose parenthetical-free base equals
+the mention. Case changes, synonyms and inferred names are not supported.
+`DEMO-303 SSD` versus SKU `DEMO-303`/name `RAM`, `1` versus name `Tool`, identifier prefixes
+such as `DEMO-30` versus `DEMO-303`, ambiguous names, and missing evidence remain blocked.
+An asserted Name contradiction cannot be hidden by a SKU-only rule.
+Required properties and missing approved names still block publication, even when
+`allow_evidence_mention` is true. SKU-only output does not create a Name assertion.
+
+`presentation_coverage.derived_instance_displays` records original mention and
+label evidence, derived display, selected template/properties, guard properties,
+property assertion IDs and evidence-span IDs (or a blocked reason). This section
+exists only when derivation is configured. The L4 label, semantic properties,
+identities, provenance and carried `l4_*` tables remain unchanged.
+
+The shared publication compiler applies the reviewed display to every typed
+membership's `__label` **before** snapshots, governed-asset hashes, plans and
+materialization. Native Ontology and independent Graph bind that same column.
+For widened Ontology endpoints, a separately hashed
+`presentation_semantic_entities` table supplies `entity_id`, derived `label` and
+`original_mention`; the original asserted-entity table is never rewritten.
+Native companion binding/ownership and scalar readback checks follow that
+presentation table. Display-query citations identify the asserted property
+lineage as `derived-instance-display`, not as a verbatim source mention.
+
+Callers constructing governed assets directly must pass the same `quality_policy`
+to `compile_governed_assets`/`build_l5a_governed_assets` and
+`compile_l5a_publication`. Prototype compilation does this automatically.
+The final quality report, physical values and bindings are bound into derived
+asset authority; stale/raw-label asset hashes fail rather than being adopted.
+Changing a derived display requires a new policy-bound plan and materialization,
+not a type-label repair or an edit to old sealed artifacts. Data Agent business
+accuracy and complete source scope remain unassessed.
+
+To separately measure the observed
+Procedure → RepairItemRequirement → **one distinct allowed Item** path, add this
+top-level `requirement_paths` value to the same version `1.0.0` quality policy:
+
+```json
+[
+  {
+    "procedure_type_id": "semantic-type:procedure",
+    "requirement_type_id": "semantic-type:repair_item_requirement",
+    "procedure_relationship_type_id": "relationship-type:procedure_has_requirement__procedure__repair_item_requirement",
+    "item_relationship_type_ids": [
+      "relationship-type:requirement_specifies_item__repair_item_requirement__consumable",
+      "relationship-type:requirement_specifies_item__repair_item_requirement__fastener",
+      "relationship-type:requirement_specifies_item__repair_item_requirement__service_part",
+      "relationship-type:requirement_specifies_item__repair_item_requirement__tool"
+    ]
+  }
+]
+```
+
+These IDs are checked against the supplied L4 domain contract. Allowed item types
+and predicate IDs come from its relationship definitions, including endpoint
+subtype policy; they are not guessed from labels. The existing assessment CLI
+includes `structural_requirement_path_readiness` when these rules are configured. It reports
+per-requirement owning procedures, distinct item IDs, supporting relationship IDs,
+missing halves, multiple-item ambiguity, invalid edges, and procedures without a
+ready path. Duplicate assertions to the same item do not count as multiple items;
+the four item relationships are a **union of alternatives**, not four mandatory
+edges. Empty requirement populations are `unobserved`, not vacuous success.
+
+Readiness is **informational-only**, separate from the business-quality blocker
+count/exit code and from explicit `endpoint_coverage` enforcement. It concerns only
+the supplied asserted L4 population. Neither a ready path nor a passing quality
+gate establishes question-answer accuracy, quantity correctness, applicability,
+business uniqueness, or complete source scope. Those remain separate acceptance
+and source-scope checks; missing links are not proof that a source has no such fact.
+
+For publication, pass the same `--quality-policy` to `fabric-kg app
+publish-structured`. The dry-run binds the recomputed report, policy and sealed
+inputs. APPLY recomputes the gate before writes; editing the report or dropping
+the option cannot downgrade an already bound plan. This gate does not replace
+Graph runtime readback or source-cited question acceptance.
+Plan-based query, agent, reconciliation and graph-presentation operations also
+recompile using the bound quality policy and require the same recomputed report;
+they must not silently revert to a policy-free projection.
+
+Detailed Search content should retain original quotations and link to the
+same canonical entity/relationship identities. Search publication and the final
+Ontology/Graph-to-Search Markdown explanation remain separate delivery steps;
+these extraction and quality commands do not deploy either automatically.
+
 ## Concept-first assessment and bounded comparison
 
 ### Observed-terms baseline
 
-The 2026-09-11 read-only assessment examined the approved prefix contract and the
-38 committed windows covering 302 chunks, not the entire extraction file tree.
-Local evidence is under
-`/Users/hyssh/.copilot/session-state/b7936870-1338-44f3-beea-5ed110ae4791/files/surface-prototype-20260908`.
-Paths in this subsection are relative to that artifact root.
+Compare only identical authorized source scopes and committed checkpoints.
+An exported snapshot may be stale relative to a paused run; verify its chunk
+inventory before comparing counts. Keep actual run artifacts and their hashes
+in access-controlled storage, not in repository examples.
 
-| Artifact/scope | Chunks | Entity concepts | Property concepts | Relationship concepts |
-|---|---:|---:|---:|---:|
-| `integrated-windows-v11/windows/000009.json`, first complete document | 78 | 64 | 2 | 2 |
-| `integrated-windows-v11-final-schema.json`, older exported snapshot | 86 | 71 | 4 | 2 |
-| `integrated-windows-v11/windows/000037.json`, actual paused prefix | 302 | 266 | 54 | 13 |
+In a synthetic device-maintenance fixture, `DEMO-101 Tape`, `Aster 7` and
+`Enclosure Installation` are instance labels, not automatically reusable root
+types. Promoting their names into types is a class/instance modeling decision,
+not a display-name cleanup. Conversely, a generic `Component` label can still
+map to an overly narrow definition; inspect meaning as well as name matching.
 
-All three snapshots have zero parent-type links. The approved
-`paused-prefix-l1/domain.yaml` contains 270 entity types and 20 relationship types,
-also without parent-type links. Of its entity types, 260 have retained `ws_`
-identifiers. Approval and retention are not evidence of suitable abstraction.
-The `*-final-schema.json` export is stale relative to the paused prefix; do not
-compare its 86 chunks against a new 78-chunk run as though the scopes match.
+Report entity/property/relationship concept counts, parent-type links,
+class/instance-name collisions, and mapped/pending/quarantined observations.
+Approval, retention and lower type counts do not prove suitable abstraction.
+Observation counts are not distinct real-world objects or semantic recall.
 
-Preserved proposals promote names such as `M1234550 Tape`, `Surface Laptop Studio`
-and `Procedure - Installation (Enclosure)` into root entity types. Antenna, fan
-and USB-C connector also become individual component-specific types rather than
-observations classified under a reusable part concept. The tape example is
-preserved in
-`integrated-windows-v11/responses/24fefedd77f0eafc3fa25ac301a73a5f2e24980b91e8507e488e108cd4366896.json`:
-candidate index 5 uses `M1234550 Tape` for both label and observed type, and proposes
-`Component.m1234550_tape` because it observed that tape as a component for SSD.
-This is a class/instance decision, not a display-name cleanup.
+### Explicit chunked policy and its limits
 
-The old request asks for new concepts to use their observed names. Combined with
-label-as-type generation, that produces lexical classes. The prefix contains
-607 of 2,969 raw entity candidates whose label and observed type are identical;
-this is a diagnostic, not a count of proven modeling errors. Generic names alone
-are insufficient too: 689 mapped `component`/`Component` observations resolve to
-`component.display_tdm`, whose definition is specifically a display requiring
-calibration/authentication, including observations labeled Battery, Feet and
-Motherboard. Inspect definition fit, not just successful name matching.
-
-For comparison accounting, the first-document run has 920 raw candidates:
-729 entities, 149 properties and 42 relationships. Its final mapping has 409
-mapped, 366 pending and 145 quarantined records. The 302-chunk prefix has 3,631
-raw candidates: 2,969 entities, 515 properties and 147 relationships; 1,741 mapped,
-1,284 pending and 606 quarantined. These are observation records, not distinct
-real-world objects or proof of semantic recall.
-
-### Current policy and its limits
-
-Fresh `domain window-run` invocations default to `--schema-policy reviewed-concepts`
+Fresh `domain window-run --discovery-mode chunked` invocations default to `--schema-policy reviewed-concepts`
 (prompt v1.5). Explicit `--schema-policy concepts` selects the v1.3 self-assessment
 policy; `--schema-policy observed-terms` retains the legacy
 v1.1 behavior. An implicit policy on resume inherits the recorded run's policy,
@@ -99,9 +714,9 @@ role. A proposal that declares an already-fitting existing concept is rejected:
 classification must use that existing type during original extraction, not
 create another class. These explanations do not authorize entity identity keys.
 
-V1.4 adds enforced independent semantic admission, because two experiments showed
-that stronger instructions and self-declared rationales alone do not reliably
-reject value classes. Original extraction proposals cannot admit their own new
+V1.4 adds enforced independent semantic admission: stronger instructions and
+self-declared rationales alone do not reliably reject value classes.
+Original extraction proposals cannot admit their own new
 concepts. They receive a review-required diagnostic and enter the existing
 bounded repair/review channel. A separate model call critiques each proposal
 against the source, business context and frozen schema, then either returns an
@@ -158,7 +773,7 @@ incorrect rationale. Grounded quotations do not prove the abstraction, identity,
 endpoint meaning or relation direction is correct. Human-reviewed semantic
 fixtures and the existing evidence/approval gates remain necessary.
 
-The target is a domain-general conceptual vocabulary, not a hard-coded Surface
+The target is a domain-general conceptual vocabulary, not a hard-coded product
 allowlist or a target count of types. Model, SKU, Part, Procedure, Step, Symptom,
 Department and geographic concepts illustrate reusable roles; only source-backed
 roles and relations should appear in a particular run. Do not invent departments,
@@ -166,94 +781,47 @@ places, steps or edges just to complete those example patterns.
 
 ### First-document experiments
 
-Use the existing cached discovery and intake, an empty initial schema and a new
-output state. Do not seed from the approved 270-type contract or resume the old
-observed-terms state. The first source is
-`src:0699b2ff3442e3e6c1ca00db9cc30475`,
-`Surface Laptop 7th Edition for Business English Service Guide.pdf` (78 chunks).
-Its cached Document Intelligence artifact is
-`ocr-corpus/fc6a9e15284211562214161a9cc8a18f912c44072abb98a720a603484c055852.json`;
-`ocr-cli-logs/10.stdout` records the 78-page `prebuilt-layout` extraction.
-Cached prepared source units are in
-`corpus-first-full-cache/sources/ae3be9fd738b48c2ae43c4a6f6d97105fb087935dca96d9d13470aa06c8f53b0.json`.
-No new DI extraction is needed for this comparison.
+Use verified cached discovery and intake, an empty initial schema and a new
+output state. Do not seed from an approved baseline contract or resume an old
+observed-terms state for a fresh comparison. Use an explicitly synthetic input
+such as `device-maintenance-guide.pdf`; keep private corpus names, IDs and
+source hashes outside this guide. No new DI extraction is needed when the
+authorized cache is complete.
 
-From the artifact root, plan the bounded run through the public CLI:
+From `/path/to/run`, plan the bounded run through the public CLI:
 
 ```bash
 fabric-kg --config fabric-kg.yaml domain window-run \
-  --discovery corpus-first-full-discovery-run4-c12.json \
-  --intake intake-sql-routing-pending.json \
-  --out-state concept-windows-v15-first-document \
+  --discovery discovery.json \
+  --discovery-mode chunked \
+  --intake intake.json \
+  --out-state build/concept-first-document \
   --schema-policy reviewed-concepts --window-size 8 --concurrency 8 \
   --max-request-chars 160000 --max-completion-tokens 32768 \
-  --max-calls 160 --max-repair-calls 80 --stop-after-document 1
+  --max-calls 20 --max-repair-calls 10 --stop-after-document 1
 ```
 
-Use an unused state path; add `--live` only for the authorized bounded inference.
-Compare with `integrated-windows-v11-run3.log` and window `000009.json`, snapshot
-10, rather than the older 86-chunk export or 302-chunk approved contract.
-Historical configuration uses `gpt-4.1`, 8,000-character chunks and the same
-window/request/completion limits. The completed historical first document used
-86 total model calls, including eight repairs. V1.2/v1.3 retain the eight-repair
-ceiling with a 100-call cap. Reviewed runs allow up to 80 admission/repair calls and 160
-total calls, explicitly trading additional inference for a separate critique.
-All experiments stop at the same document boundary and reuse DI extraction.
+The budgets are synthetic illustrations, not an allocation for a real corpus.
+Use an unused state path; add `--live` only for authorized bounded inference.
+Compare the same document boundary, prepared/source-cache and intake identities,
+recording model, prompt, seed and configuration differences separately.
 
-The first concept-first pass is retained separately in
-`concept-windows-v12-first-document`, with `concept-windows-v12-live.log` and
-`concept-windows-v12-status.json`. It completed all 78 chunks with 86 calls:
-21 entity types versus 64, but only two relationship types (revision metadata).
-Its final mapping counts were 773 mapped, 23 pending and 159 quarantined.
-The generic Component definition no longer meant only a display, and named parts,
-steps and symptoms were preserved under broader classes. Nevertheless, Battery
-remained a component-specific class, and document number/date/change values became
-entities. This pass was not accepted as sufficient simply because counts improved.
+Historical prompt/response contracts remain available for exact readback and
+resume. New representation/identity-role checks prefer owned scalar values over
+metadata nodes, distinguish instances from functional specializations, and
+require source-stated typed relationships. Never concatenate table cells into
+fabricated quotes.
 
-V1.3 retains the v1.2 prompt and response contracts for readback/resume rather than
-rewriting that experiment. It adds the representation/identity-role checks above,
-prefers owned scalar values over metadata nodes, distinguishes instances from
-functional specializations, and explicitly prompts for source-stated typed
-relationships. It reiterates that table cells must not be concatenated into
-fabricated quotes. The new comparison uses the same cached chunks in a fresh state.
-
-The v1.3 self-assessed run completed 78 chunks with 16 entity types, five property
-types and four relationship types. It introduced business predicates (`acts_on`,
-`requires_tool`, `has_step`) but still admitted scalar wrapper classes and
-conflated Procedure with Step in a relationship scope. Stronger generation
-instructions did not establish semantic acceptance.
-
-The v1.4 full-proposal critic experiment was stopped and frozen at 24 chunks using
-`--resume --max-calls 0 --max-windows 0`; the freeze made zero model calls. Its
-first 16 chunks exposed omitted replacement indexes, invalid `action: pending`
-proposals and incorrect critiques of legitimate general types/properties. It is
-retained in `concept-windows-v14-first-document` and
-`concept-windows-v14-frozen.json`, not used as a completed 78-chunk comparison.
-Its small schema was partly a fail-closed protocol result, not proof of better
-modelling. Unfinished dispatches are not silently retried. This finding motivated
-the separate compact critic and kind-aware instructions in v1.5.
-
-The unseeded v1.5 run completed the same 78 chunks, with identical prepared,
-source-cache, intake and model hashes and unchanged configuration except the
-prompt version. `concept-window-comparison.json` records those comparisons.
-
-| Run | Entity types | Property types | Relationship types | Calls (including reviews) |
-|---|---:|---:|---:|---:|
-| Legacy v1.1 | 64 | 2 | 2 | 86 |
-| Concept-first v1.2 | 21 | 1 | 2 | 86 |
-| Self-assessed v1.3 | 16 | 5 | 4 | 86 |
-| Compact-critic v1.5, empty seed | 18 | 1 | 5 | 133 |
-
-V1.5 recorded 79 admit and 173 veto decisions with zero indexed-review protocol
-errors. Its 637 grounded entity, 102 property and 40 relationship candidates
-yielded 717 mapped, 62 pending and 289 quarantined records. It preserved broader
-Part/ServicePart/Procedure/ProcedureStep roles, but still admitted Battery,
-BatteryCover and Fastener specializations. This is evidence of improvement and
-remaining errors, not a declaration that all concepts are suitably abstract.
+An interrupted run can be frozen with `--resume --max-calls 0 --max-windows 0`;
+unfinished dispatches are not silently retried. Budget exhaustion, invalid review
+indexes or fail-closed protocol errors can reduce schema size without improving
+modeling. Report these separately from semantic outcomes and compare completed
+scopes only. Neither a compact critic nor increased mapping counts establishes
+semantic acceptance.
 
 ### Source-derived reference before window zero
 
-The experiments expose a cold-start design problem as well as a prompt problem:
+An empty seed introduces a cold-start design problem as well as a prompt problem:
 parallel page workers share an *empty* schema initially, so early pages can
 establish specialized or inconsistent roles before a broader role is available.
 A critic seeing that same empty snapshot cannot reliably resolve the global
@@ -277,7 +845,7 @@ concept design. Add a full-first-document reference step before extraction:
 This is a generated domain reference, not a source-specific type allowlist in
 code. Seeded and empty-seed experiments must be reported separately: the seeded
 run deliberately has an additional whole-document modelling call and a different
-initial vocabulary. Subsequent document inference remains paused until requested.
+initial vocabulary. Subsequent document inference requires explicit authorization.
 
 The reference path is implemented as `window-bootstrap --intake ...` followed by
 `window-run --seed-reference ...`. Intake bootstrap uses separate provider-strict
@@ -289,92 +857,32 @@ Selected IDs resolve only to supplied source paragraphs, which are then checked
 by the existing exact-source validator. They support proposed vocabulary, not
 asserted relationships. Legacy no-intake bootstrap behavior is unchanged.
 
-Three rejected bootstrap attempts remain preserved: the first two could not
-faithfully retype source whitespace/table quotations; the third used invalid
-property shapes. No invalid quotation or schema was accepted. The compact,
-pointer-grounded run `concept-first-document-reference-v4` completed in one call
-over all 78 chunks/122,746 source characters, producing eight entity types, eight
-relationship types and four properties.
+Retain rejected bootstrap responses and diagnostics without accepting invalid
+quotations or property shapes. Review any broadened Part definition explicitly:
+physical components are not necessarily independently orderable SKUs. A reviewed
+reference copy must record its rationale and original hash; it is neither
+unchanged model output nor final domain approval. Keep original evidence intact.
 
-`concept-reference-reviewed.json` is a separately reviewed copy. Its only semantic
-change broadens the inferred Part definition from orderable service parts to
-physical components/subcomponents, so a connector is not falsely asserted to be
-an independently orderable SKU. `concept-reference-review.json` records that
-assistant review and the original reference file hash. This is not an unchanged
-LLM output or human/domain approval. Part Number/SKU retains the source catalogue
-identifier meaning; no device-configuration SKU relationship is manufactured.
-The original inferred response, reference and evidence are unchanged.
+### Guided first-document acceptance
 
-### Completed guided first-document result
+Use a synthetic device-maintenance fixture to compare an empty seed with a
+reviewed shared vocabulary such as Model, Part, Procedure, Step and Tool.
+Named fasteners remain instances, while Procedure → includes step → Step and
+Step → requires tool → Tool remain schema definitions until grounded observations
+support them. Labels are not resolved identities, and mentions inside quotations
+do not establish separately extracted entities.
 
-`concept-windows-guided-first-document` completed all 78 original chunks in 10
-windows. Every window started from or retained the shared high-level vocabulary.
-No component-specific entity type was added. Final entity types are Model, Part,
-Part Number, Procedure, Step, Tool, Consumable and Safety Rule.
-
-| Metric, same 78 cached chunks | Legacy empty-seed run | Guided concept run |
-|---|---:|---:|
-| Entity types | 64 | 8 |
-| Relationship types | 2 | 8 |
-| Property types | 2 | 4 |
-| Mapped entity candidates | 404 | 724 |
-| Mapped relationship candidates | 2 | 75 |
-| Grounded relationship candidates | 19 | 125 |
-| Mapped property candidates | 3 | 8 |
-
-The guided result has 155 distinct mapped Part labels, 107 Step labels, 53 Procedure
-labels, 36 Tool labels, 14 Part Number labels and five Model labels. These are
-labels, not resolved real-world identities. Antenna and named fasteners remain
-instances of Part, not separate classes. There are zero class/instance-name
-collisions in the diagnostic. The reference exposes typed links including
-Procedure -> includes step -> Step and Step -> requires tool -> Tool; observed
-relationship candidates remain distinct from those schema definitions.
-
-The 75 mapped relationship observations populate five predicates: includes step
-(24), requires tool (28), requires consumable (11), invokes safety rule (9), and
-replaces part (3). For example, page 23 connects Feet Replacement to its removal
-Step and that Step to Nylon Spudger, using the original removal instruction as
-evidence. Fan/Fan Assembly and Antenna map to Part on their servicing pages.
-USB-C connectors occur in a mapped motherboard-installation Step quotation but
-were not extracted as standalone Part entities; power-button mentions likewise
-do not establish a separately extracted Part. Do not claim mappings that are absent.
-
-The successful workflow used one whole-document bootstrap call plus 102 window
-calls (78 extraction and 24 admission/repair calls), with zero new DI extraction.
-The bootstrap and earlier experiments are separately retained, including failed
-attempts. Initialization intentionally differs from the baseline: a reviewed
-source-derived reference is present rather than an empty seed. Source chunks,
-prepared/source-cache hashes, original intake, model hash and window limits match.
-This is not a claim of a prompt-only controlled experiment.
-
-The result is still working-only: 151 observations are pending and 230 quarantined;
-only eight of 98 grounded property candidates mapped. Source quotation grounding
-is not complete semantic verification, identity resolution or L3 fact approval.
-For example, the Consumable labels still include a reusable bucket, and symptom
-coverage and part-SKU applicability need semantic review. The quantity schema
-permits Step owners while 88 grounded quantity observations use Part owners and
-remain pending; do not broaden ownership merely to inflate mapping counts.
-There are no mapped model-applicability or has-part-number relationships yet,
-and 41 grounded acts-on-part observations are pending. Fewer classes do not
-establish complete business-question coverage. No ontology migration, new Fabric
-deployment, deletion, full-corpus inference or Data Agent publication occurred.
-
-Evidence:
-
-- `concept-guided-live.log`, `concept-guided-status.json`, `concept-guided-schema.json`
-- `concept-window-comparison.json` and `concept-reference-review.json`
-- Run hash: `493e3b701d265b8cb9707e313d08fb0e0b7ad52d564e867ce019032800d75ff3`
-- Schema hash: `4f1c21a4d32ac738631d559e18d229a827e84306264752b32d416d88b3f700fb`
-- Seed hash: `1841fa214bf888e9cd7208588d9732e8ae6dc5e21f581447422a15ed2a79034b`
-
-`concept-guided-resume.json` records a zero-call resume with the same run and
-schema hashes, omitting `--seed-reference` to exercise inherited frozen content.
-`concept-reference-v4-resume.json` records zero-call, zero-write bootstrap replay.
-The original 302-chunk S38 run and its deployed 270-type ontology remain unchanged.
+Record bootstrap, extraction, admission/repair and failed calls separately.
+A seeded comparison is not a prompt-only controlled experiment. Preserve pending
+and quarantined observations, including owner mismatches and unsupported
+applicability links; do not broaden ownership solely to inflate mapping counts.
+Test exact zero-call resume and bootstrap replay against retained private hashes.
+Neither those checks nor fewer classes establishes semantic or Data Agent
+acceptance. External source readiness can still block Data Agent deployment.
 
 Acceptance requires:
 
-1. Identical 78 chunk identities, source/text hashes and intake, with model and
+1. Identical authorized chunk identities, source/text hashes and intake, with model and
    configuration differences recorded. Budget exhaustion or fewer chunks is a
    partial experiment, not a whole-document comparison.
 2. Zero class/instance leakage and zero definition-incompatible mappings in the
@@ -536,6 +1044,104 @@ Do not infer active execution from a task timer or a stale `in_progress` label.
   are prerequisites documented in the helper. This CLI change does not build
   a new index or guarantee those runtime capabilities.
 - No Search answer is silently written back into a published ontology.
+
+## Consistency architecture and optional industry specifications
+
+Recommendation recorded 2026-09-12: keep one governed conceptual contract across
+stages. An industry specification can improve terminology and acceptance criteria,
+but cannot replace source-grounded inference or make facts true. Packs should be
+optional; a customer must still be able to work from documents and intake alone.
+
+### Stage placement
+
+| Stage | Responsibility | Consistency boundary |
+|---|---|---|
+| Intake, before OCR | Capture business questions, industry hints, jurisdiction and scenario constraints; optionally select a reviewed pack. | Preserve the original intent; inferred domain is a separate hypothesis, not permission to filter unexpected source content. |
+| After OCR, before window zero | Infer reusable concepts and typed relationships from cached source text plus intake and optional references. Review class/instance boundaries and identity choices. | Freeze a provisional reference. For heterogeneous corpora, a reviewed representative bootstrap is preferable to assuming the first document covers every business role. |
+| Each extraction window | Classify source mentions against that reference; preserve detailed labels, values, local endpoints and exact evidence. Propose new concepts separately. | Every parallel worker uses the same schema version; an unknown concept remains pending rather than being forced into a nearby class. |
+| Window barrier | Review additions and conflicts, check owner/endpoint scopes, and commit one successor snapshot. | Only the coordinator changes the working schema; affected cached observations are reconciled under the recorded mapping decisions. |
+| Final design and approval | Add question-answer requirements, review semantic gaps and explicitly approve the contract and mappings. | Do not independently regenerate concept meaning or identity. Any difference from the working contract needs an explicit, reproducible correction. |
+| Enrichment, validation and publication | Replay retained observations, resolve identities, validate facts, project serving tables, and publish Ontology/Graph and Lakehouse artifacts. | These stages consume the approved contract; they cannot silently invent types, widen evidence, merge labels into identities or promote quarantined candidates. |
+| Retrieval | Use Graph for governed structure, Search for quoted detail, and SQL for numerical questions. | Bind all sources to compatible contract/publication versions and scope; retrieved text does not automatically update ontology facts. |
+
+Strong consistency here means reproducible contracts and explicit state transitions,
+not a guarantee of semantic correctness or a distributed transaction across Fabric
+items. Retain separate statuses for source grounding, classification review, identity
+resolution, fact assertion, publication integrity and business-question acceptance.
+The bucket-as-Consumable error demonstrates why exact quotation alone is insufficient.
+
+The publication exercise also exposed a final-design consistency gap: an LLM
+reintroduced optional `variant` fields as identities for Model and Procedure.
+Those fields cannot identify a model or procedure on their own. Repeated generation
+also produced malformed answer bindings and conflicting intake routing. Preserve
+these rejected proposals; the solution is explicit reviewed correction and eventually
+deterministic contract promotion, not relaxing validation or retrying until a draft
+merely compiles. Optional answer fields describe requirements and may remain empty;
+their existence does not prove that a question can be answered.
+
+### Optional governed packs, not a hardcoded industry taxonomy
+
+Use a separately versioned, organization-governed specification repository for
+reusable packs once local composition is implemented. Keep synthetic, redistributable
+fixtures in the repository; never upload customer documents or extracted evidence.
+Do not embed a particular external ontology or its URL as the runtime default.
+
+| Layer | Contents |
+|---|---|
+| Common | Reusable modeling conventions and cross-domain business roles. |
+| Industry/domain | Definitions, typed properties and relationships, scoped terminology and exclusions. |
+| Scenario/use case | Competency questions, answer shapes, applicability, routing and acceptance fixtures; not necessarily subclasses. |
+| Project overlay | Selected concepts, local extensions, exclusions, approved mappings and source identity choices. |
+
+Composition must reject conflicting definitions of the same canonical ID, incompatible
+property owners, direction changes and identity collisions. Never use silent
+last-file-wins merging. An alias or close terminology match is not instance identity.
+Unsupported pack concepts remain reference vocabulary; documents still supply the
+evidence for instances and relationships.
+
+A pack manifest should record namespace, immutable version/digest, locked dependencies,
+contract/compiler compatibility, publisher, provenance, license and attribution,
+jurisdiction, definitions, identity guidance, and positive/negative semantic fixtures.
+Treat licensing permission, publisher authenticity and semantic approval separately.
+Unknown or incompatible licenses need review before incorporation or redistribution.
+
+The future CLI should separate inspection/acquisition from activation/composition:
+explicit trusted repositories or local imports, digest and publisher verification,
+content-addressed cache, offline replay, and a project lockfile. Do not fetch `latest`
+during extraction. Packs are untrusted declarative data: reject executable hooks,
+unapproved remote imports and unsafe archive paths. A remote download is convenience,
+not a runtime dependency or authority to change a running schema.
+
+### Delivery order and acceptance
+
+The shared reference, frozen windows, admission review, snapshots, approved mappings
+and replay bindings are implemented. A governed pack downloader/composer and a complete
+semantic acceptance suite are not implemented.
+
+1. Strengthen contract promotion and semantic fixtures first: Tool versus Consumable,
+   Procedure versus Step, quantity ownership, Part Number versus device SKU,
+   applicability direction, and supported symptom coverage.
+2. Add local pack manifests, deterministic composition, provenance and compatibility
+   checks, adapting the resolved result into the existing reference/design interfaces.
+3. Add optional repository distribution with pinned versions and offline operation.
+4. Evaluate representative document families before claiming industry-wide coverage.
+
+Lock the effective intake, references/packs, source/OCR/chunk hashes, model and prompt
+versions, schema snapshots, mapping decisions and compiler/validator versions.
+Schema additions require reviewed successors; merges, splits, identity changes,
+property-owner changes and relationship reversals require migration impact review.
+Preserve raw observations and reproject compatible cached evidence before considering
+new inference. Never alter historical receipts to make a changed schema appear
+compatible. For structural Fabric replacements, publish a separate version and retain
+the prior items until an explicit migration/cutover is authorized and supported.
+
+Standards informing the design (not a claim that Fabric natively executes these):
+[OWL 2](https://www.w3.org/TR/owl2-overview/) distinguishes classes and individuals;
+[SHACL](https://www.w3.org/TR/shacl/) separates constraints from data;
+[SKOS mappings](https://www.w3.org/TR/skos-reference/#mapping) distinguish exact,
+close and hierarchical matches; [PROV-O](https://www.w3.org/TR/prov-o/#description)
+provides a model for derivation and attribution. The existing JSON contracts can
+implement these principles without requiring RDF conversion.
 
 ## Integration plan: close the raw-text window loop
 
@@ -717,14 +1323,15 @@ neither is implemented or claimed by this coordinator.
 ### CLI contract
 
 ```bash
-# Read-only plan over an existing prepared source artifact.
+# Read-only complete-document plan; profile values must be reviewed for this deployment.
 fabric-kg domain window-run --prepared PREPARED.json --intake intake.json \
-  --out-state .fkg/window-run --window-size 8 --concurrency 4 \
-  --max-calls 32 --max-repair-calls 2 --stop-after-document 1
+  --model-capabilities model-capability.json \
+  --out-state .fkg/window-run --max-calls 32 --stop-after-document 1
 
 # Same command with --live executes; --resume continues the exact recorded run.
 # An existing --discovery FILE may alternatively supply its verified prepared
 # sources, without treating its old candidates or summaries as fresh extraction.
+# --discovery-mode chunked explicitly selects legacy chunked observation discovery.
 ```
 
 Expose compatible read-only status/history/schema inspection for both run kinds.

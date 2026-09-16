@@ -4,8 +4,9 @@ Business-only authorities retain :class:`PublicationCrosswalkV1_2`; authorities
 with source-identity roots use :class:`PublicationCrosswalkV1_3`. Both exactly
 cover the sealed L4 authority: one type mapping per non-tombstoned entity type, one ownership
 mapping per declared property, and one relationship mapping per declared
-relationship type. This module derives that crosswalk from the sealed source
-alone, so the same L4 projection always compiles to the same crosswalk hash.
+relationship type. This module derives one crosswalk per required-member
+manifest from the sealed source alone, with a deterministic exact authority
+cover and one shared physical definition.
 
 Stable identifier assignment is positional over lexicographically sorted
 canonical IDs, which makes every physical name, ontology BigInt, and graph
@@ -61,6 +62,8 @@ __all__ = [
     "L5aCrosswalkError",
     "compile_access_policy",
     "compile_publication_crosswalk",
+    "compile_publication_crosswalks",
+    "publication_crosswalk_set_hash",
 ]
 
 _TYPE_BIGINT_BASE = 1_000_000
@@ -140,7 +143,9 @@ def _identity_values(source: Any, contract_kind: str) -> dict[str, Any]:
     return values
 
 
-def _authority_references(source: Any) -> PublicationAuthorityReferencesV1_2:
+def _authority_references(
+    source: Any,
+) -> tuple[PublicationAuthorityReferencesV1_2, ...]:
     """Anchor the crosswalk to every required-member manifest L3 sealed.
 
     A domain contract that declares no ``structured_fact_set`` completeness
@@ -152,31 +157,40 @@ def _authority_references(source: Any) -> PublicationAuthorityReferencesV1_2:
     manifest_rows = pq.read_table(
         source.resolve("semantic_required_member_manifests")
     ).to_pylist()
-    if not manifest_rows:
-        return PublicationAuthorityReferencesV1_2(
-            source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
-            source_artifact_manifest_hash=source.input_manifest.manifest_hash,
-        )
-    if len(manifest_rows) != 1:
+    manifest_ids = [str(row["required_member_manifest_id"]) for row in manifest_rows]
+    if len(set(manifest_ids)) != len(manifest_ids):
         raise L5aCrosswalkError(
-            "L5A_CROSSWALK_MULTIPLE_MANIFESTS",
-            "compiling more than one required-member manifest needs one crosswalk "
-            "per manifest, which this compiler does not yet emit",
+            "L5A_CROSSWALK_MANIFEST_DUPLICATE",
+            "sealed required-member manifest IDs must be unique",
         )
-    manifest = manifest_rows[0]
-    manifest_id = str(manifest["required_member_manifest_id"])
-    entry = next(
-        (
-            item for item in source.input_manifest.entries
-            if item.artifact_id == manifest_id
-        ),
-        None,
-    )
-    if entry is None:
+    entries = {
+        item.artifact_id: item for item in source.input_manifest.entries
+        if item.contract_kind == "c0.required_member_manifest"
+    }
+    if set(entries) != set(manifest_ids):
         raise L5aCrosswalkError(
             "L5A_CROSSWALK_MANIFEST_UNANCHORED",
-            f"sealed manifest {manifest_id} is absent from the L4 input manifest",
+            "sealed required-member manifests must exactly cover the L4 input manifest",
         )
+    if not manifest_rows:
+        return (PublicationAuthorityReferencesV1_2(
+            source_artifact_manifest_id=source.input_manifest.artifact_manifest_id,
+            source_artifact_manifest_hash=source.input_manifest.manifest_hash,
+        ),)
+    return tuple(
+        _manifest_authority(
+            source, manifest, entries[str(manifest["required_member_manifest_id"])],
+        )
+        for manifest in sorted(
+            manifest_rows, key=lambda row: str(row["required_member_manifest_id"]),
+        )
+    )
+
+
+def _manifest_authority(
+    source: Any, manifest: Mapping[str, Any], entry: Any,
+) -> PublicationAuthorityReferencesV1_2:
+    manifest_id = str(manifest["required_member_manifest_id"])
     expected_schema_hash = canonical_sha256(
         RequiredMemberManifestV1_1.model_json_schema()
     )
@@ -184,6 +198,15 @@ def _authority_references(source: Any) -> PublicationAuthorityReferencesV1_2:
         raise L5aCrosswalkError(
             "L5A_CROSSWALK_MANIFEST_SCHEMA_DRIFT",
             f"manifest {manifest_id} was sealed against a different schema",
+        )
+    if (
+        entry.contract_version != "1.1.0"
+        or entry.content_hash != manifest["manifest_hash"]
+        or entry.canonical_id_set_hash != manifest["member_set_hash"]
+    ):
+        raise L5aCrosswalkError(
+            "L5A_CROSSWALK_MANIFEST_AUTHORITY_MISMATCH",
+            f"manifest {manifest_id} differs from its sealed L4 input authority",
         )
     return PublicationAuthorityReferencesV1_2(
         required_member_manifest_id=manifest_id,
@@ -202,8 +225,82 @@ def compile_publication_crosswalk(
     publication_crosswalk_id: str = "publication-crosswalk:l5a",
     stable_id_lock_id: str = "stable-id-lock:l5a",
 ) -> PublicationCrosswalkV1_2 | PublicationCrosswalkV1_3:
-    """Compile the exact crosswalk a sealed L4 source admits."""
+    """Compatibility API for sources admitting exactly one crosswalk.
 
+    Call ``compile_publication_crosswalks`` for arbitrary sealed sources.
+    Never silently select one authority from a multi-manifest source.
+    """
+
+    authorities = _authority_references(source)
+    if len(authorities) != 1:
+        raise L5aCrosswalkError(
+            "L5A_CROSSWALK_MULTIPLE_MANIFESTS",
+            "use compile_publication_crosswalks to cover every required-member manifest",
+        )
+    return _compile_publication_crosswalk(
+        source, authority=authorities[0],
+        publication_crosswalk_id=publication_crosswalk_id,
+        stable_id_lock_id=stable_id_lock_id,
+    )
+
+
+def compile_publication_crosswalks(
+    source: Any,
+    *,
+    publication_crosswalk_id: str = "publication-crosswalk:l5a",
+    stable_id_lock_id: str = "stable-id-lock:l5a",
+) -> tuple[PublicationCrosswalkV1_2 | PublicationCrosswalkV1_3, ...]:
+    """Compile one exact, shared physical definition per sealed manifest.
+
+    Manifest IDs determine ordering and unique crosswalk IDs. Empty and
+    singleton covers preserve the historical crosswalk ID and content hash.
+    """
+
+    authorities = _authority_references(source)
+    template = _compile_publication_crosswalk(
+        source, authority=authorities[0],
+        publication_crosswalk_id=publication_crosswalk_id,
+        stable_id_lock_id=stable_id_lock_id,
+    )
+    if len(authorities) == 1:
+        return (template,)
+    body = template.model_dump(mode="python", exclude={"crosswalk_hash"})
+    crosswalks = []
+    for authority in authorities:
+        values = {
+            **body,
+            "authority": authority,
+            "publication_crosswalk_id": (
+                f"{publication_crosswalk_id}:"
+                f"{canonical_sha256(authority.required_member_manifest_id)}"
+            ),
+        }
+        crosswalks.append(
+            type(template)(**values, crosswalk_hash=canonical_sha256(values))
+        )
+    return tuple(crosswalks)
+
+
+def publication_crosswalk_set_hash(
+    crosswalks: Sequence[PublicationCrosswalkV1_2 | PublicationCrosswalkV1_3],
+) -> str:
+    """Bind all authorities while preserving legacy singleton provenance."""
+
+    if not crosswalks:
+        raise L5aCrosswalkError(
+            "L5A_CROSSWALK_EMPTY", "at least one crosswalk is required",
+        )
+    hashes = sorted(item.crosswalk_hash for item in crosswalks)
+    return hashes[0] if len(hashes) == 1 else canonical_sha256(hashes)
+
+
+def _compile_publication_crosswalk(
+    source: Any,
+    *,
+    authority: PublicationAuthorityReferencesV1_2,
+    publication_crosswalk_id: str,
+    stable_id_lock_id: str,
+) -> PublicationCrosswalkV1_2 | PublicationCrosswalkV1_3:
     authority_row = _authority_row(source)
     contract = DomainContractV2.model_validate_json(
         authority_row["domain_contract_json"]
@@ -419,7 +516,7 @@ def compile_publication_crosswalk(
     values = {
         "identity": identity_model.model_validate(identity_values),
         "publication_crosswalk_id": publication_crosswalk_id,
-        "authority": _authority_references(source),
+        "authority": authority,
         "semantic_contract_hash": source.projection.sealed_semantic_contract_hash,
         "stable_id_lock_id": stable_id_lock_id,
         "stable_id_lock_hash": canonical_sha256(stable_id_lock),
@@ -537,6 +634,7 @@ def compile_governed_assets(
     target_ids: Mapping[str, str],
     workspace_id: str,
     definition_version_id: str = "definition-version:1",
+    quality_policy: dict[str, Any] | None = None,
 ) -> tuple[GovernedAssetReference, ...]:
     """Compile the governed asset reference set for the four L5a targets.
 
@@ -597,4 +695,5 @@ def compile_governed_assets(
         target_ids=dict(target_ids),
         storage_references=storage_references,
         immutable_locators=locators,
+        quality_policy=quality_policy,
     )

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -29,9 +30,12 @@ from fabric_kg_builder.contracts.base import (
     canonical_json,
     canonical_sha256,
     deterministic_contract_id,
+    normalize_nfc,
+    utf8_sha256,
 )
 from fabric_kg_builder.contracts.evidence import EvidenceSpanV1_1, SourceUnit
 from fabric_kg_builder.contracts.extraction import (
+    ExtractionAuthorityReferences,
     ExtractionCandidateBatch,
     RequiredMemberManifestIdentityV1_1,
     RequiredMemberManifestV1_1,
@@ -72,6 +76,7 @@ from .schema2_evidence import (
     CompiledHierarchy,
     CompletenessOutcome,
     EndpointGroundingRequest,
+    GroundingOutcome,
     L3StageError,
     ProposedOccurrenceAnchor,
     VerifiedMember,
@@ -82,6 +87,7 @@ from .schema2_evidence import (
     ground_endpoints,
     evaluate_inherited_constraints,
     is_minted_contract_id,
+    locate_unique_quote,
     property_attribution_reasons,
     property_scalar_grounding_reasons,
     relationship_orientation_reasons,
@@ -96,6 +102,18 @@ from .schema2_evidence import (
 )
 from .schema2_sources import L2_ACCEPTED_VERSIONS, L2_STAGE_NAME, L2StageError
 from .schema2_sources import load_l2_inputs
+from .schema2_collections import (
+    COLLECTION_DEFERRAL_KIND,
+    COLLECTION_DEFERRAL_VERSION,
+    CollectionDeferral,
+    DeferredCollectionOutcome,
+    deferred_collection_outcome,
+)
+from .schema2_extraction import (
+    build_required_member_set_proposals,
+    derive_collection_member_fragments,
+    extraction_leaf_from_dict,
+)
 from .schema2_stage import (
     L2_PROPOSED_CANDIDATE_VERSION,
     proposed_candidate_schema_hash,
@@ -198,6 +216,7 @@ class ProposedCandidateView(_StrictView):
     value_json: str | None = None
     normalized_value_json: str | None = None
     temporal_key: str | None = None
+    proposed_label: str | None = None
 
     @field_validator("normalized_business_key", mode="before")
     @classmethod
@@ -239,6 +258,35 @@ class CandidateValidationRecord:
     identity_recomputed: bool
     identity_witness_kind: str
     ignored_model_evidence_id: str | None
+    label_validation_version: str | None = None
+    verified_label: str | None = None
+    label_evidence_span_id: str | None = None
+
+
+L3_LABEL_VALIDATION_VERSION = "1.0.0"
+INSTANCE_LABEL_MAX_CHARS = 120
+
+
+def grounded_instance_label(
+    proposed_label: str | None, supporting_quote: str | None,
+) -> str | None:
+    """Prove a readable source mention, never canonical identity or a summary."""
+    if proposed_label is None or supporting_quote is None:
+        return None
+    label = " ".join(normalize_nfc(proposed_label).split())
+    quote = " ".join(normalize_nfc(supporting_quote).split())
+    if not label or len(label) > INSTANCE_LABEL_MAX_CHARS or label not in quote:
+        return None
+    return label
+
+
+def candidate_validation_payload(record: CandidateValidationRecord) -> dict[str, Any]:
+    """Do not add successor label fields to historical checkpoint records."""
+    payload = dict(record.__dict__)
+    if record.label_validation_version is None:
+        for key in ("label_validation_version", "verified_label", "label_evidence_span_id"):
+            payload.pop(key)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -317,8 +365,29 @@ class L3LeafResult:
 
 @dataclass(frozen=True)
 class RequiredMemberOutcomeRecord:
-    outcome: CompletenessOutcome
+    outcome: CompletenessOutcome | DeferredCollectionOutcome
     manifest: RequiredMemberManifestV1_1 | None
+
+    @property
+    def collection_id(self) -> str:
+        if isinstance(self.outcome, DeferredCollectionOutcome):
+            return self.outcome.collection_deferral_id
+        return self.outcome.required_member_set_proposal_id
+
+    @property
+    def contract_version(self) -> str:
+        return "1.1.0" if isinstance(self.outcome, DeferredCollectionOutcome) else "1.0.0"
+
+    def payload(self) -> dict[str, Any]:
+        values = {
+            key: (list(value) if isinstance(value, tuple) else value)
+            for key, value in self.outcome.__dict__.items()
+        }
+        values["role_coverage"] = [list(item) for item in self.outcome.role_coverage]
+        values["required_member_manifest_id"] = (
+            self.manifest.required_member_manifest_id if self.manifest else None
+        )
+        return values
 
 
 @dataclass(frozen=True)
@@ -339,6 +408,8 @@ class L3Inputs:
     design_sample_manifest: DesignSampleManifest
     domain_contract: DomainContractV2
     hierarchy: CompiledHierarchy
+    collection_deferrals: tuple[CollectionDeferral, ...] = ()
+    partial_extraction_scope: Mapping[str, Any] | None = None
 
     @property
     def authority_hashes(self) -> dict[str, str]:
@@ -395,6 +466,14 @@ class L3StageResult:
             for item in self.required_member_outcomes
             if item.manifest is not None
         )
+
+    @property
+    def blocked_completeness_scopes(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted({
+            (item.outcome.requirement_id, item.outcome.scope_canonical_id)
+            for item in self.required_member_outcomes
+            if item.outcome.completeness_state != "complete"
+        }))
 
 
 # ---------------------------------------------------------------------------
@@ -615,13 +694,15 @@ def load_l3_inputs(
             "L3_INPUT_RECEIPT_INVALID",
             "L3 cannot consume an L2 receipt carrying error codes",
         )
-    if dict(receipt.accepted_contract_versions) not in (
-        dict(L2_ACCEPTED_VERSIONS),
-        {
-            **L2_ACCEPTED_VERSIONS,
-            "l2.proposed_candidate_partition": L2_PROPOSED_CANDIDATE_VERSION,
-        },
-    ):
+    supported_receipt_versions = [dict(L2_ACCEPTED_VERSIONS)]
+    for carrier_version in ("1.1.0", L2_PROPOSED_CANDIDATE_VERSION):
+        for collection_versions in ({}, {COLLECTION_DEFERRAL_KIND: COLLECTION_DEFERRAL_VERSION}):
+            supported_receipt_versions.append({
+                **L2_ACCEPTED_VERSIONS,
+                "l2.proposed_candidate_partition": carrier_version,
+                **collection_versions,
+            })
+    if dict(receipt.accepted_contract_versions) not in supported_receipt_versions:
         raise L3StageError(
             "L3_CONTRACT_VERSION_UNSUPPORTED",
             "L2 did not bind the exact accepted contract versions",
@@ -663,6 +744,18 @@ def load_l3_inputs(
     except ValueError as exc:
         raise L3StageError("L3_RESOURCE_BINDING_INVALID", str(exc)) from exc
     assert_l2_did_not_mint_l3_artifacts(output_manifest)
+    expected_carrier_version = receipt.accepted_contract_versions.get(
+        "l2.proposed_candidate_partition", "1.0.0",
+    )
+    if any(
+        entry.contract_kind == "l2.proposed_candidate_partition"
+        and entry.contract_version != expected_carrier_version
+        for entry in output_manifest.entries
+    ):
+        raise L3StageError(
+            "L3_CONTRACT_VERSION_UNSUPPORTED",
+            "L2 proposal partition version differs from its sealed receipt",
+        )
 
     try:
         l1_inputs = load_l2_inputs(
@@ -695,7 +788,15 @@ def load_l3_inputs(
         lifecycle_partitions,
     ) = _load_candidate_partitions(l2_state_root, output_manifest)
     proposals, views = _load_required_member_sets(l2_state_root, output_manifest)
+    deferrals = _load_collection_deferrals(l2_state_root, output_manifest)
+    if deferrals and COLLECTION_DEFERRAL_KIND not in receipt.accepted_contract_versions:
+        raise L3StageError("L3_CONTRACT_VERSION_UNSUPPORTED", "L2 did not authorize collection deferrals")
 
+    from .approved_partial_handoff import read_scope
+    partial_scope = read_scope(l2_state_root, output_manifest, receipt=receipt)
+    if partial_scope is not None:
+        if read_scope(l2_state_root, input_manifest, receipt=receipt) != partial_scope:
+            raise L3StageError("L3_INPUT_MANIFEST_INVALID", "partial scope input/output drift")
     inputs = L3Inputs(
         l2_receipt=receipt,
         l2_output_manifest=output_manifest,
@@ -713,6 +814,8 @@ def load_l3_inputs(
         design_sample_manifest=l1_inputs.design_sample_manifest,
         domain_contract=contract,
         hierarchy=hierarchy,
+        collection_deferrals=deferrals,
+        partial_extraction_scope=partial_scope,
     )
     _validate_accounting(inputs)
     return inputs
@@ -846,11 +949,16 @@ def _load_candidate_partitions(
                 "proposed_owner_entity_id", "value_json",
                 "normalized_value_json", "temporal_key",
             }
-            if entry.contract_version == L2_PROPOSED_CANDIDATE_VERSION:
+            if entry.contract_version in ("1.1.0", L2_PROPOSED_CANDIDATE_VERSION):
                 if any(not carrier_fields <= set(item) for item in raw):
                     raise ValueError("successor carrier fields are missing; re-extract the source")
             elif any(carrier_fields & set(item) for item in raw):
                 raise ValueError("historical carrier has successor fields; re-extract the source")
+            if entry.contract_version == L2_PROPOSED_CANDIDATE_VERSION:
+                if any("proposed_label" not in item for item in raw):
+                    raise ValueError("successor label carrier field is missing; re-extract the source")
+            elif any("proposed_label" in item for item in raw):
+                raise ValueError("historical carrier has successor label fields; re-extract the source")
             records = tuple(
                 ProposedCandidateView.model_validate(item) for item in raw
             )
@@ -908,6 +1016,28 @@ def _load_candidate_partitions(
         proposed,
         lifecycle,
     )
+
+
+def _load_collection_deferrals(
+    state_root: Path, manifest: ArtifactManifest,
+) -> tuple[CollectionDeferral, ...]:
+    records = []
+    for entry in _manifest_entries_by_kind(manifest, COLLECTION_DEFERRAL_KIND):
+        _require_version(entry, COLLECTION_DEFERRAL_VERSION)
+        path = state_root / "collection-deferrals" / f"{_safe_id(entry.artifact_id)}.json"
+        record = _read_json_model(path, CollectionDeferral, "L3_INPUT_MANIFEST_INVALID")
+        if (
+            entry.artifact_id != record.collection_deferral_id
+            or entry.content_hash != record.deferral_hash
+            or entry.schema_hash != canonical_sha256(CollectionDeferral.model_json_schema())
+            or entry.byte_count != len((canonical_json(record) + "\n").encode("utf-8"))
+            or entry.row_count != len(record.observations)
+            or entry.canonical_id_set_hash is not None
+            or path.read_bytes() != (canonical_json(record) + "\n").encode("utf-8")
+        ):
+            raise L3StageError("L3_INPUT_MANIFEST_INVALID", "collection deferral differs from its manifest")
+        records.append(record)
+    return tuple(sorted(records, key=lambda item: item.collection_deferral_id))
 
 
 def _load_required_member_sets(
@@ -1067,6 +1197,37 @@ def _validate_required_member_policy_binding(
         )
 
 
+def _validate_leaf_work_unit_binding(
+    batch: ExtractionCandidateBatch,
+    records: Sequence[ProposedCandidateView],
+) -> None:
+    """Bind response-local reference scope to the sealed L2 leaf identity."""
+    if not records:
+        return
+    scopes = {(record.source_unit_id, record.work_unit_id) for record in records}
+    if len(scopes) != 1:
+        raise L3StageError(
+            "L3_INPUT_MANIFEST_INVALID",
+            "one L2 leaf cannot mix source/work-unit reference scopes",
+        )
+    source_unit_id, work_unit_id = next(iter(scopes))
+    expected = deterministic_contract_id(
+        "extraction-candidate-batch",
+        {
+            "work_unit_id": work_unit_id,
+            "source_unit_id": source_unit_id,
+            "candidate_version_ids": [
+                reference.candidate_version_id for reference in batch.candidates
+            ],
+        },
+    )
+    if expected != batch.extraction_candidate_batch_id:
+        raise L3StageError(
+            "L3_INPUT_MANIFEST_INVALID",
+            "proposal source/work-unit scope differs from its sealed L2 leaf identity",
+        )
+
+
 def _validate_accounting(inputs: L3Inputs) -> None:
     """Prove complete L2 accounting before any candidate validation begins."""
 
@@ -1075,6 +1236,7 @@ def _validate_accounting(inputs: L3Inputs) -> None:
     for batch_id in inputs.leaf_batch_ids:
         batch = batch_by_id[batch_id]
         records = inputs.proposed_partitions[batch_id]
+        _validate_leaf_work_unit_binding(batch, records)
         lifecycle_records = inputs.lifecycle_partitions[batch_id]
         try:
             batch.validate_core_references(
@@ -1204,6 +1366,71 @@ def _validate_accounting(inputs: L3Inputs) -> None:
             )
 
 
+    validate_collection_partition(inputs)
+
+
+def validate_collection_partition(inputs: L3Inputs) -> None:
+    """Rederive every observed group; neither an omission nor a forged deferral is admissible."""
+
+    leaves = tuple(
+        extraction_leaf_from_dict({
+            "batch": inputs.batch_by_id[batch_id].model_dump(mode="json"),
+            "proposed_candidates": [
+                proposed_candidate_payload(record)
+                for record in inputs.proposed_partitions[batch_id]
+            ],
+            "lifecycle_records": [
+                record.model_dump(mode="json")
+                for record in inputs.lifecycle_partitions[batch_id]
+            ],
+            "audit_reason_counts": [],
+            "raw_candidate_count": inputs.batch_by_id[batch_id].input_candidate_count,
+        })
+        for batch_id in sorted(inputs.leaf_batch_ids)
+    )
+
+    def authority(requirement):
+        return ExtractionAuthorityReferences(
+            source_corpus_manifest_id=inputs.corpus_manifest.source_corpus_manifest_id,
+            source_corpus_manifest_hash=inputs.corpus_manifest.corpus_hash,
+            source_unit_manifest_id=inputs.source_unit_manifest.artifact_manifest_id,
+            source_unit_manifest_hash=inputs.source_unit_manifest.manifest_hash,
+            domain_contract_hash=inputs.hierarchy.domain_contract_hash,
+            completeness_requirement_id=requirement.requirement_id,
+            completeness_requirement_hash=canonical_sha256(requirement.model_dump(mode="json")),
+            hierarchy_hash=inputs.hierarchy.hierarchy_hash,
+            identity_policy_hash=inputs.hierarchy.identity_policy_hash,
+        )
+
+    expected_deferrals: list[CollectionDeferral] = []
+    supports_deferrals = COLLECTION_DEFERRAL_KIND in inputs.l2_receipt.accepted_contract_versions
+    try:
+        expected = build_required_member_set_proposals(
+            derive_collection_member_fragments(leaves, contract=inputs.domain_contract),
+            leaves=leaves,
+            contract=inputs.domain_contract,
+            authority_factory=authority,
+            base_identity=inputs.l2_receipt.identity,
+            deferrals=expected_deferrals if supports_deferrals else None,
+        )
+    except (ValueError, L2StageError) as exc:
+        raise L3StageError(
+            "L3_ACCOUNTING_INCOMPLETE", f"collection partition cannot be reproduced: {exc}",
+        ) from exc
+    if (
+        sorted(canonical_json(item.proposal) for item in expected)
+        != sorted(canonical_json(item) for item in inputs.required_member_proposals)
+        or sorted(canonical_json(item) for item in expected_deferrals)
+        != sorted(canonical_json(item) for item in inputs.collection_deferrals)
+        or len({item.collection_deferral_id for item in inputs.collection_deferrals})
+        != len(inputs.collection_deferrals)
+    ):
+        raise L3StageError(
+            "L3_ACCOUNTING_INCOMPLETE",
+            "every observed collection must have exactly its derived proposal or deferral",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Cross-leaf shared context
 # ---------------------------------------------------------------------------
@@ -1214,11 +1441,20 @@ class _SharedContext:
     classification_by_entity: Mapping[str, ClassificationResolution]
     entity_type_by_id: Mapping[str, str | None]
     entity_anchor_by_key: Mapping[tuple[str, str], ProposedOccurrenceAnchor]
-    local_reference_index: Mapping[tuple[str, str], tuple[str, ...]]
-    local_keys_by_entity: Mapping[str, tuple[tuple[str, str], ...]]
+    local_reference_index: Mapping[tuple[str, str, str], tuple[str, ...]]
+    local_keys_by_entity: Mapping[str, tuple[tuple[str, str, str], ...]]
     identity_conflict_entity_ids: frozenset[str]
     relationship_identity_conflicts: frozenset[str]
     entity_ids: frozenset[str]
+    entity_occurrence_by_key: Mapping[
+        tuple[str, str], ProposedOccurrenceAnchor | None
+    ] = field(default_factory=dict)
+    entity_occurrence_dependencies_by_key: Mapping[
+        tuple[str, str], tuple[str, ...]
+    ] = field(default_factory=dict)
+    entity_context_by_key: Mapping[
+        tuple[str, str], ProposedOccurrenceAnchor | None
+    ] = field(default_factory=dict)
 
     def context_hash(
         self,
@@ -1260,20 +1496,52 @@ class _SharedContext:
                         anchor.span_end,
                         anchor.quote,
                         anchor.model_authored_evidence_id,
+                        self.entity_type_by_id.get(entity_id),
                     ]
                     for (
                         entity_id,
                         source_unit_id,
                     ), anchor in sorted(self.entity_anchor_by_key.items())
-                    if entity_id in scoped_entities
-                    and source_unit_id in scoped_source_units
+                    if source_unit_id in scoped_source_units
                 ],
                 "local_reference_index": [
-                    [source_unit_id, local_reference, list(entity_ids)]
+                    [source_unit_id, work_unit_id, local_reference, list(entity_ids)]
                     for (
                         source_unit_id,
+                        work_unit_id,
                         local_reference,
                     ), entity_ids in sorted(self.local_reference_index.items())
+                    if source_unit_id in scoped_source_units
+                ],
+                "entity_occurrences": [
+                    [
+                        entity_id, source_unit_id,
+                        None if occurrence is None else [
+                            occurrence.span_start, occurrence.span_end, occurrence.quote,
+                        ],
+                    ]
+                    for (entity_id, source_unit_id), occurrence in sorted(
+                        self.entity_occurrence_by_key.items()
+                    )
+                    if source_unit_id in scoped_source_units
+                ],
+                "entity_occurrence_dependencies": [
+                    [entity_id, source_unit_id, list(dependencies)]
+                    for (entity_id, source_unit_id), dependencies in sorted(
+                        self.entity_occurrence_dependencies_by_key.items()
+                    )
+                    if source_unit_id in scoped_source_units
+                ],
+                "entity_contexts": [
+                    [
+                        entity_id, source_unit_id,
+                        None if anchor is None else [
+                            anchor.span_start, anchor.span_end, anchor.quote,
+                        ],
+                    ]
+                    for (entity_id, source_unit_id), anchor in sorted(
+                        self.entity_context_by_key.items()
+                    )
                     if source_unit_id in scoped_source_units
                 ],
             }
@@ -1287,15 +1555,82 @@ def _build_shared_context(
     types_by_entity: defaultdict[str, set[str]] = defaultdict(set)
     roots_by_entity: defaultdict[str, set[str]] = defaultdict(set)
     anchors: dict[tuple[str, str], ProposedOccurrenceAnchor] = {}
-    local_index: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+    occurrences: defaultdict[
+        tuple[str, str], set[ProposedOccurrenceAnchor | None]
+    ] = defaultdict(set)
+    contexts: defaultdict[
+        tuple[str, str], set[ProposedOccurrenceAnchor | None]
+    ] = defaultdict(set)
+    occurrence_dependencies: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+    local_index: defaultdict[
+        tuple[str, str, str], set[tuple[str, str]]
+    ] = defaultdict(set)
+    fallback_identity_payloads: defaultdict[
+        tuple[str, str], dict[tuple[str, str], set[str]]
+    ] = defaultdict(dict)
     triples_by_relationship: defaultdict[str, set[tuple[str, str, str]]] = defaultdict(
         set
     )
     entity_ids: set[str] = set()
 
     for batch_id in inputs.leaf_batch_ids:
+        project_id = inputs.batch_by_id[batch_id].identity.project_id
         for record in inputs.proposed_partitions[batch_id]:
             if record.candidate_kind == "entity":
+                key = (record.semantic_id, record.source_unit_id)
+                source_unit = inputs.source_units.require(record.source_unit_id)
+                has_label = "proposed_label" in record.model_fields_set
+                identity_recomputed, witness_kind, _ = _identity_witness(
+                    record, hierarchy=hierarchy,
+                    project_id=project_id,
+                )
+                identity_payload = {
+                    "project_id": project_id,
+                    "approved_semantic_id": record.approved_semantic_id,
+                    "policy": hierarchy.identity_policy_by_type.get(record.approved_semantic_id),
+                    "normalized_business_key": record.normalized_business_key,
+                    "local_reference": record.local_reference,
+                    "payload_hash": record.payload_hash,
+                    "observed_term": record.observed_term,
+                    "anchor": record.proposed_anchor,
+                    "has_label": has_label,
+                    "label": record.proposed_label,
+                    "identity_recomputed": identity_recomputed,
+                    "witness_kind": witness_kind,
+                }
+                if identity_recomputed and witness_kind == "derived_source_identity":
+                    scope = (record.work_unit_id, record.approved_semantic_id)
+                    fallback_identity_payloads[key].setdefault(scope, set()).add(
+                        canonical_sha256(identity_payload)
+                    )
+                occurrence_dependencies[key].add(canonical_sha256({
+                    "has_label": has_label,
+                    "work_unit_id": record.work_unit_id,
+                    "label": record.proposed_label,
+                    "anchor": record.proposed_anchor,
+                    "source": inputs.source_units.semantic_hash(record.source_unit_id),
+                    "identity": identity_payload,
+                }))
+                contexts[key].add(_scoped_entity_context(
+                    proposed_label=record.proposed_label,
+                    has_label=has_label,
+                    anchor=(
+                        record.proposed_anchor.to_anchor()
+                        if record.proposed_anchor is not None else None
+                    ),
+                    source_unit=source_unit,
+                    domain_contract=inputs.domain_contract,
+                ))
+                if has_label:
+                    occurrences[key].add(_scoped_label_occurrence(
+                        proposed_label=record.proposed_label,
+                        anchor=(
+                            record.proposed_anchor.to_anchor()
+                            if record.proposed_anchor is not None else None
+                        ),
+                        source_unit=source_unit,
+                        domain_contract=inputs.domain_contract,
+                    ))
                 entity_ids.add(record.semantic_id)
                 if record.approved_semantic_id is not None:
                     types_by_entity[record.semantic_id].add(record.approved_semantic_id)
@@ -1311,8 +1646,15 @@ def _build_shared_context(
                     anchors.setdefault(key, record.proposed_anchor.to_anchor())
                 if record.local_reference:
                     local_index[
-                        (record.source_unit_id, record.local_reference.casefold())
-                    ].add(record.semantic_id)
+                        (
+                            record.source_unit_id,
+                            record.work_unit_id,
+                            record.local_reference.casefold(),
+                        )
+                    ].add((record.semantic_id, canonical_sha256({
+                        "anchor": record.proposed_anchor,
+                        "label": record.proposed_label,
+                    })))
             elif record.candidate_kind == "relationship":
                 relationship = (
                     hierarchy.relationship_by_id.get(record.approved_semantic_id)
@@ -1336,10 +1678,16 @@ def _build_shared_context(
         entity_id: resolve_most_specific_classification(type_ids, hierarchy)
         for entity_id, type_ids in sorted(types_by_entity.items())
     }
-    local_keys_by_entity: defaultdict[str, set[tuple[str, str]]] = defaultdict(set)
+    local_keys_by_entity: defaultdict[str, set[tuple[str, str, str]]] = defaultdict(set)
     for key, values in local_index.items():
-        for entity_id in values:
+        for entity_id, _ in values:
             local_keys_by_entity[entity_id].add(key)
+    fallback_conflicts = {
+        entity_id
+        for (entity_id, _), scopes in fallback_identity_payloads.items()
+        if len({work_unit_id for work_unit_id, _ in scopes}) > 1
+        or any(len(payloads) > 1 for payloads in scopes.values())
+    }
     return _SharedContext(
         classification_by_entity=classification_by_entity,
         entity_type_by_id={
@@ -1347,8 +1695,26 @@ def _build_shared_context(
             for entity_id, resolution in classification_by_entity.items()
         },
         entity_anchor_by_key=anchors,
+        entity_context_by_key={
+            key: next(iter(values)) if len(values) == 1 else None
+            for key, values in contexts.items()
+        },
+        entity_occurrence_by_key={
+            key: (
+                next(iter(values))
+                if len(values) == 1 and len(occurrence_dependencies[key]) == 1
+                else None
+            )
+            for key, values in occurrences.items()
+        },
+        entity_occurrence_dependencies_by_key={
+            key: tuple(sorted(values)) for key, values in occurrence_dependencies.items()
+        },
         local_reference_index={
-            key: tuple(sorted(values)) for key, values in local_index.items()
+            # Preserve conflicting occurrence witnesses even if frozen L2 gave
+            # both occurrences the same canonical ID.
+            key: tuple(entity_id for entity_id, _ in sorted(values))
+            for key, values in local_index.items()
         },
         local_keys_by_entity={
             entity_id: tuple(sorted(keys))
@@ -1356,7 +1722,7 @@ def _build_shared_context(
         },
         identity_conflict_entity_ids=frozenset(
             entity_id for entity_id, roots in roots_by_entity.items() if len(roots) > 1
-        ),
+        ) | frozenset(fallback_conflicts),
         relationship_identity_conflicts=frozenset(
             relationship_id
             for relationship_id, triples in triples_by_relationship.items()
@@ -1399,15 +1765,24 @@ def _resolve_endpoint(
     *,
     entity_id: str | None,
     source_unit_id: str,
+    work_unit_id: str,
     shared: _SharedContext,
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
     """Resolve one local endpoint reference to exactly one retained entity."""
 
     if entity_id is None or entity_id not in shared.entity_ids:
         return None, None, ("ENDPOINT_UNRESOLVED",)
-    for key in shared.local_keys_by_entity.get(entity_id, ()):
+    if entity_id in shared.identity_conflict_entity_ids:
+        return None, None, ("IDENTITY_POLICY_VIOLATION",)
+    local_keys = [
+        key for key in shared.local_keys_by_entity.get(entity_id, ())
+        if key[:2] == (source_unit_id, work_unit_id)
+    ]
+    if not local_keys:
+        return None, None, ("ENDPOINT_UNRESOLVED",)
+    for key in local_keys:
         # Case-insensitive local references resolve only when unambiguous.
-        if key[0] == source_unit_id and len(shared.local_reference_index[key]) != 1:
+        if shared.local_reference_index.get(key) != (entity_id,):
             return None, None, ("ENDPOINT_UNRESOLVED",)
     classification = shared.entity_type_by_id.get(entity_id)
     if classification is None:
@@ -1426,6 +1801,7 @@ def _validate_leaf(
     occurred_at_utc: datetime,
     leaf_fingerprint: str,
 ) -> L3LeafResult:
+    _validate_leaf_work_unit_binding(batch, records)
     hierarchy = inputs.hierarchy
     index = inputs.source_units
     project_id = batch.identity.project_id
@@ -1484,8 +1860,21 @@ def _validate_leaf(
         witness_kind = "not_applicable"
         property_reasons: tuple[str, ...] = ()
         property_owner_id: str | None = None
+        label_validation_version: str | None = None
+        verified_label: str | None = None
+        label_evidence_span_id: str | None = None
 
         if record.candidate_kind == "entity":
+            if "proposed_label" in record.model_fields_set:
+                label_validation_version = L3_LABEL_VALIDATION_VERSION
+                verified_label = grounded_instance_label(
+                    record.proposed_label,
+                    outcome.span.quote if outcome.span is not None else None,
+                )
+                if verified_label is None:
+                    reasons.add("ENTITY_LABEL_UNGROUNDED")
+                elif outcome.span is not None:
+                    label_evidence_span_id = outcome.span.evidence_span_id
             identity_recomputed, witness_kind, identity_reasons = _identity_witness(
                 record,
                 hierarchy=hierarchy,
@@ -1604,6 +1993,9 @@ def _validate_leaf(
                 identity_recomputed=identity_recomputed,
                 identity_witness_kind=witness_kind,
                 ignored_model_evidence_id=outcome.ignored_model_evidence_id,
+                label_validation_version=label_validation_version,
+                verified_label=verified_label,
+                label_evidence_span_id=label_evidence_span_id,
             )
         )
         if record.candidate_kind == "entity":
@@ -1675,6 +2067,17 @@ def _validate_prefix_evidence_spans(inputs, spans):
     from .window_prefix import prefix_span_allowed
 
     for span in spans:
+        scope = inputs.partial_extraction_scope
+        if scope is not None and not any(
+            root["source_unit_id"] == span.source_unit_id
+            and root["source_text_hash"] == span.source_text_content_hash
+            and root["slice_start"] <= span.span_start < span.span_end <= root["slice_end"]
+            for root in scope["plan"]["included_roots"]
+        ):
+            raise L3StageError(
+                "L3_EVIDENCE_OUTSIDE_PARTIAL_SCOPE",
+                f"evidence {span.evidence_span_id} is outside approved completed roots",
+            )
         if not prefix_span_allowed(
             inputs.domain_contract, source_unit_id=span.source_unit_id,
             span_start=span.span_start, span_end=span.span_end,
@@ -1700,6 +2103,7 @@ def _property_reasons(
     owner_id, owner_type, owner_reasons = _resolve_endpoint(
         entity_id=record.proposed_owner_entity_id,
         source_unit_id=record.source_unit_id,
+        work_unit_id=record.work_unit_id,
         shared=shared,
     )
     reasons = set(owner_reasons) if record.proposed_owner_entity_id else set()
@@ -1742,7 +2146,18 @@ def _property_reasons(
         value_available=value_available,
         owner_classification_unresolved=owner_id is not None and owner_type is None,
     ))
-    if owner_id is not None and evidence_span is not None:
+    if (
+        owner_id is not None
+        and evidence_span is not None
+        and not _property_inside_owner(
+            shared=shared,
+            owner_id=owner_id,
+            source_unit_id=record.source_unit_id,
+            source_text=source_unit.text,
+            span_start=evidence_span.span_start,
+            span_end=evidence_span.span_end,
+        )
+    ):
         reasons.update(ground_endpoints(
             source_text=source_unit.text,
             span_start=evidence_span.span_start,
@@ -1758,6 +2173,56 @@ def _property_reasons(
             ),),
         ).reason_codes)
     return sorted_reasons(reasons), owner_id
+
+
+def _property_inside_owner(
+    *,
+    shared: _SharedContext,
+    owner_id: str,
+    source_unit_id: str,
+    source_text: str,
+    span_start: int,
+    span_end: int,
+) -> bool:
+    """Prove a field occurrence inside its exact, source-local owner context.
+
+    Unlike relationship grounding, a field can be smaller than its owner.
+    Multi-row anchors and competing same-type owners need finer evidence.
+    """
+    anchor = shared.entity_anchor_by_key.get((owner_id, source_unit_id))
+    if anchor is None or not (
+        0 <= anchor.span_start <= span_start < span_end <= anchor.span_end <= len(source_text)
+    ):
+        return False
+    if source_text[anchor.span_start:anchor.span_end] != anchor.quote:
+        return False
+    row_tags = re.findall(r"</?tr\b[^>]*>", anchor.quote, flags=re.IGNORECASE)
+    if (
+        len(row_tags) > 2
+        or (len(row_tags) == 2 and (
+            row_tags[0].startswith("</") or not row_tags[1].startswith("</")
+        ))
+    ):
+        return False
+    source_rows = re.finditer(r"<tr\b[^>]*>.*?</tr\s*>", source_text, re.IGNORECASE | re.DOTALL)
+    if sum(
+        row.start() < anchor.span_end and anchor.span_start < row.end()
+        for row in source_rows
+    ) > 1:
+        return False
+    owner_type = shared.entity_type_by_id.get(owner_id)
+    if owner_type is None:
+        return False
+    for (other_id, other_source), other in shared.entity_anchor_by_key.items():
+        if (
+            other_id != owner_id
+            and other_source == source_unit_id
+            and shared.entity_type_by_id.get(other_id) == owner_type
+            and other.span_start < span_end
+            and span_start < other.span_end
+        ):
+            return False
+    return True
 
 
 def _entity_reasons(
@@ -1810,11 +2275,13 @@ def _relationship_reasons(
     source_id, source_type, source_reasons = _resolve_endpoint(
         entity_id=record.proposed_source_entity_id,
         source_unit_id=record.source_unit_id,
+        work_unit_id=record.work_unit_id,
         shared=shared,
     )
     target_id, target_type, target_reasons = _resolve_endpoint(
         entity_id=record.proposed_target_entity_id,
         source_unit_id=record.source_unit_id,
+        work_unit_id=record.work_unit_id,
         shared=shared,
     )
     reasons.update(source_reasons)
@@ -1864,36 +2331,13 @@ def _relationship_reasons(
         # Ground endpoints inside the *verified* span. The proposed anchor may
         # have been relocated while minting evidence, and searching the stale
         # window reports every relocated relationship as ungrounded.
-        grounding = ground_endpoints(
-            source_text=source_unit.text,
+        grounding = _ground_relationship_endpoints(
+            shared=shared,
+            source_unit=source_unit,
+            source_id=source_id,
+            target_id=target_id,
             span_start=evidence_span.span_start,
             span_end=evidence_span.span_end,
-            requests=(
-                EndpointGroundingRequest(
-                    endpoint_id=source_id,
-                    role="source",
-                    terms=_endpoint_terms(shared, source_id, record.source_unit_id),
-                    anchor=_endpoint_anchor(
-                        shared,
-                        source_id,
-                        record.source_unit_id,
-                        evidence_span.span_start,
-                        evidence_span.span_end,
-                    ),
-                ),
-                EndpointGroundingRequest(
-                    endpoint_id=target_id,
-                    role="target",
-                    terms=_endpoint_terms(shared, target_id, record.source_unit_id),
-                    anchor=_endpoint_anchor(
-                        shared,
-                        target_id,
-                        record.source_unit_id,
-                        evidence_span.span_start,
-                        evidence_span.span_end,
-                    ),
-                ),
-            ),
         )
         reasons.update(grounding.reason_codes)
     return (
@@ -1906,11 +2350,130 @@ def _relationship_reasons(
     )
 
 
+def _ground_relationship_endpoints(
+    *,
+    shared: _SharedContext,
+    source_unit: SourceUnit,
+    source_id: str,
+    target_id: str,
+    span_start: int,
+    span_end: int,
+) -> GroundingOutcome:
+    """Prefer distinct explicit contexts; use unique mentions only as fallback."""
+    keys = ((source_id, source_unit.source_unit_id), (target_id, source_unit.source_unit_id))
+
+    def contained(anchor):
+        if (
+            anchor is not None
+            and 0 <= span_start <= anchor.span_start < anchor.span_end <= span_end <= len(source_unit.text)
+            and source_unit.text[anchor.span_start:anchor.span_end] == anchor.quote
+        ):
+            return anchor
+        return None
+
+    contexts = tuple(contained(shared.entity_context_by_key.get(key)) for key in keys)
+    context_proven = all(context is not None for context in contexts) and (
+        (contexts[0].span_start, contexts[0].span_end)
+        != (contexts[1].span_start, contexts[1].span_end)
+    )
+    # Reified contexts (e.g. a requirement row and its item cell) may overlap.
+    # Neither path supplies terms or out-of-span anchors for relocation.
+    anchors = contexts if context_proven else tuple(
+        contained(shared.entity_occurrence_by_key.get(key)) for key in keys
+    )
+    outcome = ground_endpoints(
+        source_text=source_unit.text, span_start=span_start, span_end=span_end,
+        requests=tuple(
+            EndpointGroundingRequest(endpoint_id=key[0], role=role, anchor=anchor)
+            for key, role, anchor in zip(keys, ("source", "target"), anchors)
+        ),
+    )
+    if not context_proven and len(outcome.occurrences) == 2:
+        first, second = outcome.occurrences
+        if first.span_start < second.span_end and second.span_start < first.span_end:
+            return GroundingOutcome(
+                occurrences=outcome.occurrences,
+                reason_codes=sorted_reasons((*outcome.reason_codes, "ENDPOINT_EVIDENCE_UNGROUNDED")),
+            )
+    return outcome
+
+
+def _scoped_entity_context(
+    *,
+    proposed_label: str | None,
+    has_label: bool,
+    anchor: ProposedOccurrenceAnchor | None,
+    source_unit: SourceUnit,
+    domain_contract: DomainContractV2,
+) -> ProposedOccurrenceAnchor | None:
+    """Verify explicit context without requiring a separately named occurrence."""
+    from .window_prefix import prefix_span_allowed
+
+    if (
+        anchor is None
+        or source_unit.offset_unit != "unicode_codepoint"
+        or source_unit.text_content_hash != utf8_sha256(source_unit.text)
+        or source_unit.text != normalize_nfc(source_unit.text)
+        or not 0 <= anchor.span_start < anchor.span_end <= len(source_unit.text)
+        or source_unit.text[anchor.span_start:anchor.span_end] != anchor.quote
+        or not prefix_span_allowed(
+            domain_contract, source_unit_id=source_unit.source_unit_id,
+            span_start=anchor.span_start, span_end=anchor.span_end,
+            source_text_hash=source_unit.text_content_hash,
+        )
+    ):
+        return None
+    if has_label and grounded_instance_label(proposed_label, anchor.quote) is None:
+        return None
+    return ProposedOccurrenceAnchor(anchor.span_start, anchor.span_end, anchor.quote)
+
+
+def _scoped_label_occurrence(
+    *,
+    proposed_label: str | None,
+    anchor: ProposedOccurrenceAnchor | None,
+    source_unit: SourceUnit,
+    domain_contract: DomainContractV2,
+) -> ProposedOccurrenceAnchor | None:
+    """Locate a unique mention only within its exact approved support context."""
+    anchor = _scoped_entity_context(
+        proposed_label=proposed_label, has_label=True, anchor=anchor,
+        source_unit=source_unit, domain_contract=domain_contract,
+    )
+    if anchor is None:
+        return None
+    label = grounded_instance_label(proposed_label, anchor.quote)
+    if label is None:
+        return None
+
+    # Collapse layout whitespace while retaining a map to original code points.
+    # Count *all* normalized matches, even when one spelling also matches literally.
+    characters: list[str] = []
+    positions: list[int] = []
+    for token in re.finditer(r"\S+", anchor.quote):
+        if characters:
+            characters.append(" ")
+            positions.append(token.start() - 1)
+        characters.extend(token.group())
+        positions.extend(range(token.start(), token.end()))
+    located = locate_unique_quote("".join(characters), label)
+    if located is None:
+        return None
+    start = anchor.span_start + positions[located[0]]
+    end = anchor.span_start + positions[located[1] - 1] + 1
+    return ProposedOccurrenceAnchor(
+        span_start=start, span_end=end, quote=source_unit.text[start:end],
+    )
+
+
 def _endpoint_terms(
     shared: _SharedContext,
     entity_id: str,
     source_unit_id: str,
 ) -> tuple[str, ...]:
+    if (entity_id, source_unit_id) in getattr(shared, "entity_occurrence_by_key", {}):
+        # A failed/out-of-span scoped mention must never relocate via term search.
+        return ()
     anchor = shared.entity_anchor_by_key.get((entity_id, source_unit_id))
     return (anchor.quote,) if anchor is not None else ()
 
@@ -1922,7 +2485,13 @@ def _endpoint_anchor(
     span_start: int,
     span_end: int,
 ) -> ProposedOccurrenceAnchor | None:
-    anchor = shared.entity_anchor_by_key.get((entity_id, source_unit_id))
+    key = (entity_id, source_unit_id)
+    occurrences = getattr(shared, "entity_occurrence_by_key", {})
+    anchor = (
+        occurrences[key]
+        if key in occurrences
+        else shared.entity_anchor_by_key.get(key)
+    )
     if anchor is None:
         return None
     inside = span_start <= anchor.span_start < anchor.span_end <= span_end
@@ -1978,7 +2547,7 @@ def _leaf_to_dict(leaf: L3LeafResult) -> dict[str, Any]:
         "lifecycle_records": [
             record.model_dump(mode="json") for record in leaf.lifecycle_records
         ],
-        "candidate_results": [item.__dict__ for item in leaf.candidate_results],
+        "candidate_results": [candidate_validation_payload(item) for item in leaf.candidate_results],
         "classifications": [item.__dict__ for item in leaf.classifications],
         "property_observations": [
             property_observation_payload(
@@ -2080,7 +2649,27 @@ def _verifier_binding() -> list[str]:
         L3_EXTRACTION_PURPOSE,
         L3_EXTRACTION_PURPOSE_VERSION,
         L3_EVIDENCE_SPAN_VERSION,
+        "property-owner-containment/1.0.0",
+        "scoped-label-occurrence/1.1.0",
+        "work-unit-local-reference/1.0.0",
+        "source-local-identity-collision/1.0.0",
     ]
+
+
+def l3_accepted_versions(inputs: L3Inputs) -> dict[str, str]:
+    versions = {
+        **L3_ACCEPTED_VERSIONS,
+        "l2.proposed_candidate_partition": inputs.l2_receipt.accepted_contract_versions.get(
+            "l2.proposed_candidate_partition", "1.1.0",
+        ),
+    }
+    if COLLECTION_DEFERRAL_KIND in inputs.l2_receipt.accepted_contract_versions:
+        return {
+            **versions,
+            COLLECTION_DEFERRAL_KIND: COLLECTION_DEFERRAL_VERSION,
+            "l3.required_member_outcome": "1.1.0",
+        }
+    return versions
 
 
 def l3_input_fingerprint(inputs: L3Inputs) -> str:
@@ -2118,7 +2707,7 @@ def l3_input_fingerprint(inputs: L3Inputs) -> str:
             "validator": [L3_VALIDATOR_NAME, L3_VALIDATOR_VERSION],
             "verifier": _verifier_binding(),
             "stage_contract_version": L3_STAGE_CONTRACT_VERSION,
-            "accepted_contract_versions": L3_ACCEPTED_VERSIONS,
+            "accepted_contract_versions": l3_accepted_versions(inputs),
         }
     )
 
@@ -2366,6 +2955,10 @@ def _validate_required_member_sets(
                 sealed_at_utc=sealed_at_utc,
             )
         outcomes.append(RequiredMemberOutcomeRecord(outcome=outcome, manifest=manifest))
+    outcomes.extend(
+        RequiredMemberOutcomeRecord(outcome=deferred_collection_outcome(item), manifest=None)
+        for item in inputs.collection_deferrals
+    )
     return tuple(outcomes)
 
 
@@ -2515,11 +3108,13 @@ def _reason_code_index(
             for reason in result.reason_codes:
                 by_reason[reason].add(result.candidate_id)
     collection_reasons: defaultdict[str, set[str]] = defaultdict(set)
+    proposal_reasons: defaultdict[str, set[str]] = defaultdict(set)
+    deferral_reasons: defaultdict[str, set[str]] = defaultdict(set)
     for record in outcomes:
         for reason in record.outcome.reason_codes:
-            collection_reasons[reason].add(
-                record.outcome.required_member_set_proposal_id
-            )
+            collection_reasons[reason].add(record.collection_id)
+            target = deferral_reasons if isinstance(record.outcome, DeferredCollectionOutcome) else proposal_reasons
+            target[reason].add(record.collection_id)
     return {
         "candidate_reason_counts": [
             [reason, len(values)] for reason, values in sorted(by_reason.items())
@@ -2533,8 +3128,11 @@ def _reason_code_index(
         ],
         "proposal_ids_by_reason": {
             reason: sorted(values)
-            for reason, values in sorted(collection_reasons.items())
+            for reason, values in sorted(proposal_reasons.items())
         },
+        **({"collection_deferral_ids_by_reason": {
+            reason: sorted(values) for reason, values in sorted(deferral_reasons.items())
+        }} if deferral_reasons else {}),
         "domain_rereview_requested": sorted(
             by_reason.get("DOMAIN_REREVIEW_REQUESTED", set())
         ),
@@ -2875,13 +3473,12 @@ def _reconcile(
                     "L3_VALIDATION_RESULT_INCOMPLETE",
                     "asserted property observations require approved IDs and evidence",
                 )
-    outcome_ids = [
-        record.outcome.required_member_set_proposal_id for record in outcomes
-    ]
+    outcome_ids = [record.collection_id for record in outcomes]
     proposal_ids = [
         proposal.required_member_set_proposal_id
         for proposal in inputs.required_member_proposals
     ]
+    proposal_ids.extend(item.collection_deferral_id for item in inputs.collection_deferrals)
     if sorted(outcome_ids) != sorted(proposal_ids) or len(outcome_ids) != len(
         set(outcome_ids)
     ):
@@ -2915,6 +3512,7 @@ def _reconcile(
     _reconcile_collection_partition(
         proposals=inputs.required_member_proposals,
         outcomes=outcomes,
+        deferrals=inputs.collection_deferrals,
     )
 
 
@@ -2922,20 +3520,23 @@ def _reconcile_collection_partition(
     *,
     proposals: Sequence[RequiredMemberSetProposalV1_1],
     outcomes: Sequence[RequiredMemberOutcomeRecord],
+    deferrals: Sequence[CollectionDeferral] = (),
 ) -> None:
-    """Prove the sealed/unresolved split partitions every proposal exactly once.
+    """Prove every proposal or observation deferral has exactly one outcome.
 
     ``c0.required_member_manifest@1.1.0`` can only carry a complete collection,
     so an incomplete collection is intentionally not representable as a manifest.
     That is an explicit frozen-contract constraint, not an equivalence: the
     unresolved ``l3.required_member_outcome`` is the only audit-addressable
-    carrier for it. This proof keeps the two carriers a strict partition of the
-    proposal set — no proposal is dropped, duplicated, or silently upgraded.
+    carrier for it. Outcome 1.0 binds a valid C0 proposal; outcome 1.1 binds a
+    non-asserting L2 deferral instead. No input may be dropped or upgraded.
     """
 
     proposal_ids = [
         proposal.required_member_set_proposal_id for proposal in proposals
     ]
+    deferral_by_id = {item.collection_deferral_id: item for item in deferrals}
+    proposal_ids.extend(item.collection_deferral_id for item in deferrals)
     if len(proposal_ids) != len(set(proposal_ids)):
         raise L3StageError(
             "L3_ACCOUNTING_INCOMPLETE",
@@ -2944,7 +3545,17 @@ def _reconcile_collection_partition(
     sealed: list[str] = []
     unresolved: list[str] = []
     for record in outcomes:
-        proposal_id = record.outcome.required_member_set_proposal_id
+        proposal_id = record.collection_id
+        if isinstance(record.outcome, DeferredCollectionOutcome):
+            deferral = deferral_by_id.get(proposal_id)
+            if (
+                deferral is None
+                or record.manifest is not None
+                or record.outcome != deferred_collection_outcome(deferral)
+            ):
+                raise L3StageError("L3_VALIDATION_RESULT_INCOMPLETE", "deferred collections must remain unresolved and blocked")
+        elif proposal_id in deferral_by_id:
+            raise L3StageError("L3_VALIDATION_RESULT_INCOMPLETE", "a deferral cannot masquerade as a C0 proposal")
         if record.manifest is None:
             unresolved.append(proposal_id)
             continue
@@ -3198,21 +3809,10 @@ def _output_artifacts(
 
     for record in sorted(
         outcomes,
-        key=lambda item: item.outcome.required_member_set_proposal_id,
+        key=lambda item: item.collection_id,
     ):
-        proposal_id = record.outcome.required_member_set_proposal_id
-        outcome_payload = {
-            key: (list(value) if isinstance(value, tuple) else value)
-            for key, value in record.outcome.__dict__.items()
-        }
-        outcome_payload["role_coverage"] = [
-            list(item) for item in record.outcome.role_coverage
-        ]
-        outcome_payload["required_member_manifest_id"] = (
-            record.manifest.required_member_manifest_id
-            if record.manifest is not None
-            else None
-        )
+        proposal_id = record.collection_id
+        outcome_payload = record.payload()
         payload = _persist_json(
             state_root
             / "required-member-outcomes"
@@ -3223,11 +3823,11 @@ def _output_artifacts(
             _artifact_entry(
                 artifact_id=f"{proposal_id}:outcome",
                 contract_kind="l3.required_member_outcome",
-                contract_version="1.0.0",
+                contract_version=record.contract_version,
                 schema_hash=canonical_sha256(
                     {
                         "contract_kind": "l3.required_member_outcome",
-                        "version": "1.0.0",
+                        "version": record.contract_version,
                     }
                 ),
                 content_hash=canonical_sha256(outcome_payload),
@@ -3459,6 +4059,10 @@ def run_l3(
         leaves=leaves,
         outcomes=outcomes,
     )
+    if inputs.partial_extraction_scope is not None:
+        from .approved_partial_handoff import SCOPE_FILE, _scope_entry
+        scope_payload = _persist_json(run_root / SCOPE_FILE, inputs.partial_extraction_scope)
+        output_entries = (*output_entries, _scope_entry(inputs.partial_extraction_scope, scope_payload))
     output_manifest = _manifest(
         identity=identity,
         label="output",
@@ -3570,7 +4174,7 @@ def run_l3(
         "output_manifest_id": output_manifest.artifact_manifest_id,
         "output_manifest_hash": output_manifest.manifest_hash,
         "skip_key": fingerprint,
-        "accepted_contract_versions": L3_ACCEPTED_VERSIONS,
+        "accepted_contract_versions": l3_accepted_versions(inputs),
         "resource_metrics_id": metrics.resource_metrics_id,
         "resource_metrics_hash": metrics.metrics_hash,
         "attempt_count": 1,

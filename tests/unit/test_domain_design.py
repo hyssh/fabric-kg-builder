@@ -103,6 +103,39 @@ class Client:
         return copy.deepcopy(self.response)
 
 
+@pytest.mark.parametrize("limit", [16_000, 32_768, 128_000])
+def test_design_output_budget_is_bound_and_legacy_default_unchanged(tmp_path, limit):
+    client = Client(_sketch())
+    draft = generate_domain_design(_preflight(tmp_path), client=client, max_completion_tokens=limit)
+    assert client.calls[0]["max_completion_tokens"] == limit
+    assert ("max_completion_tokens" in draft.inputs.model_dump(mode="json")) == (limit != 16_000)
+    path = tmp_path / "draft.json"
+    save_design_artifact(path, draft)
+    assert load_domain_design(path) == draft
+    changed = draft.model_dump(mode="json")
+    changed["inputs"]["max_completion_tokens"] = 16_000 if limit != 16_000 else 32_768
+    with pytest.raises(ValueError):
+        DomainDesignDraft.model_validate(changed)
+
+
+def test_design_private_trace_retains_invalid_response_diagnostics(tmp_path):
+    from fabric_kg_builder.enrichment.foundry_client import FoundryJSONResponseError
+
+    diagnostics = {"raw_output": '{"types":[', "finish_reason": "length",
+                   "usage": {"completion_tokens": 16000}, "max_completion_tokens": 16000}
+
+    class InvalidClient:
+        def complete_json(self, **_):
+            raise FoundryJSONResponseError("invalid JSON", diagnostics)
+
+    trace = []
+    with pytest.raises(FoundryJSONResponseError):
+        generate_domain_design(_preflight(tmp_path), client=InvalidClient(), proposal_trace_callback=trace.append)
+    assert trace[-1]["event"] == "request_failed"
+    assert trace[-1]["diagnostics"] == diagnostics
+    assert not any(row["event"] == "response_completed" for row in trace)
+
+
 def test_seed_name_diagnostics_ignore_formatting_without_claiming_semantic_alignment(tmp_path):
     preflight = _preflight(tmp_path)
     raw = _sketch()

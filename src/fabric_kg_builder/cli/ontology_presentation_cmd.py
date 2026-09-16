@@ -15,6 +15,10 @@ from fabric_kg_builder.contracts.base import canonical_json
 @click.option("--publication-plan", "plan_path", type=click.Path(path_type=Path, exists=True), required=True)
 @click.option("--prototype-journal", "journal_path", type=click.Path(path_type=Path, exists=True), required=True)
 @click.option("--materialize", type=click.Path(path_type=Path, exists=True), required=True)
+@click.option("--naming-review", type=click.Path(path_type=Path, exists=True, dir_okay=False),
+              help="Complete versioned Copilot semantic naming JSON; exact bytes sealed and rechecked on apply/resume.")
+@click.option("--current-definition-review", type=click.Path(path_type=Path, exists=True, dir_okay=False),
+              help="Explicit review of pre-existing type names/local contextualization IDs; original ownership and all binding semantics remain required.")
 @click.option("--state", type=click.Path(path_type=Path), required=True, help="NEW directory for immutable plan and backup.")
 @click.option("--previous-repair-state", type=click.Path(path_type=Path, exists=True, file_okay=False),
               help="Completed prior repair directory; verify its full immutable chain before planning another same-item repair.")

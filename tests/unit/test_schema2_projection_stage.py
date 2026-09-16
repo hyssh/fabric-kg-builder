@@ -1652,6 +1652,45 @@ def test_schema2_source_reconciles_required_member_authority_hashes(
 
 
 @pytest.mark.unit
+def test_l4_indexes_identical_evidence_shared_across_leaves(tmp_path: Path) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    l3 = _l3(tmp_path, l1_root, domain_path)
+    expected = lifecycle_projection._verified_evidence(l3)
+    repeated = dataclasses.replace(l3, leaves=(*l3.leaves, l3.leaves[0]))
+
+    assert len(repeated.evidence_spans) > len(l3.evidence_spans)
+    assert lifecycle_projection._verified_evidence(repeated) == expected
+    assert lifecycle_projection._verified_evidence(
+        dataclasses.replace(repeated, leaves=tuple(reversed(repeated.leaves)))
+    ) == expected
+
+
+@pytest.mark.parametrize("field,value", [
+    ("quote", "different source quotation"),
+    ("purpose", "schema-discovery"),
+    ("source_text_content_hash", "f" * 64),
+])
+def test_l4_rejects_conflicting_shared_evidence(
+    tmp_path: Path, field: str, value: str,
+) -> None:
+    l1_root, domain_path, _ = _pipeline(tmp_path, "records")
+    l3 = _l3(tmp_path, l1_root, domain_path)
+    leaf = l3.leaves[0]
+    span = leaf.evidence_spans[0]
+    # Exercise the index's conflict gate independently of contract parsing.
+    conflicting = type(span).model_construct(**{
+        **{name: getattr(span, name) for name in type(span).model_fields},
+        field: value,
+    })
+    repeated = dataclasses.replace(
+        l3, leaves=(*l3.leaves, dataclasses.replace(
+            leaf, evidence_spans=(conflicting, *leaf.evidence_spans[1:]),
+        )),
+    )
+    with pytest.raises(L4ProjectionError, match="L4_EVIDENCE_INVALID"):
+        lifecycle_projection._verified_evidence(repeated)
+
+
 def test_l4_serving_gates_evidence_identity_hierarchy_endpoints_and_contract(
     tmp_path: Path,
 ) -> None:
@@ -1748,6 +1787,7 @@ def test_l4_reclassification_keeps_one_node_and_explicit_ancestor_types(
         first = work_unit.text.find("governed record")
         specialized = dict(candidates[0])
         specialized["observed_type"] = "Record A"
+        specialized["label"] = "record"
         specialized["anchors"] = [{
             "span_start": work_unit.slice_start + first + len("governed "),
             "span_end": work_unit.slice_start + first + len("governed record"),

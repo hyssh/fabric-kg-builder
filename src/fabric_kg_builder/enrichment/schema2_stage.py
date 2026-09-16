@@ -48,6 +48,12 @@ from .schema2_extraction import (
     raw_candidate_response_schema,
     render_extraction_prompt,
 )
+from .schema2_collections import (
+    COLLECTION_DEFERRAL_KIND,
+    COLLECTION_DEFERRAL_VERSION,
+    COLLECTION_PARTITION_VERSION,
+    CollectionDeferral,
+)
 from .schema2_sources import (
     L2_ACCEPTED_VERSIONS,
     L2_STAGE_NAME,
@@ -73,7 +79,12 @@ L2_LEGACY_RESPONSE_SCHEMA_HASH = canonical_sha256(
         "required_member_observation_fields": ["member_role_id", "member_order"],
     }
 )
-L2_PROPOSED_CANDIDATE_VERSION = "1.1.0"
+# Immutable 1.1.0 descriptor: do not recompute it from evolving dataclasses or
+# response schemas. Sealed historical snapshots must retain their exact hash.
+L2_PROPERTY_CARRIER_SCHEMA_HASH = (
+    "b13b4ebe78f1f8728e69d2996fae683c8aa0ce6b1725b103a1dd5118abc4de08"
+)
+L2_PROPOSED_CANDIDATE_VERSION = "1.2.0"
 L2_RESPONSE_SCHEMA_HASH = canonical_sha256({
     "contract_kind": "l2.proposed_candidate_partition",
     "contract_version": L2_PROPOSED_CANDIDATE_VERSION,
@@ -84,12 +95,15 @@ L2_RESPONSE_SCHEMA_HASH = canonical_sha256({
 L2_OUTPUT_ACCEPTED_VERSIONS = {
     **L2_ACCEPTED_VERSIONS,
     "l2.proposed_candidate_partition": L2_PROPOSED_CANDIDATE_VERSION,
+    COLLECTION_DEFERRAL_KIND: COLLECTION_DEFERRAL_VERSION,
 }
 
 
 def proposed_candidate_schema_hash(version: str) -> str:
     if version == "1.0.0":
         return L2_LEGACY_RESPONSE_SCHEMA_HASH
+    if version == "1.1.0":
+        return L2_PROPERTY_CARRIER_SCHEMA_HASH
     if version == L2_PROPOSED_CANDIDATE_VERSION:
         return L2_RESPONSE_SCHEMA_HASH
     raise ValueError("Unsupported L2 property carrier; re-extract with the current extractor")
@@ -120,6 +134,7 @@ class L2StageResult:
     output_manifest: ArtifactManifest
     metrics: StageResourceMetrics
     receipt: StageReceipt
+    collection_deferrals: tuple[CollectionDeferral, ...] = ()
 
 
 def dry_run_l2(
@@ -359,6 +374,7 @@ def _output_artifacts(
     leaves: tuple[ExtractionLeafResult, ...],
     required_member_sets: tuple[ProposedRequiredMemberSetView, ...],
     required_member_batches: tuple[ExtractionCandidateBatch, ...],
+    collection_deferrals: tuple[CollectionDeferral, ...] = (),
 ) -> tuple[ArtifactEntry, ...]:
     entries: list[ArtifactEntry] = []
     manifest_payload = _persist_json(
@@ -560,6 +576,21 @@ def _output_artifacts(
                 ),
             )
         )
+    for deferral in collection_deferrals:
+        payload = _persist_json(
+            state_root / "collection-deferrals"
+            / f"{deferral.collection_deferral_id.replace(':', '-', 1)}.json",
+            deferral,
+        )
+        entries.append(_artifact_entry(
+            artifact_id=deferral.collection_deferral_id,
+            contract_kind=COLLECTION_DEFERRAL_KIND,
+            contract_version=COLLECTION_DEFERRAL_VERSION,
+            schema_hash=canonical_sha256(CollectionDeferral.model_json_schema()),
+            content_hash=deferral.deferral_hash,
+            payload=payload,
+            row_count=len(deferral.observations),
+        ))
     return tuple(entries)
 
 
@@ -680,6 +711,7 @@ def run_l2(
         extractor_version=extractor_version,
         response_schema_hash=L2_RESPONSE_SCHEMA_HASH,
         split_policy_version="paragraph-sentence-token/1.0.0",
+        collection_partition_version=COLLECTION_PARTITION_VERSION,
     )
     input_manifest = _input_manifest(
         inputs=inputs,
@@ -765,13 +797,15 @@ def run_l2(
     validate_prefix_candidate_anchors(
         leaves, contract=inputs.domain_contract, source_units=materialized.source_units,
     )
+    collection_leaves = tuple(sorted(leaves, key=lambda item: item.batch.extraction_candidate_batch_id))
     fragments = derive_collection_member_fragments(
-        leaves,
+        collection_leaves,
         contract=inputs.domain_contract,
     )
+    collection_deferrals: list[CollectionDeferral] = []
     required_member_sets = build_required_member_set_proposals(
         fragments,
-        leaves=leaves,
+        leaves=collection_leaves,
         contract=inputs.domain_contract,
         authority_factory=lambda requirement: _authority(
             inputs,
@@ -779,6 +813,7 @@ def run_l2(
             requirement,
         ),
         base_identity=identity,
+        deferrals=collection_deferrals,
     )
     requirements_by_id = {
         requirement.requirement_id: requirement
@@ -810,6 +845,7 @@ def run_l2(
         leaves=leaves,
         required_member_sets=required_member_sets,
         required_member_batches=required_member_batches,
+        collection_deferrals=tuple(collection_deferrals),
     )
     output_manifest = _manifest(
         identity=identity,
@@ -848,6 +884,7 @@ def run_l2(
                 materialized=materialized,
                 leaves=leaves,
                 required_member_sets=required_member_sets,
+                collection_deferrals=tuple(collection_deferrals),
                 input_manifest=input_manifest,
                 output_manifest=output_manifest,
                 metrics=prior_metrics,
@@ -934,6 +971,7 @@ def run_l2(
         materialized=materialized,
         leaves=leaves,
         required_member_sets=required_member_sets,
+        collection_deferrals=tuple(collection_deferrals),
         input_manifest=input_manifest,
         output_manifest=output_manifest,
         metrics=metrics,

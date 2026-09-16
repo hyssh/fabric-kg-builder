@@ -272,7 +272,7 @@ def test_prefix_schedules_only_selected_ranges_inside_a_long_source_unit(tmp_pat
     prepared_path.write_text(canonical_json(prepared))
     _invoke([
         "domain", "window-run", "--prepared", str(prepared_path), "--intake", str(intake),
-        "--schema-policy", "concepts",
+        "--discovery-mode", "chunked", "--schema-policy", "concepts",
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
         "--max-chunk-chars", "512", "--max-calls", "2", "--max-repair-calls", "0", "--live",
     ], model=LongUnitModel())

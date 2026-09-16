@@ -17,6 +17,101 @@ def test_integrated_commands_registered():
     } <= cli.commands["domain"].commands.keys()
 
 
+@pytest.mark.parametrize("mode_flags", [[], ["--discovery-mode", "whole-document"]])
+def test_complete_document_default_requires_reviewed_profile(tmp_path, monkeypatch, mode_flags):
+    from fabric_kg_builder.cli import domain_design_cmd
+    from fabric_kg_builder.domain import document_schema
+    from tests.unit.test_document_schema import profile
+    from tests.unit.test_window_run import inputs
+
+    inputs(tmp_path, files=2, paragraphs=3)
+    monkeypatch.setattr(domain_design_cmd, "_build_client",
+                        lambda *_: pytest.fail("Planning must not construct a model"))
+    args = [
+        "domain", "window-run", "--prepared", str(tmp_path / "prepared.json"),
+        "--intake", str(tmp_path / "intake.json"), "--out-state", str(tmp_path / "state"),
+        *mode_flags,
+    ]
+    missing = CliRunner().invoke(cli, args)
+    assert missing.exit_code == 1
+    assert "explicit capability profile" in missing.output
+    path = tmp_path / "capabilities.json"
+    path.write_text(json.dumps(profile()))
+    result = CliRunner().invoke(cli, [*args, "--model-capabilities", str(path)])
+    assert result.exit_code == 0, result.output
+    planned = json.loads(result.output)
+    assert planned["writes"] == planned["model_calls"] == 0
+    assert planned["result"]["minimum_schema_calls"] == 2
+    assert planned["result"]["minimum_extraction_calls"] == 0
+    assert planned["result"]["config"]["prompt_version"] == document_schema.PROMPT_VERSION
+    assert planned["result"]["config"]["max_completion_tokens"] == 32768
+    assert planned["budget"]["max_transport_retries"] == 3
+    assert planned["budget"]["max_transport_retry_wait_seconds"] == 900
+    disabled = CliRunner().invoke(cli, [
+        *args, "--model-capabilities", str(path), "--max-transport-retries", "0",
+        "--max-transport-retry-wait-seconds", "120",
+    ])
+    assert disabled.exit_code == 0, disabled.output
+    assert json.loads(disabled.output)["budget"]["max_transport_retries"] == 0
+    assert json.loads(disabled.output)["budget"]["max_transport_retry_wait_seconds"] == 120
+    assert not (tmp_path / "state").exists()
+
+
+def test_default_mode_rejects_chunked_policy_instead_of_silently_switching(tmp_path):
+    from tests.unit.test_window_run import inputs
+
+    inputs(tmp_path)
+    result = CliRunner().invoke(cli, [
+        "domain", "window-run", "--prepared", str(tmp_path / "prepared.json"),
+        "--intake", str(tmp_path / "intake.json"), "--out-state", str(tmp_path / "state"),
+        "--schema-policy", "concepts",
+    ])
+    assert result.exit_code == 1
+    assert "--schema-policy is for chunked discovery" in result.output
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("prompt_version", [
+    "whole-document-schema/1.0.0", "whole-document-schema/1.1.0",
+])
+def test_whole_document_resume_inherits_recorded_prompt_and_hash(tmp_path, monkeypatch, prompt_version):
+    from fabric_kg_builder.cli import domain_design_cmd
+    from fabric_kg_builder.domain.window_run import RunBudget, run_windowed
+    from tests.unit.test_document_schema import DocumentModel, config
+    from tests.unit.test_window_run import inputs
+
+    class ResumeModel(DocumentModel):
+        def complete_json(self, **request):
+            response = super().complete_json(**request)
+            if prompt_version == "whole-document-schema/1.0.0":
+                for proposal in response["schema_proposals"]:
+                    for key in ("layer", "scope_change", "generalization_reason"):
+                        proposal.pop(key, None)
+            return response
+
+    data = inputs(tmp_path, files=1, paragraphs=1)
+    state = tmp_path / "state"
+    run_windowed(
+        inputs=data, output_dir=state, config=config(prompt_version=prompt_version),
+        budget=RunBudget(max_calls=2), client=ResumeModel(),
+    )
+    before = (state / "run.json").read_bytes()
+    monkeypatch.setattr(domain_design_cmd, "_build_client",
+                        lambda *_: pytest.fail("Completed zero-call resume must not construct a model"))
+    args = [
+        "domain", "window-run", "--prepared", str(tmp_path / "prepared.json"),
+        "--intake", str(tmp_path / "intake.json"), "--out-state", str(state),
+        "--max-chunk-chars", "128", "--resume", "--live", "--max-calls", "0",
+    ]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["model_calls"] == 0
+    assert (state / "run.json").read_bytes() == before
+    changed = CliRunner().invoke(cli, [*args, "--model-transport", "project_responses"])
+    assert changed.exit_code == 1 and "binding changed" in changed.output
+    assert (state / "run.json").read_bytes() == before
+
+
 @pytest.mark.parametrize("sources", [[], ["--prepared", "prepared.json", "--discovery", "discovery.json"]])
 def test_exactly_one_input_required_before_core(tmp_path, monkeypatch, sources):
     for name in ("intake.json", "prepared.json", "discovery.json"):

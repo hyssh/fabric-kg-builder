@@ -138,7 +138,7 @@ class AssessmentReport(ContractModel):
     prompt_version: Literal["domain-challenge/1.0.0"] = PROMPT_VERSION
     window_chars: Annotated[int, Field(ge=256, le=32_000)]
     max_calls: Annotated[int, Field(ge=0, le=1000)]
-    max_output_tokens: Annotated[int, Field(ge=256, le=8000)]
+    max_output_tokens: Annotated[int, Field(ge=256, le=128000)]
     max_prompt_chars: Annotated[int, Field(ge=256)]
     model_calls: NonNegative
     files: tuple[FileDisposition, ...]
@@ -387,8 +387,8 @@ def assess_documents(
 ) -> AssessmentReport:
     if not 0 <= max_calls <= 1000:
         raise ValueError("max_calls must be between 0 and 1000")
-    if not 256 <= max_output_tokens <= 8000:
-        raise ValueError("max_output_tokens must be between 256 and 8000")
+    if not 256 <= max_output_tokens <= 128000:
+        raise ValueError("max_output_tokens must be between 256 and 128000")
     if max_prompt_chars < 256:
         raise ValueError("max_prompt_chars must be at least 256")
     if not dry_run and (client is None) == (responses is None):

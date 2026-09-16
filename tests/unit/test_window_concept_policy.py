@@ -187,11 +187,12 @@ def test_repair_requires_abstraction_without_replacing_instances(tmp_path):
     assert all("CONCEPT-FIRST ONTOLOGY POLICY" in r["system"] for r in client.requests)
 
 
-def test_cli_defaults_new_runs_to_concepts_and_preserves_explicit_legacy(tmp_path):
+def test_cli_defaults_explicit_chunked_runs_to_concepts_and_preserves_legacy(tmp_path):
     inputs(tmp_path, files=1, paragraphs=1)
     args = [
         "domain", "window-run", "--prepared", str(tmp_path / "prepared.json"),
         "--intake", str(tmp_path / "intake.json"), "--out-state", str(tmp_path / "new-state"),
+        "--discovery-mode", "chunked",
     ]
     for flags, version in [([], COMPACT_REVIEW_PROMPT_VERSION), (["--schema-policy", "concepts"], CORE_PROMPT_VERSION),
                            (["--schema-policy", "observed-terms"], RUN_PROMPT_VERSION)]:

@@ -908,6 +908,7 @@ def l2_input_fingerprint(
     extractor_version: str,
     response_schema_hash: str,
     split_policy_version: str,
+    collection_partition_version: str | None = None,
 ) -> str:
     """Bind every semantic input; design-sample hash is context, never coverage."""
 
@@ -943,6 +944,10 @@ def l2_input_fingerprint(
             "extractor": [extractor_name, extractor_version],
             "response_schema_hash": response_schema_hash,
             "split_policy_version": split_policy_version,
+            **(
+                {"collection_partition_version": collection_partition_version}
+                if collection_partition_version is not None else {}
+            ),
             "accepted_contract_versions": L2_ACCEPTED_VERSIONS,
         }
     )

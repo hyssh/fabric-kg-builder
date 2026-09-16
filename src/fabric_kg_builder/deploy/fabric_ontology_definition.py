@@ -40,9 +40,14 @@ LABEL_PROPERTY_NAME = "label"
 # Typed publication tables carry the derived mention as a structural column.
 TYPED_LABEL_COLUMN = "__label"
 
+
 _NAMESPACE = "usertypes"
 _SCHEMA_ROOT = "https://developer.microsoft.com/json-schemas/fabric/item/ontology"
 _ID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+
+def instance_base_entity_table(l5a_ontology: dict[str, Any]) -> str:
+    return l5a_ontology.get("instance_presentation", {}).get("base_entity_table", BASE_ENTITY_TABLE)
 
 
 def _stable_guid(kind: str, key: str) -> str:
@@ -122,6 +127,7 @@ def _entity_type_payload(
     identity_property_id: str,
     label_property_id: str | None = None,
     legacy_names: bool = True,
+    display_label: bool = False,
 ) -> dict[str, Any]:
     properties = [
         {
@@ -157,7 +163,7 @@ def _entity_type_payload(
         "baseEntityTypeId": None,
         "name": _name(str(entity_type["canonical_semantic_type_id"])),
         "entityIdParts": [identity_property_id],
-        "displayNamePropertyId": identity_property_id,
+        "displayNamePropertyId": label_property_id if display_label and label_property_id else identity_property_id,
         "namespaceType": "Custom",
         "visibility": "Visible",
         "properties": properties,
@@ -265,7 +271,9 @@ def compile_fabric_ontology_definition(
         "baseEntityTypeId": None,
         "name": BASE_ENTITY_TYPE_NAME,
         "entityIdParts": [BASE_IDENTITY_PROPERTY_ID],
-        "displayNamePropertyId": BASE_IDENTITY_PROPERTY_ID,
+        "displayNamePropertyId": (
+            BASE_LABEL_PROPERTY_ID if l5a_ontology.get("instance_presentation") else BASE_IDENTITY_PROPERTY_ID
+        ),
         "namespaceType": "Custom",
         "visibility": "Visible",
         "properties": [
@@ -305,7 +313,7 @@ def compile_fabric_ontology_definition(
                 workspace_id=workspace_id,
                 lakehouse_id=lakehouse_id,
                 lakehouse_schema=lakehouse_schema,
-                table_name=BASE_ENTITY_TABLE,
+                table_name=instance_base_entity_table(l5a_ontology),
                 identity_column=BASE_ENTITY_IDENTITY_COLUMN,
                 label_property_id=BASE_LABEL_PROPERTY_ID,
                 label_column=BASE_ENTITY_LABEL_COLUMN,
@@ -326,6 +334,7 @@ def compile_fabric_ontology_definition(
                     identity_property_id=identity_property_id,
                     label_property_id=label_property_id,
                     legacy_names=legacy_names,
+                    display_label=bool(l5a_ontology.get("instance_presentation")),
                 ),
             )
         )

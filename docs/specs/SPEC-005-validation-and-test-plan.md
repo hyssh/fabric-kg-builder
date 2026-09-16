@@ -1227,7 +1227,7 @@ remain unchanged.
 |---|---|---|
 | DOM-101 | domain validation | Fewer than five or more than ten competency questions |
 | DOM-102 | domain validation | An extracted entity lacks proposal evidence without `business_defined=true`, or a relationship lacks both proposal evidence and an explicit governance rule/business justification |
-| DOM-103 | domain validation | N is outside 1-24, or N 21-24 lacks rationale; N below 8 is advisory and must not be padded |
+| DOM-103 | domain validation | N exceeds default 1-24 or explicit reviewed-design-64/v1 1-64; capability/maximum mismatch; N > 20 lacks per-type rationale; N below 8 is advisory and must not be padded |
 | DOM-104 | domain validation | A required question has neither a valid path nor an explicit unsupported result; unsupported critical questions block approval |
 | DOM-105 | domain validation | K differs from the maximum shortest covered path on the question-scoped relationship graph, exceeds 4, or K=4 lacks cited rationale |
 | DOM-106 | domain validation | Type IDs, predicates, endpoint signatures, per-hop endpoints, or traversal direction are ambiguous or invalid |

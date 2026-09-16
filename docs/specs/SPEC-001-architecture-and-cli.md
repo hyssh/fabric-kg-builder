@@ -852,7 +852,9 @@ Copilot-authored proposal.
 
 - N counts approved relationship **types**, not relationship instances.
 - The advisory N range is 8-20. A valid minimal set may be below eight and must
-  not be padded. Values 21-24 require a recorded rationale. Values above 24 fail.
+  not be padded. Values above 20 require per-type rationale. Values above 24
+  fail by default; explicit hash-bound `reviewed-design-64/v1` compilation
+  permits at most 64 explicit endpoint definitions (see SPEC-007 §5).
 - K is the maximum shortest covered competency-question path. Values 1-3 are
   normal. K=4 requires a cited rationale. K greater than four fails.
 - Each path step declares `from_type`, `relationship_type`, `to_type`, and

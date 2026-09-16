@@ -4,6 +4,7 @@ from collections import Counter
 
 from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from .concept_policy import CONCEPT_PROMPT_VERSIONS
+from . import document_schema
 
 WINDOW_DESIGN_CONTEXT_VERSION = "window-design-context/1.0.0"
 PATTERN_CHARS = 48_000
@@ -96,6 +97,11 @@ def window_design_context(run, acceptance=None, *, _validation=None):
     """No schema/intake truncation, synthetic discovery, or alteration of candidate values."""
     from fabric_kg_builder.enrichment.window_run_reuse import window_run_binding
 
+    evolution = {}
+    if run.config.prompt_version in document_schema.EVOLUTION_PROMPT_VERSIONS:
+        from .document_schema_evolution import evolution_context
+
+        evolution = evolution_context(run.logs)
     units = {unit.source_unit_id: unit for unit in run.prepared.source_units}
     records = run.final_mapping.records
     patterns = {}
@@ -172,10 +178,28 @@ def window_design_context(run, acceptance=None, *, _validation=None):
     return {
         "format_version": WINDOW_DESIGN_CONTEXT_VERSION,
         "authority": "representative_schema_design_reference_only",
+        **({"discovery_mode": "whole-document",
+            "coverage_semantics": "complete_cached_document_text_inspected_for_schema_not_instances",
+            "instance_lineage": "not_created; requires_approved_reextraction"}
+           if run.config.discovery_mode == "whole-document" else {}),
         "binding": window_run_binding(run, acceptance, _validation=_validation).model_dump(mode="json"),
         "context": {"intake_raw": run.context.intake_raw, "context_hash": run.context.artifact_hash,
                     "intake_text_hash": canonical_sha256(run.context.intake_text), "routing": run.context.routing},
         "final_snapshot": run.final_snapshot.model_dump(mode="json"),
+        **evolution,
+        **({"schema_layers": document_schema.schema_layers(run.logs),
+            "generalization_policy": {
+                "prompt_version": run.config.prompt_version,
+                "guidance": (
+                    "Preserve the accumulated cross-document meanings, stable IDs, common/domain layers "
+                    "and owner/endpoint scopes. Reuse and broaden types rather than specialize them to "
+                    "the newest document. Model names, document titles, SKU values and instruction "
+                    "sentences are instances/properties, not classes. Layer assignments are witnessed "
+                    "working proposals, not approved taxonomy. Review semantic generality, unresolved "
+                    "scope conflicts and identity before freezing. Re-extract every authorized document "
+                    "under that frozen schema; discovery witnesses are not instance lineage."
+                ),
+            }} if run.config.prompt_version in document_schema.GENERALIZED_PROMPT_VERSIONS else {}),
         **({"concept_policy": {
             "prompt_version": run.config.prompt_version,
             "guidance": (

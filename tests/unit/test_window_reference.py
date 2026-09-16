@@ -223,6 +223,7 @@ def test_new_concepts_still_require_independent_admission_with_seed(tmp_path):
 
 def _args(tmp_path):
     return ["domain", "window-run", "--prepared", str(tmp_path / "prepared.json"),
+            "--discovery-mode", "chunked",
             "--intake", str(tmp_path / "intake.json"), "--out-state", str(tmp_path / "state")]
 
 

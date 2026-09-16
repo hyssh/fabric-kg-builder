@@ -9,6 +9,7 @@ from typing import Iterable
 
 from .proposal import ProposalQuestionRouteV2, RelationshipCandidateV2
 from .question_routing import SQL_ROUTING_UNRESOLVED
+from .compiler_capacity import CompilerCapability, relationship_capacity
 
 SELECTOR_VERSION = "l1-domain-selector/1.0.0"
 
@@ -348,8 +349,10 @@ def select_relationship_vocabulary(
     critical_question_ids: set[str],
     required_relationship_type_ids: set[str] | None = None,
     eligible_type_ids: set[str] | None = None,
+    compiler_capability: CompilerCapability | None = None,
 ) -> SelectionResult:
     """Select the minimum path union plus mandatory governance/role relationships."""
+    capacity = relationship_capacity(compiler_capability)
     merged, _aliases, merge_groups = eligible_relationship_vocabulary(
         candidates,
         eligible_type_ids=eligible_type_ids,
@@ -391,9 +394,9 @@ def select_relationship_vocabulary(
         )
 
     selected_ids = min(states, key=lambda item: _selection_key(item, by_id))
-    if len(selected_ids) > 24:
+    if len(selected_ids) > capacity:
         raise ProposalSelectionError(
-            f"[DOM-103] minimal vocabulary N={len(selected_ids)} exceeds 24"
+            f"[DOM-103] minimal vocabulary N={len(selected_ids)} exceeds {capacity}"
         )
     selected = tuple(by_id[item_id] for item_id in sorted(selected_ids))
     plans: list[SelectedQuestionPlan] = []
@@ -449,7 +452,7 @@ def select_relationship_vocabulary(
             )
             if not references:
                 raise ProposalSelectionError(
-                    "[DOM-103] N=21..24 requires rationale for every retained type"
+                    f"[DOM-103] N=21..{capacity} requires rationale for every retained type"
                 )
             rationales[relationship.relationship_type_id] = references
 

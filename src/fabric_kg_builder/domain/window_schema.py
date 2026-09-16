@@ -246,6 +246,12 @@ class SchemaChange(_WindowModel):
     reason: RequiredText
 
 
+class DefinitionChange(SchemaChange):
+    """Whole-document mutations; not part of the legacy chunked proposal schema."""
+
+    action: Literal["update_concept", "delete_concept"]
+
+
 class PendingProposal(_WindowModel):
     observation_ids: list[RequiredText]
     reason: RequiredText
@@ -257,7 +263,7 @@ class WindowProposal(_WindowModel):
 
 
 class ChangeDecision(_WindowModel):
-    change: SchemaChange
+    change: SchemaChange | DefinitionChange
     status: Literal["accepted_working", "rejected", "pending"]
     reason: RequiredText
     review: Literal["deterministic_normalization", "structural_working_review"]

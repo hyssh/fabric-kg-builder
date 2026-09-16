@@ -59,6 +59,91 @@ def _render(definition, compilation, source):
     return result, mapping
 
 
+def _reviewed_ontology(case, *, suffix=""):
+    from tests.unit.test_naming_review import write_review
+
+    context = m._local(**{k: v for k, v in case.args.items() if k != "state"})
+    path = case.state.parent / f"copilot-names{suffix}.json"
+    payload = write_review(path, context, suffix)
+    case.args["naming_review"] = path
+    return payload
+
+
+def test_copilot_review_applies_only_exact_native_names(repair):
+    payload = _reviewed_ontology(repair)
+    result = _plan(repair)
+    sealed = p._read_json(repair.state / "plan.json")
+    assert sealed["local_evidence"]["naming_review"]["payload"] == payload
+    assert all(change["pointer"] == "/name" for change in sealed["allowed_field_diff"])
+    assert all(item["reason"] for item in sealed["mapping"])
+    for item in sealed["mapping"]:
+        kind = "entity_types" if item["kind"] == "entity_type" else "relationship_types"
+        assert item["new_name"] == payload[kind][item["canonical_id"]]["native_name"]
+    _live(repair, result)
+    assert len(repair.updates) == 1
+    m._readback_equivalence(
+        p._read_json(repair.state / "replacement.json"), repair.backend.definitions[repair.item_id],
+    )
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("mutation", ["bytes", "delete", "omit"])
+def test_review_drift_blocks_ontology_apply_and_resume(repair, resume, mutation):
+    _reviewed_ontology(repair)
+    result = _plan(repair)
+    if resume:
+        repair.mode = "lost-after"
+        with pytest.raises(ValueError):
+            _live(repair, result)
+    path = repair.args["naming_review"]
+    if mutation == "bytes":
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif mutation == "delete":
+        path.unlink()
+    else:
+        repair.args.pop("naming_review")
+    with pytest.raises((ValueError, OSError)):
+        _live(repair, result, resume=resume)
+    assert len(repair.updates) == int(resume)
+
+
+@pytest.mark.parametrize("mutation", ["bytes", "delete"])
+def test_reviewed_ontology_resume_and_donor_chain_preserve_each_review(repair, mutation):
+    _reviewed_ontology(repair)
+    first = _plan(repair)
+    _live(repair, first)
+    _live(repair, first, resume=True)
+    assert len(repair.updates) == 1
+    donor_review = repair.args["naming_review"]
+    prior = repair.state
+    repair.state = prior.parent / "second-presentation"
+    repair.args.update(state=repair.state, previous_repair_state=prior)
+    _reviewed_ontology(repair, suffix="Revised")
+    second = _plan(repair)
+    assert second["status"] == "planned-read-only"
+    if mutation == "bytes":
+        donor_review.write_bytes(donor_review.read_bytes() + b"\n")
+    else:
+        donor_review.unlink()
+    with pytest.raises((ValueError, OSError)):
+        _live(repair, second)
+    assert len(repair.updates) == 1
+
+
+def test_new_copilot_review_can_follow_legacy_review_without_rewriting_it(repair):
+    first = _plan(repair)
+    _live(repair, first)
+    prior = repair.state
+    frozen = {path: path.read_bytes() for path in prior.glob("*.json")}
+    repair.state = prior.parent / "second-presentation"
+    repair.args.update(state=repair.state, previous_repair_state=prior)
+    _reviewed_ontology(repair)
+    second = _plan(repair)
+    _live(repair, second)
+    assert len(repair.updates) == 2
+    assert all(path.read_bytes() == data for path, data in frozen.items())
+
+
 @pytest.fixture
 def repair(paused, monkeypatch, legacy_native_compilation):
     case = paused

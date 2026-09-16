@@ -976,6 +976,7 @@ def run_discovery_reuse(
         model_version=run.model_version, model_hash=run.model_hash,
         extractor_name=extractor_name, extractor_version="1.0.0",
         response_schema_hash=stage.L2_RESPONSE_SCHEMA_HASH, split_policy_version="paragraph-sentence-token/1.0.0",
+        collection_partition_version=stage.COLLECTION_PARTITION_VERSION,
     )
     checkpoint = WorkUnitCheckpoint(state_root / "checkpoint.json", state_root / "checkpoint-leaves")
     extraction_authority = stage._authority(inputs, materialized)
@@ -1057,4 +1058,6 @@ def run_discovery_reuse(
     return {
         **summary, "l2_model_calls": result.metrics.foundry_calls,
         "l2_receipt_id": result.receipt.stage_receipt_id, "l2_receipt_hash": result.receipt.receipt_hash,
+        "collection_deferral_count": len(result.collection_deferrals),
+        "collection_deferral_ids": [item.collection_deferral_id for item in result.collection_deferrals],
     }

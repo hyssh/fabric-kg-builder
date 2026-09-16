@@ -19,6 +19,8 @@ from fabric_kg_builder.cli.semantic_cmd import (
     validate_artifacts_cmd,
 )
 from fabric_kg_builder.cli.enrich_cmd import enrich_cmd
+from fabric_kg_builder.cli.partial_handoff_cmd import handoff_partial_cmd
+from fabric_kg_builder.cli.business_quality_cmd import assess_business_quality_cmd
 from fabric_kg_builder.cli.densify_cmd import densify_cmd
 from fabric_kg_builder.cli.compile_data_cmd import compile_data_cmd
 from fabric_kg_builder.cli.schema2_stages_cmd import (
@@ -43,7 +45,10 @@ from fabric_kg_builder.cli.lineage_cmd import assets_cmd, lineage_cmd, trace_cmd
 from fabric_kg_builder.cli.infra_cmd import infra_cmd
 from fabric_kg_builder.cli.knowledge_cmd import knowledge_group
 from fabric_kg_builder.cli.app_cmd import app_cmd
-from fabric_kg_builder.cli.prototype_reconcile_cmd import reconcile_prototype_create_cmd
+from fabric_kg_builder.cli.graph_presentation_cmd import repair_graph_labels_cmd
+from fabric_kg_builder.cli.prototype_reconcile_cmd import (
+    reconcile_prototype_create_cmd, verify_prototype_companion_cmd,
+)
 from fabric_kg_builder.cli.ontology_presentation_cmd import repair_ontology_names_cmd
 from fabric_kg_builder.cli.runtime_cmd import (
     collect_evidence_cmd,
@@ -61,16 +66,25 @@ Default: corpus-first Schema-2 pipeline (explicit approval and state bindings):
   -> domain design --input <sources> --intake <intake>
        --discovery <discovery.json> --out <design-draft.json>
   -> domain evaluate-design -> review evaluation -> domain compile-design
-  -> domain approve -> enrich --discovery <approved-discovery.json>
-  -> validate-evidence -> project-serving
+  -> domain approve -> enrich --reextract-approved
+       --discovery <approved-discovery.json> --l2-state <fresh-state>
+  -> validate-evidence -> project-serving -> assess-business-quality
   Discover accounts for the entire declared corpus before design. Intake is
   optional during discovery; business context/questions guide subsequent design.
   Discovery defaults to a no-call/no-write plan; --live and explicit budgets
   authorize execution. Resume reuses received observations. Approval binds the
-  exact discovery hash; enrichment reuses it rather than silently extracting
-  the full corpus again. Processing coverage is not verified semantic recall.
+  exact discovery hash. Final-data extraction explicitly revisits cached source
+  text under the frozen contract. Processing coverage is not semantic recall.
   Evaluate locally, review findings, compile with the exact evaluation-hash
   acknowledgment, then explicitly approve the compiled contract, not the draft.
+  Use enrich --reextract-approved with that discovery or accepted --window-run,
+  a fresh --l2-state and bounded call budgets. This reuses cached source text,
+  not prior candidate values, without rerunning OCR. Freeze the final schema
+  before this second pass and revisit all source units in the approved scope.
+  Without --reextract-approved, enrichment retains its candidate-replay behavior;
+  replay alone cannot populate fields newly introduced by final design.
+  Assess business quality locally; use app publish-structured --quality-policy
+  to bind and enforce the reviewed policy before publication writes.
 
 \b
 Explicit compatibility only (not the default corpus-first workflow):
@@ -192,7 +206,8 @@ def cli(
 
     Default to corpus discovery, then business/question-driven design using
     --discovery. Evaluate and review the design, compile it, and explicitly
-    approve the contract before enrichment reuses that exact discovery.
+    approve the contract before explicit --reextract-approved extraction from
+    that exact cached discovery or approved window prefix.
     Sample-only design, direct init-domain, and the legacy semantic-bundle
     pipeline are explicit compatibility paths, not the default workflow.
 
@@ -218,8 +233,10 @@ cli.add_command(inspect_source_cmd, name="inspect-source")
 cli.add_command(inspect_ontology_cmd, name="inspect-ontology")
 cli.add_command(compile_semantic_cmd, name="compile-semantic")
 cli.add_command(enrich_cmd, name="enrich")
+cli.add_command(handoff_partial_cmd)
 cli.add_command(validate_evidence_cmd, name="validate-evidence")  # schema-2 L3
 cli.add_command(project_serving_cmd, name="project-serving")  # schema-2 L4
+cli.add_command(assess_business_quality_cmd)
 cli.add_command(densify_cmd, name="densify")
 cli.add_command(compile_data_cmd, name="compile-data")
 cli.add_command(compile_ontology_cmd, name="compile-ontology")
@@ -244,7 +261,9 @@ cli.add_command(trace_cmd, name="trace")
 cli.add_command(infra_cmd, name="infra")
 cli.add_command(knowledge_group, name="knowledge")
 app_cmd.add_command(reconcile_prototype_create_cmd)
+app_cmd.add_command(verify_prototype_companion_cmd)
 app_cmd.add_command(repair_ontology_names_cmd)
+app_cmd.add_command(repair_graph_labels_cmd)
 cli.add_command(app_cmd, name="app")  # M8: Foundry agent + reference app
 cli.add_command(validate_deployment_cmd, name="validate-deployment")
 cli.add_command(collect_evidence_cmd, name="collect-evidence")

@@ -7,7 +7,10 @@ model bytes are retained separately from the candidate-only grounding adapter.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
+import time
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +30,7 @@ from .discovery import (
     _reader_binding, _save_provider_diagnostic, _seal, _write, load_discovery, plan_discovery_chunks,
 )
 from .question_routing import question_routing_context
+from . import document_schema
 from .concept_policy import (
     CONCEPT_POLICY, CONCEPT_PROMPT_VERSION, CONCEPT_PROMPT_VERSIONS, CORE_POLICY, CORE_PROMPT_VERSION,
     CORE_PROMPT_VERSIONS, REVIEWED_PROMPT_VERSION, SEMANTIC_REVIEW_POLICY,
@@ -82,23 +86,42 @@ class RunConfig(_WindowModel):
     window_size: int = Field(default=8, ge=1, le=1024)
     max_concurrency: int = Field(default=4, ge=1, le=16)
     max_request_chars: int = Field(default=96_000, ge=1024)
-    max_completion_tokens: int = Field(default=8192, ge=128, le=32_768)
+    max_completion_tokens: int = Field(default=8192, ge=128, le=128_000)
     max_chunk_chars: int = Field(default=8000, ge=128, le=64_000)
     prompt_version: Literal[
         "raw-working-window/1.1.0", "raw-working-window/1.2.0", "raw-working-window/1.3.0",
         "raw-working-window/1.4.0", "raw-working-window/1.5.0",
+        "whole-document-schema/1.0.0", "whole-document-schema/1.1.0", "whole-document-schema/1.2.0",
+        "whole-document-schema/1.3.0",
     ] = RUN_PROMPT_VERSION
     seed_reference: DesignReference | None = None
+    discovery_mode: Literal["chunked", "whole-document"] = "chunked"
+    capability_profile: dict[str, Any] | None = None
+    model_transport: Literal["chat_completions", "project_responses"] = "chat_completions"
 
     @model_serializer(mode="wrap")
     def _legacy_serialization(self, handler):
         data = handler(self)
         if self.seed_reference is None:
             data.pop("seed_reference", None)
+        if self.discovery_mode == "chunked":
+            data.pop("discovery_mode", None)
+            data.pop("capability_profile", None)
+            data.pop("model_transport", None)
         return data
 
     @model_validator(mode="after")
     def _provisional_reference(self):
+        if self.discovery_mode == "whole-document":
+            if self.prompt_version not in document_schema.PROMPT_VERSIONS or self.capability_profile is None:
+                raise ValueError("whole-document discovery requires its own prompt version and explicit capability profile")
+            from fabric_kg_builder.enrichment.model_capabilities import ModelCapabilityProfile
+            ModelCapabilityProfile.model_validate(self.capability_profile)
+            if self.max_completion_tokens < 256:
+                raise ValueError("whole-document output reserve must be at least 256 tokens")
+        elif (self.prompt_version in document_schema.PROMPT_VERSIONS or self.capability_profile is not None
+              or self.model_transport != "chat_completions"):
+            raise ValueError("whole-document prompt/profile cannot be used by chunked discovery")
         if self.seed_reference is None:
             return self
         for concept in self.seed_reference.concepts:
@@ -137,6 +160,8 @@ class RunBudget(_WindowModel):
     stop_after_document: int | None = Field(default=None, ge=1)
     retry_uncertain: bool = False
     retry_invalid_response: bool = False
+    max_transport_retries: int = Field(default=0, ge=0, le=10)
+    max_transport_retry_wait_seconds: int = Field(default=900, ge=0, le=3600)
     request_char_budget: int | None = Field(
         default=None, ge=1024, description="Explicit invocation admission ceiling; None uses the immutable config ceiling.")
 
@@ -193,6 +218,8 @@ class _CoreConceptProposedChange(_ProposedChange):
 
 
 def _system(config, *, repair=False):
+    if config.discovery_mode == "whole-document":
+        return document_schema.system_prompt(config.prompt_version)
     if config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION and repair:
         return CRITIC_SYSTEM
     system = RUN_SYSTEM
@@ -314,6 +341,8 @@ class WindowedRun(_WindowArtifact):
     prompt_version: Literal[
         "raw-working-window/1.1.0", "raw-working-window/1.2.0", "raw-working-window/1.3.0",
         "raw-working-window/1.4.0", "raw-working-window/1.5.0",
+        "whole-document-schema/1.0.0", "whole-document-schema/1.1.0", "whole-document-schema/1.2.0",
+        "whole-document-schema/1.3.0",
     ] = RUN_PROMPT_VERSION
     prompt_hash: Sha256
     chunks: list[ChunkObservation]
@@ -483,7 +512,7 @@ def _plan(inputs, config):
     _verify_chunks(inputs.prepared, chunks)
     windows = []
     for chunk in chunks:
-        if (not windows or len(windows[-1]) >= config.window_size
+        if (not windows or (config.discovery_mode == "chunked" and len(windows[-1]) >= config.window_size)
                 or windows[-1][0].source_file_id != chunk.source_file_id):
             windows.append([])
         windows[-1].append(chunk)
@@ -493,11 +522,16 @@ def _plan(inputs, config):
 def plan_window_run(inputs, config=RunConfig()):
     chunks, windows = _plan(inputs, config)
     seed = initial_snapshot(config)
-    return {
+    result = {
         "prepared_hash": inputs.prepared.artifact_hash, "context_hash": inputs.context.artifact_hash,
         "config": config.model_dump(mode="json"), "document_count": len(inputs.prepared.sources),
         "source_unit_count": len(inputs.prepared.source_units), "chunk_count": len(chunks),
-        "window_count": len(windows), "windows": windows, "minimum_extraction_calls": len(chunks),
+        "window_count": len(windows), "windows": windows,
+        "minimum_extraction_calls": 0 if config.discovery_mode == "whole-document" else len(chunks),
+        **({"discovery_mode": "whole-document", "minimum_schema_calls": len(windows),
+            "coverage_semantics": "complete_cached_document_text_inspected_for_schema_not_instances",
+            "instance_extraction": "requires_L1_approval_and_reextract_approved"}
+           if config.discovery_mode == "whole-document" else {}),
         "primary_codepoint_count": sum(c.slice_end - c.slice_start for c in chunks),
         "scope": "full_prepared_corpus", "initial_schema_version": 0,
         "source_statuses": [s.model_dump(mode="json") for s in inputs.prepared.sources],
@@ -506,6 +540,25 @@ def plan_window_run(inputs, config=RunConfig()):
         **({"seed_reference_authority": "provisional_working_only"}
            if config.seed_reference is not None else {}),
     }
+    if config.discovery_mode == "whole-document":
+        accounting = []
+        for window in windows:
+            chunk = next(item for item in chunks if item.chunk_id == window[0])
+            payload = document_schema.request_payload(
+                inputs.prepared, inputs.context, seed, chunk.source_file_id, _pending_context([]),
+                prompt_version=config.prompt_version)
+            request = {
+                "system": _system(config), "user": canonical_json({"input": payload}),
+                "json_schema": document_schema.response_model(config.prompt_version).model_json_schema(),
+                "max_completion_tokens": config.max_completion_tokens, "max_attempts": 1,
+            }
+            accounting.append({"source_file_id": chunk.source_file_id,
+                               **_document_request_accounting(config, request)})
+        result["input_preflight"] = {
+            "basis": "complete_documents_with_initial_schema; accumulated_schema_rechecked_before_each_call",
+            "documents": accounting,
+        }
+    return result
 
 
 def _source_payload(prepared, chunk):
@@ -527,7 +580,29 @@ def _source_payload(prepared, chunk):
     }
 
 
-def _request(manifest, snapshot, chunk, pending, *, repair=None):
+def _request(manifest, snapshot, chunk, pending, *, repair=None, history=()):
+    if manifest.config.discovery_mode == "whole-document":
+        if repair is not None:
+            raise ValueError("whole-document schema conflicts require existing schema review, not instance repair")
+        payload = document_schema.request_payload(
+            manifest.inputs.prepared, manifest.inputs.context, snapshot, chunk.source_file_id, pending,
+            prompt_version=manifest.config.prompt_version, history=history)
+        _, references = document_schema.source_document(manifest.inputs.prepared, chunk.source_file_id)
+        request = {
+            "system": _system(manifest.config), "user": canonical_json({"input": payload}),
+            "json_schema": document_schema.response_model(manifest.config.prompt_version).model_json_schema(),
+            "max_completion_tokens": manifest.config.max_completion_tokens, "max_attempts": 1,
+        }
+        return _seal(_Ledger, kind="request", payload={
+            "request": request, "manifest_hash": manifest.artifact_hash,
+            "schema_hash": snapshot.artifact_hash, "chunk_id": chunk.chunk_id,
+            "context_hash": manifest.inputs.context.artifact_hash,
+            "prompt_version": manifest.config.prompt_version, "model_hash": manifest.model_hash,
+            "repair": False, "source_file_id": chunk.source_file_id,
+            "source_references": references,
+            "covered_chunk_ids": [item.chunk_id for item in manifest.chunk_plan
+                                  if item.source_file_id == chunk.source_file_id],
+        })
     payload = {
         **_source_payload(manifest.inputs.prepared, chunk),
         "context": manifest.inputs.context.model_dump(mode="json"),
@@ -750,6 +825,10 @@ class _WindowEvaluation:
 
 def _effective_window(snapshot, items, exchanges, config):
     """Derive authority exclusively from immutable original and repair envelopes."""
+    if config.discovery_mode == "whole-document":
+        if len(exchanges) != 1:
+            raise ValueError("whole-document schema window must contain exactly one model exchange")
+        return document_schema.evaluate(snapshot, items, exchanges[0], config)
     if len(exchanges) < len(items):
         raise ValueError("window is missing original response envelopes")
     changes, pending, errors, contexts = [], [], [], []
@@ -1119,8 +1198,11 @@ def _expected_pending(stored, history):
     raise ValueError("unsupported pending context representation")
 
 
-def _resumable_request(root, manifest, snapshot, chunk, pending, legacy_pending, *, previous_pending=None, repair=None):
-    preferred = _request(manifest, snapshot, chunk, pending, repair=repair)
+def _resumable_request(root, manifest, snapshot, chunk, pending, legacy_pending, *,
+                       previous_pending=None, repair=None, history=()):
+    preferred = _request(manifest, snapshot, chunk, pending, repair=repair, history=history)
+    if manifest.config.discovery_mode == "whole-document":
+        return preferred
     previous = _request(manifest, snapshot, chunk, previous_pending, repair=repair) if previous_pending is not None else None
     legacy = _request(manifest, snapshot, chunk, legacy_pending, repair=repair)
     for candidate in (preferred, previous, legacy):
@@ -1138,7 +1220,159 @@ def _resumable_request(root, manifest, snapshot, chunk, pending, legacy_pending,
     return preferred
 
 
+def _document_request_accounting(config, request, client_config=None):
+    from fabric_kg_builder.config.schema import FoundryConfig
+    from fabric_kg_builder.enrichment.model_capabilities import ModelCapabilityProfile, preflight_model_prompt
+
+    profile = ModelCapabilityProfile.model_validate(config.capability_profile)
+    transport = client_config or FoundryConfig(
+        endpoint=profile.endpoint, openai_endpoint=profile.endpoint,
+        chat_deployment=profile.deployment, chat_model=profile.model_name,
+        inference_api=config.model_transport)
+    accounting = preflight_model_prompt(
+        transport, profile, system=request["system"], user=request["user"],
+        schema=request["json_schema"], output=request["max_completion_tokens"])
+    return {**accounting, "reserved_tokens": accounting["estimated_total_tokens"]}
+
+
+def _dispatch_document(client, config, request, dispatched, root):
+    from types import SimpleNamespace
+    from openai import APIError
+
+    from fabric_kg_builder.enrichment.foundry_client import (
+        FoundryClient, FoundryJSONResponseError, _transport_error_is_retryable,
+        transport_retry_after_seconds,
+    )
+    from fabric_kg_builder.enrichment.model_capabilities import (
+        ModelCapabilityProfile, enforce_model_request, validate_model_response,
+    )
+
+    profile = ModelCapabilityProfile.model_validate(config.capability_profile)
+    sdk = client._client.with_options(max_retries=0)
+    attempted = False
+    metadata = {}
+
+    def physical(operation, **kwargs):
+        nonlocal attempted
+        accounting = enforce_model_request(kwargs, profile)
+        if (accounting["output_reserve_tokens"] != config.max_completion_tokens
+                or accounting["estimated_total_tokens"] > dispatched.payload["reserved_tokens"]):
+            raise ValueError("DOCUMENT_MODEL_PHYSICAL_RESERVATION_DRIFT")
+        # SDK retries are disabled; wrapper fallback/transport retries must return
+        # to the durable coordinator rather than consume unreserved physical calls.
+        if attempted:
+            raise ValueError("DOCUMENT_MODEL_PHYSICAL_RETRY_REQUIRES_EXPLICIT_RETRY")
+        attempted = True
+        physical_request = _seal(_Ledger, kind="physical_request", payload={
+            "request_hash": request.artifact_hash, "dispatch_hash": dispatched.artifact_hash,
+            "sdk_request_hash": canonical_sha256(kwargs), "request_accounting": accounting,
+        })
+        _write(root / "physical-requests" / f"{dispatched.artifact_hash}.json", physical_request)
+        try:
+            result = operation(**kwargs)
+        except APIError as exc:
+            diagnostic = _seal(_Ledger, kind="physical_api_error", payload={
+                "dispatch_hash": dispatched.artifact_hash,
+                "physical_request_hash": physical_request.artifact_hash,
+                "error_type": type(exc).__name__, "status_code": getattr(exc, "status_code", None),
+                "code": exc.code, "param": exc.param, "message": exc.message,
+                "retryable": _transport_error_is_retryable(exc),
+                "retry_after_seconds": transport_retry_after_seconds(exc),
+            })
+            _write(root / "physical-errors" / f"{dispatched.artifact_hash}.json", diagnostic)
+            raise
+        response_model = getattr(result, "model", None)
+        try:
+            validate_model_response(response_model, profile)
+        except ValueError as exc:
+            raise FoundryJSONResponseError(str(exc), {
+                "transport": config.model_transport, "attempt": 1,
+                "parse_error": {
+                    "code": "DOCUMENT_MODEL_VERSION_MISMATCH", "provider_model": response_model,
+                    "expected_model": f"{profile.model_name}-{profile.model_version}",
+                },
+            }) from exc
+        metadata.update(provider_model=response_model, physical_request_hash=physical_request.artifact_hash)
+        return result
+
+    if config.model_transport == "project_responses":
+        proxy = SimpleNamespace(responses=SimpleNamespace(
+            create=lambda **kwargs: physical(sdk.responses.create, **kwargs)))
+    else:
+        proxy = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=lambda **kwargs: physical(sdk.chat.completions.create, **kwargs))))
+    guarded = FoundryClient(client._config, _sdk_client=proxy, _coordinator_owned_retries=True)
+    raw = guarded.complete_json(**request.payload["request"])
+    if not metadata:
+        raise ValueError("DOCUMENT_MODEL_PHYSICAL_RESPONSE_REQUIRED")
+    return raw, metadata
+
+
+def _validate_document_exchange(log, items, snapshot, *, prepared, context, manifest_hash,
+                                model_hash, config, history):
+    if not items or len(log.exchanges) != 1 or log.repair_request_hashes or log.repair_response_hashes:
+        raise ValueError("whole-document window requires one exchange and no extraction repairs")
+    exchange = log.exchanges[0]
+    request, response = exchange.request, exchange.response
+    from fabric_kg_builder.enrichment.model_capabilities import ModelCapabilityProfile, validate_model_response
+
+    validate_model_response(response.payload.get("provider_model"),
+                            ModelCapabilityProfile.model_validate(config.capability_profile))
+    first = items[0].chunk
+    if (log.request_hashes != [request.artifact_hash] or log.response_hashes != [response.artifact_hash]
+            or request.kind != "request" or response.kind != "response"
+            or response.payload.get("request_hash") != request.artifact_hash):
+        raise ValueError("whole-document request/response binding differs")
+    expected_binding = {
+        "manifest_hash": manifest_hash, "schema_hash": snapshot.artifact_hash,
+        "context_hash": context.artifact_hash, "model_hash": model_hash,
+        "prompt_version": config.prompt_version, "repair": False,
+        "chunk_id": first.chunk_id, "source_file_id": first.source_file_id,
+        "covered_chunk_ids": [item.chunk.chunk_id for item in items],
+    }
+    if any(request.payload.get(key) != value for key, value in expected_binding.items()):
+        raise ValueError("whole-document identity or cached chunk coverage differs")
+    if any(item.chunk.source_file_id != first.source_file_id for item in items):
+        raise ValueError("whole-document window cannot batch documents")
+    _, references = document_schema.source_document(prepared, first.source_file_id)
+    if request.payload.get("source_references") != references:
+        raise ValueError("whole-document compact source reference binding differs")
+    payload = document_schema.request_payload(
+        prepared, context, snapshot, first.source_file_id, _pending_context(history),
+        prompt_version=config.prompt_version, history=history)
+    expected_request = {
+        "system": _system(config), "user": canonical_json({"input": payload}),
+        "json_schema": document_schema.response_model(config.prompt_version).model_json_schema(),
+        "max_completion_tokens": config.max_completion_tokens, "max_attempts": 1,
+    }
+    if request.payload.get("request") != expected_request:
+        raise ValueError("whole-document full source/intake/schema request drift")
+    units = {unit.source_unit_id: unit for unit in prepared.source_units}
+    for item in items:
+        expected = _grounded_observation(
+            item.chunk, request.artifact_hash, {"candidates": []},
+            units[item.chunk.source_unit_id], request_prompt_version=None)
+        if item != expected:
+            raise ValueError("whole-document coverage must not contain instance observations")
+    for ref in references.values():
+        unit = units[ref["source_unit_id"]]
+        ranges = sorted((item.chunk.slice_start, item.chunk.slice_end) for item in items
+                        if item.chunk.source_unit_id == unit.source_unit_id)
+        cursor = 0
+        for start, end in ranges:
+            if start != cursor:
+                raise ValueError("whole-document chunk coverage omits or overlaps cached text")
+            cursor = end
+        if cursor != len(unit.text):
+            raise ValueError("whole-document commit must cover every cached source section")
+
+
 def _validate_exchanges(log, items, snapshot, *, prepared, context, manifest_hash, model_hash, config, history):
+    if config.discovery_mode == "whole-document":
+        _validate_document_exchange(
+            log, items, snapshot, prepared=prepared, context=context,
+            manifest_hash=manifest_hash, model_hash=model_hash, config=config, history=history)
+        return
     expected_requests = [e.request.artifact_hash for e in log.exchanges]
     expected_responses = [e.response.artifact_hash for e in log.exchanges]
     if (log.request_hashes + log.repair_request_hashes != expected_requests
@@ -1224,7 +1458,7 @@ def _load_commits(root, manifest):
                 or commit.snapshot.version != index + 1
                 or log.previous_log_hash != (logs[-1].artifact_hash if logs else None)):
             raise ValueError("window commit binding/chain mismatch")
-        if (len(log.request_hashes) != len(log.chunk_ids)
+        if (len(log.request_hashes) != (1 if manifest.config.discovery_mode == "whole-document" else len(log.chunk_ids))
                 or len(log.response_hashes) != len(log.request_hashes)
                 or [item.chunk.chunk_id for item in commit.chunks] != log.chunk_ids):
             raise ValueError("window commit request/chunk accounting mismatch")
@@ -1236,6 +1470,8 @@ def _load_commits(root, manifest):
                     or request.payload["manifest_hash"] != manifest.artifact_hash
                     or request.payload["schema_hash"] != snapshot.artifact_hash):
                 raise ValueError("window request/response ledger mismatch")
+            if manifest.config.discovery_mode == "whole-document":
+                continue
             chunk = commit.chunks[position].chunk
             payload = json.loads(request.payload["request"]["user"])["input"]
             if (request.payload["chunk_id"] != chunk.chunk_id
@@ -1322,6 +1558,18 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
     """Resume exact immutable requests; uncertain remote dispatch requires opt-in."""
     root = Path(output_dir)
     inputs = WindowInputs.model_validate(inputs.model_dump(mode="python"))
+    config = RunConfig.model_validate(config.model_dump(mode="python"))
+    if config.discovery_mode == "whole-document" and client is not None:
+        from fabric_kg_builder.enrichment.foundry_client import FoundryClient
+        from fabric_kg_builder.enrichment.model_capabilities import ModelCapabilityProfile, validate_model_binding
+        if not isinstance(client, FoundryClient):
+            raise ValueError("whole-document discovery requires the guarded FoundryClient SDK boundary")
+        client_config = getattr(client, "_config", None)
+        if client_config is None:
+            raise ValueError("whole-document client requires explicit Foundry configuration binding")
+        validate_model_binding(client_config, ModelCapabilityProfile.model_validate(config.capability_profile))
+        if client_config.inference_api != config.model_transport:
+            raise ValueError("whole-document client transport differs from sealed accounting transport")
     _verify_prepared(inputs.prepared)
     chunks, windows = _plan(inputs, config)
     manifest = _seal(_Manifest, inputs=inputs, config=config, chunk_plan=chunks, windows=windows,
@@ -1332,7 +1580,9 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
                                                   "candidates": RawCandidateResponse.model_json_schema(),
                                                   **({"admission_system": CRITIC_SYSTEM,
                                                       "admission_response": SemanticAdmissionResponse.model_json_schema()}
-                                                     if config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION else {})}))
+                                                     if config.prompt_version == COMPACT_REVIEW_PROMPT_VERSION else {}),
+                                                   **({"document_response": document_schema.response_model(config.prompt_version).model_json_schema()}
+                                                     if config.discovery_mode == "whole-document" else {})}))
     _write(root / "manifest.json", manifest)
     snapshot, logs, observations = _load_commits(root, manifest)
     counters = dict(model_call_count=0, repair_call_count=0, reserved_tokens=0,
@@ -1350,7 +1600,7 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
     repair_total = sum(_read(p, _Ledger, "dispatch").payload["repair"]
                        for p in (root / "dispatches").glob("*.json"))
 
-    def reserve(request):
+    def reserve(request, *, automatic_retry_of=None):
         nonlocal repair_total
         key = request.artifact_hash
         _write(root / "requests" / f"{key}.json", request)
@@ -1380,9 +1630,14 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
                     raise ValueError("received-invalid provider diagnostic binding mismatch")
                 if not budget.retry_invalid_response:
                     return None, "received_invalid_response_requires_explicit_retry"
-            elif not budget.retry_uncertain:
+            elif automatic_retry_of != last_dispatch.artifact_hash and not budget.retry_uncertain:
                 return None, "uncertain_dispatch_requires_explicit_retry"
         reserve_tokens = len(canonical_json(request.payload["request"]).encode("utf-8")) + config.max_completion_tokens
+        accounting = None
+        if config.discovery_mode == "whole-document":
+            accounting = _document_request_accounting(
+                config, request.payload["request"], getattr(client, "_config", None))
+            reserve_tokens = accounting["reserved_tokens"]
         if (counters["model_call_count"] >= budget.max_calls
                 or (budget.max_tokens and counters["reserved_tokens"] + reserve_tokens > budget.max_tokens)):
             return None, "model_budget_exhausted"
@@ -1392,8 +1647,11 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
             return None, "model_client_required"
         dispatch = _seal(_Ledger, kind="dispatch", payload={
             "request_hash": key, "repair": is_repair, "reserved_tokens": reserve_tokens,
-            "attempt": len(prior_dispatches), "explicit_retry": bool(prior_dispatches),
+            "attempt": len(prior_dispatches),
+            "explicit_retry": bool(prior_dispatches) and automatic_retry_of is None,
+            **({"automatic_retry_of": automatic_retry_of} if automatic_retry_of is not None else {}),
             "request_chars": request_chars, "effective_request_char_budget": request_char_budget,
+            **({"request_accounting": accounting} if accounting is not None else {}),
         })
         _write(root / "dispatches" / f"{key}-{len(prior_dispatches):04d}.json", dispatch)
         counters["model_call_count"] += 1
@@ -1402,13 +1660,17 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
         repair_total += int(is_repair)
         return None, None
 
-    def dispatch(request):
+    def dispatch_once(request):
         key = request.artifact_hash
         dispatched = _read(sorted((root / "dispatches").glob(f"{key}-*.json"))[-1], _Ledger, "dispatch")
         try:
-            raw = client.complete_json(**request.payload["request"])
+            metadata = {}
+            if config.discovery_mode == "whole-document":
+                raw, metadata = _dispatch_document(client, config, request, dispatched, root)
+            else:
+                raw = client.complete_json(**request.payload["request"])
             response = _seal(_Ledger, kind="response", payload={
-                "request_hash": request.artifact_hash, "response": raw,
+                "request_hash": request.artifact_hash, "response": raw, **metadata,
             })
             _write(root / "responses" / f"{request.artifact_hash}.json", response)
             return response, None
@@ -1429,6 +1691,54 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
             _write(root / "errors" / f"{diagnostic.artifact_hash}.json", diagnostic)
             return None, "uncertain_dispatch_requires_explicit_retry"
 
+    def dispatch(request):
+        waited = 0.0
+        for retry in range(budget.max_transport_retries + 1):
+            response, error = dispatch_once(request)
+            if (config.discovery_mode != "whole-document" or response is not None
+                    or error != "uncertain_dispatch_requires_explicit_retry"):
+                return response, error
+            dispatched = _read(
+                sorted((root / "dispatches").glob(f"{request.artifact_hash}-*.json"))[-1],
+                _Ledger, "dispatch")
+            failure_path = root / "physical-errors" / f"{dispatched.artifact_hash}.json"
+            if not failure_path.exists():
+                return None, error
+            failure = _read(failure_path, _Ledger, "physical_api_error")
+            physical = _read(root / "physical-requests" / f"{dispatched.artifact_hash}.json",
+                             _Ledger, "physical_request")
+            if (failure.payload["dispatch_hash"] != dispatched.artifact_hash
+                    or failure.payload["physical_request_hash"] != physical.artifact_hash
+                    or physical.payload["dispatch_hash"] != dispatched.artifact_hash
+                    or physical.payload["request_hash"] != request.artifact_hash):
+                raise ValueError("document retry physical failure binding mismatch")
+            if not failure.payload.get("retryable") or retry == budget.max_transport_retries:
+                return None, error
+            hint = failure.payload.get("retry_after_seconds")
+            base = 60.0 if failure.payload["status_code"] == 429 else 1.0
+            delay = (hint if hint is not None else min(300.0, base * 2 ** retry)) + random.uniform(0, 1)
+            if waited + delay > budget.max_transport_retry_wait_seconds:
+                return None, "transport_retry_wait_budget_exhausted"
+            # Every retry is reserved before sleeping/dispatching. A process crash
+            # still requires explicit resume authorization; no hidden SDK retries.
+            cached, blocked = reserve(request, automatic_retry_of=dispatched.artifact_hash)
+            if cached is not None or blocked:
+                return cached, blocked
+            event = _seal(_Ledger, kind="transport_retry", payload={
+                "request_hash": request.artifact_hash, "failed_dispatch_hash": dispatched.artifact_hash,
+                "failure_hash": failure.artifact_hash, "retry_number": retry + 1,
+                "delay_seconds": delay, "error_type": failure.payload["error_type"],
+                "status_code": failure.payload["status_code"],
+            })
+            _write(root / "retries" / f"{event.artifact_hash}.json", event)
+            logging.getLogger(__name__).warning(
+                "Whole-document transport retry %s/%s after %s (status=%s); waiting %.2fs",
+                retry + 1, budget.max_transport_retries, failure.payload["error_type"],
+                failure.payload["status_code"], delay)
+            time.sleep(delay)
+            waited += delay
+        raise AssertionError("transport retry loop must return")
+
     for index in range(len(logs), len(windows)):
         if budget.max_windows is not None and len(logs) - initial_windows >= budget.max_windows:
             reason = "window_budget_exhausted"
@@ -1442,8 +1752,8 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
         previous_pending = _pending_context_v1(logs)
         legacy_pending = _pending_ledger(logs)
         requests = [_resumable_request(root, manifest, snapshot, chunk, pending_context, legacy_pending,
-                                       previous_pending=previous_pending)
-                    for chunk in window_chunks]
+                                       previous_pending=previous_pending, history=logs)
+                    for chunk in (window_chunks[:1] if config.discovery_mode == "whole-document" else window_chunks)]
         responses, needs_dispatch = {}, []
         blocked = None
         for request in requests:
@@ -1470,7 +1780,20 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
         items, exchanges = [], []
         decoded = {}
         try:
+            if config.discovery_mode == "whole-document":
+                request = requests[0]
+                response = responses[request.artifact_hash]
+                items = [
+                    _grounded_observation(chunk, request.artifact_hash, {"candidates": []},
+                                          units[chunk.source_unit_id], request_prompt_version=None)
+                    for chunk in window_chunks
+                ]
+                exchanges = [WindowedExchange(request=request, response=response)]
+                # Reject malformed schema output before recording document coverage.
+                _effective_window(snapshot, items, exchanges, config)
             for chunk, request in zip(window_chunks, requests):
+                if config.discovery_mode == "whole-document":
+                    break
                 response = responses[request.artifact_hash]
                 raw = _decode(response, config)
                 item = _grounded_observation(
@@ -1553,7 +1876,8 @@ def run_windowed(*, inputs, output_dir, config=RunConfig(), budget=RunBudget(),
         snapshot = next_snapshot
         if not snapshot.concepts:
             reason = "bootstrap_blocked"
-            break
+            if config.discovery_mode == "chunked":
+                break
     return _publish(root, manifest, snapshot, logs, observations, reason, counters)
 
 
@@ -1606,6 +1930,7 @@ class _CommittedProgress:
     model_call_count: int
     repair_call_count: int
     reserved_tokens: int
+    config: RunConfig
 
     @property
     def publication_state(self):
@@ -1621,7 +1946,7 @@ def _committed_progress(path):
         run = load_windowed_run(path)
         return _CommittedProgress(
             run.prepared, run.chunk_plan, run.final_snapshot, run.logs, run.chunks,
-            run.manifest_hash, run, run.model_call_count, run.repair_call_count, run.reserved_tokens)
+            run.manifest_hash, run, run.model_call_count, run.repair_call_count, run.reserved_tokens, run.config)
     manifest = _read(path / "manifest.json", _Manifest)
     _verify_prepared(manifest.inputs.prepared)
     _verify_chunks(manifest.inputs.prepared, manifest.chunk_plan)
@@ -1654,7 +1979,7 @@ def _committed_progress(path):
     return _CommittedProgress(
         manifest.inputs.prepared, manifest.chunk_plan, snapshot, logs, chunks, manifest.artifact_hash,
         report, len(dispatches), sum(d.payload["repair"] for d in dispatches),
-        sum(d.payload["reserved_tokens"] for d in dispatches))
+        sum(d.payload["reserved_tokens"] for d in dispatches), manifest.config)
 
 
 def windowed_status(path):
@@ -1674,6 +1999,11 @@ def windowed_status(path):
         if all(chunk.chunk_id in completed_ids for chunk in plan if chunk.source_unit_id == unit.source_unit_id)
     ]
     records = [r for item in chunks for r in map_chunk(item, snapshot)]
+    revision = {}
+    if progress.config.prompt_version in document_schema.EVOLUTION_PROMPT_VERSIONS:
+        from .document_schema_evolution import evolution_context
+
+        revision = {"schema_revision": evolution_context(logs)["schema_revision"]}
     return {
         "artifact_kind": "domain.windowed_run" if published else "domain.windowed_progress",
         "state": report.state if published else progress.publication_state,
@@ -1683,10 +2013,18 @@ def windowed_status(path):
         "published_cursor": report.cursor if report is not None else None,
         "published_run_hash": report.artifact_hash if report is not None else None,
         "completed_windows": len(logs), "schema_version": snapshot.version,
+        **revision,
         "schema_hash": snapshot.artifact_hash, "run_hash": report.artifact_hash if published else None,
         "last_chunk_id": chunks[-1].chunk.chunk_id if chunks else None,
         "model_call_count": progress.model_call_count, "repair_call_count": progress.repair_call_count,
-        "reserved_tokens": progress.reserved_tokens, "token_accounting": "conservative_utf8_byte_reservation",
+        "reserved_tokens": progress.reserved_tokens,
+        "token_accounting": ("serialized_sdk_envelope_tokenizer_estimate_with_headroom"
+                             if progress.config.discovery_mode == "whole-document"
+                             else "conservative_utf8_byte_reservation"),
+        **({"discovery_mode": "whole-document",
+            "coverage_semantics": "complete_cached_document_text_inspected_for_schema_not_instances",
+            "instance_extraction": "requires_L1_approval_and_reextract_approved"}
+           if progress.config.discovery_mode == "whole-document" else {}),
         "planned_documents": len(prepared.sources), "completed_document_ids": completed_documents,
         "planned_source_units": len(prepared.source_units), "completed_source_unit_ids": completed_units,
         "planned_primary_codepoints": sum(c.slice_end - c.slice_start for c in plan),
@@ -1700,8 +2038,15 @@ def windowed_status(path):
     }
 
 
-def windowed_history(path):
-    return _committed_progress(path).logs
+def windowed_history(path, *, changes_only=False):
+    progress = _committed_progress(path)
+    if changes_only:
+        if progress.config.prompt_version not in document_schema.EVOLUTION_PROMPT_VERSIONS:
+            raise ValueError("--changes-only requires whole-document-schema/1.2.0 or 1.3.0; use full history for legacy runs")
+        from .document_schema_evolution import transitions
+
+        return transitions(progress.logs)
+    return progress.logs
 
 
 def windowed_schema(path):

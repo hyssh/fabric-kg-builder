@@ -7,6 +7,7 @@ Its journal owns returned IDs, not names; uncertain writes stop rather than retr
 from __future__ import annotations
 
 import base64
+import copy
 import fcntl
 import hashlib
 import json
@@ -25,6 +26,7 @@ from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.deploy.fabric_ontology_definition import (
     BASE_ENTITY_TYPE_ID,
     compile_fabric_ontology_definition,
+    instance_base_entity_table,
 )
 from fabric_kg_builder.deploy.fabric_semantic_model_definition import (
     compile_fabric_semantic_model_definition,
@@ -33,17 +35,23 @@ from fabric_kg_builder.deploy.lakehouse_schema import (
     onelake_tables_path,
     resolve_lakehouse_schema,
 )
-from fabric_kg_builder.deploy.ontology_names import NATIVE_NAME_PATTERN
+from fabric_kg_builder.deploy.ontology_names import (
+    METADATA_ONLY_ALIASES_LIMITATION,
+    NATIVE_NAME_PATTERN,
+    allocate_readable_names,
+)
 from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
 from fabric_kg_builder.serving.graph_model import (
     build_graph_model_parts,
     encode_parts_for_api,
     validate_graph_data_source_paths,
+    validate_graph_model_schema,
 )
 from fabric_kg_builder.serving.l5a_crosswalk import (
     compile_access_policy,
     compile_governed_assets,
-    compile_publication_crosswalk,
+    compile_publication_crosswalks,
+    publication_crosswalk_set_hash,
 )
 from fabric_kg_builder.serving.structured_publication import (
     _typed_fingerprint_scalar,
@@ -71,7 +79,7 @@ ITEM_TYPES = {
 }
 GRAPH_TYPES = {
     "string": "STRING",
-    "integer": "INTEGER",
+    "integer": "INT",
     "number": "DOUBLE",
     "boolean": "BOOLEAN",
     "datetime": "ZONED DATETIME",
@@ -190,7 +198,8 @@ def _table_proof(table: Any) -> dict[str, Any]:
 
 
 def _compile(
-    l4_run: Path, l3_root: Path, workspace_id: str, prefix: str
+    l4_run: Path, l3_root: Path, workspace_id: str, prefix: str,
+    *, quality_policy: dict[str, Any] | None = None,
 ) -> _Compilation:
     import pyarrow as pa
 
@@ -201,7 +210,7 @@ def _compile(
         kind: f"prototype-target:{prefix}:{kind}"
         for kind in ("parquet", "semantic_model", "ontology", "graph")
     }
-    crosswalk = compile_publication_crosswalk(source)
+    crosswalks = compile_publication_crosswalks(source)
     policy = compile_access_policy(
         source,
         access_policy_id=f"access-policy:{prefix}",
@@ -210,14 +219,18 @@ def _compile(
         authorization_resource_id=f"authorization-resource:{prefix}",
     )
     assets = compile_governed_assets(
-        source, crosswalks=(crosswalk,), access_policy=policy,
+        source, crosswalks=crosswalks, access_policy=policy,
         target_ids=targets, workspace_id=workspace_id,
+        quality_policy=quality_policy,
     )
     compiled = compile_l5a_publication(
-        source, crosswalks=(crosswalk,), access_policy=policy,
+        source, crosswalks=crosswalks, access_policy=policy,
         governed_assets=assets, target_ids=targets,
+        quality_policy=quality_policy,
     )
-    window_scope = export_serving_question_context(source).get("window_run_scope")
+    question_context = export_serving_question_context(source)
+    window_scope = question_context.get("window_run_scope")
+    partial_scope = question_context.get("partial_extraction_scope")
     tables = dict(compiled.tables)
     if tables["l4_semantic_asserted_entities"].num_rows == 0:
         raise PrototypePublicationError("Empty asserted semantic entity data is not publishable")
@@ -227,10 +240,14 @@ def _compile(
     nodes = {
         item["canonical_semantic_type_id"]: item for item in graph["node_types"]
     }
+    presentation = compiled.definitions["ontology"]["presentation_catalog"]
+    labels = allocate_readable_names({
+        semantic_id: presentation["entity_types"][semantic_id]
+        for semantic_id in nodes
+    })
     identities: dict[str, set[str]] = {}
     bindings: dict[str, dict[str, Any]] = {}
     types_by_alias: dict[str, dict[str, str]] = {}
-    labels: dict[str, str] = {}
     for semantic_id, node in sorted(nodes.items()):
         table_id = node["physical_table_id"]
         table = tables[table_id]
@@ -251,10 +268,10 @@ def _compile(
             "node_type_alias": alias, "property_columns": list(columns),
         }
         types_by_alias[alias] = columns
-        labels[semantic_id] = node["label"]
 
     pairs: list[dict[str, Any]] = []
     edge_catalog: list[dict[str, Any]] = []
+    edge_presentation: dict[str, dict[str, Any]] = {}
     for edge in graph["edge_types"]:
         relationship_id = edge["canonical_semantic_relationship_id"]
         source_types = edge["allowed_source_semantic_type_ids"]
@@ -290,13 +307,18 @@ def _compile(
                     [relationship_id, source_type, target_type]
                 )[:16]
                 table_id = edge["physical_table_id"]
-                label = edge["label"]
+                metadata = presentation["relationship_types"][relationship_id]
                 if expanded:
                     table_id = f"prototype_graph_edge_{suffix}"
                     if table_id in tables:
                         raise PrototypePublicationError("Derived graph table collision")
                     tables[table_id] = table.take(pa.array(selected, type=pa.int64()))
-                    label = f"{label}_{suffix}"
+                    metadata = {
+                        "display_name": (
+                            f"{labels[source_type]} {metadata['display_name']} {labels[target_type]}"
+                        ),
+                    }
+                edge_presentation[f"edge_{suffix}"] = metadata
                 columns = [
                     "__canonical_id", "__semantic_relationship_id",
                     edge["source_identity_column"], edge["target_identity_column"],
@@ -307,12 +329,12 @@ def _compile(
                     "table": table_id, "property_columns": columns,
                     "source_entity_id_column": edge["source_identity_column"],
                     "target_entity_id_column": edge["target_identity_column"],
-                    "graph_alias": f"edge_{suffix}", "graph_label": label,
+                    "graph_alias": f"edge_{suffix}",
                 })
                 edge_catalog.append({
                     "canonical_relationship_id": relationship_id,
                     "source_type": source_type, "target_type": target_type,
-                    "graph_label": label, "physical_table_id": table_id,
+                    "physical_table_id": table_id,
                     "source_table_id": edge["physical_table_id"],
                     "row_count": len(selected),
                 })
@@ -322,6 +344,11 @@ def _compile(
             )
     if not sum(tables[node["physical_table_id"]].num_rows for node in nodes.values()):
         raise PrototypePublicationError("No typed semantic data to bind")
+    edge_labels = allocate_readable_names(
+        edge_presentation, prefix="Relationship", reserved=list(labels.values()),
+    )
+    for pair, entry in zip(pairs, edge_catalog):
+        pair["graph_label"] = entry["graph_label"] = edge_labels[pair["graph_alias"]]
     parts = build_graph_model_parts(
         entity_types=sorted(nodes), relationship_pairs=pairs,
         node_labels=labels, node_table_bindings=bindings,
@@ -329,20 +356,33 @@ def _compile(
         schema="dbo", model_name="schema2_prototype",
     )
     parts = [part for part in parts if part["path"] != ".platform"]
+    node_source_columns = {
+        binding["nodeTypeAlias"]: {
+            item["propertyName"]: item["sourceColumn"]
+            for item in binding["propertyMappings"]
+        }
+        for part in parts if part["path"] == "graphDefinition.json"
+        for binding in part["payload_json"]["nodeTables"]
+    }
     for part in parts:
         if part["path"] == "graphType.json":
             for node in part["payload_json"]["nodeTypes"]:
                 for prop in node["properties"]:
-                    prop["type"] = types_by_alias[node["alias"]][prop["name"]]
+                    column = node_source_columns[node["alias"]][prop["name"]]
+                    prop["type"] = types_by_alias[node["alias"]][column]
     validate_graph_data_source_paths(parts)
+    validate_graph_model_schema(parts)
     for table_id in tables:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_id):
             raise PrototypePublicationError(f"Unsafe physical table name: {table_id}")
+    ontology = compiled.definitions["ontology"]
+    if ontology["relationship_types"] or any(item["properties"] for item in ontology["entity_types"]):
+        limitations.append(METADATA_ONLY_ALIASES_LIMITATION)
     return _Compilation(
         definitions=compiled.definitions, tables=tables, graph_parts=parts,
         graph_catalog={
             "nodes": [
-                {"canonical_type_id": semantic_id, "graph_label": node["label"],
+                {"canonical_type_id": semantic_id, "graph_label": labels[semantic_id],
                  "physical_table_id": node["physical_table_id"],
                  "row_count": tables[node["physical_table_id"]].num_rows}
                 for semantic_id, node in sorted(nodes.items())
@@ -357,10 +397,13 @@ def _compile(
         limitations=limitations, blockers=blockers,
         provenance={
             **({"window_run_scope": window_scope} if window_scope is not None else {}),
+            **({"partial_extraction_scope": partial_scope} if partial_scope is not None else {}),
             "source_projection_id": compiled.definitions["parquet"]["source_projection_id"],
             "source_projection_hash": compiled.definitions["parquet"]["source_projection_hash"],
-            "crosswalk_hash": crosswalk.crosswalk_hash,
-            "stable_id_lock_hash": crosswalk.stable_id_lock_hash,
+            "crosswalk_hash": publication_crosswalk_set_hash(crosswalks),
+            **({"crosswalk_hashes": sorted(item.crosswalk_hash for item in crosswalks)}
+               if len(crosswalks) > 1 else {}),
+            "stable_id_lock_hash": crosswalks[0].stable_id_lock_hash,
             "access_policy_hash": policy.policy_hash,
             "definition_hashes": {
                 kind: canonical_sha256(value)
@@ -370,7 +413,53 @@ def _compile(
     )
 
 
-def _prototype_description(run_id: str, window_scope: dict[str, Any] | None = None) -> str:
+def _compile_from_plan(
+    l4_run: Path, l3_root: Path, plan: dict[str, Any],
+) -> _Compilation:
+    """Retain publication quality authority through readback and repair paths."""
+    if "business_quality" not in plan:
+        return _compile(l4_run, l3_root, plan["workspace_id"], plan["name_prefix"])
+    report = plan["business_quality"]
+    if not isinstance(report, dict) or not isinstance(report.get("policy"), dict):
+        raise PrototypePublicationError("Bound business quality policy is missing")
+    compilation = _compile(
+        l4_run, l3_root, plan["workspace_id"], plan["name_prefix"],
+        quality_policy=report["policy"],
+    )
+    if compilation.definitions["ontology"].get("business_quality") != report:
+        raise PrototypePublicationError("Immutable business quality assessment changed; create a new plan")
+    return compilation
+
+
+def _prototype_description(
+    run_id: str, window_scope: dict[str, Any] | None = None,
+    partial_scope: dict[str, Any] | None = None,
+) -> str:
+    if partial_scope is not None:
+        plan = partial_scope["plan"]
+        inventory = plan["source_chunk_inventory_count"]
+        corpus = (
+            f"{inventory} chunks" if inventory is not None
+            else f"{plan['source_unit_inventory_count']} source units"
+        )
+        roots = (
+            f"PARTIAL: roots={plan['selected_root_count']}/{plan['approved_contract_root_count']} "
+            f"selected,{plan['operator_excluded_completed_root_count']} completed-excluded,"
+            f"{plan['missing_root_count']} missing; "
+            if plan.get("operator_excluded_completed_root_count", 0) else
+            f"PARTIAL EXTRACTION: approved roots={plan['completed_root_count']}/"
+            f"{plan['approved_contract_root_count']} complete,{plan['excluded_root_count']} excluded; "
+        )
+        description = (
+            roots +
+            f"leaves={plan['completed_leaf_count']}; corpus={corpus}; NOT full coverage; "
+            f"scope={plan['plan_hash']}; run={run_id}"
+        )
+        if len(description) > 256:
+            raise PrototypePublicationError(
+                "Scoped prototype description exceeds 256 characters; no content was truncated"
+            )
+        return description
     if window_scope is None:
         return f"Schema2 create-only prototype run {run_id}; retain partial items"
     label = (
@@ -487,13 +576,13 @@ def _compiler_hash() -> str:
     from fabric_kg_builder.deploy import fabric_ontology_definition
     from fabric_kg_builder.deploy import ontology_names
     from fabric_kg_builder.deploy import fabric_semantic_model_definition
-    from fabric_kg_builder.serving import graph_model, structured_publication
+    from fabric_kg_builder.serving import business_quality, graph_model, structured_publication
 
     return canonical_sha256({
         module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
         for module in (
             fabric_ontology_definition, ontology_names, fabric_semantic_model_definition,
-            graph_model, structured_publication,
+            graph_model, structured_publication, business_quality,
         )
     } | {
         "prototype": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -804,8 +893,11 @@ class _Run:
             if (
                 not isinstance(status, str) or not status.startswith(("00", "01", "02", "03"))
                 or not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+                or body.get("result", {}).get("kind") != "TABLE"
+                or set(rows[0]) != {"observed_count"} or type(rows[0].get("observed_count")) is not int
                 or rows[0].get("observed_count") != expected[name]
                 or body.get("continuationToken") or body.get("continuationUri")
+                or body.get("result", {}).get("continuationToken") or body.get("result", {}).get("continuationUri")
             ):
                 raise PrototypePublicationError(
                     f"Graph {name} query/readback not ready or mismatched; "
@@ -921,27 +1013,11 @@ class _Run:
             try:
                 native = self.definition("graph", graph_id)
                 payloads = _definition_payloads(native)
-                sources = payloads.get("dataSources.json", {})
-                references = {
-                    ref["name"]: ref.get("item", {})
-                    for ref in sources.get("itemReferences", [])
-                }
-                bindings = sources.get("dataSources", [])
-                if not bindings:
-                    raise PrototypePublicationError("Companion source bindings absent")
-                observed_tables: set[str] = set()
-                for binding in bindings:
-                    properties = binding.get("properties", {})
-                    reference = references.get(properties.get("referenceName"), {})
-                    path = properties.get("path", "")
-                    if (
-                        reference.get("workspaceId") != self.plan["workspace_id"]
-                        or reference.get("itemId") != lakehouse_id
-                        or not path.startswith("Tables/dbo/")
-                        or path.removeprefix("Tables/dbo/") not in bound_tables
-                    ):
-                        raise PrototypePublicationError("Companion linkage is not proved by native sources")
-                    observed_tables.add(path.removeprefix("Tables/dbo/"))
+                _validate_companion_parts(native, item)
+                observed_tables = set(_graph_source_tables(
+                    payloads["dataSources.json"], self.plan["workspace_id"], lakehouse_id,
+                    bound_tables, companion=True,
+                ).values())
                 if observed_tables != bound_tables:
                     raise PrototypePublicationError("Companion omits required Ontology source tables")
                 self.data.setdefault("verified_service_companions", {})[graph_id] = {
@@ -973,8 +1049,156 @@ class _Run:
         return len(verified) == 1
 
 
+_GRAPH_SCHEMA_ROOT = "https://developer.microsoft.com/json-schemas/fabric/item/"
+_INSTANCE_SOURCES_SCHEMA = _GRAPH_SCHEMA_ROOT + "graphInstance/definition/dataSources/1.0.0/schema.json"
+
+
+def _graph_source_tables(
+    sources: dict[str, Any], workspace_id: str, lakehouse_id: str,
+    allowed_tables: Any, *, companion: bool,
+) -> dict[str, str]:
+    """Resolve exact, versioned source bindings; never rewrite native evidence."""
+    instance = sources.get("$schema") == _INSTANCE_SOURCES_SCHEMA
+    if instance:
+        if not companion or set(sources) != {"$schema", "dataSources"}:
+            raise PrototypePublicationError("Unsupported companion source dialect")
+        references = {}
+    else:
+        if sources.get("$schema") != _GRAPH_SCHEMA_ROOT + "graphIndex/definition/dataSources/1.1.0/schema.json":
+            raise PrototypePublicationError("Unsupported Graph data source schema")
+        items = sources.get("itemReferences", [])
+        references = {item["name"]: item["item"] for item in items}
+        if len(references) != len(items):
+            raise PrototypePublicationError("Duplicate Graph item references")
+    result = {}
+    for source in sources.get("dataSources", []):
+        properties = source["properties"]
+        path = properties.get("path")
+        if not isinstance(path, str) or source.get("type") != "DeltaTable":
+            raise PrototypePublicationError("Graph source must be an exact DeltaTable binding")
+        if instance:
+            match = re.fullmatch(
+                r"abfss://([0-9a-f-]+)@onelake\.pbidedicated\.windows\.net/"
+                r"([0-9a-f-]+)/Tables/dbo/([A-Za-z_][A-Za-z0-9_]*)", path,
+            )
+            if (
+                set(source) != {"name", "type", "properties"} or set(properties) != {"path"}
+                or match is None
+            ):
+                raise PrototypePublicationError("Unsafe or unsupported native companion source path")
+            source_workspace, source_lakehouse, table_id = match.groups()
+            if any(str(uuid.UUID(value)) != value for value in (source_workspace, source_lakehouse)):
+                raise PrototypePublicationError("Companion source GUID is not canonical")
+        else:
+            reference = references.get(properties.get("referenceName"), {})
+            source_workspace, source_lakehouse = reference.get("workspaceId"), reference.get("itemId")
+            table_id = path.removeprefix("Tables/dbo/")
+            if path != onelake_tables_path("dbo", table_id):
+                raise PrototypePublicationError("Unsupported relative Graph source path")
+        name = source.get("name")
+        if (
+            source_workspace != workspace_id or source_lakehouse != lakehouse_id
+            or table_id not in allowed_tables or not isinstance(name, str) or not name
+            or name in result or table_id in result.values()
+        ):
+            raise PrototypePublicationError("Graph source identity/coverage is outside approved compiled tables")
+        result[name] = table_id
+    if not result:
+        raise PrototypePublicationError("Graph source bindings absent")
+    return result
+
+
+def _validate_companion_parts(
+    definition: dict[str, Any], metadata: dict[str, Any] | None = None,
+) -> None:
+    payloads = _definition_payloads(definition)
+    if payloads.get("dataSources.json", {}).get("$schema") != _INSTANCE_SOURCES_SCHEMA:
+        return
+    if set(payloads) != {
+        "dataSources.json", "graphType.json", "graphDefinition.json",
+        "stylingConfiguration.json", "graphSettings.json",
+    }:
+        raise PrototypePublicationError("Unsupported native companion definition parts")
+    for name in ("graphType", "graphDefinition", "stylingConfiguration"):
+        if payloads[name + ".json"].get("$schema") != (
+            _GRAPH_SCHEMA_ROOT + f"graphInstance/definition/{name}/1.0.0/schema.json"
+        ):
+            raise PrototypePublicationError("Mixed or unsupported companion part schema")
+    graph_type, bindings = payloads["graphType.json"], payloads["graphDefinition.json"]
+    if set(graph_type) != {"$schema", "nodeTypes", "edgeTypes"} or set(bindings) != {
+        "$schema", "nodeTables", "edgeTables",
+    }:
+        raise PrototypePublicationError("Unsupported companion graph type/definition fields")
+    for kind, keys in (
+        ("nodeTypes", {"alias", "labels", "primaryKeyProperties", "properties"}),
+        ("edgeTypes", {"alias", "labels", "sourceNodeType", "destinationNodeType", "properties"}),
+    ):
+        for item in graph_type[kind]:
+            if (
+                set(item) != keys or not isinstance(item.get("alias"), str) or not item["alias"]
+                or any(set(prop) != {"name", "type"} for prop in item["properties"])
+            ):
+                raise PrototypePublicationError("Unsupported companion type/property declaration")
+            if kind == "edgeTypes" and any(
+                set(item[key]) != {"alias"} for key in ("sourceNodeType", "destinationNodeType")
+            ):
+                raise PrototypePublicationError("Unsupported companion endpoint declaration")
+    binding_ids = set()
+    for kind, keys in (
+        ("nodeTables", {"id", "nodeTypeAlias", "dataSourceName", "propertyMappings"}),
+        ("edgeTables", {
+            "id", "edgeTypeAlias", "dataSourceName", "propertyMappings",
+            "sourceNodeKeyColumns", "destinationNodeKeyColumns", "edgeIdMapping",
+        }),
+    ):
+        for item in bindings[kind]:
+            if (
+                set(item) != keys or item.get("edgeIdMapping") is not None
+                or str(uuid.UUID(item["id"])) != item["id"] or item["id"] in binding_ids
+                or any(set(mapping) != {"propertyName", "sourceColumn"} for mapping in item["propertyMappings"])
+            ):
+                raise PrototypePublicationError("Unsupported companion table/key/property mapping")
+            binding_ids.add(item["id"])
+    if payloads["graphSettings.json"] != {
+        "$schema": _GRAPH_SCHEMA_ROOT + "graphIndex/definition/graphSettings/1.0.0/schema.json",
+    }:
+        raise PrototypePublicationError("Unsupported companion graph settings")
+    styling = payloads["stylingConfiguration.json"]
+    layout = styling.get("modelLayout", {})
+    if (
+        set(styling) != {"$schema", "modelLayout", "visualFormat", "scenario"}
+        or styling["scenario"] != "Ontology" or styling["visualFormat"] is not None
+        or styling["modelLayout"] != {
+            "positions": {}, "styles": {}, "pan": {"x": 0, "y": 0}, "zoomLevel": 1,
+        }
+        or any(type(value) not in (int, float) for value in (
+            layout.get("pan", {}).get("x"), layout.get("pan", {}).get("y"), layout.get("zoomLevel"),
+        ))
+    ):
+        raise PrototypePublicationError("Unsupported companion styling/scenario")
+    platforms = [part for part in definition["parts"] if part.get("path") == ".platform"]
+    if len(platforms) != 1 or platforms[0].get("payloadType") != "InlineBase64":
+        raise PrototypePublicationError("Missing or duplicate companion platform metadata")
+    envelope = json.loads(base64.b64decode(platforms[0]["payload"], validate=True).decode("utf-8-sig"))
+    if (
+        set(envelope) != {"$schema", "metadata", "config"}
+        or envelope["$schema"] != "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json"
+        or set(envelope["metadata"]) != {"type", "displayName"}
+        or envelope["metadata"]["type"] != "GraphModel"
+        or not isinstance(envelope["metadata"]["displayName"], str)
+        or not envelope["metadata"]["displayName"]
+        or set(envelope["config"]) != {"version", "logicalId"}
+        or envelope["config"]["version"] != "2.0"
+        or str(uuid.UUID(envelope["config"]["logicalId"])) != envelope["config"]["logicalId"]
+        or metadata is not None and any(
+            envelope["metadata"][key] != metadata.get(key) for key in ("type", "displayName")
+        )
+    ):
+        raise PrototypePublicationError("Companion platform metadata/schema/config mismatch")
+
+
 def _quote_graph_identifier(identifier: str) -> str:
-    if not isinstance(identifier, str) or not re.fullmatch(r"[A-Za-z0-9_]+", identifier):
+    if not isinstance(identifier, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", identifier):
         raise PrototypePublicationError(f"Unsupported graph schema identifier: {identifier!r}")
     return f"`{identifier}`"
 
@@ -1008,22 +1232,11 @@ def _graph_readback_checks(
 
     payloads = _definition_payloads(definition)
     sources = payloads["dataSources.json"]
-    references = {ref["name"]: ref["item"] for ref in sources["itemReferences"]}
-    tables_by_source = {}
-    for source in sources["dataSources"]:
-        properties = source["properties"]
-        reference = references[properties["referenceName"]]
-        path = properties["path"]
-        table_id = path.removeprefix("Tables/dbo/")
-        if (
-            source["type"] != "DeltaTable"
-            or reference.get("workspaceId") != workspace_id
-            or reference.get("itemId") != lakehouse_id
-            or not path.startswith("Tables/dbo/")
-            or table_id not in compilation.tables
-        ):
-            raise PrototypePublicationError("Graph readback source is outside approved compiled tables")
-        tables_by_source[source["name"]] = table_id
+    if companion:
+        _validate_companion_parts(definition)
+    tables_by_source = _graph_source_tables(
+        sources, workspace_id, lakehouse_id, compilation.tables, companion=companion,
+    )
     ontology = compilation.definitions["ontology"]
     types_by_id = {
         item["canonical_semantic_type_id"]: item for item in ontology["entity_types"]
@@ -1045,8 +1258,8 @@ def _graph_readback_checks(
         for item in ontology["relationship_types"]
     )
     if widened:
-        required_columns["l4_semantic_asserted_entities"] = {"entity_id", "label"}
-        identity_columns["l4_semantic_asserted_entities"] = "entity_id"
+        required_columns[instance_base_entity_table(ontology)] = {"entity_id", "label"}
+        identity_columns[instance_base_entity_table(ontology)] = "entity_id"
     graph_type = payloads["graphType.json"]
     graph_definition = payloads["graphDefinition.json"]
     ontology_node_bindings: dict[str, tuple[str, dict[str, str]]] = {}
@@ -1076,6 +1289,15 @@ def _graph_readback_checks(
                 ontology_edge_labels[part["dataBindingTable"]["sourceTableName"]] = relationship["name"]
     node_types = {item["alias"]: item for item in graph_type["nodeTypes"]}
     edge_types = {item["alias"]: item for item in graph_type["edgeTypes"]}
+    if (
+        len(node_types) != len(graph_type["nodeTypes"]) or len(edge_types) != len(graph_type["edgeTypes"])
+        or set(node_types) != {item["nodeTypeAlias"] for item in graph_definition["nodeTables"]}
+        or set(edge_types) != {item["edgeTypeAlias"] for item in graph_definition["edgeTables"]}
+        or set(tables_by_source) != {
+            item["dataSourceName"] for item in graph_definition["nodeTables"] + graph_definition["edgeTables"]
+        }
+    ):
+        raise PrototypePublicationError("Duplicate, unused or missing native Graph types/sources")
     nodes: dict[str, tuple[str, str, str]] = {}
     observed_node_tables: list[str] = []
     observed_edges: list[tuple[str, str, str]] = []
@@ -1107,7 +1329,7 @@ def _graph_readback_checks(
             expected_type = (
                 "STRING" if pa.types.is_string(arrow_type)
                 else "BOOLEAN" if pa.types.is_boolean(arrow_type)
-                else "INTEGER" if pa.types.is_integer(arrow_type)
+                else "INT" if pa.types.is_integer(arrow_type)
                 else "DOUBLE" if pa.types.is_floating(arrow_type)
                 else "ZONED DATETIME" if pa.types.is_timestamp(arrow_type)
                 else None
@@ -1198,7 +1420,7 @@ def _graph_readback_checks(
     if companion:
         def endpoint_table(allowed: list[str]) -> str:
             return (
-                "l4_semantic_asserted_entities" if len(allowed) > 1
+                instance_base_entity_table(ontology) if len(allowed) > 1
                 else types_by_id[allowed[0]]["physical_table_id"]
             )
         expected_edges = [
@@ -1234,6 +1456,60 @@ def _definition_payloads(definition: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _native_definition_payloads_equal(
+    kind: str, expected: dict[str, Any], actual: dict[str, Any],
+) -> bool:
+    """Compare full payloads, allowing only observed serialization defaults.
+
+    Keep raw definitions/hashes as evidence. Never normalize source mappings,
+    graph types, key order, unknown fields, or nonempty service settings.
+    """
+    def normalized(payloads: dict[str, Any]) -> dict[str, Any]:
+        if kind == "semantic_model":
+            return {
+                path: value.rstrip("\n")
+                if path.endswith(".tmdl") and isinstance(value, str) else value
+                for path, value in payloads.items()
+            }
+        if kind != "graph":
+            return payloads
+        result = copy.deepcopy(payloads)
+        schema_root = "https://developer.microsoft.com/json-schemas/fabric/item/graphIndex/definition"
+        if result.get("graphSettings.json") == {
+            "$schema": f"{schema_root}/graphSettings/1.0.0/schema.json",
+        }:
+            del result["graphSettings.json"]
+        graph = result.get("graphDefinition.json")
+        if isinstance(graph, dict) and graph.get("$schema") == (
+            f"{schema_root}/graphDefinition/1.0.0/schema.json"
+        ):
+            for edge in graph.get("edgeTables", []):
+                if isinstance(edge, dict) and edge.get("edgeIdMapping") is None:
+                    edge.pop("edgeIdMapping", None)
+        styling = result.get("stylingConfiguration.json")
+        if isinstance(styling, dict) and styling.get("$schema") == (
+            f"{schema_root}/stylingConfiguration/1.0.0/schema.json"
+        ):
+            if styling.get("visualFormat") is None:
+                styling.pop("visualFormat", None)
+            layout = styling.get("modelLayout")
+            if isinstance(layout, dict):
+                numeric_fields = [(layout, "zoomLevel")]
+                positions = layout.get("positions", {})
+                points = list(positions.values()) if isinstance(positions, dict) else []
+                points.append(layout.get("pan"))
+                for point in points:
+                    if isinstance(point, dict):
+                        numeric_fields.extend((point, axis) for axis in ("x", "y"))
+                for container, key in numeric_fields:
+                    value = container.get(key)
+                    if type(value) is float and value.is_integer():
+                        container[key] = int(value)
+        return result
+
+    return canonical_sha256(normalized(expected)) == canonical_sha256(normalized(actual))
+
+
 def _validate_companion_key_windows(compilation: _Compilation, page_size: int) -> None:
     # Ontology companion edges need endpoint-pair paging, not independent-graph edge IDs.
     columns = ["__source_entity_id", "__target_entity_id"]
@@ -1260,6 +1536,7 @@ def publish_schema2_prototype(
     approved_limitations: tuple[str, ...] = (), semantic_model: bool = False,
     readback_page_size: int = MAX_GRAPH_READBACK_ROWS,
     readback_total_rows: int = DEFAULT_GRAPH_READBACK_TOTAL_ROWS,
+    quality_policy: dict[str, Any] | None = None,
     _candidate_only: bool = False,
 ) -> dict[str, Any]:
     """Plan, or execute exactly that plan, without invoking transactional L5a."""
@@ -1298,13 +1575,44 @@ def publish_schema2_prototype(
             raise PrototypePublicationError("Immutable plan hash mismatch")
         if not dry_run and previous is None:
             raise PrototypePublicationError("Live execution requires an existing immutable dry-run plan")
+        if previous is not None and quality_policy is not None and "business_quality" not in previous:
+            raise PrototypePublicationError("Quality opt-in requires a new plan, not a historical repair")
+        if previous is not None and "business_quality" in previous:
+            bound_policy = previous["business_quality"]["policy"]
+            if quality_policy is not None:
+                from fabric_kg_builder.serving.business_quality import parse_quality_policy
+
+                if parse_quality_policy(quality_policy).model_dump(mode="json") != bound_policy:
+                    raise PrototypePublicationError("Immutable business quality policy changed")
+            quality_policy = bound_policy
+        returned_runtime_repair = False
+        if not _candidate_only and journal_path.exists():
+            from fabric_kg_builder.deploy.schema2_prototype_reconcile import (
+                RETURNED_ID_POLICY, validate_returned_artifacts,
+            )
+
+            journal = _read_json(journal_path)
+            validate_returned_artifacts(journal, materialize_dir)
+            returned_runtime_repair = journal.get("runtime_repair", {}).get("policy") == RETURNED_ID_POLICY
         run_id = previous["run_id"] if previous else uuid.uuid4().hex
         kinds = ["lakehouse", "ontology", "graph"]
         if semantic_model:
             kinds.append("semantic_model")
         names = {kind: f"{name_prefix}_{run_id[:12]}_{kind}" for kind in kinds}
-        compilation = _compile(l4_run, l3_root, workspace_id, name_prefix)
-        description = _prototype_description(run_id, compilation.provenance.get("window_run_scope"))
+        compilation = _compile(
+            l4_run, l3_root, workspace_id, name_prefix,
+            **({"quality_policy": quality_policy} if quality_policy is not None else {}),
+        )
+        quality_report = compilation.definitions["ontology"].get("business_quality")
+        if quality_policy is not None and quality_report is None:
+            raise PrototypePublicationError("Quality-enabled publication lacks a recomputed quality report")
+        if previous is not None and "business_quality" in previous:
+            if quality_report != previous["business_quality"]:
+                raise PrototypePublicationError("Immutable business quality assessment changed; create a new plan")
+        description = _prototype_description(
+            run_id, compilation.provenance.get("window_run_scope"),
+            compilation.provenance.get("partial_extraction_scope"),
+        )
         ontology = compilation.definitions["ontology"]
         widened = any(
             len(item["allowed_source_semantic_type_ids"]) > 1
@@ -1314,7 +1622,7 @@ def publish_schema2_prototype(
         companion_rows = sum(
             compilation.tables[item["physical_table_id"]].num_rows
             for item in ontology["entity_types"] + ontology["relationship_types"]
-        ) + (compilation.tables["l4_semantic_asserted_entities"].num_rows if widened else 0)
+        ) + (compilation.tables[instance_base_entity_table(ontology)].num_rows if widened else 0)
         expected_readback_rows = (
             compilation.graph_catalog["expected_node_count"]
             + compilation.graph_catalog["expected_edge_count"] + companion_rows
@@ -1323,7 +1631,7 @@ def publish_schema2_prototype(
             compilation.blockers.append(
                 f"Complete readback needs {expected_readback_rows} rows; approved total cap is {readback_total_rows}"
             )
-        if not _candidate_only:
+        if not _candidate_only and not returned_runtime_repair:
             _materialize(compilation, materialize_dir)
         native: dict[str, Any] = {}
         try:
@@ -1391,6 +1699,8 @@ def publish_schema2_prototype(
             ),
             "business_acceptance": "requires-six-deployed-source-cited-question-results",
         }
+        if quality_report is not None:
+            plan["business_quality"] = quality_report
         plan["plan_hash"] = canonical_sha256(plan)
         if _candidate_only:
             return plan
@@ -1425,6 +1735,9 @@ def publish_schema2_prototype(
             raise PrototypePublicationError("Live prototype requires the exact --approve-live plan hash")
         if blockers:
             raise PrototypePublicationError(f"Prototype plan blocked: {blockers}")
+        from fabric_kg_builder.deploy.schema2_prototype_reconcile import validate_returned_resume
+
+        validate_returned_resume(journal_path, plan, materialize_dir, l4_run, l3_root)
         run = _Run(journal_path, plan)
         if "graph_readback_row_count" in run.data:
             run.data.setdefault("prior_readback_attempts", []).append({
@@ -1489,7 +1802,7 @@ def publish_schema2_prototype(
                 )
                 expected_payloads = _definition_payloads(definition)
                 actual_payloads = _definition_payloads(actual)
-                if actual_payloads != expected_payloads:
+                if not _native_definition_payloads_equal(kind, expected_payloads, actual_payloads):
                     raise PrototypePublicationError(f"Native {kind} definition readback drift")
                 run.data["actions"][f"create:{kind}"]["definition_readback_hash"] = (
                     canonical_sha256(actual_payloads)
@@ -1513,13 +1826,13 @@ def publish_schema2_prototype(
                 item.startswith("ontology.endpoint-widening:") for item in limitations
             )
             if widened:
-                bound_tables.add("l4_semantic_asserted_entities")
+                bound_tables.add(instance_base_entity_table(ontology))
             companion_ready = run.companion_readiness(
                 ontology_id=ids["ontology"], lakehouse_id=lakehouse_id,
                 bound_tables=bound_tables, compilation=compilation,
                 expected={
                     "nodes": compilation.graph_catalog["expected_node_count"]
-                    + (compilation.tables["l4_semantic_asserted_entities"].num_rows if widened else 0),
+                    + (compilation.tables[instance_base_entity_table(ontology)].num_rows if widened else 0),
                     "edges": sum(
                         compilation.tables[item["physical_table_id"]].num_rows
                         for item in ontology["relationship_types"]

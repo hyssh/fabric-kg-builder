@@ -18,9 +18,11 @@ def _key(concept):
     return "ws_" + canonical_sha256(concept.concept_id)
 
 
-def build_design_corrections(*, actor, rationale, route_targets, completeness, prefer_window_definitions=False):
+def build_design_corrections(*, actor, rationale, route_targets, completeness, prefer_window_definitions=False, source_scoped_types=()):
     values = dict(actor=actor, rationale=rationale, route_targets=route_targets, completeness=completeness,
-                  prefer_window_definitions=prefer_window_definitions)
+                  prefer_window_definitions=prefer_window_definitions, source_scoped_types=tuple(source_scoped_types))
+    if source_scoped_types:
+        values["correction_version"] = "window-design-corrections/1.1.0"
     provisional = WindowDesignCorrections.model_construct(**values, correction_hash="0" * 64)
     return WindowDesignCorrections(**values, correction_hash=canonical_sha256(
         provisional.model_dump(mode="json", exclude={"correction_hash"}),
@@ -60,7 +62,11 @@ def _apply_corrections(parent, sketch, corrections):
             message=(
                 f"Unapproved operator schema corrections by {corrections.actor}: {corrections.rationale}. "
                 f"Audit hash {corrections.correction_hash}. "
-                + ("Declared structural edits and explicitly requested exact source-definition precedence are audited; scopes and identities were not overridden. "
+                + ("Explicitly selected unapproved type identities were corrected to source-scoped before retention; "
+                   "original identities remain in the hash-bound parent sketch. Properties, scopes and approval were not overridden. "
+                   "Declared route/completeness edits and any requested source-definition precedence are audited."
+                   if corrections.source_scoped_types else
+                   "Declared structural edits and explicitly requested exact source-definition precedence are audited; scopes and identities were not overridden. "
                    "No observed counts, members, ordering facts or approval were supplied."
                    if corrections.prefer_window_definitions else
                    "Only declared route targets and additive completeness definitions changed; no observed counts, members, ordering facts or approval were supplied.")
@@ -69,10 +75,54 @@ def _apply_corrections(parent, sketch, corrections):
     })
 
 
-def _derive(parent, corrections=None, *, _validation=None, _projection_version="window-schema-projection/1.2.0"):
+def _source_scoped_sketch(sketch, concepts, names):
+    """Only explicit, uniquely matched working entities may lose draft key claims."""
+    selected = {}
+    for name in names:
+        sources = [item for item in concepts if item.kind == "entity" and item.name.casefold() == name.casefold()]
+        matches = [item for item in sketch.types if item.display_name.casefold() == name.casefold()]
+        if len(sources) != 1 or len(matches) != 1 or sources[0].name != name or matches[0].display_name != name:
+            raise WindowSchemaProjectionError(
+                f"WINDOW_CORRECTION_SOURCE_SCOPED_TYPE_NOT_UNIQUE: {name!r} requires exact unique working and draft entity names"
+            )
+        if sources[0].identity_policy != {"mode": "unresolved"}:
+            raise WindowSchemaProjectionError(
+                f"WINDOW_CORRECTION_SOURCE_IDENTITY_NOT_UNRESOLVED: {name!r}; approved, resolved and extra identity claims cannot be overridden"
+            )
+        selected[matches[0].key] = sources[0].concept_id
+    by_key = {item.key: item for item in sketch.types}
+    for item in sketch.types:
+        ancestor = item.parent_key
+        while ancestor is not None:
+            if ancestor in selected and by_key[ancestor].identity_property_keys and item.key not in selected:
+                raise WindowSchemaProjectionError(
+                    "WINDOW_CORRECTION_UNSELECTED_INHERITED_IDENTITY: explicitly select every affected descendant"
+                )
+            ancestor = by_key[ancestor].parent_key
+    return sketch.model_copy(update={
+        "types": [
+            item.model_copy(update={"identity_property_keys": []}) if item.key in selected else item
+            for item in sketch.types
+        ],
+    }), selected
+
+
+def _derive(parent, corrections=None, *, _validation=None, _projection_version=None):
     if parent.window_run is None or parent.schema_projection is not None:
         raise WindowSchemaProjectionError("Projection requires an original integrated model draft, not a projected draft")
     sketch = parent.sketch
+    if corrections is not None:
+        corrections = WindowDesignCorrections.model_validate(corrections.model_dump(mode="python"))
+    identity_correction = corrections is not None and bool(corrections.source_scoped_types)
+    if _projection_version is None:
+        _projection_version = "window-schema-projection/1.3.0" if identity_correction else "window-schema-projection/1.2.0"
+    if identity_correction and _projection_version != "window-schema-projection/1.3.0":
+        raise WindowSchemaProjectionError("WINDOW_SCHEMA_PROJECTION_IDENTITY_VERSION_MISMATCH")
+    selected = {}
+    if identity_correction:
+        sketch, selected = _source_scoped_sketch(
+            sketch, parent.window_run.final_snapshot.concepts, corrections.source_scoped_types,
+        )
     types, properties, relationships = list(sketch.types), list(sketch.properties), list(sketch.relationships)
     retained, added, findings, precedence = {}, [], [], []
     concepts = sorted(parent.window_run.final_snapshot.concepts, key=lambda item: item.concept_id)
@@ -235,7 +285,7 @@ def _derive(parent, corrections=None, *, _validation=None, _projection_version="
                 unsupported(concept, "relationship_identity_not_representable", "Working relationship identity cannot be represented as an exact context policy.")
                 continue
             matches = [item for item in relationships if item.display_name.casefold() == concept.name.casefold()]
-            if _projection_version == "window-schema-projection/1.2.0":
+            if _projection_version in {"window-schema-projection/1.2.0", "window-schema-projection/1.3.0"}:
                 if any(
                     item.display_name != concept.name or (
                         (item.source_key, item.target_key) != (source, target)
@@ -274,6 +324,10 @@ def _derive(parent, corrections=None, *, _validation=None, _projection_version="
         added.append(concept.concept_id)
 
     unsupported_ids = {finding.concept_id for finding in findings}
+    if any(retained.get(concept_id) != key for key, concept_id in selected.items()):
+        raise WindowSchemaProjectionError(
+            "WINDOW_CORRECTION_SOURCE_SCOPED_TYPE_NOT_RETAINED: selected types must retain exact source definitions and hierarchy"
+        )
     if set(retained) & unsupported_ids or set(retained) | unsupported_ids != set(by_id):
         raise WindowSchemaProjectionError("WINDOW_SCHEMA_PROJECTION_ACCOUNTING_MISMATCH")
     concerns = [*sketch.review_concerns, DesignFinding(
@@ -385,7 +439,7 @@ def projected_type_keys(draft):
     }
 
 
-def validated_projection_type_ids(draft, *, intake, candidates, _validation=None):
+def validated_projection_type_ids(draft, *, intake, candidates, _validation=None, compiler_capability=None):
     from .compact import expand_compact_design
     from .design import _checked_draft
 
@@ -396,6 +450,7 @@ def validated_projection_type_ids(draft, *, intake, candidates, _validation=None
         draft.sketch, intake=draft.inputs.intake,
         known_evidence_ids={item.evidence_span_id for item in draft.samples.evidence_spans},
         derive_route_metadata=False,
+        compiler_capability=compiler_capability,
     )
     if candidates.semantic_type_candidates != expected.semantic_type_candidates:
         raise WindowSchemaProjectionError("SOURCE_TYPE_RETENTION_CANDIDATE_DRIFT")

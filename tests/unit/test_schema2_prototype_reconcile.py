@@ -82,6 +82,7 @@ def paused(tmp_path, monkeypatch):
         "l4_run": source.root, "l3_root": l3, "workspace_id": WORKSPACE,
         "name_prefix": "recovery", "plan_path": tmp_path / "plan.json",
         "journal_path": tmp_path / "journal.json", "materialize_dir": tmp_path / "artifacts",
+        "approved_limitations": (p.METADATA_ONLY_ALIASES_LIMITATION,),
     }
     plan = p.publish_schema2_prototype(**kwargs, dry_run=True, approve_live=None)
     with pytest.raises(p.PrototypePublicationError, match="retained"):
@@ -107,6 +108,56 @@ def _accept(case):
         **case.recovery, accept_review=preview["review_hash"],
         actor="operator@example.test", rationale="Observed exact run-scoped server creation after lost response",
     )
+
+
+def test_metadata_only_aliases_require_explicit_approval_before_any_cloud_call(paused):
+    calls = list(paused.backend.calls)
+    plan_bytes = paused.kwargs["plan_path"].read_bytes()
+    journal_bytes = paused.kwargs["journal_path"].read_bytes()
+    candidate = p.publish_schema2_prototype(
+        **{**paused.kwargs, "approved_limitations": ()},
+        dry_run=True, approve_live=None, _candidate_only=True,
+    )
+    assert p.METADATA_ONLY_ALIASES_LIMITATION in candidate["limitations"]
+    assert f"unapproved:{p.METADATA_ONLY_ALIASES_LIMITATION}" in candidate["blockers"]
+    assert paused.backend.calls == calls
+    assert paused.kwargs["plan_path"].read_bytes() == plan_bytes
+    assert paused.kwargs["journal_path"].read_bytes() == journal_bytes
+
+
+def test_reconciliation_does_not_accept_lost_custom_presentation_metadata(paused):
+    from fabric_kg_builder.deploy.ontology_names import PRESENTATION_ATTRIBUTE
+
+    definition = paused.backend.definitions[paused.item_id]
+    removed = 0
+    for part in definition["parts"]:
+        payload = json.loads(base64.b64decode(part["payload"]))
+        for target in [payload, *payload.get("properties", [])]:
+            attributes = target.get("semanticEnrichment", {}).get("customAttributes", {})
+            if PRESENTATION_ATTRIBUTE in attributes:
+                del attributes[PRESENTATION_ATTRIBUTE]
+                removed += 1
+        part["payload"] = base64.b64encode(json.dumps(payload).encode()).decode()
+    assert removed
+    journal_bytes = paused.kwargs["journal_path"].read_bytes()
+    with pytest.raises(p.PrototypePublicationError, match="full native bound definition mismatch"):
+        r.reconcile_prototype_create(**paused.recovery)
+    assert paused.kwargs["journal_path"].read_bytes() == journal_bytes
+    assert not paused.recovery["review_path"].exists()
+
+
+def test_reconciliation_cannot_reclassify_returned_id_owned_create(paused):
+    journal = p._read_json(paused.kwargs["journal_path"])
+    journal["actions"]["create:ontology"].update({
+        "status": "identity-verified", "item_id": paused.item_id, "returned_item_id": paused.item_id,
+    })
+    p._atomic_json(paused.kwargs["journal_path"], journal)
+    journal_bytes = paused.kwargs["journal_path"].read_bytes()
+    calls = list(paused.backend.calls)
+    with pytest.raises(p.PrototypePublicationError, match="without an item ID"):
+        r.reconcile_prototype_create(**paused.recovery)
+    assert paused.backend.calls == calls
+    assert paused.kwargs["journal_path"].read_bytes() == journal_bytes
 
 
 def test_public_cli_preview_accept_and_original_plan_resume(paused):
@@ -309,7 +360,7 @@ def test_agent_explicitly_reports_reconciled_handoff_incompatibility(paused):
     from fabric_kg_builder.deploy import schema2_prototype_agent as agent
 
     _accept(paused)
-    with pytest.raises(agent.Error, match="incompatible with operator-reconciled/runtime-repaired"):
+    with pytest.raises(agent.Error, match="incompatible with operator-reconciled"):
         agent._handoff(
             prototype_plan=paused.kwargs["plan_path"], prototype_journal=paused.kwargs["journal_path"],
             materialize=paused.kwargs["materialize_dir"], l4_run=paused.kwargs["l4_run"],

@@ -69,7 +69,7 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 L3_STAGE_NAME = "Evidence Validation"
 L3_STAGE_CONTRACT_VERSION = "1.0.0"
 L3_VALIDATOR_NAME = "l3-evidence-validator"
-L3_VALIDATOR_VERSION = "1.2.0"
+L3_VALIDATOR_VERSION = "1.3.0"
 
 # Verifier identity is purpose-scoped: L3 never reuses an L1 design verifier ID.
 L3_EXTRACTION_VERIFIER_NAME = "fabric-kg.local-evidence-verifier/extraction_assertion"
@@ -126,6 +126,7 @@ UNRESOLVED_REASONS = frozenset(
         "AMBIGUOUS_SIBLING_CLASSIFICATION",
         "ENDPOINT_UNRESOLVED",
         "EVIDENCE_MISSING",
+        "ENTITY_LABEL_UNGROUNDED",
         "IDENTITY_WITNESS_UNAVAILABLE",
     }
 )
@@ -1072,6 +1073,13 @@ def property_scalar_grounding_reasons(
         reasons.add("PROPERTY_NORMALIZATION_UNSUPPORTED")
     if isinstance(value, str):
         supported = value in quote if value else '""' in quote
+        if value and not supported and value.strip():
+            # Permit layout whitespace, not spelling, punctuation, case, or token edits.
+            pattern = "".join(
+                r"\s+" if part.isspace() else re.escape(part)
+                for part in re.split(r"(\s+)", value)
+            )
+            supported = re.search(pattern, quote) is not None
     elif isinstance(value, bool):
         supported = re.search(r"(?<!\w)" + value_json + r"(?!\w)", quote) is not None
     else:

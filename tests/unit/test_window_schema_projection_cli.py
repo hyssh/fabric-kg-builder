@@ -286,6 +286,7 @@ def original_case(tmp_path, request):
     _invoke([
         "domain", "window-run", "--prepared", str(prepared_path), "--intake", str(intake),
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
+        "--discovery-mode", "chunked", "--schema-policy", "observed-terms",
         "--max-calls", "1", "--max-repair-calls", "0", "--live",
     ], model=model)
     run = load_windowed_run(windows)
@@ -477,9 +478,12 @@ def test_same_name_disjoint_source_scopes_remain_distinct_through_l4(original_ca
     assert all(item.relationship_type_id.casefold() in vocabulary.relationships_by_alias for item in compiled)
     assert vocabulary.prompt_payload["id_only_relationship_display_names"] == ["lift_out_of"]
     unprojected = contract.model_copy(update={"window_schema_projection": None})
-    assert projected_id_only_relationship_aliases(unprojected) == set()
+    assert projected_id_only_relationship_aliases(unprojected) == {"lift_out_of"}
+    assert "lift_out_of" not in compile_closed_vocabulary(unprojected).relationships_by_alias
+    unbound = unprojected.model_copy(update={"window_run_binding": None})
+    assert projected_id_only_relationship_aliases(unbound) == set()
     with pytest.raises(ValueError, match="ambiguous approved relationship alias"):
-        compile_closed_vocabulary(unprojected)
+        compile_closed_vocabulary(unbound)
     review = tmp_path / "review.json"
     reviewed = _review(windows, domain, review)["result"]
     assert len({reviewed["concept_targets"][item] for item in source_ids}) == 2

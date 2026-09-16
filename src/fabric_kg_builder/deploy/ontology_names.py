@@ -15,6 +15,8 @@ from typing import Any, Mapping, Sequence
 NATIVE_NAME_PATTERN = r"[A-Za-z][A-Za-z0-9_]{0,127}"
 _DEFINITION_PATH = re.compile(r"(EntityTypes|RelationshipTypes)/([0-9]+)/definition\.json")
 _BASE_ID = "1000000"
+PRESENTATION_ATTRIBUTE = "fabric_kg_presentation"
+METADATA_ONLY_ALIASES_LIMITATION = "ontology.property-relationship-aliases-metadata-only"
 
 
 def readable_catalog_from_domain(domain: Any) -> dict[str, Any]:
@@ -122,14 +124,30 @@ def _indexed_parts(parts: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str,
 
 def _enrich(
     payload: dict[str, Any], metadata: Mapping[str, Any], *, preserve_live_metadata: bool,
+    entity_synonyms: bool = True,
 ) -> None:
     enrichment = copy.deepcopy(payload.get("semanticEnrichment", {}))
     if not preserve_live_metadata:
-        synonyms = list(enrichment.get("synonyms", []))
-        for label in [metadata["display_name"], *metadata.get("aliases", ())]:
-            if label not in synonyms:
-                synonyms.append(label)
-        enrichment["synonyms"] = synonyms
+        if entity_synonyms:
+            synonyms = list(enrichment.get("synonyms", []))
+            for label in [metadata["display_name"], *metadata.get("aliases", ())]:
+                if label not in synonyms:
+                    synonyms.append(label)
+            enrichment["synonyms"] = synonyms
+        else:
+            # Fabric only supports native synonyms on entity types. Preserve
+            # approved labels as custom metadata, not as synonym functionality.
+            if "synonyms" in enrichment:
+                raise ValueError("Unsupported native property/relationship synonyms require explicit migration")
+            presentation = json.dumps({
+                key: metadata[key] for key in ("display_name", "aliases", "ascii_alias")
+                if key in metadata
+            }, sort_keys=True, ensure_ascii=False)
+            attributes = enrichment.setdefault("customAttributes", {})
+            if PRESENTATION_ATTRIBUTE in attributes and attributes[PRESENTATION_ATTRIBUTE] != presentation:
+                raise ValueError("Conflicting native presentation custom attribute")
+            attributes[PRESENTATION_ATTRIBUTE] = presentation
+            enrichment.setdefault("description", "")
     if metadata.get("description"):
         enrichment["description"] = metadata["description"]
     if enrichment != payload.get("semanticEnrichment", {}):
@@ -167,8 +185,20 @@ def validate_presentation_only(
             key: value for key, value in enrichment.items()
             if key != "description" and (preserve_live_metadata or key != "synonyms")
         }
+        if not preserve_live_metadata and isinstance(retained.get("customAttributes"), dict):
+            retained["customAttributes"].pop(PRESENTATION_ATTRIBUTE, None)
+            if not retained["customAttributes"]:
+                retained.pop("customAttributes")
         if retained:
             payload["semanticEnrichment"] = retained
+
+    def protect_existing_metadata(old: dict[str, Any], new: dict[str, Any]) -> None:
+        attributes = old.get("semanticEnrichment", {}).get("customAttributes", {})
+        if PRESENTATION_ATTRIBUTE in attributes and (
+            new.get("semanticEnrichment", {}).get("customAttributes", {}).get(PRESENTATION_ATTRIBUTE)
+            != attributes[PRESENTATION_ATTRIBUTE]
+        ):
+            raise ValueError("Presentation repair changed existing custom presentation metadata")
 
     for path, old_part in before.items():
         new_part = after[path]
@@ -182,11 +212,14 @@ def validate_presentation_only(
         }:
             raise ValueError(f"Presentation repair changed a part envelope: {path}")
         old, new = _decode(old_part), _decode(new_part)
+        protect_existing_metadata(old, new)
         name = new.get("name", "")
         if not re.fullmatch(NATIVE_NAME_PATTERN, name) or name.casefold() in type_names[match[1]]:
             raise ValueError(f"Invalid or colliding native presentation name: {path}")
         type_names[match[1]].add(name.casefold())
         if match[1] == "EntityTypes":
+            for old_prop, new_prop in zip(old.get("properties", []), new.get("properties", [])):
+                protect_existing_metadata(old_prop, new_prop)
             properties = new.get("properties", [])
             property_names = [prop.get("name", "") for prop in properties]
             if any(not re.fullmatch(NATIVE_NAME_PATTERN, name) for name in property_names) or len(
@@ -217,8 +250,9 @@ def repair_ontology_presentation(
     Never compile replacement bindings: preserve every original byte. The L5
     crosswalk maps existing numeric IDs to approved catalog labels.
     Existing-item repairs preserve synonyms and custom attributes. Only fresh
-    compilation may opt into adding approved human labels/aliases as synonyms;
-    the repair mapping always records the exact original approved display label.
+    compilation may add entity synonyms. Property/relationship labels and aliases
+    are retained in a namespaced custom attribute, not native synonyms. The repair
+    mapping always records the exact original approved display label.
     """
     parts = _indexed_parts(current_parts)
     entities = {
@@ -287,7 +321,9 @@ def repair_ontology_presentation(
             for binding_path, binding_part in parts.items():
                 if binding_path.startswith(f"EntityTypes/{type_id}/DataBindings/"):
                     configuration = _decode(binding_part)["dataBindingConfiguration"]
-                    expected_table = entity["physical_table_id"] if entity else "l4_semantic_asserted_entities"
+                    expected_table = entity["physical_table_id"] if entity else l5a_ontology.get(
+                        "instance_presentation", {}
+                    ).get("base_entity_table", "l4_semantic_asserted_entities")
                     if configuration["sourceTableProperties"]["sourceTableName"] != expected_table:
                         raise ValueError(f"Current binding differs from the L5 table: {binding_path}")
                     expected_label = "__label" if entity else "label"
@@ -328,7 +364,10 @@ def repair_ontology_presentation(
                     old_name = prop["name"]
                     key = l5_prop["canonical_property_id"]
                     prop["name"] = property_names[key]
-                    _enrich(prop, property_meta[key], preserve_live_metadata=preserve_live_metadata)
+                    _enrich(
+                        prop, property_meta[key], preserve_live_metadata=preserve_live_metadata,
+                        entity_synonyms=False,
+                    )
                     report.append({
                         "kind": "property", "owner_id": type_id, "id": prop_id,
                         "canonical_id": key, "old_name": old_name,
@@ -346,7 +385,10 @@ def repair_ontology_presentation(
             relationship = relationships[type_id]
             canonical = relationship["canonical_semantic_relationship_id"]
             payload["name"] = rel_names[canonical]
-            _enrich(payload, rel_meta[type_id], preserve_live_metadata=preserve_live_metadata)
+            _enrich(
+                payload, rel_meta[type_id], preserve_live_metadata=preserve_live_metadata,
+                entity_synonyms=False,
+            )
         report.append({
             "kind": "entity_type" if match[1] == "EntityTypes" else "relationship_type",
             "id": type_id, "canonical_id": canonical,

@@ -102,7 +102,7 @@ def integrated_case(tmp_path, request):
     model = IntegratedModel()
     result = _invoke([
         "domain", "window-run", "--prepared", str(prepared_path), "--intake", str(intake),
-        "--schema-policy", request.param,
+        "--discovery-mode", "chunked", "--schema-policy", request.param,
         "--out-state", str(windows), "--window-size", "1", "--concurrency", "1",
         "--max-tokens", "1000000", "--max-calls", "8", "--max-repair-calls", "8", "--live",
     ], model=model)

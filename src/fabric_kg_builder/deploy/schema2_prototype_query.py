@@ -18,8 +18,8 @@ from fabric_kg_builder.contracts.evidence import EvidenceSpanV1_1
 from fabric_kg_builder.contracts.receipts import ArtifactManifest
 from fabric_kg_builder.deploy.schema2_prototype import (
     API, FORMAT_VERSION, MAX_GRAPH_READBACK_ROWS, PrototypePublicationError,
-    _Run, _atomic_json, _compile, _compiler_hash, _definition_payloads,
-    _graph_readback_checks, _graph_row_fingerprint, _native_definitions,
+    _Run, _atomic_json, _compile_from_plan, _compiler_hash, _definition_payloads,
+    _graph_readback_checks, _graph_row_fingerprint, _graph_source_tables, _native_definitions,
     _quote_graph_identifier, _read_json, _table_proof,
 )
 from fabric_kg_builder.enrichment.schema2_validation_stage import L3_EXTRACTION_PURPOSE, _safe_id
@@ -32,6 +32,7 @@ _TOKEN = re.compile(
     r"|(?P<number>\d+(?:\.\d+)?)|(?P<word>[A-Za-z_][A-Za-z0-9_]*)"
     r"|(?P<symbol>->|<-|<=|>=|<>|!=|[()\[\],.:=<>+-]))"
 )
+_PROBE_ALIAS_PREFIX = "fkg_probe_"
 
 
 def _strict_json(path: Path) -> Any:
@@ -236,7 +237,7 @@ class _Query:
             variable, prop, expression = self.property()
             self.take("AS")
             alias = self.identifier()
-            if alias in self.outputs or alias.startswith("__probe_"):
+            if alias in self.outputs or alias.casefold().startswith((_PROBE_ALIAS_PREFIX, "__probe_")):
                 raise PrototypePublicationError("Duplicate/reserved output alias")
             self.outputs[alias] = (variable, prop)
             selections.append(f"{expression} AS {_quote_graph_identifier(alias)}")
@@ -244,7 +245,7 @@ class _Query:
                 break
             self.take(",")
         for index, (variable, label) in enumerate(self.nodes.items()):
-            alias = f"__probe_entity_{index}"
+            alias = f"{_PROBE_ALIAS_PREFIX}entity_{index}"
             self.identity_columns[variable] = alias
             primary_key = self.schema["nodes"][label]["primary_key"]
             selections.append(
@@ -356,12 +357,25 @@ class _Probe(_Run):
         return _GMResponse(response.status_code, payload, dict(response.headers))
 
 
-def _schema(definition: dict[str, Any], compilation: Any) -> dict[str, Any]:
+def _schema(
+    definition: dict[str, Any], compilation: Any, *,
+    workspace_id: str | None = None, lakehouse_id: str | None = None, companion: bool = False,
+) -> dict[str, Any]:
     payloads = _definition_payloads(definition)
-    sources = {
-        item["name"]: item["properties"]["path"].removeprefix("Tables/dbo/")
-        for item in payloads["dataSources.json"]["dataSources"]
-    }
+    if workspace_id is not None and lakehouse_id is not None:
+        sources = _graph_source_tables(
+            payloads["dataSources.json"], workspace_id, lakehouse_id, compilation.tables, companion=companion,
+        )
+    else:
+        if companion or workspace_id is not None or lakehouse_id is not None:
+            raise PrototypePublicationError("Companion query schema requires exact workspace and Lakehouse ownership")
+        sources = {}
+        for item in payloads["dataSources.json"]["dataSources"]:
+            path = item["properties"]["path"]
+            table_id = path.removeprefix("Tables/dbo/")
+            if path != f"Tables/dbo/{table_id}" or table_id not in compilation.tables:
+                raise PrototypePublicationError("Query schema requires a compiled relative table or explicit source ownership")
+            sources[item["name"]] = table_id
     node_types = {item["alias"]: item for item in payloads["graphType.json"]["nodeTypes"]}
     edge_types = {item["alias"]: item for item in payloads["graphType.json"]["edgeTypes"]}
     nodes, edges = {}, {}
@@ -622,6 +636,12 @@ def _citation_index(compilation: Any, schema: dict[str, Any]) -> dict[str, Any]:
         "entities": entities, "properties": properties, "relationships": relationships,
         "identities": identities, "pairs": pairs, "property_ids": property_ids,
         "evidence_spans": {},
+        "derived_displays": {
+            row["entity_id"]: row for row in compilation.definitions["ontology"].get(
+                "business_quality", {}
+            ).get("presentation_coverage", {}).get("derived_instance_displays", [])
+            if row["status"] == "derived"
+        },
     }
 
 
@@ -695,6 +715,22 @@ def _citations(
                         assertion_id=proof["property_assertion_id"], claim_kind="asserted-property-value",
                     )
             else:
+                derived = index.get("derived_displays", {}).get(entity_id)
+                if derived is not None and column in ("label", "__label"):
+                    proofs = {
+                        proof["property_assertion_id"]: proof
+                        for key in derived["guard_property_ids"]
+                        for proof in index["properties"].get((entity_id, key), [])
+                    }
+                    if not derived["property_assertion_ids"] or not set(derived["property_assertion_ids"]) <= proofs.keys():
+                        raise PrototypePublicationError("Derived display lacks its asserted property lineage")
+                    for assertion_id in derived["property_assertion_ids"]:
+                        proof = proofs[assertion_id]
+                        attach(
+                            proof, proof["evidence_span_ids"], columns=[alias],
+                            assertion_id=assertion_id, claim_kind="derived-instance-display",
+                        )
+                    continue
                 evidence_ids = (
                     [entity["label_evidence_span_id"]]
                     if column in ("label", "__label") and entity["label_evidence_span_id"]
@@ -761,9 +797,23 @@ def query_schema2_prototype(
         or journal.get("plan_hash") != plan["plan_hash"]
         or journal.get("run_id") != plan["run_id"] or journal.get("workspace_id") != plan["workspace_id"]
         or journal.get("policy") != "create-only-retain-partial"
-        or plan.get("compiler_hash") != _compiler_hash()
     ):
         raise PrototypePublicationError("Unowned, changed, blocked, or incompatible prototype plan/journal")
+    if plan.get("compiler_hash") != _compiler_hash() or journal.get("runtime_repair"):
+        from fabric_kg_builder.deploy.schema2_prototype_reconcile import (
+            RETURNED_ID_POLICY,
+            recompile_plan,
+            validate_returned_artifacts,
+            validate_returned_resume,
+            validate_runtime_repair,
+        )
+
+        if journal.get("runtime_repair", {}).get("policy") != RETURNED_ID_POLICY:
+            raise PrototypePublicationError("Probe requires an accepted returned-ID runtime repair")
+        candidate = recompile_plan(plan_path, journal_path, materialize_dir, l4_run, l3_root)
+        validate_runtime_repair(plan, candidate, journal, plan_bytes=plan_path.read_bytes())
+        validate_returned_artifacts(journal, materialize_dir)
+        validate_returned_resume(journal_path, plan, materialize_dir, l4_run, l3_root)
     policy = plan.get("graph_readback_policy", {})
     if (
         not isinstance(policy, dict)
@@ -778,7 +828,7 @@ def query_schema2_prototype(
         or not 1 <= policy["max_pages_per_window"] <= MAX_GRAPH_READBACK_ROWS + 1
     ):
         raise PrototypePublicationError("Query bounds exceed or lack the approved paged-readback policy")
-    compilation = _compile(l4_run, l3_root, plan["workspace_id"], plan["name_prefix"])
+    compilation = _compile_from_plan(l4_run, l3_root, plan)
     if compilation.provenance != plan["provenance"] or {
         name: _table_proof(table) for name, table in sorted(compilation.tables.items())
     } != plan["tables"]:
@@ -882,7 +932,10 @@ def query_schema2_prototype(
             native_ontology=ontology_readback,
         )
         del checks
-        schema = _schema(graph, compilation)
+        schema = _schema(
+            graph, compilation, workspace_id=plan["workspace_id"], lakehouse_id=ids["lakehouse"],
+            companion=target == "ontology-companion",
+        )
         report["schema"] = schema
         probe.save()
         queries = [_Query(item["query"], schema, max_rows) for item in questions]
@@ -925,6 +978,7 @@ def query_schema2_prototype(
         probe.graph_content(
             graph_id, graph, compilation, ids["lakehouse"],
             companion=target == "ontology-companion",
+            native_ontology=ontology_readback if target == "ontology-companion" else None,
         )
         report["ontology_equivalent"] = target == "ontology-companion"
         citation_index = _citation_index(compilation, schema)

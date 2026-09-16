@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import click
 
@@ -30,14 +31,23 @@ def _core():
 @click.option("--max-request-chars", default=96000, show_default=True, type=click.IntRange(1024))
 @click.option("--request-char-budget", type=click.IntRange(1024),
               help="Explicit invocation input-size admission limit; preserves recorded config and request contents.")
-@click.option("--max-completion-tokens", default=8192, show_default=True,
-              type=click.IntRange(128, 32768))
+@click.option("--max-completion-tokens", type=click.IntRange(128, 128000),
+              help="Output/reasoning allowance: new whole-document runs default to 32768, "
+                   "chunked to 8192; resume inherits the recorded value. Reviewed model limits still apply.")
 @click.option("--max-chunk-chars", default=8000, show_default=True,
               type=click.IntRange(128, 64000),
               help="Chunking cap for --prepared; --discovery preserves its recorded chunk plan.")
 @click.option("--schema-policy", type=click.Choice(["reviewed-concepts", "concepts", "observed-terms"]),
-              help="New runs default to reviewed-concepts (independent admission of new types). "
+              help="Chunked runs default to reviewed-concepts (independent admission of new types). "
                   "concepts uses self-assessment only. Resume inherits its recorded policy.")
+@click.option("--discovery-mode", type=click.Choice(["chunked", "whole-document"]),
+              help="New runs default to whole-document: serial complete-document schema discovery, "
+                  "without instance extraction. Resume inherits the recorded mode; chunked is explicit.")
+@click.option("--model-capabilities", "--capability-profile", "capability_profile",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Required explicit model/deployment context, input and output limits JSON for whole-document mode.")
+@click.option("--model-transport", type=click.Choice(["chat_completions", "project_responses"]),
+              help="Whole-document request-accounting transport; default chat_completions. Must match Foundry config.")
 @click.option("--max-calls", default=32, show_default=True, type=click.IntRange(0, 100000),
               help="Total model-call ceiling for this invocation, including repairs.")
 @click.option("--max-repair-calls", default=16, show_default=True, type=click.IntRange(0, 100000),
@@ -55,17 +65,30 @@ def _core():
               help="Explicitly allow retry of a dispatched request with no durable response; requires --resume.")
 @click.option("--retry-invalid-response", is_flag=True,
               help="Explicitly retry a received invalid JSON response with retained diagnostics; requires --resume.")
+@click.option("--max-transport-retries", type=click.IntRange(0, 10),
+              help="Extra attempts per whole-document request for 429/timeouts/connections/5xx; "
+                   "default 3 in whole-document mode, 0 in chunked mode. Every attempt consumes --max-calls/tokens.")
+@click.option("--max-transport-retry-wait-seconds", default=900, show_default=True,
+              type=click.IntRange(0, 3600),
+              help="Total retry sleep allowance per document; longer provider delays stop rather than retry early.")
 @click.pass_context
 def domain_window_run_cmd(
     ctx, prepared, discovery, intake, seed_reference, out_state, window_size, concurrency,
     max_request_chars, request_char_budget, max_completion_tokens, max_chunk_chars, schema_policy, max_calls,
     max_repair_calls, max_tokens, stop_after_document, max_windows, live, dry_run, resume,
     retry_uncertain, retry_invalid_response,
+    discovery_mode, capability_profile, model_transport,
+    max_transport_retries, max_transport_retry_wait_seconds,
 ):
-    """Bootstrap, extract, evaluate and evolve a working schema over raw chunks.
+    """Evolve a working schema over raw chunks or complete documents.
 
-    Every worker in a window uses the same frozen schema and full intake context.
-    Outputs are unapproved observations, never asserted graph facts or deployment.
+    By default, each complete document evolves the prior reusable type schema.
+    Add, update or delete working definitions with exact source witnesses and
+    reasons. History retains before/after definitions and rejected attempts.
+    Content revisions advance only on change; document checkpoints always advance.
+    Review and freeze once, then extract instances across all authorized documents.
+    Explicit chunked mode retains legacy observation extraction.
+    Outputs are unapproved working artifacts, never asserted graph facts.
     Without --live this command only plans the work.
     """
     if (prepared is None) == (discovery is None):
@@ -97,6 +120,22 @@ def domain_window_run_cmd(
                     or protected.is_relative_to(destination)):
                 raise ValueError("Window output must not overlap source, intake or source-cache authority")
         binding = core.windowed_model_binding(out_state) if resume else None
+        saved = binding["config"] if binding is not None else {}
+        mode = discovery_mode or (
+            saved.get("discovery_mode", "chunked") if resume else "whole-document"
+        )
+        profile = saved.get("capability_profile")
+        if capability_profile is not None:
+            profile_path = capability_profile.resolve()
+            if profile_path == destination or profile_path.is_relative_to(destination):
+                raise ValueError("Capability profile must be outside output state")
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        if mode == "whole-document" and schema_policy is not None:
+            raise ValueError("--schema-policy is for chunked discovery; whole-document uses its own schema-only policy")
+        if mode == "chunked" and (capability_profile is not None or model_transport is not None):
+            raise ValueError("--model-capabilities/--capability-profile/--model-transport require whole-document discovery")
+        if mode == "chunked" and max_transport_retries:
+            raise ValueError("--max-transport-retries requires whole-document discovery")
         reference = binding["config"].get("seed_reference") if binding is not None else None
         if seed_reference is not None:
             reference_path = seed_reference.resolve()
@@ -108,16 +147,22 @@ def domain_window_run_cmd(
             reference = core.DesignReference.model_validate_json(
                 reference_path.read_text(encoding="utf-8"))
         prompt_version = (
-            binding["config"]["prompt_version"] if binding is not None and schema_policy is None
+            saved["prompt_version"] if binding is not None and schema_policy is None
+            else core.document_schema.PROMPT_VERSION if mode == "whole-document"
             else core.RUN_PROMPT_VERSION if schema_policy == "observed-terms"
             else core.CORE_PROMPT_VERSION if schema_policy == "concepts"
             else core.COMPACT_REVIEW_PROMPT_VERSION
         )
         config = core.RunConfig(
             window_size=window_size, max_concurrency=concurrency,
-            max_request_chars=max_request_chars, max_completion_tokens=max_completion_tokens,
+            max_request_chars=max_request_chars,
+            max_completion_tokens=(max_completion_tokens if max_completion_tokens is not None else
+                                   saved.get("max_completion_tokens", 8192) if resume else
+                                   32768 if mode == "whole-document" else 8192),
             max_chunk_chars=max_chunk_chars, prompt_version=prompt_version,
             seed_reference=reference,
+            discovery_mode=mode, capability_profile=profile,
+            model_transport=model_transport or saved.get("model_transport", "chat_completions"),
         )
         budget = core.RunBudget(
             max_calls=max_calls, max_repair_calls=max_repair_calls,
@@ -125,6 +170,9 @@ def domain_window_run_cmd(
             max_windows=max_windows,
             retry_uncertain=retry_uncertain, retry_invalid_response=retry_invalid_response,
             request_char_budget=request_char_budget,
+            max_transport_retries=(max_transport_retries if max_transport_retries is not None
+                                   else 3 if mode == "whole-document" else 0),
+            max_transport_retry_wait_seconds=max_transport_retry_wait_seconds,
         )
         if binding is not None and (
             binding["inputs_hash"] != inputs.artifact_hash
@@ -174,10 +222,12 @@ def domain_window_run_status_cmd(state):
 
 @click.command("window-run-history")
 @click.option("--state", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
-def domain_window_run_history_cmd(state):
+@click.option("--changes-only", is_flag=True,
+              help="Version 1.2.0/1.3.0 document changes: source quotations, reasons, before/after definitions and content revisions.")
+def domain_window_run_history_cmd(state, changes_only):
     """Read all verified raw-window transitions, decisions and source accounting."""
     try:
-        _emit(_core().windowed_history(state))
+        _emit(_core().windowed_history(state, changes_only=changes_only))
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
 

@@ -14,14 +14,15 @@ foundry:
   project: example-project
 
 enrichment:
-  # Enrichment/chat model deployment. Default gpt-5.4-mini @ >=200K TPM.
-  chat_deployment: gpt-5-4-mini
+  # Recommended for new runs; explicit environment/per-env deployment settings win.
+  # Whole-document discovery additionally requires reviewed deployment capabilities.
+  chat_deployment: gpt-5.4
   # Embedding model deployment — text-embedding-3-large.
   embedding_deployment: embedding
   # LOCKED: must match the AI Search chunk_vector field width. Reindex if changed.
   embedding_dimensions: 1536
   # Vision uses the chat deployment (multimodal) by default.
-  vision_deployment: gpt-5-4-mini
+  vision_deployment: gpt-5.4
 
 blob_storage:
   container: kg-assets

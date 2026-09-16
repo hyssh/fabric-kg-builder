@@ -54,9 +54,10 @@ from fabric_kg_builder.domain.models import (
 from fabric_kg_builder.domain.service import compute_contract_hash
 
 from .schema2_sources import L2StageError
+from .schema2_collections import CollectionDeferral, observed_order_reasons
 
-L2_PROMPT_VERSION = "l2-schema-constrained/1.2.0"
-L2_EXTRACTOR_VERSION = "1.3.0"
+L2_PROMPT_VERSION = "l2-schema-constrained/1.3.0"
+L2_EXTRACTOR_VERSION = "1.4.0"
 UNKNOWN_SEMANTIC_TYPE = {
     "entity": "unapproved-observation:entity",
     "relationship": "unapproved-observation:relationship",
@@ -185,6 +186,7 @@ class ProposedCandidateRecord:
     value_json: str | None = None
     normalized_value_json: str | None = None
     temporal_key: str | None = None
+    proposed_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -471,10 +473,23 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             "Proposed source anchors use Unicode codepoint offsets and are not verified evidence.",
             "Do not return asserted state, verified evidence IDs, or publication fields.",
             "Do not truncate candidates.",
+            "An entity label is a concise instance mention, not its supporting quote, "
+            "a generated summary, or a semantic type name. Copy a readable name or title "
+            "as a verbatim substring of that entity's supporting anchor quote (at most "
+            "120 characters, allowing whitespace normalization). Preserve source wording; "
+            "numbering may remain in the quote without being part of the label.",
+            "A generic source mention does not establish canonical product identity. "
+            "Do not expand a generic mention into a specific product or model name, "
+            "or infer identity-key values not explicitly supported by the source.",
             "Emit explicit property candidates for observed declared attributes, "
             "including identity-key values when supported by the source quote. "
             "Use each effective property's declared value_type; entity identity_key "
             "strings are not a substitute for typed, evidence-backed property observations.",
+            "Inspect every required declared effective property for each instance and "
+            "emit a separate property candidate with field-level exact source evidence "
+            "when present. A label does not satisfy a declared name or title property. "
+            "Never fabricate a missing required value or use a generated summary as an "
+            "exact quote; retain missingness for validation.",
         ],
         "max_relations_per_work_unit": (
             contract.reasoning_policy.max_relations_per_work_unit
@@ -932,6 +947,7 @@ def _make_candidate_record(
         value_json=value_json,
         normalized_value_json=normalized_value_json,
         temporal_key=temporal_key,
+        proposed_label=raw.label if isinstance(raw, RawEntityCandidate) else None,
     )
 
 
@@ -1313,6 +1329,7 @@ def build_required_member_set_proposals(
     contract: DomainContractV2,
     authority_factory: Any,
     base_identity: CanonicalIdentityEnvelope,
+    deferrals: list[CollectionDeferral] | None = None,
 ) -> tuple[ProposedRequiredMemberSetView, ...]:
     """Merge full-manifest collection fragments without another model call."""
 
@@ -1396,10 +1413,7 @@ def build_required_member_set_proposals(
                 unresolved.add("L2_ORDER_ROLE_INVALID")
             if fact_set.member_role_ids and member.member_role_id is None:
                 unresolved.add("L2_ORDER_ROLE_UNSPECIFIED")
-            if fact_set.ordering_policy.mode == "ordered":
-                if member.member_order is None:
-                    unresolved.add("L2_ORDER_ROLE_INVALID")
-            elif member.member_order is not None:
+            if fact_set.ordering_policy.mode != "ordered" and member.member_order is not None:
                 unresolved.add("L2_ORDER_ROLE_INVALID")
             prior = member_by_identity.get(member.member_entity_id)
             if prior is not None and prior != member:
@@ -1431,12 +1445,6 @@ def build_required_member_set_proposals(
                     "L2_ORDER_ROLE_INVALID",
                     "C0 1.1 requires approved unique contiguous ordered-member semantics",
                 )
-            observed_orders = [member.member_order for member in ordered_members]
-            if observed_orders != list(range(len(ordered_members))):
-                raise L2StageError(
-                    "L2_ORDER_ROLE_INVALID",
-                    "ordered members require observed unique contiguous zero-based positions",
-                )
         if fact_set.member_role_ids:
             observed_roles = {member.member_role_id for member in ordered_members}
             if None in observed_roles or observed_roles != set(fact_set.member_role_ids):
@@ -1457,6 +1465,8 @@ def build_required_member_set_proposals(
                 + ", ".join(sorted(unresolved & structural_errors)),
             )
 
+        # Validate C0 member syntax and sentinel restrictions before partitioning;
+        # only collection-level observed ordering failures may be deferred.
         c0_members = tuple(
             RequiredMemberReferenceV1_1.seal(
                 member_canonical_id=member.member_entity_id,
@@ -1468,6 +1478,22 @@ def build_required_member_set_proposals(
             )
             for member in ordered_members
         )
+        if ordering.mode == "ordered" and observed_order_reasons(
+            [member.member_order for member in ordered_members]
+        ):
+            if deferrals is None:
+                raise L2StageError(
+                    "L2_ORDER_ROLE_INVALID",
+                    "ordered members require observed unique contiguous zero-based positions",
+                )
+            deferrals.append(CollectionDeferral.seal(
+                authority=authority,
+                scope_canonical_id=aggregate_id,
+                leaves=leaves,
+                members=members,
+            ))
+            continue
+
         if not c0_members:
             raise L2StageError(
                 "L2_REQUIRED_MEMBER_SET_INVALID",

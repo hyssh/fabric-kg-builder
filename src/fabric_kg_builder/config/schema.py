@@ -9,6 +9,9 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+RECOMMENDED_CHAT_DEPLOYMENT = "gpt-5.4"
+
+
 class EnrichmentConfig(BaseModel):
     """Bounded LLM enrichment execution settings."""
 
@@ -34,7 +37,12 @@ class FoundryConfig(BaseModel):
         "Required for live SDK calls. Source: ${AZURE_OPENAI_ENDPOINT} or foundry.openai_endpoint.",
     )
     project: str = Field(default="example-project", description="Foundry project name")
+    # Preserve the legacy constructor default; load_config selects the current live default.
     chat_deployment: str = Field(default="gpt-5-4-mini")
+    chat_model: str = Field(
+        default="",
+        description="Underlying model name for request compatibility with custom deployment aliases.",
+    )
     embedding_deployment: str = Field(default="embedding")
     embedding_dimensions: int = Field(default=1536, description="Must match AI Search chunk_vector field width")
     api_version: str = Field(
@@ -44,8 +52,8 @@ class FoundryConfig(BaseModel):
     request_timeout_seconds: float = Field(
         default=120.0,
         ge=1.0,
-        le=600.0,
-        description="Bounded timeout for each Azure OpenAI SDK request.",
+        le=1800.0,
+        description="Bounded per-request timeout; long whole-document reasoning may need an explicit increase.",
     )
 
 

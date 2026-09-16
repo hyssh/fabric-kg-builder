@@ -1934,6 +1934,26 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
 @click.option("--reextract-pending", is_flag=True,
               help="Authorize targeted calls for missing/unmappable discovery chunks only.")
 @click.option("--max-reextract-calls", default=1, show_default=True, type=click.IntRange(0, 100_000))
+@click.option("--reextract-approved", is_flag=True,
+              help="Explicit fresh schema-constrained extraction from approved cached SourceUnits, not candidate replay. Requires a new --l2-state and explicit --max-calls.")
+@click.option("--reuse-approved-run", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Approved reextraction only: verify an inactive sealed donor and reuse its raw responses in a fresh child; budgets are ADDITIONAL. Repeat with --resume only for that exact child.")
+@click.option("--allow-budget-limited-partial", is_flag=True,
+              help="Explicit source-spans-v2 continuation only: allow a budget below full-completion minimum. Limits still stop execution with an error; no successful partial L2 or automatic handoff. Requires --reextract-approved --reuse-approved-run; repeat on exact --resume.")
+@click.option("--approved-few-shot", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Approved reextraction only: JSON array of synthetic examples replacing {{a few shot}}; validated against the approved contract and sealed for exact resume.")
+@click.option("--approved-anchor-mode", type=click.Choice(["offsets-v1", "quote-first-v1", "source-spans-v1", "source-spans-v2"]), default=None,
+              help="Approved extraction model contract: source-spans-v2 selects request-local s1/s2 line/HTML row/cell IDs and supports exact same-producer --reuse-approved-run continuation. Source-spans-v1 requires source-bound IDs and model-copied context (fresh run/exact resume only). Fresh GPT-5.4 defaults to quote-first-v1, others to offsets-v1. Changing a sealed mode requires a fresh run without a donor.")
+@click.option("--approved-quote-review", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Explicit reviewed exact-quote corrections for the pinned quote-first producer. Requires --reuse-approved-run; v2 reviews support reviewed-donor ancestry in a fresh child, preserving prior reviews and original output. Repeat the exact review for --resume.")
+@click.option("--max-calls", type=click.IntRange(0, 100_000),
+              help="Sealed logical-call budget across resumes; ADDITIONAL calls with --reuse-approved-run. Full-completion minimum is required unless --allow-budget-limited-partial is explicit.")
+@click.option("--max-physical-calls", type=click.IntRange(0, 100_000),
+              help="Sealed physical attempts including retries; ADDITIONAL with --reuse-approved-run; defaults to --max-calls.")
+@click.option("--max-output-tokens", type=click.IntRange(256, 128_000), default=None,
+              help="Approved reextraction only: output token ceiling per physical attempt (new GPT-5.4 runs: 32768; other models: 8000). Omitted limits inherit the sealed run on resume or donor continuation; changing replay limits requires a fresh run without a donor.")
+@click.option("--max-context-tokens", type=click.IntRange(1), default=None,
+              help="Approved reextraction only: total context cap (new runs: 96000; omitted on resume/continuation: sealed cap), INCLUDING output reserve and 1024 framing tokens. Conservatively counts complete request UTF-8 bytes as input tokens, not a model tokenizer. Dry-run reports overhead; oversized requests fail before calls. Set within verified backend capacity.")
 @click.pass_context
 def enrich_cmd(
     ctx: click.Context,
@@ -1968,6 +1988,16 @@ def enrich_cmd(
     window_mapping: Path | None = None,
     window_state: Path | None = None,
     window_run: Path | None = None,
+    reextract_approved: bool = False,
+    reuse_approved_run: Path | None = None,
+    approved_few_shot: Path | None = None,
+    approved_anchor_mode: str | None = None,
+    approved_quote_review: Path | None = None,
+    max_calls: int | None = None,
+    max_physical_calls: int | None = None,
+    max_output_tokens: int | None = None,
+    max_context_tokens: int | None = None,
+    allow_budget_limited_partial: bool = False,
 ) -> None:
     """Run LLM extraction on source files and produce structured JSON in build/enriched/.
 
@@ -1987,6 +2017,67 @@ def enrich_cmd(
     """
     ctx.ensure_object(dict)
     planning = dry_run or bool(ctx.obj.get("dry_run"))
+    if allow_budget_limited_partial and (not reextract_approved or reuse_approved_run is None):
+        raise click.UsageError("--allow-budget-limited-partial requires --reextract-approved and --reuse-approved-run")
+    if reextract_approved:
+        if approved_quote_review is not None and reuse_approved_run is None:
+            raise click.UsageError("--approved-quote-review requires --reuse-approved-run")
+        if not domain_file or not l1_state or not l2_state or max_calls is None:
+            raise click.UsageError("--reextract-approved requires --domain-file, --l1-state, a new --l2-state, and explicit --max-calls")
+        if (window_run is None) == (discovery_file is None):
+            raise click.UsageError("--reextract-approved requires exactly one of --window-run or --discovery")
+        if any((force, replay_only, reextract_pending, compact_response, window_mapping,
+                window_state, ocr_cache, ocr_identity, domain_prompt)):
+            raise click.UsageError("--reextract-approved conflicts with replay/repair/mapping, --force, --compact-response, OCR and legacy prompt options")
+        if max_concurrent not in (None, 1):
+            raise click.UsageError("--reextract-approved uses concurrency 1 for durable physical-call accounting")
+        try:
+            from ..config.loader import load_config
+            from ..enrichment.approved_reextraction import run_approved_reextraction
+            from ..enrichment.foundry_client import _is_gpt54
+
+            config = load_config(
+                env=str(ctx.obj.get("env", "dev")),
+                yaml_path=Path(str(ctx.obj.get("config", "fabric-kg.yaml"))),
+            )
+            if max_output_tokens is None and not resume and reuse_approved_run is None:
+                max_output_tokens = 32_768 if _is_gpt54(config.foundry) else 8_000
+            runner = run_approved_reextraction
+            reuse_options = {}
+            if approved_anchor_mode is None and not resume and reuse_approved_run is None and _is_gpt54(config.foundry):
+                approved_anchor_mode = "quote-first-v1"
+            if approved_anchor_mode is not None:
+                reuse_options["anchor_mode"] = approved_anchor_mode
+            if approved_quote_review is not None:
+                reuse_options["approved_quote_review"] = approved_quote_review
+            if approved_few_shot is not None:
+                replacement = json.loads(approved_few_shot.read_text(encoding="utf-8"))
+                if not isinstance(replacement, list):
+                    raise ValueError("--approved-few-shot requires a JSON array of synthetic examples")
+                reuse_options["few_shot"] = replacement
+            if reuse_approved_run is not None:
+                from ..enrichment.approved_donor_continuation import run_approved_continuation
+
+                runner = run_approved_continuation
+                reuse_options["reuse_approved_run"] = reuse_approved_run
+                if allow_budget_limited_partial:
+                    reuse_options["allow_budget_limited_partial"] = True
+            summary = runner(
+                source_path=Path(input_path), l1_state_root=Path(l1_state),
+                domain_path=Path(domain_file), state_root=Path(l2_state),
+                foundry_config=config.foundry, window_run_path=window_run,
+                discovery_file=discovery_file, max_calls=max_calls,
+                max_physical_calls=max_physical_calls,
+                max_output_tokens=max_output_tokens, model_override=model,
+                max_context_tokens=max_context_tokens,
+                dry_run=planning, resume=resume, **reuse_options,
+            )
+        except Exception as exc:
+            raise click.ClickException(f"Approved source reextraction failed: {exc}") from exc
+        click.echo(json.dumps(summary, sort_keys=True))
+        return
+    if any(value is not None for value in (reuse_approved_run, approved_few_shot, approved_anchor_mode, approved_quote_review, max_calls, max_physical_calls, max_output_tokens, max_context_tokens)):
+        raise click.UsageError("--reuse-approved-run/--approved-few-shot/--approved-anchor-mode/--approved-quote-review/--max-calls/--max-physical-calls/--max-output-tokens/--max-context-tokens require --reextract-approved")
     if (ocr_cache is None) != (ocr_identity is None):
         raise click.UsageError("--ocr-cache and --ocr-identity must be supplied together")
     if replay_only and reextract_pending:

@@ -36,11 +36,11 @@ from fabric_kg_builder.enrichment.schema2_sources import IndexedSourceCorpusRead
 from fabric_kg_builder.enrichment.schema2_stage import run_l2
 from fabric_kg_builder.enrichment import schema2_validation_stage
 from fabric_kg_builder.enrichment.schema2_validation_stage import (
-    L3_ACCEPTED_VERSIONS,
     REMOTE_METRIC_DIMENSIONS,
     RequiredMemberOutcomeRecord,
     assert_l2_did_not_mint_l3_artifacts,
     l3_input_fingerprint,
+    l3_accepted_versions,
     l3_leaf_checkpoint_path,
     l3_run_root,
     load_l3_inputs,
@@ -364,7 +364,7 @@ class _Service:
                 "candidate_kind": "entity",
                 "local_id": "record-1",
                 "observed_type": "Record",
-                "label": "Record 1",
+                "label": "governed record",
                 "aliases": [],
                 "identity_key": {},
                 "stable_source_identity": None,
@@ -374,7 +374,7 @@ class _Service:
                 "candidate_kind": "entity",
                 "local_id": "subject-1",
                 "observed_type": "Subject",
-                "label": "Subject 1",
+                "label": "governed subject",
                 "aliases": [],
                 "identity_key": {},
                 "stable_source_identity": None,
@@ -601,7 +601,7 @@ def test_l3_asserts_grounded_candidates_with_local_1_1_evidence(
     assert result.receipt.status == "succeeded"
     assert result.receipt.stage_id == "L3"
     assert result.receipt.stage_name == L3_STAGE_NAME
-    assert result.receipt.accepted_contract_versions == L3_ACCEPTED_VERSIONS
+    assert result.receipt.accepted_contract_versions == l3_accepted_versions(result.inputs)
     states_by_kind: dict[str, set[str]] = {}
     for item in result.candidate_results:
         states_by_kind.setdefault(item.candidate_kind, set()).add(item.current_state)
@@ -1158,6 +1158,7 @@ def test_l3_prefers_the_most_specific_concrete_classification(tmp_path: Path) ->
         first = text.find("governed record")
         specialized = dict(candidates[0])
         specialized["observed_type"] = "Record A"
+        specialized["label"] = "record"
         specialized["anchors"] = [
             {
                 "span_start": offset + first + len("governed "),
@@ -1395,7 +1396,7 @@ def test_l3_governs_property_observations_against_effective_properties(
 def _scalar_pipeline(
     tmp_path, monkeypatch, *, value=0, value_type="integer",
     normalized_value=None, source_literal=None, quote=None, inherited=False,
-    unasserted_owner=False,
+    unasserted_owner=False, owner_context=False,
 ):
     from fabric_kg_builder.contracts.base import canonical_json
 
@@ -1406,6 +1407,14 @@ def _scalar_pipeline(
     )
 
     def mutate(candidates, work_unit):
+        if owner_context:
+            text = work_unit.text.rstrip()
+            candidates[0]["anchors"] = [{
+                "span_start": work_unit.slice_start,
+                "span_end": work_unit.slice_start + len(text),
+                "quote": text,
+                "model_authored_evidence_id": None,
+            }]
         if inherited:
             candidates[0]["observed_type"] = "Record A"
         if unasserted_owner:
@@ -1499,6 +1508,17 @@ def test_l3_refuses_unproven_or_transformed_property(tmp_path, monkeypatch, opti
         assert observation.observation_state == "unsupported"
 
 
+def test_l3_asserts_field_inside_grounded_owner_context(tmp_path, monkeypatch):
+    l1_root, domain_path, _ = _scalar_pipeline(
+        tmp_path, monkeypatch, owner_context=True, quote="reading 0.",
+    )
+    result = _l3(tmp_path, l1_root, domain_path)
+    observation = next(item for leaf in result.leaves for item in leaf.property_observations)
+    assert observation.observation_state == "asserted"
+    assert observation.evidence_span_ids
+    assert observation.entity_id is not None
+
+
 def test_l3_property_uses_effective_inherited_owner_classification(tmp_path, monkeypatch) -> None:
     l1_root, domain_path, _ = _scalar_pipeline(tmp_path, monkeypatch, inherited=True)
     result = _l3(tmp_path, l1_root, domain_path)
@@ -1564,6 +1584,7 @@ def test_l3_carrier_field_presence_is_versioned_and_historical_hashes_are_preser
         path = root / "proposed-candidates" / f"{schema2_validation_stage._safe_id(batch_id)}.json"
         raw = json.loads(path.read_text("utf-8"))
         for record in raw:
+            record.pop("proposed_label")
             for field in ("proposed_owner_entity_id", "value_json", "normalized_value_json", "temporal_key"):
                 record.pop(field)
         raw_by_batch[batch_id] = raw

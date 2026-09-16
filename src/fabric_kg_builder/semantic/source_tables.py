@@ -137,6 +137,17 @@ L4_ACCEPTED_VERSIONS = {
 }
 
 
+def l4_accepted_versions(*, qualified_witness=False):
+    if not qualified_witness:
+        return dict(L4_ACCEPTED_VERSIONS)
+    from fabric_kg_builder.enrichment.approved_partial_handoff import (
+        WITNESS_KIND, WITNESS_FILE_KIND, WITNESS_VERSION,
+    )
+    return {
+        **L4_ACCEPTED_VERSIONS, WITNESS_KIND: WITNESS_VERSION, WITNESS_FILE_KIND: WITNESS_VERSION,
+    }
+
+
 def decode_property_scalar(value_json: str, value_type: str) -> object:
     """Decode an asserted canonical scalar without implicit value coercion."""
     if not isinstance(value_json, str):
@@ -333,7 +344,9 @@ class SealedL4ServingSource:
             or self.receipt.stage_contract_version != "1.0.0"
             or self.receipt.status != "succeeded"
             or dict(self.receipt.accepted_contract_versions)
-            != L4_ACCEPTED_VERSIONS
+            != l4_accepted_versions(qualified_witness=any(
+                entry.artifact_id == "partial-extraction-witnesses" for entry in self.manifest.entries
+            ))
         ):
             raise ValueError(
                 "schema-2 serving requires a successful L4 receipt for the current version; "
@@ -431,6 +444,18 @@ class SealedL4ServingSource:
             raise ValueError("sealed L4 stage lineage or local metrics differ")
 
     def _validate_complete_artifact_set(self) -> None:
+        from fabric_kg_builder.enrichment.approved_partial_handoff import (
+            SCOPE_FILE, SCOPE_ID, WITNESS_ID, WITNESS_PREFIX, read_scope, witness_artifact_path,
+        )
+        partial_scope = read_scope(self.root, self.manifest)
+        input_scope_entries = [
+            entry for entry in self.input_manifest.entries if entry.artifact_id == SCOPE_ID
+        ]
+        output_scope_entries = [
+            entry for entry in self.manifest.entries if entry.artifact_id == SCOPE_ID
+        ]
+        if input_scope_entries != output_scope_entries:
+            raise ValueError("L4 partial extraction scope differs from sealed L3 input")
         expected_files = set(_L4_STAGE_FILES)
         expected_artifact_ids = {
             *(
@@ -439,6 +464,13 @@ class SealedL4ServingSource:
             ),
             *_L4_PROJECTION_FILES,
         }
+        if partial_scope is not None:
+            expected_files.add(SCOPE_FILE)
+            expected_artifact_ids.add(SCOPE_ID)
+        for entry in self.manifest.entries:
+            if entry.artifact_id == WITNESS_ID or entry.artifact_id.startswith(WITNESS_PREFIX):
+                expected_artifact_ids.add(entry.artifact_id)
+                expected_files.add(str(witness_artifact_path(entry.artifact_id)))
         if {entry.artifact_id for entry in self.manifest.entries} != (
             expected_artifact_ids
         ):
@@ -1437,6 +1469,10 @@ class SealedL4ServingSource:
                 f"sealed L4 table differs from its artifact manifest: {path}"
             )
         return path, rows
+
+    def audit_rows(self) -> tuple[dict[str, object], ...]:
+        """Read sealed lifecycle rows without admitting them as serving facts."""
+        return self._validate_table_artifact("audit_candidates")[1]
 
     def resolve(self, source_table_name: str) -> Path:
         table_name = source_table_name.removesuffix(".parquet")

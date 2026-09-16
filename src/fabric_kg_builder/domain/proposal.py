@@ -22,6 +22,7 @@ from fabric_kg_builder.contracts.base import (
 )
 from fabric_kg_builder.contracts.identity import CanonicalIdentityEnvelope
 
+from .compiler_capacity import CompilerCapability, relationship_capacity
 from .contexts import DomainDesignContext, DomainIntake, draft_contract_hash
 from .models import (
     ApprovedExternalSemanticReferenceV2,
@@ -829,6 +830,7 @@ def build_draft_contract_from_candidates(
     known_evidence_span_ids: set[str],
     source_projection_draft: Any = None,
     _window_validation: Any = None,
+    compiler_capability: CompilerCapability | None = None,
 ) -> tuple[DomainContractV2, dict[str, tuple[str, ...]], set[str]]:
     """Apply deterministic local authority to untrusted model candidates."""
     from .hierarchy import build_type_hierarchy_closure
@@ -844,6 +846,7 @@ def build_draft_contract_from_candidates(
 
         projected_type_ids = validated_projection_type_ids(
             source_projection_draft, intake=intake, candidates=candidates, _validation=_window_validation,
+            compiler_capability=compiler_capability,
         )
     question_ids = {item.id for item in intake.competency_questions}
     route_ids = [item.question_id for item in candidates.question_routes]
@@ -918,6 +921,7 @@ def build_draft_contract_from_candidates(
         },
         required_relationship_type_ids=required_relationship_ids,
         eligible_type_ids=eligible_semantic_type_ids,
+        compiler_capability=compiler_capability,
     )
     selected_relationship_candidates = list(selection.relationships)
     selected_type_ids = set(required_type_ids) | projected_type_ids
@@ -1177,6 +1181,8 @@ def build_draft_contract_from_candidates(
         external_reference_decision_hash=external_hash,
         reasoning_policy=ReasoningPolicyV2(
             relationship_type_count=len(relationships),
+            max_relationship_types=relationship_capacity(compiler_capability),
+            compiler_capability=compiler_capability,
             retained_type_rationales={
                 key: list(value)
                 for key, value in selection.retained_type_rationales.items()

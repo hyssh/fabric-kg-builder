@@ -1,5 +1,14 @@
 # PRD: Fabric KG Builder
 
+> **Current whole-document workflow (2026-09-13):** The
+> [auditable schema evolution amendment](PRD-0.2.4-COPILOT-DOMAIN-DESIGN.md#current-workflow-amendment-auditable-whole-document-evolution-2026-09-13)
+> supersedes the sample/chunk-first schema design described below. Compare each
+> complete cached document with the accumulated working schema; allow explicit
+> additions, updates and deletions with source quotations, reasons and immutable
+> before/after records; review/freeze once, then extract instances across the
+> approved scope. A confirming document does not advance the content revision.
+> Business-quality publication policy remains optional.
+
 > **NOTE: Specs supersede this PRD**
 >
 > For the following topics, the authoritative source is **[`docs/specs/SPEC-001`](./specs/SPEC-001-architecture-and-cli.md) through [`SPEC-005`](./specs/)** and **[`docs/infra/INFRA-001`](./infra/INFRA-001-azure-resources.md)**:

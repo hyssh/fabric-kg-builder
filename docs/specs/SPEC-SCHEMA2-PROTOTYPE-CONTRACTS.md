@@ -97,8 +97,13 @@ Persistence alone is not source proof. Assertion requires:
 1. Owner entity exists and is asserted under the same approved authority.
 2. Property is declared/effective for the owner's validated classification.
 3. The exact evidence quote is verified against the trusted SourceUnit.
-4. Owner is grounded in that quote under existing endpoint-grounding rules.
-5. The observed scalar is supported by the quote: literal string occurrence,
+4. Owner is grounded in that quote under existing endpoint-grounding rules, or
+   the field's exact occurrence is contained in the owner's exact source-local
+   context. The latter rejects multi-row HTML contexts and overlapping competing
+   same-type owners; it does not permit adjacent or cross-source attribution.
+   Relationship endpoints still require their existing independent proof.
+5. The observed scalar is supported by the quote: literal string occurrence
+   (allowing only layout-whitespace differences without changing the source quote),
    or a whole scalar token for numbers and boolean literals. No fuzzy matches,
    substring matches inside larger numeric tokens, or yes/no inference.
 6. Raw and normalized canonical JSON are equal in this prototype. Different
@@ -113,11 +118,37 @@ owner-only fixtures must remain negative.
 The rule is deliberately conservative. It may abstain on valid normalization;
 report unsupported outcomes rather than inventing conversions.
 
+The `property-owner-containment/1.0.0` binding invalidates prior L3 run/leaf
+fingerprints. Source-local competing owner anchors and classifications participate
+in the leaf dependency hash. Revalidation writes a new run rather than modifying
+historical evidence. Containment proves source ownership, not semantic entailment
+of a condition, negation, or relationship.
+
+For relationship endpoints, distinct exact original contexts inside the verified
+relationship span retain their existing proof. Overlapping row/cell contexts can
+represent a contextual requirement and its item; they need not name two separate
+physical things. Modern labels must still be source-grounded.
+
+When original contexts cannot distinguish endpoints (for example two entities
+selected from one paragraph), L3 may derive each unique label occurrence inside
+its own exact approved context. Only layout whitespace is normalized for matching;
+returned offsets address the original source. Derived occurrences must lie inside
+the relationship evidence and must not overlap. Repeated labels, unsupported
+labels, outside-context matches and relationship-wide relocation fail closed.
+The `scoped-label-occurrence/1.1.0` binding and label/context/source dependencies
+invalidate earlier L3 cache entries. This adds occurrence proof, not semantic
+entailment, cross-document resolution, or inferred relationships.
+
 ## B4: typed projection
 
 L4 requires complete owner/value proof, asserted owner presence and agreement
 among records grouped into the same assertion. L5a joins properties by
 `(entity_id, semantic_property_id)`.
+
+Across L3 leaves, identical full evidence records sharing an ID are indexed
+once; conflicting records sharing that ID still fail. Source and purpose gates
+remain enforced, and original leaf provenance is retained. The L4 fingerprint
+binds this behavior as `evidence_index_version: exact-span-union/1.0.0`.
 
 Identical normalized values may coalesce while retaining assertion/evidence
 provenance. Distinct values are an explicit conflict; never choose first/last.
@@ -131,6 +162,22 @@ from business keys without property evidence.
 Reuse existing Arrow normalizers: strict int64 excluding booleans, finite
 float64 excluding booleans, boolean, string, ISO date and timezone-aware UTC
 datetime. Reject incompatible JSON encodings and noncanonical representations.
+
+L5a compiles one publication crosswalk per sealed required-member manifest,
+ordered by manifest ID. Every crosswalk carries the same complete physical
+definition and stable-ID lock, but its own exact L3 manifest authority and
+unique, manifest-derived crosswalk ID. Publication validates exact manifest
+coverage and produces one required-member equivalence proof per manifest per
+target; omission, duplicate authorities, conflicting definitions, and altered
+member readback remain failures. This applies to both crosswalk 1.2 and 1.3.
+An empty manifest set still requires exactly one unanchored crosswalk.
+
+`compile_publication_crosswalks` is the production collection API; the singular
+API remains compatible for zero/one-manifest sources and rejects larger covers.
+Existing singleton IDs, hashes, and plan shapes remain unchanged. For multiple
+crosswalks, plan/prototype provenance carries sorted `crosswalk_hashes`, and the
+legacy `crosswalk_hash` field binds their complete list via canonical SHA-256
+(it never means the first manifest). Repair evidence retains every crosswalk.
 
 ## B5: version and legacy rules
 
@@ -151,6 +198,59 @@ Legacy rows without owner/value proof remain non-asserting. New projection
 schemas invalidate old projection caches. Owner identity/classification is part
 of property validation dependencies. Domain and C0 assertion schema versions do
 not change solely to carry fields already represented by their contracts.
+
+### B5.1: lossless ordered-collection deferrals
+
+`l2.collection_deferral@1.0.0` is a non-asserting observation carrier, not a new
+C0 proposal variant. C0 1.1 ordering and manifest validation remain unchanged.
+Only observed order that cannot satisfy the approved unique, contiguous,
+zero-based requirement is deferrable: missing positions, duplicate positions,
+or non-zero-based/gapped positions. Role/reference/type/identity violations and
+incompatible approved ordering policies remain hard errors. An absent collection
+is not synthesized, and existing explicit empty-collection obligation guards
+remain in force.
+
+Each immutable deferral binds:
+
+- the complete extraction authority (domain, hierarchy, identity, completeness
+  requirement and source-manifest IDs/hashes);
+- the aggregate scope and all contributing observation fragments, retaining exact
+  observed positions, member IDs, member/relationship candidate IDs and source
+  units (anchors/evidence remain in the referenced atomic partitions);
+- the leaf candidate batch IDs/hashes, canonical diagnostics,
+  `status: review_required`, a deterministic ID and canonical self-hash.
+
+L2 writes deferrals under `collection-deferrals/` and binds their schema, bytes,
+row count and hashes in its output manifest/receipt. Its accepted-version map
+declares the carrier even when there are no deferrals. The
+`l2-collection-partition/1.0.0` fingerprint component is shared by normal
+extraction and zero-call replay, preventing reuse of an older policy's successful
+receipt as a new partition. Atomic checkpoint formats do not change.
+
+L3 verifies storage and deterministically rederives **every** observed
+requirement/scope group from the persisted candidate partitions. The exact result
+must partition into C0 proposals or deferrals once each; missing, duplicated,
+foreign or rehashed-but-reinterpreted records fail. A legacy receipt without the
+new capability must still pass strict proposal derivation; it cannot silently
+omit invalid collections.
+
+An existing valid C0 proposal retains `l3.required_member_outcome@1.0.0` and its
+historical serialization. A deferral instead produces outcome **1.1.0**, with
+`collection_deferral_id` and `deferral_hash` (never a fabricated C0 proposal ID),
+`completeness_state: unresolved`, `readiness_state: blocked`, scope/requirement,
+observed member IDs and diagnostics. It cannot produce a collection manifest.
+Atomic validation/evidence and all approved completeness/question obligations
+are unchanged. L4 verifies both outcome variants and excludes deferred
+collections from semantic required-member tables while retaining independently
+asserted atomic rows.
+
+Historical accepted-version maps, successful C0 carriers and outcome-1.0 bytes
+remain readable. New-capability L3 fingerprints/receipts bind the successor
+versions; the old maps are not reinterpreted. Immutable storage collisions and
+corrupt outcomes fail on resume; interruptions may regenerate identical derived
+artifacts from intact atomic checkpoints. Use fresh L2 state to adopt the
+successor, not edited/resealed historical state. Processing success does not
+establish complete-procedure readiness.
 
 ## B6: document-assessment and review artifacts
 
@@ -317,6 +417,37 @@ ordering assumption. It is not a claim that all real instances were extracted.
 This compatibility behavior is not a substitute for evaluating design gaps in
 the new design-first workflow; new compilation must expose unsupported
 completeness requirements rather than silently manufacture a passing assessment.
+
+### Reviewed relationship compiler capacity
+
+`domain evaluate-design --compiler-capability reviewed-design-64/v1` opts a
+specific draft evaluation into a bounded 64-relationship compiler capability.
+Omitting the option preserves the legacy 24 limit, including the default
+25-relationship unsupported case. `domain compile-design` consumes the saved
+evaluation and requires its exact `--accept-evaluation-hash`; no additional
+override can bypass findings. The frozen design schema, prompt, request and
+draft hashes are unchanged, including drafts generated before this capability.
+
+The evaluation hash binds `compiler_capability`. Compiled
+`reasoning_policy` records both `compiler_capability: reviewed-design-64/v1`
+and `max_relationship_types: 64`. Neither a bare numeric override nor an unknown
+capability is accepted. Design compilation assumptions and the selector policy
+hash record the same capability; persisted/reloaded contracts preserve it.
+Default evaluation/contract serialization omits the optional capability, and
+the legacy selector hash is unchanged.
+
+The bound counts explicit compiler relationship definitions, not normalized
+relationship concepts or extracted instances. For example, normalized revision
+9 has 12 entities, 13 polymorphic relationships and 14 properties; expansion
+of its declared endpoint sets and permitted subtype endpoints requires 38
+explicit relationship pairs. Preserve all pairs and property-owner declarations
+losslessly. This is not a request to split or drop normalized concepts.
+Default compact sketches remain capped at 24; the reviewed compact
+representation and expander, evaluator, selector and strict reasoning policy
+all support the explicit 64 capability. More than 64 fails closed.
+Every retained relationship still requires rationale above 20. Four-hop limits,
+per-hop evidence, identity/hierarchy, source, completeness, lossless selection,
+explicit L1 approval and downstream business-quality gates are unchanged.
 
 ## B11: explicit cached-layout text units
 

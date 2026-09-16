@@ -318,7 +318,7 @@ def domain_question_context_cmd(
 @click.option("--retry-missing", is_flag=True,
               help="Raise output capacity only for prior chunks with no received raw response; requires --resume.")
 @click.option("--retry-max-completion-tokens", default=16_384, show_default=True,
-              type=click.IntRange(256, 32_768),
+              type=click.IntRange(256, 128_000),
               help="Per-missing-chunk output ceiling; requires --retry-missing. Global/summary ceilings stay unchanged.")
 @click.option("--project-id")
 @click.option("--live", is_flag=True, help="Permit bounded full-corpus parsing and model calls.")
@@ -327,13 +327,16 @@ def domain_question_context_cmd(
 @click.option("--concurrency", default=4, show_default=True, type=click.IntRange(1, 16))
 @click.option("--max-chunk-chars", default=12_000, show_default=True, type=click.IntRange(128, 64_000))
 @click.option("--max-tokens", default=2_000_000, show_default=True, type=click.IntRange(0))
+@click.option("--max-completion-tokens", type=click.IntRange(256, 128_000),
+              help="Explicit discovery output allowance; default 4096, or the saved budget on resume. "
+                   "Use --retry-max-completion-tokens to expand only missing responses.")
 @click.option("--ocr-cache", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--ocr-identity", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.pass_context
 def domain_discover_cmd(
     ctx, source, intake, out, cache_dir, resume, retry_missing, retry_max_completion_tokens,
     project_id, live, dry_run,
-    max_calls, concurrency, max_chunk_chars, max_tokens, ocr_cache, ocr_identity,
+    max_calls, concurrency, max_chunk_chars, max_tokens, ocr_cache, ocr_identity, max_completion_tokens,
 ) -> None:
     """Visit all corpus chunks before design; observations and summaries are unapproved.
 
@@ -359,6 +362,11 @@ def domain_discover_cmd(
     try:
         core = _discovery_core()
         prior = core.load_discovery(resume) if resume else None
+        if (prior is not None and max_completion_tokens is not None
+                and max_completion_tokens != prior.budget.max_completion_tokens):
+            raise ValueError(
+                "DISCOVERY_RESUME_DRIFT: output budget changed; use --retry-missing "
+                "with --retry-max-completion-tokens for missing responses")
         retry_policy = core.DiscoveryMissingRetry(
             max_completion_tokens=retry_max_completion_tokens,
         ) if retry_missing else None
@@ -381,7 +389,8 @@ def domain_discover_cmd(
         budget = core.DiscoveryBudget(
             max_calls=max_calls, max_concurrency=concurrency, max_chunk_chars=max_chunk_chars,
             max_tokens=max_tokens,
-            **({"max_completion_tokens": prior.budget.max_completion_tokens} if prior else {}),
+            max_completion_tokens=(max_completion_tokens if max_completion_tokens is not None else
+                                   prior.budget.max_completion_tokens if prior else 4096),
         )
         if prior is not None:
             _validate_discovery_resume_cache(prior, cache_dir)
@@ -530,6 +539,9 @@ def domain_accept_discovery_partial_cmd(
               help="Logical call ceiling; this design implementation uses one call, no repair loop.")
 @click.option("--max-prompt-chars", default=192_000, show_default=True, type=click.IntRange(256),
               help="Explicit serialized request ceiling; full intake/schema are never truncated to fit.")
+@click.option("--max-completion-tokens", default=32_768, show_default=True,
+              type=click.IntRange(256, 128_000),
+              help="Explicit design output budget, including reasoning; sealed into the draft request.")
 @click.option("--proposal-trace-dir", type=click.Path(file_okay=False, path_type=Path),
               help="Opt-in private, create-only request/response JSON traces; not a replay cache.")
 @click.pass_context
@@ -544,6 +556,7 @@ def domain_design_cmd(
     window_run: Path | None = None,
     window_run_acceptance_file: Path | None = None,
     max_prompt_chars: int = 192_000,
+    max_completion_tokens: int = 32_768,
 ) -> None:
     """Design an unapproved ontology from intent, seed and reviewed corpus discovery.
 
@@ -659,6 +672,7 @@ def domain_design_cmd(
                 "model_calls": 0,
                 "planned_model_calls": 1,
                 "max_prompt_chars": max_prompt_chars,
+                "max_completion_tokens": max_completion_tokens,
                 "writes": 0,
                 "samples_materialized": False,
                 "design_mode": "reviewed_partial_window_run" if window_acceptance is not None else "integrated_window_run" if integrated is not None else "sample_only" if sample_only else (
@@ -697,6 +711,7 @@ def domain_design_cmd(
                 preflight, client=client, seed_path=seed_domain,
                 **validation_options,
                 max_prompt_chars=max_prompt_chars,
+                max_completion_tokens=max_completion_tokens,
                 **({"window_run": integrated} if integrated is not None else
                    {"discovery": discovery} if discovery is not None else {"sample_only": True}),
                 **({"window_run_acceptance": window_acceptance} if window_acceptance is not None else {}),
@@ -735,9 +750,11 @@ def domain_design_cmd(
 @click.option("--file", "draft_file", required=True,
               type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--out", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--compiler-capability", type=click.Choice(["reviewed-design-64/v1"]),
+              help="Explicit bounded compiler policy for review; omitted retains the 24-relationship limit.")
 @click.pass_context
 def domain_evaluate_design_cmd(
-    ctx: click.Context, draft_file: Path, out: Path,
+    ctx: click.Context, draft_file: Path, out: Path, compiler_capability: str | None,
 ) -> None:
     """Save local structural diagnostics, NOT a live-answerability evaluation.
 
@@ -752,7 +769,10 @@ def domain_evaluate_design_cmd(
         operation = WindowValidationOperation()
         validation_options = _validation_options(core, operation)
         draft = core.load_domain_design(draft_file, **validation_options)
-        evaluation = core.evaluate_domain_design(draft, **validation_options)
+        evaluation = core.evaluate_domain_design(
+            draft, **validation_options,
+            **({"compiler_capability": compiler_capability} if compiler_capability is not None else {}),
+        )
         if not planning:
             core.save_design_artifact(out, evaluation, **validation_options)
     except (OSError, ValueError, TypeError) as exc:

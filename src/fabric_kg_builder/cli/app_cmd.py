@@ -1391,13 +1391,16 @@ def _run_offline_evaluation(cases: list[EvalCase]) -> list[dict]:
 @click.option("--out-state", required=True, type=click.Path(file_okay=False, path_type=Path))
 @click.option("--search-source", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Optional native-search-source/1.0.0 capability record from a real configured Data Agent.")
+@click.option("--runtime-context-review", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Explicit schema2-runtime-context-review/1.0.0 JSON: organization text and optional lossless routing encoding.")
 @click.option("--live/--dry-run", default=False, help="Default is offline planning. Live creates one new draft agent.")
 @click.option("--approve-live", help="Exact immutable agent plan hash printed by the offline plan.")
 @click.option("--acknowledge-preview", is_flag=True, help="Acknowledge native Ontology/Search preview sources.")
 def publish_prototype_agent_cmd(
     prototype_journal: Path, prototype_plan: Path, materialize: Path,
     l4_run: Path, l3_root: Path, workspace_id: str, name_prefix: str, out_state: Path,
-    search_source: Path | None, live: bool, approve_live: str | None, acknowledge_preview: bool,
+    search_source: Path | None, runtime_context_review: Path | None,
+    live: bool, approve_live: str | None, acknowledge_preview: bool,
 ) -> None:
     """Create a testable Schema-2 Fabric Data Agent; never adopt/overwrite/delete.
 
@@ -1421,13 +1424,14 @@ def publish_prototype_agent_cmd(
             materialize=materialize, l4_run=l4_run, l3_root=l3_root,
             workspace_id=workspace_id, name_prefix=name_prefix, out_state=out_state,
             search_source=search_source, live=live, approve_live=approve_live,
-            acknowledge_preview=acknowledge_preview,
+            acknowledge_preview=acknowledge_preview, runtime_context_review=runtime_context_review,
         )
     except (Error, ValueError, OSError, KeyError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({
         key: result[key] for key in (
             "status", "plan", "journal", "plan_hash", "agent_id", "readiness", "cost_scope",
+            "runtime_context_review",
         ) if key in result
     }, ensure_ascii=False, indent=2))
 
@@ -1512,6 +1516,11 @@ def publish_prototype_agent_cmd(
     "--prototype-readback-total-rows", type=click.IntRange(1, 10_000_000), default=1_000_000,
     show_default=True, help="Approved total data-row readback cap per live invocation.",
 )
+@click.option(
+    "--quality-policy", "quality_policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Versioned business-quality policy bound to this contract; gates publication before writes.",
+)
 def publish_structured_cmd(
     l4_run: Path,
     l3_root: Path,
@@ -1527,6 +1536,7 @@ def publish_structured_cmd(
     prototype_semantic_model: bool,
     prototype_readback_page_size: int,
     prototype_readback_total_rows: int,
+    quality_policy_path: Path | None = None,
 ) -> None:
     """Compile and plan the L5a structured publication of a sealed L4 run.
 
@@ -1544,6 +1554,16 @@ def publish_structured_cmd(
     root_options = context.find_root().obj if context is not None else None
     if isinstance(root_options, dict) and root_options.get("dry_run") and not dry_run:
         raise click.ClickException("Global --dry-run cannot be combined with publish-structured --live")
+    quality_policy = None
+    if quality_policy_path is not None:
+        from fabric_kg_builder.serving.business_quality import parse_quality_policy
+
+        try:
+            quality_policy = parse_quality_policy(
+                json.loads(quality_policy_path.read_text("utf-8"))
+            ).model_dump(mode="json")
+        except (OSError, ValueError) as error:
+            raise click.ClickException(str(error)) from error
 
     if prototype_create_only:
         from fabric_kg_builder.deploy.schema2_prototype import publish_schema2_prototype
@@ -1558,6 +1578,7 @@ def publish_structured_cmd(
                 semantic_model=prototype_semantic_model,
                 readback_page_size=prototype_readback_page_size,
                 readback_total_rows=prototype_readback_total_rows,
+                quality_policy=quality_policy,
             )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
@@ -1591,7 +1612,8 @@ def publish_structured_cmd(
     from fabric_kg_builder.serving.l5a_crosswalk import (
         compile_access_policy,
         compile_governed_assets,
-        compile_publication_crosswalk,
+        compile_publication_crosswalks,
+        publication_crosswalk_set_hash,
     )
     from fabric_kg_builder.serving.structured_publication import (
         compile_l5a_publication,
@@ -1607,7 +1629,7 @@ def publish_structured_cmd(
         "ontology": f"target:{name_prefix}-ontology",
         "graph": f"target:{name_prefix}-graph",
     }
-    crosswalk = compile_publication_crosswalk(source)
+    crosswalks = compile_publication_crosswalks(source)
     policy = compile_access_policy(
         source,
         access_policy_id=f"access-policy:{name_prefix}",
@@ -1615,20 +1637,27 @@ def publish_structured_cmd(
         resource_scope_id=f"resource:fabric-workspace:{workspace_id}",
         authorization_resource_id=f"authorization-resource:{name_prefix}",
     )
-    assets = compile_governed_assets(
-        source,
-        crosswalks=(crosswalk,),
-        access_policy=policy,
-        target_ids=target_ids,
-        workspace_id=workspace_id,
-    )
-    compiled = compile_l5a_publication(
-        source,
-        crosswalks=(crosswalk,),
-        access_policy=policy,
-        governed_assets=assets,
-        target_ids=target_ids,
-    )
+    from fabric_kg_builder.serving.business_quality import BusinessQualityError
+
+    try:
+        assets = compile_governed_assets(
+            source,
+            crosswalks=crosswalks,
+            access_policy=policy,
+            target_ids=target_ids,
+            workspace_id=workspace_id,
+            quality_policy=quality_policy,
+        )
+        compiled = compile_l5a_publication(
+            source,
+            crosswalks=crosswalks,
+            access_policy=policy,
+            governed_assets=assets,
+            target_ids=target_ids,
+            quality_policy=quality_policy,
+        )
+    except BusinessQualityError as error:
+        raise click.ClickException(str(error)) from error
     capabilities = FabricL5aTargetClient(
         workspace_id=workspace_id,
         token="",
@@ -1648,8 +1677,10 @@ def publish_structured_cmd(
         "source_projection_hash": compiled.definitions["parquet"][
             "source_projection_hash"
         ],
-        "crosswalk_hash": crosswalk.crosswalk_hash,
-        "stable_id_lock_hash": crosswalk.stable_id_lock_hash,
+        "crosswalk_hash": publication_crosswalk_set_hash(crosswalks),
+        **({"crosswalk_hashes": sorted(item.crosswalk_hash for item in crosswalks)}
+           if len(crosswalks) > 1 else {}),
+        "stable_id_lock_hash": crosswalks[0].stable_id_lock_hash,
         "access_policy_hash": policy.policy_hash,
         "target_ids": dict(sorted(target_ids.items())),
         "definition_hashes": {
@@ -1669,6 +1700,8 @@ def publish_structured_cmd(
         "blocked_capabilities": blocked,
         "live_publication_supported": not blocked,
     }
+    if compiled.business_quality_report is not None:
+        plan["business_quality"] = compiled.business_quality_report
     if materialize_dir is not None:
         import pyarrow.parquet as pq
 

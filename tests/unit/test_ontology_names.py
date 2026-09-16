@@ -10,6 +10,7 @@ import pytest
 from fabric_kg_builder.deploy.fabric_ontology_definition import compile_fabric_ontology_definition
 from fabric_kg_builder.deploy.ontology_names import (
     NATIVE_NAME_PATTERN,
+    PRESENTATION_ATTRIBUTE,
     allocate_readable_names,
     readable_catalog_from_domain,
     repair_ontology_presentation,
@@ -167,6 +168,83 @@ def test_readable_compilation_disambiguates_colliding_legacy_property_spellings(
     assert all(prop["name"].startswith("Part_Number_") for prop in properties)
 
 
+def test_fresh_enrichment_uses_supported_fields_without_losing_approved_aliases():
+    ontology, catalog = _fixtures()
+    prop_metadata = next(iter(catalog["properties"].values()))
+    prop_metadata.update({"aliases": ["Part #", "部件"], "ascii_alias": "Part ID"})
+    relationship_metadata = next(iter(catalog["relationship_types"].values()))
+    relationship_metadata["aliases"] = ["Battery secured by fastener"]
+    before = copy.deepcopy(catalog)
+    parts = _compile(ontology, catalog=catalog).parts
+    decoded = _decode(parts)
+    entity = decoded["EntityTypes/1000001/definition.json"]
+    assert entity["semanticEnrichment"]["synonyms"] == ["Battery Screw", "Battery fastener"]
+    prop = entity["properties"][2]["semanticEnrichment"]
+    relationship = decoded["RelationshipTypes/3000001/definition.json"]["semanticEnrichment"]
+    for enrichment, metadata in ((prop, prop_metadata), (relationship, relationship_metadata)):
+        assert set(enrichment) == {"description", "customAttributes"}
+        assert json.loads(enrichment["customAttributes"][PRESENTATION_ATTRIBUTE]) == {
+            key: value for key, value in metadata.items()
+            if key in ("display_name", "aliases", "ascii_alias")
+        }
+    assert prop["description"] == ""
+    assert relationship["description"] == relationship_metadata["description"]
+    assert catalog == before
+    assert _compile(ontology, catalog=catalog).parts == parts
+    # The service's property/relationship enrichment serializer recognizes only
+    # these two fields. Its default insertion now makes no comparison changes.
+    observed = copy.deepcopy(decoded)
+    for path, payload in observed.items():
+        targets = (
+            payload.get("properties", []) if path.startswith("EntityTypes/")
+            else [payload] if path.startswith("RelationshipTypes/") else []
+        )
+        for target in targets:
+            if "semanticEnrichment" in target:
+                enrichment = target["semanticEnrichment"]
+                enrichment.pop("synonyms", None)
+                enrichment.setdefault("description", None)
+                enrichment.setdefault("customAttributes", {})
+    assert observed == decoded
+
+
+@pytest.mark.parametrize("kind", ["property", "relationship"])
+def test_fresh_compilation_rejects_existing_unsupported_synonyms_without_dropping_them(kind):
+    from fabric_kg_builder.deploy.ontology_names import _enrich
+
+    payload = {"semanticEnrichment": {"synonyms": ["Intended synonym"]}}
+    original = copy.deepcopy(payload)
+    with pytest.raises(ValueError, match="explicit migration"):
+        _enrich(
+            payload, {"display_name": kind}, preserve_live_metadata=False, entity_synonyms=False,
+        )
+    assert payload == original
+
+
+@pytest.mark.parametrize("kind", ["property", "relationship"])
+def test_live_repairs_preserve_custom_presentation_metadata(kind):
+    ontology, catalog = _fixtures()
+    parts = _compile(ontology, catalog=catalog).parts
+    key = "properties" if kind == "property" else "relationship_types"
+    next(iter(catalog[key].values()))["aliases"] = ["New alias must not overwrite live metadata"]
+    repaired = repair_ontology_presentation(parts, l5a_ontology=ontology, catalog=catalog)
+    assert repaired.parts == parts
+
+
+@pytest.mark.parametrize("preserve_live_metadata", [True, False])
+def test_guard_never_allows_overwriting_existing_presentation_attribute(preserve_live_metadata):
+    ontology, catalog = _fixtures()
+    parts = _compile(ontology, catalog=catalog).parts
+    changed = _replace(
+        parts, "EntityTypes/1000001/definition.json",
+        lambda entity: entity["properties"][2]["semanticEnrichment"]["customAttributes"].update({
+            PRESENTATION_ATTRIBUTE: "lost approved labels",
+        }),
+    )
+    with pytest.raises(ValueError, match="existing custom presentation metadata"):
+        validate_presentation_only(parts, changed, preserve_live_metadata=preserve_live_metadata)
+
+
 def test_repair_retains_every_binding_identity_path_scope_and_source_object():
     ontology, catalog = _fixtures()
     original = _compile(ontology, legacy_names=True).parts
@@ -298,6 +376,7 @@ def test_companion_reader_uses_actual_native_names_not_new_compiler_guesses(monk
     mappings = dict(zip(names, columns))
     graph = {"parts": [
         _part("dataSources.json", {
+            "$schema": publication._GRAPH_SCHEMA_ROOT + "graphIndex/definition/dataSources/1.1.0/schema.json",
             "itemReferences": [{"name": "source", "item": {"workspaceId": "workspace", "itemId": "lakehouse"}}],
             "dataSources": [{"name": "table", "type": "DeltaTable", "properties": {
                 "referenceName": "source", "path": "Tables/dbo/physical_ws_a",
@@ -327,8 +406,21 @@ def test_companion_reader_uses_actual_native_names_not_new_compiler_guesses(monk
         raise AssertionError("An existing ontology must not be renamed by a reader")
 
     monkeypatch.setattr(publication, "_ontology_parts", no_recompile)
+    original_graph, original_parts = copy.deepcopy(graph), copy.deepcopy(parts)
     checks = publication._graph_readback_checks(
         graph, compilation, "workspace", "lakehouse", companion=True,
         native_ontology={"parts": parts},
     )
     assert len(checks) == 1
+    assert "Existing_Human_Name" in checks[0].match
+    assert checks[0].rows == [{"c0": "value", "c1": "value", "c2": "value"}]
+    assert graph == original_graph and parts == original_parts
+    unversioned = {
+        **graph, "parts": _replace(
+            graph["parts"], "dataSources.json", lambda source: source.pop("$schema"),
+        ),
+    }
+    with pytest.raises(publication.PrototypePublicationError, match="Unsupported Graph data source schema"):
+        publication._graph_readback_checks(
+            unversioned, compilation, "workspace", "lakehouse", companion=True, native_ontology={"parts": parts},
+        )

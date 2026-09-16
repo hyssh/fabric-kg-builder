@@ -485,6 +485,7 @@ class L5aCompiledPublication:
     required_member_manifest_rows: tuple[Mapping[str, Any], ...]
     required_member_rows: tuple[Mapping[str, Any], ...]
     required_member_snapshots: tuple[L5aRequiredMemberSnapshot, ...]
+    business_quality_report: Mapping[str, Any] | None = None
 
     @property
     def question_routing_context(self) -> dict[str, Any] | None:
@@ -802,10 +803,13 @@ def _typed_table_fingerprint_rows(table: pa.Table) -> list[dict[str, Any]]:
 
 
 def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
+    from fabric_kg_builder.serving.business_quality import DERIVED_ENTITY_TABLE
+
     id_column = "__canonical_id" if "__canonical_id" in table.column_names else None
     if id_column is None:
         source_id_field = {
             "l4_semantic_asserted_entities": "entity_id",
+            DERIVED_ENTITY_TABLE: "entity_id",
             "l4_semantic_asserted_relationships": "relationship_id",
             "l4_semantic_asserted_properties": "property_assertion_id",
         }.get(table_id)
@@ -1009,6 +1013,26 @@ def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, 
     window_scope = _window_run_scope_context(contract)
     if window_scope is not None:
         values["window_run_scope"] = window_scope
+    from fabric_kg_builder.enrichment.approved_partial_handoff import read_scope, scope_context
+    partial_scope = read_scope(source.root, source.manifest)
+    if partial_scope is not None:
+        values["partial_extraction_scope"] = scope_context(partial_scope)
+        if window_scope is not None:
+            values["window_run_scope"] = {
+                **window_scope,
+                "scope_notice": (
+                    partial_scope["plan"]["scope_notice"]
+                    + " The window-run acceptance below is only the schema/source ceiling, "
+                    "not this extraction's processing coverage."
+                ),
+            }
+        else:
+            # Existing agent publishers consume this scope-warning carrier.
+            values["window_run_scope"] = {
+                "kind": "partial-extraction-scope",
+                "authority": "explicit_completed_response_roots_only",
+                "scope_notice": partial_scope["plan"]["scope_notice"],
+            }
     return {**values, "export_hash": canonical_sha256(values)}
 
 
@@ -1561,6 +1585,8 @@ def _entity_tables(
     crosswalk: PublicationCrosswalkV1_2,
     values: Mapping[tuple[str, str], Any],
     required_properties: frozenset[str],
+    *,
+    derived_display_labels: Mapping[str, str] | None = None,
 ) -> dict[str, pa.Table]:
     entities = {
         str(row["entity_id"]): row
@@ -1601,7 +1627,7 @@ def _entity_tables(
                 "__semantic_type_id": mapping.canonical_semantic_type_id,
                 "__most_specific_type_id": entity["most_specific_type_id"],
                 "__hierarchy_depth": assertion["hierarchy_depth"],
-                "__label": entity.get("label"),
+                "__label": (derived_display_labels or {}).get(entity_id, entity.get("label")),
             }
             for prop in mapping.physical_property_bindings:
                 row[prop.physical_column_id] = _property_value(
@@ -1694,6 +1720,8 @@ def _all_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
     contract: DomainContractV2,
+    *,
+    derived_display_labels: Mapping[str, str] | None = None,
 ) -> dict[str, pa.Table]:
     values = _property_values(source_tables, contract)
     required_properties = frozenset(
@@ -1711,13 +1739,35 @@ def _all_tables(
             for property_id in entity.identity_key_policy.business_key_fields
         )
     typed = {
-        **_entity_tables(source_tables, crosswalk, values, required_properties),
+        **_entity_tables(
+            source_tables, crosswalk, values, required_properties,
+            derived_display_labels=derived_display_labels,
+        ),
         **_relationship_tables(source_tables, crosswalk, values),
     }
     carried = {
         f"l4_{name}": table
         for name, table in source_tables.items()
     }
+    if derived_display_labels is not None:
+        from fabric_kg_builder.serving.business_quality import DERIVED_ENTITY_TABLE
+
+        if DERIVED_ENTITY_TABLE in typed or DERIVED_ENTITY_TABLE in carried:
+            raise L5aPublicationError(
+                "L5A_PHYSICAL_TABLE_COLLISION", "Derived presentation table collides with a physical mapping",
+            )
+        typed[DERIVED_ENTITY_TABLE] = pa.Table.from_pylist([
+            {
+                "entity_id": row["entity_id"],
+                "label": derived_display_labels.get(row["entity_id"], row.get("label")),
+                "original_mention": row.get("label"),
+            }
+            for row in source_tables["semantic_asserted_entities"].to_pylist()
+        ], schema=pa.schema([
+            pa.field("entity_id", pa.string(), nullable=False),
+            pa.field("label", pa.string(), nullable=True),
+            pa.field("original_mention", pa.string(), nullable=True),
+        ]))
     if set(typed).intersection(carried):
         raise L5aPublicationError(
             "L5A_PHYSICAL_TABLE_COLLISION",
@@ -2468,6 +2518,23 @@ def _validate_governed_assets(
             ) from exc
 
 
+def _bind_instance_presentation(
+    definitions: Mapping[str, dict[str, Any]], report: Mapping[str, Any] | None,
+) -> None:
+    from fabric_kg_builder.serving.business_quality import (
+        DERIVED_ENTITY_TABLE, derived_instance_display_labels,
+    )
+
+    if derived_instance_display_labels(report) is not None:
+        for definition in definitions.values():
+            definition["business_quality"] = report
+        definitions["ontology"]["instance_presentation"] = {
+            "base_entity_table": DERIVED_ENTITY_TABLE,
+            "policy_hash": report["policy_hash"],
+            "report_hash": report["report_hash"],
+        }
+
+
 def build_l5a_governed_assets(
     source: SealedL4ServingSource,
     *,
@@ -2476,6 +2543,7 @@ def build_l5a_governed_assets(
     target_ids: Mapping[L5ATargetKind, str],
     storage_references: Mapping[L5ATargetKind, StorageReference],
     immutable_locators: Mapping[L5ATargetKind, ImmutableSourceLocator],
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> tuple[GovernedAssetReference, ...]:
     """Build output asset references from exact compiled target definitions."""
 
@@ -2499,8 +2567,16 @@ def build_l5a_governed_assets(
         ordered_crosswalks,
         access_policy,
     )
+    from fabric_kg_builder.serving.business_quality import (
+        derived_instance_display_labels, require_business_quality,
+    )
+
+    quality_report = require_business_quality(
+        source, policy=quality_policy, crosswalks=ordered_crosswalks,
+    ) if quality_policy is not None else None
     tables = _all_tables(
-        source_tables, _canonical_crosswalk(ordered_crosswalks), authority
+        source_tables, _canonical_crosswalk(ordered_crosswalks), authority,
+        derived_display_labels=derived_instance_display_labels(quality_report),
     )
     snapshots = tuple(
         _table_snapshot(table_id, table)
@@ -2516,6 +2592,7 @@ def build_l5a_governed_assets(
         target_ids,
         access_policy,
     )
+    _bind_instance_presentation(definitions, quality_report)
     result = []
     for kind in L5A_TARGET_ORDER:
         storage = storage_references[kind]
@@ -2571,7 +2648,14 @@ def l5a_input_fingerprint(
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> str:
+    quality_binding = {}
+    if quality_policy is not None:
+        from fabric_kg_builder.serving.business_quality import require_business_quality
+
+        report = require_business_quality(source, policy=quality_policy, crosswalks=crosswalks)
+        quality_binding = {"business_quality_report_hash": report["report_hash"]}
     return canonical_sha256({
         "stage": L5A_STAGE_NAME,
         "stage_contract_version": L5A_STAGE_CONTRACT_VERSION,
@@ -2587,6 +2671,7 @@ def l5a_input_fingerprint(
             item.asset_reference_hash for item in governed_assets
         ),
         "target_ids": dict(sorted(target_ids.items())),
+        **quality_binding,
     })
 
 
@@ -2597,6 +2682,7 @@ def compile_l5a_publication(
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> L5aCompiledPublication:
     """Compile deterministic L5a physical tables and structured definitions."""
 
@@ -2631,7 +2717,19 @@ def compile_l5a_publication(
         access_policy,
     )
     crosswalk = _canonical_crosswalk(ordered_crosswalks)
-    tables = _all_tables(source_tables, crosswalk, authority)
+    quality_report = None
+    if quality_policy is not None:
+        from fabric_kg_builder.serving.business_quality import require_business_quality
+
+        quality_report = require_business_quality(
+            source, policy=quality_policy, crosswalks=ordered_crosswalks,
+        )
+    from fabric_kg_builder.serving.business_quality import derived_instance_display_labels
+
+    tables = _all_tables(
+        source_tables, crosswalk, authority,
+        derived_display_labels=derived_instance_display_labels(quality_report),
+    )
     snapshots = tuple(
         _table_snapshot(table_id, table)
         for table_id, table in sorted(tables.items())
@@ -2659,6 +2757,7 @@ def compile_l5a_publication(
         typed_target_ids,
         access_policy,
     )
+    _bind_instance_presentation(definitions, quality_report)
     _validate_governed_assets(
         source,
         definitions,
@@ -2666,6 +2765,9 @@ def compile_l5a_publication(
         access_policy,
         ordered_assets,
     )
+    if quality_report is not None:
+        for definition in definitions.values():
+            definition["business_quality"] = quality_report
     return L5aCompiledPublication(
         source=source,
         fingerprint=l5a_input_fingerprint(
@@ -2674,6 +2776,7 @@ def compile_l5a_publication(
             access_policy=access_policy,
             governed_assets=ordered_assets,
             target_ids=typed_target_ids,
+            quality_policy=quality_policy,
         ),
         crosswalks=ordered_crosswalks,
         access_policy=access_policy,
@@ -2685,6 +2788,7 @@ def compile_l5a_publication(
         required_member_manifest_rows=required_member_manifest_rows,
         required_member_rows=required_member_rows,
         required_member_snapshots=required_member_snapshots,
+        business_quality_report=quality_report,
     )
 
 
@@ -3500,6 +3604,7 @@ def run_l5a(
     target_ids: Mapping[L5ATargetKind, str],
     client: L5aTargetClient,
     state_root: Path = L5A_STATE_DIR,
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> L5aStageResult:
     """Persist, publish, and read back all four L5a structured targets."""
 
@@ -3512,6 +3617,7 @@ def run_l5a(
         access_policy=access_policy,
         governed_assets=governed_assets,
         target_ids=target_ids,
+        quality_policy=quality_policy,
     )
     run_root = state_root / "runs" / compiled.fingerprint
     accounting = _CallAccounting()
@@ -3618,6 +3724,13 @@ def run_l5a(
                 raise L5aPublicationError(
                     "L5A_TARGET_VERSION_UNSUPPORTED",
                     f"{kind} has unsupported version {prior.target_version!r}",
+                )
+            if prior is not None and prior.definition.get("business_quality") is not None and (
+                compiled.business_quality_report is None
+            ):
+                raise L5aPublicationError(
+                    "L5A_BUSINESS_QUALITY_DOWNGRADE",
+                    f"{kind} is quality-enabled; refusing to replace it without a quality policy",
                 )
             prior_states[kind] = prior
 
