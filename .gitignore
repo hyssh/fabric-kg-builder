@@ -24,6 +24,17 @@ __pycache__/
 *.egg
 .eggs/
 
+# Locally supplied source corpora; keep only setup documentation.
+/sample_data/**
+!/sample_data/**/
+!/sample_data/**/README.md
+!/sample_data/.gitkeep
+
+# Local debugging and validation outputs, not reusable test fixtures.
+/.core-compile-debug/
+/.crosswalk-validation/
+/.test-*/
+
 # Virtual environments
 .venv/
 venv/

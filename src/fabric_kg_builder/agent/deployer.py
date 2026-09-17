@@ -141,6 +141,8 @@ def deploy_agent(
     entity_types: list[str] | None = None,
     relationship_types: list[str] | None = None,
     domain_context: str | None = None,
+    question_routing_context: dict[str, Any] | None = None,
+    question_routing_source_hash: str | None = None,
     dry_run: bool = False,
     smoke_timeout_s: int = 60,
     require_grounding_tools: bool = False,
@@ -264,6 +266,11 @@ def deploy_agent(
         entity_types=entity_types,
         relationship_types=relationship_types,
         domain_context=domain_context,
+        **({
+            "question_routing_context": question_routing_context,
+            "fabric_data_agent_connection_id": fabric_connection_id,
+            "question_routing_source_hash": question_routing_source_hash,
+        } if question_routing_context is not None else {}),
     )
     instructions_hash = _hash_instructions(instructions)
     image_tag = _timestamp_tag()

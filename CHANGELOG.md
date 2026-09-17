@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.2.6 (local development)
+
+- Add `domain window-run`: bootstrap from an empty working schema, carry the
+  complete intake through raw-text extraction and bounded schema repair, then
+  commit one schema transition per frozen batch. Document stops preserve corpus
+  scope, and read-only status/history/schema commands expose committed progress.
+- Connect complete integrated runs to explicit domain design/approval, scoped
+  mapping review and zero-call approved L2 replay. Planning previews cannot
+  authorize replay. Existing L3/L4 evidence and identity rules remain intact.
+- Bind schema transitions to original model proposals and explicitly linked
+  repair replacements. Preserve invalid-response diagnostics privately, require
+  explicit retry authorization, and reject stale or tampered resume authority.
+  The integrated protocol is `raw-working-window/1.1.0`; experimental 1.0 state
+  is retained separately rather than silently upgraded.
+- Add windowed common-schema alignment over saved discovery observations.
+  Each batch uses one frozen version; snapshots, proposals, decisions and final
+  mappings remain inspectable with `domain window-status` and `window-history`.
+  Explicit deterministic mode performs unique formatting normalization without
+  model calls; bounded model mode can propose semantic aliases or new working
+  concepts. Unresolved concepts remain visible instead of becoming facts.
+- Add target-domain-bound `domain review-window-mapping` and explicit
+  `enrich --window-state --mapping-review` replay. Working changes do not alter
+  an approved domain, source values or evidence requirements. A final working
+  schema can also inform `domain design --window-state`.
+- Document Foundry Agent orchestration of core ontology keys, scoped source
+  Search and SQL analytics, including source-index coverage and permissions.
+  Window operations do not add a new Search engine or automatically assert
+  retrieved details into the ontology.
+- Reorder the normal workflow to full-corpus source preparation and open
+  candidate discovery, document/corpus consolidation, then discovery-bound
+  ontology design. Bounded design now requires explicit `--sample-only`.
+- Reuse prepared source units and observations after approval with
+  `enrich --discovery`; no implicit second full model pass. Missing/unmapped
+  work requires explicit targeted authorization and remains accounted for.
+- Add atomic immutable caches, recovery of failed source preparation, zero-call
+  raw-response revalidation and candidate-level grounding quarantine. Raw
+  observations and original request provenance are preserved; retries cannot
+  silently delete observations or clear unresolved work.
+- Route analytical questions to Lakehouse SQL through typed question context,
+  preserving original question IDs/criticality, population/grain, filter/time
+  and source requirements. SQL-directed questions no longer require fabricated
+  ontology quantity fields or Graph answer paths.
+- Add read-only `domain question-context` exports and carry approved context
+  through extraction request identity, sealed serving authority and agent
+  instructions. Pending requirements and additional user background survive
+  approval. SQL routing remains unbound/unexecuted; no SQL engine is added.
+- Introduce a design-first CLI boundary: preserve business intent, full reference
+  YAML and bounded document samples in an unapproved design before evaluating
+  question coverage. Separate design gaps from structural errors and strict
+  Schema-2 compilation/approval.
+- Permit common concepts without question assignments and retain multi-question
+  usage. A generated draft is neither an approved extraction contract nor proof
+  that source data can answer a question.
+- Align the Copilot helper with design, evaluation, compilation and explicit
+  approval rather than asking the model to satisfy all execution gates at once.
+- Keep historical L7 `0.2.4` receipt formats independent of the CLI package
+  version. No historical approval or deployment receipt is upgraded implicitly.
+- Retain local prototype work on compact model transport, exact cached OCR-page
+  extraction, source-identity crosswalks and create-only Fabric publication.
+  These capabilities do not imply a completed live Fabric acceptance run.
+
 ## 0.2.4
 
 - Fixed L1 proposal validation failures reporting no diagnosable cause. When a

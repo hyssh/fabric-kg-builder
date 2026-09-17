@@ -296,9 +296,11 @@ def _create_inputs(
 
 
 @pytest.mark.unit
-def test_release_version_and_38_top_level_commands() -> None:
-    assert __version__ == "0.2.4"
-    assert len(cli.commands) == 38
+def test_release_version_and_40_top_level_commands() -> None:
+    assert __version__ == "0.2.6"
+    assert len(cli.commands) == 40
+    assert "assess-business-quality" in cli.commands
+    assert "handoff-partial" in cli.commands
     assert "app" in cli.commands
     assert "deploy-l7" in cli.commands["app"].commands
     # L5a publication is CLI-activated in 0.2.4 for compile and dry-run
@@ -307,6 +309,18 @@ def test_release_version_and_38_top_level_commands() -> None:
     # Schema-2 L3 and L4 are CLI-activated in 0.2.4.
     assert "validate-evidence" in cli.commands
     assert "project-serving" in cli.commands
+
+
+@pytest.mark.unit
+def test_product_version_does_not_rewrite_legacy_l7_contracts() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plugin = json.loads((root / "plugins/fabric-kg/plugin.json").read_text())
+    marketplace = json.loads((root / ".github/plugin/marketplace.json").read_text())
+    assert plugin["version"] == __version__
+    assert marketplace["metadata"]["version"] == __version__
+    assert marketplace["plugins"][0]["version"] == __version__
+    assert L7ReleaseConfig.model_fields["release"].default == "0.2.4"
+    assert L7DeploymentPlan.model_fields["release"].default == "0.2.4"
 
 
 @pytest.mark.unit

@@ -354,10 +354,13 @@ def _build_contract_from_profile(
 
 
 _INIT_DOMAIN_EPILOG = """\b
-Example:
-  fabric-kg init-domain --input ./facility-records
-  fabric-kg init-domain --input ./data --approve --out domain.yaml
-  fabric-kg init-domain --input ./docs --domain-description "Facility asset management"
+Examples:
+  fabric-kg init-domain --input ./docs --intake intake.yaml --dry-run
+  fabric-kg init-domain --input ./docs --intake intake.yaml --non-interactive --out domain.yaml
+  fabric-kg init-domain --legacy-schema-1 --input ./docs --domain-description "Facility asset management"
+
+For full-YAML seed-based design, use domain design --seed-domain,
+then domain evaluate-design and domain compile-design.
 
 Exit codes: 0 success · 1 error · 4 user rejected profile (interactive only).
 
@@ -397,14 +400,14 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
     "--domain-description",
     "domain_description",
     default=None,
-    help="Existing domain description to incorporate before generating questions.",
+    help="Legacy schema-1 description only. Schema-2 design: domain design --description.",
 )
 @click.option(
     "--domain-file",
     "domain_file",
     default=None,
     type=click.Path(),
-    help="Existing domain.yaml to read description from (alternative to --domain-description).",
+    help="Legacy schema-1 description seed only. Schema-2 full YAML: domain design --seed-domain.",
 )
 @click.option(
     "--force",
@@ -482,6 +485,21 @@ Questions? https://github.com/hyssh/fabric-kg-builder/issues
     default=None,
     help="Stable project identity for schema-2 artifacts.",
 )
+@click.option(
+    "--proposal-trace-dir", default=None, type=click.Path(file_okay=False),
+    help="Opt-in private request/response traces for Schema-2 proposal diagnostics.",
+)
+@click.option(
+    "--proposal-format", default="verbose", show_default=True,
+    type=click.Choice(["verbose", "compact"]),
+    help="Model-facing proposal format; both produce the full validated Schema-2 contract.",
+)
+@click.option("--source-identity-type", "source_identity_types", multiple=True,
+              help="Reviewed compact root key to retain as source-scoped occurrences.")
+@click.option("--identity-policy-actor", default=None,
+              help="Named reviewer of source-identity policy overrides.")
+@click.option("--identity-policy-rationale", default=None,
+              help="Rationale for retaining document-specific occurrences without invented keys.")
 @click.pass_context
 def init_domain_cmd(
     ctx: click.Context,
@@ -502,24 +520,48 @@ def init_domain_cmd(
     resume: bool,
     state_dir: str,
     project_id: str | None,
+    proposal_trace_dir: str | None = None,
+    proposal_format: str = "verbose",
+    source_identity_types: tuple[str, ...] = (),
+    identity_policy_actor: str | None = None,
+    identity_policy_rationale: str | None = None,
 ) -> None:
-    """Inspect source files then guide domain contract authoring.
+    """Run the existing Schema-2 L1 authoring and approval workflow.
 
-    Inspects source files first, presents a profile of observed facts and
-    inferred suggestions, asks only unresolved questions, then writes a
-    draft domain.yaml contract.
+    Use --intake for Schema-2 questions and constraints, --dry-run for local
+    preflight, or --non-interactive to persist an unapproved draft. Existing
+    explicit approval/resume behavior is unchanged.
 
-    Use --approve (or redirect stdin) for noninteractive CI/CD execution.
-    Use --interactive to force the approval prompt regardless of TTY detection.
-    Use --domain-description or --domain-file to incorporate an existing
-    domain context before generating questions.
+    Full-YAML seed-based, additive design uses domain design, evaluate-design,
+    and compile-design. --domain-file/--domain-description are not silently
+    applied to Schema-2 initialization.
 
-    The approved profile is persisted to .fkg/source-profile.json so that
-    later commands (enrich, compile-data) can reuse the same context.
+    --legacy-schema-1 selects the original source-profile workflow, including
+    its description-seed options and interactive profile approval.
 
     Exit codes: 0 success · 1 error · 4 user rejected profile.
     """
+    if source_identity_types and (
+        legacy_schema_1 or proposal_format != "compact" or resume or candidates_path
+        or not identity_policy_actor or not identity_policy_rationale
+    ):
+        raise click.UsageError(
+            "Reviewed identity overrides require compact mode, actor/rationale and "
+            "fresh generation (not legacy, resume or candidate fixtures)."
+        )
     if not legacy_schema_1:
+        if domain_file is not None or domain_description is not None:
+            raise click.UsageError(
+                "Schema-2 init-domain does not consume --domain-file/--domain-description. "
+                "Use 'fabric-kg domain design --seed-domain PATH --description TEXT' "
+                "with --input, --intake and --out for additive, unapproved design; "
+                "then evaluate-design and compile-design. "
+                "For the original description-only profile workflow use --legacy-schema-1."
+            )
+        root_options = ctx.find_root().obj
+        effective_dry_run = dry_run or (
+            isinstance(root_options, dict) and bool(root_options.get("dry_run"))
+        )
         _run_schema_2_l1(
             ctx=ctx,
             input_path=input_path,
@@ -529,15 +571,22 @@ def init_domain_cmd(
             source_corpus_manifest_path=source_corpus_manifest_path,
             non_interactive=non_interactive,
             force_interactive=force_interactive,
-            dry_run=dry_run,
+            dry_run=effective_dry_run,
             resume=resume,
             force=force,
             approve=approve,
             state_dir=state_dir,
             project_id=project_id,
+            proposal_trace_dir=proposal_trace_dir,
+            proposal_format=proposal_format,
+            source_identity_types=source_identity_types,
+            identity_policy_actor=identity_policy_actor,
+            identity_policy_rationale=identity_policy_rationale,
         )
         return
 
+    if proposal_trace_dir is not None or proposal_format != "verbose":
+        raise click.UsageError("--proposal-trace-dir/--proposal-format require Schema-2")
     import sys
 
     out_path = Path(output_path)
@@ -798,6 +847,11 @@ def _run_schema_2_l1(
     approve: bool,
     state_dir: str,
     project_id: str | None,
+    proposal_trace_dir: str | None = None,
+    proposal_format: str = "verbose",
+    source_identity_types: tuple[str, ...] = (),
+    identity_policy_actor: str | None = None,
+    identity_policy_rationale: str | None = None,
 ) -> None:
     import sys
 
@@ -823,6 +877,26 @@ def _run_schema_2_l1(
         or f"project:{provisional_source.resolve().name}"
     )
     run_id = f"run:{uuid.uuid4().hex}"
+
+    def trace_proposal(event: dict) -> None:
+        if proposal_trace_dir is None or dry_run:
+            return
+        kind = event.get("event")
+        if kind not in {"request_started", "request_failed", "response_completed"}:
+            raise ValueError("unknown proposal trace event")
+        index = int(event["logical_call_index"])
+        request_hash = str(event["request_hash"])
+        if index < 1 or not re.fullmatch(r"[0-9a-f]{64}", request_hash):
+            raise ValueError("invalid proposal trace identity")
+        directory = Path(proposal_trace_dir) / run_id.replace(":", "-", 1)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = directory / f"{index:03d}-{kind}-{request_hash[:12]}.json"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(event, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def fail_precondition(path: str, code: str, reason: str) -> None:
         audit_path = _persist_early_l1_failure_audit(
@@ -1001,6 +1075,12 @@ def _run_schema_2_l1(
                 }
                 for path, code in exc.validation_failures
             ]
+        elif isinstance(getattr(exc, "status_code", None), int):
+            failures = [{
+                "path": "proposal.provider",
+                "code": f"http_{exc.status_code}",
+                "detail": _sanitize_detail_text(str(exc)),
+            }]
         elif isinstance(exc, ValidationError):
             failures = [
                 {
@@ -1043,6 +1123,7 @@ def _run_schema_2_l1(
             ]
         audit = {
             "schema_version": "1.0.0",
+            "exception_type": type(exc).__name__,
             "error_code": failure_error_code(exc),
             "run_id": run_id,
             "project_id": effective_project_id,
@@ -1147,6 +1228,13 @@ def _run_schema_2_l1(
             preflight,
             candidates=candidates,
             client=client,
+            **({"proposal_trace_callback": trace_proposal} if proposal_trace_dir else {}),
+            **({"proposal_format": proposal_format} if proposal_format != "verbose" else {}),
+            **({
+                "source_identity_types": source_identity_types,
+                "identity_policy_actor": identity_policy_actor,
+                "identity_policy_rationale": identity_policy_rationale,
+            } if source_identity_types else {}),
         )
         if non_interactive or not (force_interactive or sys.stdin.isatty()):
             result = finalize_l1_stage(
@@ -1204,6 +1292,13 @@ def _run_schema_2_l1(
                         if correction_result.approval_context is not None
                         else None
                     ),
+                    **({"proposal_trace_callback": trace_proposal} if proposal_trace_dir else {}),
+                    **({"proposal_format": proposal_format} if proposal_format != "verbose" else {}),
+                    **({
+                        "source_identity_types": source_identity_types,
+                        "identity_policy_actor": identity_policy_actor,
+                        "identity_policy_rationale": identity_policy_rationale,
+                    } if source_identity_types else {}),
                 )
                 continue
             result = finalize_l1_stage(

@@ -412,9 +412,11 @@ SEMANTIC_ASSERTED_RELATIONSHIPS_SCHEMA = pa.schema([
 
 SEMANTIC_ASSERTED_PROPERTIES_SCHEMA = pa.schema([
     pa.field("property_assertion_id", _STR, nullable=False),
+    pa.field("entity_id", _STR, nullable=True),
     pa.field("semantic_property_id", _STR, nullable=False),
     pa.field("candidate_ids", _LIST_STR, nullable=False),
     pa.field("value_type", _STR, nullable=False),
+    pa.field("normalized_value_json", _STR, nullable=True),
     pa.field("evidence_span_ids", _LIST_STR, nullable=False),
     pa.field("domain_contract_hash", _STR, nullable=False),
     pa.field("semantic_contract_hash", _STR, nullable=False),

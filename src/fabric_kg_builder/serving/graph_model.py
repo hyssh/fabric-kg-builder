@@ -363,9 +363,7 @@ def build_graph_model_parts(
         ])
     def graph_label(raw_label: str, used_labels: set[str]) -> str:
         """Return a Fabric-valid, collision-free graph label."""
-        label = re.sub(r"[^A-Za-z0-9_]", "_", raw_label).strip("_") or "GraphItem"
-        if label[0].isdigit():
-            label = f"GraphItem_{label}"
+        label = _graph_alias(raw_label)
         candidate = label
         suffix = 2
         while candidate in used_labels:
@@ -373,6 +371,18 @@ def build_graph_model_parts(
             suffix += 1
         used_labels.add(candidate)
         return candidate
+
+    # Graph identifiers and Delta columns occupy different namespaces. Allocate
+    # once for the entire graph, including keys, so collisions cannot depend on
+    # table/column traversal order or accidentally merge different properties.
+    source_columns: list[str] = []
+    for et in entity_types:
+        binding = node_table_bindings.get(et, {})
+        source_columns.extend(binding.get("property_columns") or node_property_names)
+        source_columns.append(str(binding.get("entity_id_column") or "entity_id"))
+    for pair in relationship_pairs:
+        source_columns.extend(pair.get("property_columns") or edge_property_names)
+    property_names = _graph_property_names(source_columns)
 
     # ── dataSources.json ─────────────────────────────────────────────────────
     # Each Delta table is relative to the Lakehouse item reference. Fabric's
@@ -421,6 +431,7 @@ def build_graph_model_parts(
     node_type_aliases: dict[str, str] = {}
     node_type_labels: dict[str, str] = {}
     used_labels: set[str] = set()
+    used_aliases: set[str] = set()
     graph_node_types: list[dict[str, Any]] = []
     for et in entity_types:
         binding = node_table_bindings.get(et, {})
@@ -442,10 +453,13 @@ def build_graph_model_parts(
             raise ValueError(
                 f"Invalid contract-owned Graph node alias '{requested_alias}'."
             )
+        if alias in used_aliases:
+            raise ValueError(f"Duplicate Graph type alias '{alias}'.")
+        used_aliases.add(alias)
         node_type_aliases[et] = alias
         requested_label = node_labels.get(et)
         if requested_label:
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", requested_label):
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", requested_label):
                 raise ValueError(
                     f"Invalid contract-owned Graph node label '{requested_label}'."
                 )
@@ -460,9 +474,9 @@ def build_graph_model_parts(
         graph_node_types.append({
             "alias": alias,
             "labels": [node_type_labels[et]],
-            "primaryKeyProperties": [entity_id_column],
+            "primaryKeyProperties": [property_names[entity_id_column]],
             "properties": [
-                {"name": name, "type": "STRING"}
+                {"name": property_names[name], "type": "STRING"}
                 for name in property_columns
             ],
         })
@@ -500,6 +514,9 @@ def build_graph_model_parts(
             raise ValueError(
                 f"Invalid contract-owned Graph edge alias '{requested_alias}'."
             )
+        if alias in used_aliases:
+            raise ValueError(f"Duplicate Graph type alias '{alias}'.")
+        used_aliases.add(alias)
         edge_type_aliases[pair_key] = alias
         label_seed = (
             f"{src}_{name}_{tgt}"
@@ -509,7 +526,7 @@ def build_graph_model_parts(
         requested_label = rp.get("graph_label")
         if requested_label:
             requested_label = str(requested_label)
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", requested_label):
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", requested_label):
                 raise ValueError(
                     f"Invalid contract-owned Graph edge label '{requested_label}'."
                 )
@@ -531,7 +548,7 @@ def build_graph_model_parts(
             "destinationNodeType": {"alias": node_type_aliases[tgt]},
             "properties": [
                 {
-                    "name": name,
+                    "name": property_names[name],
                     "type": "FLOAT" if name == "confidence" else "STRING",
                 }
                 for name in property_columns
@@ -548,12 +565,15 @@ def build_graph_model_parts(
                 binding.get("property_columns") or node_property_names
             )
         )
+        entity_id_column = str(binding.get("entity_id_column") or "entity_id")
+        if entity_id_column not in property_columns:
+            property_columns.insert(0, entity_id_column)
         node_table = {
             "id": _stable_id(f"graphmodel:nodetable:{et}"),
             "nodeTypeAlias": node_type_aliases[et],
             "dataSourceName": data_source_by_table[table_name],
             "propertyMappings": [
-                {"propertyName": name, "sourceColumn": name}
+                {"propertyName": property_names[name], "sourceColumn": name}
                 for name in property_columns
             ],
         }
@@ -592,7 +612,7 @@ def build_graph_model_parts(
                 str(rp.get("target_entity_id_column") or "target_entity_id")
             ],
             "propertyMappings": [
-                {"propertyName": name, "sourceColumn": name}
+                {"propertyName": property_names[name], "sourceColumn": name}
                 for name in property_columns
             ],
         }
@@ -682,7 +702,85 @@ def build_graph_model_parts(
             },
         },
     ]
+    validate_graph_model_schema(parts)
     return parts
+
+
+def validate_graph_model_schema(parts: list[dict[str, Any]]) -> None:
+    """Check native naming, cardinality and cross-part invariants before create.
+
+    This is not a replacement for the service validator. The published 1.0.0
+    schemas reference a currently unavailable shared identifiers schema.
+    """
+    payloads = {part["path"]: part["payload_json"] for part in parts}
+    graph_type = payloads["graphType.json"]
+    definition = payloads["graphDefinition.json"]
+    for payload in (graph_type, definition, payloads["dataSources.json"]):
+        for value in payload.values():
+            if isinstance(value, list) and len(value) > 1000:
+                raise ValueError("Native Graph definition arrays cannot exceed 1000 items.")
+    aliases: dict[str, dict[str, Any]] = {}
+    property_types: dict[str, str] = {}
+    type_aliases = {"INT64": "INT", "BOOL": "BOOLEAN", "FLOAT": "DOUBLE", "FLOAT64": "DOUBLE"}
+    for item in graph_type["nodeTypes"] + graph_type["edgeTypes"]:
+        alias = item["alias"]
+        if alias in aliases:
+            raise ValueError(f"Duplicate Graph type alias '{alias}'.")
+        aliases[alias] = item
+        properties = item.get("properties", [])
+        names = [prop["name"] for prop in properties]
+        for values in (item["labels"], names, item.get("primaryKeyProperties", [])):
+            if len(values) > 1000 or len(values) != len(set(values)):
+                raise ValueError(
+                    "Native Graph names must be unique within each type and bounded to 1000."
+                )
+            if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) for name in values):
+                raise ValueError(
+                    "Native Graph names must start with an ASCII letter and contain "
+                    "only letters, digits or underscores."
+                )
+        if not item["labels"] or not set(item.get("primaryKeyProperties", [])).issubset(names):
+            raise ValueError("Native Graph labels/primary key properties are missing.")
+        for prop in properties:
+            native_type = type_aliases.get(prop["type"], prop["type"])
+            if native_type not in {
+                "STRING", "INT", "DOUBLE", "BOOLEAN", "ZONED DATETIME", "DURATION",
+            }:
+                raise ValueError(f"Unsupported native Graph property type: {prop['type']}")
+            if property_types.setdefault(prop["name"], native_type) != native_type:
+                raise ValueError(f"Native Graph property has conflicting types: {prop['name']}")
+    node_aliases = {node["alias"] for node in graph_type["nodeTypes"]}
+    if any(not node["primaryKeyProperties"] for node in graph_type["nodeTypes"]):
+        raise ValueError("Native Graph node types require primary key properties.")
+    for edge in graph_type["edgeTypes"]:
+        if any(
+            edge[end]["alias"] not in node_aliases
+            for end in ("sourceNodeType", "destinationNodeType")
+        ):
+            raise ValueError("Native Graph edge references an unknown node type.")
+    for binding in definition["nodeTables"] + definition["edgeTables"]:
+        alias = binding.get("nodeTypeAlias", binding.get("edgeTypeAlias"))
+        item = aliases[alias]
+        mappings = binding.get("propertyMappings", [])
+        names = [mapping["propertyName"] for mapping in mappings]
+        if len(mappings) > 1000 or len(names) != len(set(names)) or set(names) != {
+            prop["name"] for prop in item.get("properties", [])
+        }:
+            raise ValueError("Native Graph property mappings must match the declared properties exactly.")
+        if any(
+            not isinstance(mapping["sourceColumn"], str) or not mapping["sourceColumn"]
+            for mapping in mappings
+        ):
+            raise ValueError("Native Graph source columns must be nonempty strings.")
+        if "edgeTypeAlias" in binding:
+            for endpoint, key in (
+                ("sourceNodeType", "sourceNodeKeyColumns"),
+                ("destinationNodeType", "destinationNodeKeyColumns"),
+            ):
+                if len(binding[key]) != len(aliases[item[endpoint]["alias"]]["primaryKeyProperties"]):
+                    raise ValueError("Native Graph edge key arity differs from its endpoint primary key.")
+                if any(not isinstance(column, str) or not column for column in binding[key]):
+                    raise ValueError("Native Graph endpoint source columns must be nonempty strings.")
 
 
 def encode_parts_for_api(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1493,3 +1591,24 @@ def _graph_alias(value: str) -> str:
     if not alias or not alias[0].isalpha():
         alias = f"Type_{alias}"
     return f"{alias[:96]}_{_stable_id(value)[:8]}"
+
+
+def _graph_property_names(columns: list[str]) -> dict[str, str]:
+    """Map source columns to unique Graph names without renaming source data."""
+    if any(not isinstance(column, str) or not column for column in columns):
+        raise ValueError("Graph source column names must be nonempty strings.")
+    ordered = sorted(set(columns))
+    names = {column: column for column in ordered if _graph_alias(column) == column}
+    used = set(names.values())
+    for column in ordered:
+        if column in names:
+            continue
+        seed = _graph_alias(column)
+        candidate = seed
+        suffix = 2
+        while candidate in used:
+            candidate = f"{seed}_{suffix}"
+            suffix += 1
+        names[column] = candidate
+        used.add(candidate)
+    return names

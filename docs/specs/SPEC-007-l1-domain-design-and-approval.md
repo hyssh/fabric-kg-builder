@@ -104,7 +104,12 @@ schema.
 - N counts approved relationship types, including required role relationships
   even when they are not on a selected CQ path.
 - 8-20 is advisory. Smaller complete vocabularies are not padded.
-- 21-24 requires a recorded complexity rationale. More than 24 blocks approval.
+- N above 20 requires per-type complexity rationale. The default cap is 24;
+  explicit `reviewed-design-64/v1` evaluation/compilation permits at most 64.
+  The bound counts explicit endpoint definitions: normalized revision 9's
+  13 relationship concepts expand losslessly to 38 pairs. See
+  [reviewed compiler capacity](SPEC-SCHEMA2-PROTOTYPE-CONTRACTS.md#reviewed-relationship-compiler-capacity)
+  for hash-bound opt-in and unchanged evidence/approval gates.
 - K is the maximum shortest approved competency-question path.
 - K values 1-3 are normal. K=4 requires an exact cited rationale. K above four
   is invalid.
@@ -167,7 +172,7 @@ table is the exact behavior-level salvage map for this successor.
 | Deterministic candidate score recomputation | **Keep** | `domain/scoring.py`; model scores are not trusted |
 | Duplicate/inverse relationship merge | **Keep** | Deterministic semantic merge in `domain/selection.py` |
 | Minimum relationship union covering approved CQ paths | **Keep** | Shortest question-scoped path union plus mandatory relationships |
-| N advisory range, no padding, rationale/hard cap | **Keep** | Contract and selection invariants enforce 8-20 advisory, 21-24 rationale, hard 24 |
+| N advisory range, no padding, rationale/hard cap | **Keep** | Contract and selection enforce 8-20 advisory, per-type rationale above 20, default cap 24; reviewed-design-64/v1 cap 64 |
 | K from maximum shortest approved path | **Keep** | Directed CQ paths, normal maximum 3, cited K=4 exception |
 | Required role relationships count toward N | **Keep** | Mandatory relationship selection includes completeness role requirements |
 | One rendered summary and approve/correct/abort | **Keep** | `render_approval_summary` and CLI decision loop |

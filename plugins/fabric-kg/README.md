@@ -10,9 +10,9 @@ multi-type Ontology + Azure AI Search + Data Agent grounding).
 
 | Component | Type | Purpose |
 |-----------|------|---------|
-| `fabric-kg-pipeline` | skill | The `enrich → densify → compile → deploy` pipeline, with guidance on domain-fit modelling, densify/RCA passes, and safe deploys. |
+| `fabric-kg-pipeline` | skill | Schema-2 proposal, document assessment, reviewed revision, approval, extraction and local projection; deployment is separately capability-gated. |
 | `surface-repro` | skill | Reproduce the canonical Surface troubleshooting RCA graph end-to-end via `scripts/reproduce-surface-kg.*`. |
-| `kg-builder` | agent | A guided assistant that walks through building and deploying a graph. |
+| `kg-builder` | agent | A guided assistant that separates design, model spending, approval, extraction and deployment. |
 
 ## Prerequisite
 
@@ -69,10 +69,15 @@ agent.
 Just ask Copilot, e.g.:
 
 - "Build a Fabric knowledge graph from the PDFs in `./docs`."
-- "Densify the graph and add RCA paths, then validate."
+- "Assess these documents against the draft ontology and prepare a reviewed revision."
 - "Reproduce the Surface troubleshooting graph and deploy to dev."
 
 Or select the agent with `/agent` and choose `kg-builder`.
+
+Check `fabric-kg domain assess --help` and `domain revise --help` before using
+the prototype workflow. Equal package version numbers do not prove the commands
+exist in an older installation. Schema-2 local projection is not yet equivalent
+to an end-to-end live Fabric deployment; respect the published capability gates.
 
 ## Safety
 

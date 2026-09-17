@@ -23,13 +23,13 @@ from fabric_kg_builder.agent.instructions import (
 )
 
 
-def test_instructions_version_is_v1_7():
-    assert INSTRUCTIONS_VERSION == "v1.7"
+def test_instructions_version_is_v1_8():
+    assert INSTRUCTIONS_VERSION == "v1.8"
 
 
 def test_build_routing_instructions_embeds_version_header():
     doc = build_routing_instructions()
-    assert "instructions version v1.7" in doc
+    assert "instructions version v1.8" in doc
 
 
 def test_entity_id_handoff_section_present():
@@ -89,7 +89,7 @@ def test_custom_version_override_renders_in_header_not_module_constant():
     (used by the deployer for hashing/audit) is unaffected."""
     doc = build_routing_instructions(version="v9.9-test")
     assert "instructions version v9.9-test" in doc
-    assert INSTRUCTIONS_VERSION == "v1.7"
+    assert INSTRUCTIONS_VERSION == "v1.8"
 
 
 def test_named_entity_routing_floor_present_v1_7():

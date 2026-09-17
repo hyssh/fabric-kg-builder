@@ -42,12 +42,37 @@ import math
 import os
 import threading
 import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 
 from pydantic import ValidationError
 from ..config.schema import FoundryConfig
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_gpt54(config: FoundryConfig) -> bool:
+    return (config.chat_model or config.chat_deployment) in ("gpt-5.4", "gpt-5.4-2026-03-05")
+
+
+def strict_response_schema(config: FoundryConfig, schema: dict[str, Any]) -> dict[str, Any]:
+    # Preserve legacy request reconstruction; GPT-5.4 avoids invalid open-map schemas.
+    if _is_gpt54(config):
+        return _azure_strict_schema(schema, reject_open_mappings=True)
+    return _azure_strict_schema(schema)
+
+
+def generation_parameters(config: FoundryConfig) -> dict[str, Any]:
+    """Share model-specific settings between dispatch, preflight and run identity."""
+    if _is_gpt54(config):
+        if config.inference_api == "project_responses":
+            return {"reasoning": {"effort": "medium"}}
+        return {"reasoning_effort": "medium"}
+    if config.inference_api == "project_responses":
+        return {"temperature": 0.0}
+    return {"temperature": 0.0, "seed": 42}
+
 
 # Transport failures that are safe to retry with an identical deterministic
 # request.  Configuration, authority, and schema errors are never retried.
@@ -136,6 +161,34 @@ def _transport_retry_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def transport_retry_after_seconds(exc: BaseException) -> float | None:
+    """Read provider cooldowns without capping them below the requested wait."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    waits = []
+    for key, scale in (("retry-after-ms", 0.001), ("x-ms-retry-after-ms", 0.001),
+                       ("retry-after", 1.0)):
+        raw = headers.get(key)
+        if raw is None:
+            continue
+        try:
+            seconds = float(raw) * scale
+        except (TypeError, ValueError):
+            if key != "retry-after":
+                continue
+            try:
+                date = parsedate_to_datetime(raw)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+                seconds = max(0.0, date.timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if math.isfinite(seconds) and seconds >= 0:
+            waits.append(seconds)
+    return max(waits) if waits else None
+
+
 class TransportOutageError(RuntimeError):
     """Raised when a provider outage outlives the shared outage budget."""
 
@@ -148,6 +201,51 @@ class TransportOutageError(RuntimeError):
         )
         self.elapsed_seconds = elapsed_seconds
         self.budget_seconds = budget_seconds
+
+
+class FoundryJSONResponseError(ValueError):
+    """A failed JSON boundary with private diagnostics, never raw text in its message."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
+def _json_response_diagnostics(response, raw, *, transport, output_limit, attempt, finish_reason=None):
+    def field(value, key):
+        return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+    result = {
+        "transport": transport, "max_completion_tokens": output_limit, "attempt": attempt,
+        "raw_output": raw if isinstance(raw, str) else None,
+    }
+    for key, value in (
+        ("response_id", field(response, "id")),
+        ("provider_model", field(response, "model")),
+        ("status", field(response, "status")),
+        ("incomplete_reason", field(field(response, "incomplete_details"), "reason")),
+        ("finish_reason", finish_reason),
+    ):
+        if isinstance(value, str):
+            result[key] = value
+    usage = field(response, "usage")
+    result["usage"] = {
+        key: value for key in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens")
+        if isinstance(value := field(usage, key), int) and not isinstance(value, bool)
+    }
+    details = {}
+    for key in ("completion_tokens_details", "output_tokens_details",
+                "prompt_tokens_details", "input_tokens_details"):
+        value = field(usage, key)
+        counts = {
+            name: count for name in ("reasoning_tokens", "cached_tokens",
+                                    "accepted_prediction_tokens", "rejected_prediction_tokens")
+            if isinstance(count := field(value, name), int) and not isinstance(count, bool)
+        }
+        if counts:
+            details[key] = counts
+    if details:
+        result["usage_details"] = details
+    return result
 
 
 class _TransportOutageBreaker:
@@ -456,11 +554,18 @@ class FoundryClient:
         config: FoundryConfig,
         *,
         _sdk_client: Any = None,
+        _coordinator_owned_retries: bool = False,
     ) -> None:
         self._config = config
+        self._coordinator_owned_retries = _coordinator_owned_retries
         self._client = (
             _sdk_client if _sdk_client is not None else self._build_sdk_client(config)
         )
+
+    def _transport_call(self, operation: Callable[[], Any]) -> Any:
+        if self._coordinator_owned_retries:
+            return operation()
+        return _call_with_transport_retry(operation)
 
     # ------------------------------------------------------------------
     # SDK construction — isolated so the rest of the class stays testable
@@ -482,6 +587,34 @@ class FoundryClient:
         If ``AZURE_AI_FOUNDRY_API_KEY`` or ``AZURE_OPENAI_API_KEY`` is set,
         ``api_key=`` is used instead of the token provider.
         """
+        if config.inference_api == "project_responses":
+            from urllib.parse import urlsplit
+            from azure.identity import AzureCliCredential
+
+            endpoint = urlsplit(config.endpoint)
+            if (
+                endpoint.scheme != "https"
+                or not endpoint.netloc
+                or "/api/projects/" not in endpoint.path
+                or endpoint.username or endpoint.password
+                or endpoint.query or endpoint.fragment
+            ):
+                raise ValueError("project_responses requires a clean HTTPS Foundry project endpoint")
+            try:
+                from azure.ai.projects import AIProjectClient
+            except ImportError as exc:
+                raise ImportError(
+                    "project_responses requires the existing agent extra: "
+                    "install fabric-kg-builder[agent]"
+                ) from exc
+            project = AIProjectClient(
+                endpoint=config.endpoint.rstrip("/"),
+                credential=AzureCliCredential(),
+                retry_total=0,
+            )
+            return project.get_openai_client(
+                timeout=config.request_timeout_seconds, max_retries=0,
+            )
         try:
             from openai import AzureOpenAI  # type: ignore[import]
         except ImportError as exc:
@@ -523,7 +656,7 @@ class FoundryClient:
 
     def execution_identity(self) -> dict[str, Any]:
         """Return non-secret model and request settings that affect outputs."""
-        return {
+        identity = {
             "provider": "azure_openai",
             "chat_deployment": self._config.chat_deployment,
             "api_version": self._config.api_version,
@@ -531,11 +664,28 @@ class FoundryClient:
             "completion_format": (
                 "json_schema_strict_when_compatible_else_json_object"
             ),
-            "temperature": 0.0,
-            "seed": 42,
+            **generation_parameters(self._config),
             "max_completion_tokens": 4_096,
             "max_attempts": 2,
         }
+        if self._config.inference_api == "project_responses":
+            import hashlib
+            from importlib.metadata import version
+            identity.update({
+                "provider": "azure_ai_projects",
+                "inference_api": "project_responses",
+                "project_transport_version": "1.0.0",
+                "api_version": "project-sdk-default",
+                "project_sdk_version": version("azure-ai-projects"),
+                "project_endpoint_hash": hashlib.sha256(
+                    self._config.endpoint.rstrip("/").encode("utf-8")
+                ).hexdigest(),
+                "store": False,
+            })
+            identity.pop("seed", None)
+        if self._config.chat_model:
+            identity["chat_model"] = self._config.chat_model
+        return identity
 
     # ------------------------------------------------------------------
     # Public API
@@ -547,7 +697,7 @@ class FoundryClient:
         user: str,
         json_schema: dict,
         *,
-        max_completion_tokens: int = 4_096,
+        max_completion_tokens: int | None = None,
         max_attempts: int = 2,
     ) -> dict:
         """Call the chat deployment and return the parsed JSON response.
@@ -565,6 +715,9 @@ class FoundryClient:
             JSON Schema dict.  Used to augment the system prompt with schema
             expectations; ``response_format={"type":"json_object"}`` is sent
             to the model (proven working with gpt-5-4-mini).
+        max_completion_tokens:
+            Output and reasoning allowance. Defaults to 32768 for GPT-5.4,
+            otherwise the legacy 4096. Explicit values are never reduced.
 
         Returns
         -------
@@ -576,6 +729,15 @@ class FoundryClient:
         ValueError
             When the model returns content that cannot be parsed as JSON.
         """
+        if max_completion_tokens is None:
+            max_completion_tokens = 32_768 if _is_gpt54(self._config) else 4_096
+        if _is_gpt54(self._config) and max_completion_tokens > 128_000:
+            raise ValueError("GPT-5.4 supports at most 128000 output tokens, including reasoning.")
+        if self._config.inference_api == "project_responses":
+            return self._complete_project_json(
+                system, user, json_schema,
+                max_completion_tokens=max_completion_tokens, max_attempts=max_attempts,
+            )
         schema_instruction = ""
         if json_schema:
             schema_instruction = (
@@ -597,6 +759,7 @@ class FoundryClient:
         raw = ""
         strict_rejected = False
         empty_response = False
+        diagnostics = {}
         for attempt in range(max_attempts):
             attempt_system = system + schema_instruction
             if attempt:
@@ -604,7 +767,7 @@ class FoundryClient:
             strict_schema = None
             if json_schema and not strict_rejected:
                 try:
-                    strict_schema = _azure_strict_schema(json_schema)
+                    strict_schema = strict_response_schema(self._config, json_schema)
                 except ValueError:
                     strict_schema = None
             response_format = (
@@ -626,19 +789,19 @@ class FoundryClient:
                     {"role": "user", "content": user},
                 ],
                 "response_format": response_format,
-                "temperature": 0.0,
-                "seed": 42,
+                **generation_parameters(self._config),
                 "max_completion_tokens": max_completion_tokens,
             }
             try:
-                response = _call_with_transport_retry(
+                response = self._transport_call(
                     lambda: self._client.chat.completions.create(
                         **request_values
                     )
                 )
             except Exception as exc:
                 if (
-                    strict_schema is None
+                    self._coordinator_owned_retries
+                    or strict_schema is None
                     or (
                         getattr(exc, "status_code", None) != 400
                         and not isinstance(exc, ValidationError)
@@ -649,12 +812,22 @@ class FoundryClient:
                     "type": "json_object"
                 }
                 strict_rejected = True
-                response = _call_with_transport_retry(
+                response = self._transport_call(
                     lambda: self._client.chat.completions.create(
                         **request_values
                     )
                 )
             raw = response.choices[0].message.content
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+            diagnostics = _json_response_diagnostics(
+                response, raw, transport="chat_completions", output_limit=max_completion_tokens,
+                attempt=attempt + 1, finish_reason=finish_reason,
+            )
+            if finish_reason in ("length", "content_filter"):
+                last_error = json.JSONDecodeError("provider did not finish the JSON response", "", 0)
+                diagnostics["parse_error"] = "provider_incomplete"
+                empty_response = False
+                continue
             if not raw or not raw.strip():
                 last_error = json.JSONDecodeError(
                     "empty model response", "", 0
@@ -663,20 +836,98 @@ class FoundryClient:
                 continue
             empty_response = False
             try:
-                return json.loads(raw)
+                result = json.loads(raw)
+                if not isinstance(result, dict):
+                    raise json.JSONDecodeError("response is not a JSON object", raw, 0)
+                return result
             except json.JSONDecodeError as exc:
                 last_error = exc
+                diagnostics["parse_error"] = {"line": exc.lineno, "column": exc.colno, "position": exc.pos}
 
         assert last_error is not None
         if empty_response:
-            raise ValueError(
+            raise FoundryJSONResponseError(
                 "Foundry returned an empty completion after "
                 f"{max_attempts} attempt(s); the deployment produced no "
-                "content for this request"
+                "content for this request", diagnostics,
             )
-        raise ValueError(
+        raise FoundryJSONResponseError(
             f"Foundry response could not be parsed as JSON after {max_attempts} "
-            f"attempt(s); line={last_error.lineno}; column={last_error.colno}"
+            f"attempt(s); line={last_error.lineno}; column={last_error.colno}", diagnostics,
+        )
+
+    def _complete_project_json(
+        self, system: str, user: str, json_schema: dict, *,
+        max_completion_tokens: int, max_attempts: int,
+    ) -> dict:
+        if max_completion_tokens < 256 or max_attempts < 1:
+            raise ValueError("project inference requires at least 256 output tokens and one attempt")
+        instructions = system + "\nReturn only a complete JSON object."
+        if json_schema:
+            instructions += "\nRequired JSON schema:\n" + json.dumps(json_schema, sort_keys=True)
+        strict_schema = None
+        diagnostics = {}
+        if json_schema:
+            try:
+                strict_schema = strict_response_schema(self._config, json_schema)
+            except ValueError:
+                # The same local validation boundary as the legacy transport.
+                strict_schema = None
+        for attempt in range(max_attempts):
+            format_value = (
+                {
+                    "type": "json_schema", "name": "fabric_kg_structured_response",
+                    "schema": strict_schema, "strict": True,
+                }
+                if strict_schema is not None else {"type": "json_object"}
+            )
+            request = {
+                "model": self._config.chat_deployment,
+                "instructions": instructions + (
+                    "\nPrevious output was incomplete or invalid JSON; return a smaller complete object."
+                    if attempt else ""
+                ),
+                "input": "Return only a valid JSON object for this request.\n" + user,
+                "text": {"format": format_value},
+                "max_output_tokens": max_completion_tokens,
+                **generation_parameters(self._config), "store": False,
+            }
+            try:
+                response = self._transport_call(
+                    lambda: self._client.responses.create(**request)
+                )
+            except Exception as exc:
+                if (self._coordinator_owned_retries or strict_schema is None
+                        or getattr(exc, "status_code", None) != 400):
+                    raise
+                strict_schema = None
+                request["text"] = {"format": {"type": "json_object"}}
+                response = self._transport_call(
+                    lambda: self._client.responses.create(**request)
+                )
+            raw = response.output_text
+            diagnostics = _json_response_diagnostics(
+                response, raw, transport="project_responses", output_limit=max_completion_tokens,
+                attempt=attempt + 1,
+            )
+            diagnostics["response_format"] = request["text"]["format"]["type"]
+            if diagnostics.get("status") not in (None, "completed") or diagnostics.get("incomplete_reason"):
+                diagnostics["parse_error"] = "provider_incomplete"
+                continue
+            if not raw or not raw.strip():
+                diagnostics["parse_error"] = "empty_output"
+                continue
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                diagnostics["parse_error"] = {"line": exc.lineno, "column": exc.colno, "position": exc.pos}
+                continue
+            if isinstance(result, dict):
+                return result
+            diagnostics["parse_error"] = "not_a_json_object"
+        raise FoundryJSONResponseError(
+            f"Foundry project returned no complete JSON object after {max_attempts} attempt(s)",
+            diagnostics,
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -700,7 +951,12 @@ class FoundryClient:
         configured dimension (1536).  Changing this value requires a full
         rebuild of the AI Search vector index — see SPEC-004 §9.2.
         """
-        response = _call_with_transport_retry(
+        if self._config.inference_api == "project_responses":
+            raise ValueError(
+                "Project Responses transport is generation-only; configure a separately "
+                "authorized embedding transport instead of inferring an account endpoint"
+            )
+        response = self._transport_call(
             lambda: self._client.embeddings.create(
                 model=self._config.embedding_deployment,
                 input=texts,
@@ -708,7 +964,9 @@ class FoundryClient:
             )
         )
         return [item.embedding for item in response.data]
-def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+def _azure_strict_schema(
+    schema: dict[str, Any], *, reject_open_mappings: bool = False,
+) -> dict[str, Any]:
     """Convert generated schemas to Azure structured-output subset."""
     normalized = json.loads(json.dumps(schema))
     property_count = 0
@@ -740,6 +998,11 @@ def _azure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
             for keyword in unsupported_constraints:
                 value.pop(keyword, None)
             properties = value.get("properties")
+            if reject_open_mappings and value.get("type") == "object" and (
+                not isinstance(properties, dict)
+                or value.get("additionalProperties", False) is not False
+            ):
+                raise ValueError("Azure strict schema cannot represent open-ended object mappings")
             if value.get("type") == "object" and isinstance(properties, dict):
                 object_depth += 1
                 if object_depth > 5:

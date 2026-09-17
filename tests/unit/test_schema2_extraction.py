@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fabric_kg_builder.contracts.base import canonical_sha256
+from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.contracts.evidence import SourceUnit
 from fabric_kg_builder.contracts.extraction import ExtractionAuthorityReferences
 from fabric_kg_builder.contracts.identity import (
@@ -29,6 +29,7 @@ from fabric_kg_builder.enrichment.schema2_extraction import (
     build_candidate_batch,
     build_required_member_set_proposals,
     compile_closed_vocabulary,
+    RawPropertyCandidate,
     derive_collection_member_fragments,
     extraction_leaf_from_dict,
     extraction_leaf_to_dict,
@@ -132,6 +133,47 @@ def _build(domain: DomainContractV2, response: list[dict]):
         extractor_version="1.0.0",
         occurred_at_utc=datetime(2026, 6, 24, 12, tzinfo=timezone.utc),
     )
+
+
+@pytest.mark.parametrize("value", [0, False, "", "  exact text  ", 1.5, "2026-07-01"])
+def test_property_carrier_round_trips_scalar_owner_and_temporal_key(value) -> None:
+    response = _response() + [{
+        "candidate_kind": "property",
+        "owner_local_id": " equipment-1 ",
+        "observed_property": " Reading ",
+        "value": value,
+        "normalized_value": value,
+        "temporal_key": " measurement:morning ",
+        "anchor": None,
+    }]
+    result = _build(_domain(), response)
+    restored = extraction_leaf_from_dict(extraction_leaf_to_dict(result))
+    record = next(item for item in restored.proposed_candidates if item.candidate_kind == "property")
+    owner = next(item for item in restored.proposed_candidates if item.local_reference == "equipment-1")
+    assert record.proposed_owner_entity_id == owner.semantic_id
+    assert record.value_json == canonical_json(value)
+    assert record.normalized_value_json == canonical_json(value)
+    assert record.temporal_key == "measurement:morning"
+    response[-1]["temporal_key"] = "measurement:evening"
+    changed = next(
+        item for item in _build(_domain(), response).proposed_candidates
+        if item.candidate_kind == "property"
+    )
+    assert changed.semantic_id != record.semantic_id
+    assert changed.payload_hash != record.payload_hash
+    assert changed.candidate_version_id != record.candidate_version_id
+
+
+@pytest.mark.parametrize("value", [None, [], {}, float("inf"), float("nan")])
+def test_property_raw_candidate_rejects_non_scalar_or_nonfinite_values(value) -> None:
+    with pytest.raises(ValueError):
+        RawPropertyCandidate.model_validate({
+            "candidate_kind": "property",
+            "owner_local_id": "equipment-1",
+            "observed_property": "Reading",
+            "value": value,
+            "normalized_value": value,
+        })
 
 
 def test_closed_vocabulary_unknowns_are_audited_not_mutated() -> None:

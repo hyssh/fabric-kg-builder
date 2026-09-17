@@ -19,12 +19,16 @@ Every trust-making primitive here delegates to C0-owned contracts:
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from fabric_kg_builder.contracts.base import (
+    canonical_json,
     canonical_sha256,
     deterministic_contract_id,
     normalize_nfc,
@@ -65,7 +69,7 @@ from fabric_kg_builder.domain.service import compute_contract_hash
 L3_STAGE_NAME = "Evidence Validation"
 L3_STAGE_CONTRACT_VERSION = "1.0.0"
 L3_VALIDATOR_NAME = "l3-evidence-validator"
-L3_VALIDATOR_VERSION = "1.1.0"
+L3_VALIDATOR_VERSION = "1.3.0"
 
 # Verifier identity is purpose-scoped: L3 never reuses an L1 design verifier ID.
 L3_EXTRACTION_VERIFIER_NAME = "fabric-kg.local-evidence-verifier/extraction_assertion"
@@ -95,6 +99,7 @@ REJECTION_REASONS = frozenset(
         "DIRECTION_MISMATCH",
         "ENDPOINT_EVIDENCE_UNGROUNDED",
         "EVIDENCE_QUOTE_MISMATCH",
+        "EVIDENCE_OUTSIDE_APPROVED_PREFIX",
         "EVIDENCE_SOURCE_MISMATCH",
         "EVIDENCE_SPAN_INVALID",
         "HIERARCHY_CONCEPT_MISSING",
@@ -102,13 +107,17 @@ REJECTION_REASONS = frozenset(
         "INHERITED_CONSTRAINT_VIOLATION",
         "INHERITED_PROPERTY_INVALID",
         "PROPERTY_VALUE_INVALID",
+        "PROPERTY_VALUE_UNGROUNDED",
         "SEMANTIC_ID_MISMATCH",
         "SOURCE_TYPE_MISMATCH",
         "SUBTYPE_HIERARCHY_CYCLE",
         "TARGET_TYPE_MISMATCH",
     }
 )
-UNSUPPORTED_REASONS = frozenset({"EVIDENCE_MODALITY_UNSUPPORTED"})
+UNSUPPORTED_REASONS = frozenset({
+    "EVIDENCE_MODALITY_UNSUPPORTED",
+    "PROPERTY_NORMALIZATION_UNSUPPORTED",
+})
 DISCOVERY_REASONS = frozenset(
     {"UNKNOWN_ENTITY_TYPE", "UNKNOWN_PROPERTY", "UNKNOWN_RELATIONSHIP_TYPE"}
 )
@@ -117,6 +126,7 @@ UNRESOLVED_REASONS = frozenset(
         "AMBIGUOUS_SIBLING_CLASSIFICATION",
         "ENDPOINT_UNRESOLVED",
         "EVIDENCE_MISSING",
+        "ENTITY_LABEL_UNGROUNDED",
         "IDENTITY_WITNESS_UNAVAILABLE",
     }
 )
@@ -313,6 +323,7 @@ def verify_and_mint_extraction_span(
     verifier_name: str = L3_EXTRACTION_VERIFIER_NAME,
     verifier_version: str = L3_EXTRACTION_VERIFIER_VERSION,
     verifier_purpose_version: str = L3_EXTRACTION_PURPOSE_VERSION,
+    domain_contract=None,
 ) -> EvidenceOutcome:
     """Verify an untrusted anchor exactly, then mint one C0 1.1 span.
 
@@ -371,6 +382,13 @@ def verify_and_mint_extraction_span(
             )
         span_start, span_end = located
         reasons.add("EVIDENCE_ANCHOR_RELOCATED")
+    from .window_prefix import prefix_span_allowed
+
+    if not prefix_span_allowed(
+        domain_contract, source_unit_id=source_unit.source_unit_id,
+        span_start=span_start, span_end=span_end, source_text_hash=source_unit.text_content_hash,
+    ):
+        reasons.add("EVIDENCE_OUTSIDE_APPROVED_PREFIX")
     if reasons - INFORMATIONAL_REASONS:
         return EvidenceOutcome(
             span=None,
@@ -995,15 +1013,84 @@ def evaluate_inherited_constraints(
     return sorted_reasons(reasons)
 
 
+def _is_iso_date(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _is_iso_datetime(value: Any) -> bool:
+    if not isinstance(value, str) or "T" not in value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.tzinfo is not None and parsed.utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def _is_finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+
+
 _VALUE_TYPE_CHECKS = {
     "string": lambda value: isinstance(value, str),
-    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
-    "number": lambda value: isinstance(value, (int, float))
-    and not isinstance(value, bool),
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool)
+    and -(2**63) <= value < 2**63,
+    "number": _is_finite_number,
     "boolean": lambda value: isinstance(value, bool),
-    "date": lambda value: isinstance(value, str),
-    "datetime": lambda value: isinstance(value, str),
+    "date": _is_iso_date,
+    "datetime": _is_iso_datetime,
 }
+
+
+def decode_property_scalar(value_json: str) -> str | int | float | bool:
+    """Decode only a canonically encoded finite JSON scalar, without coercion."""
+    value = json.loads(value_json)
+    if type(value) not in (str, int, float, bool) or canonical_json(value) != value_json:
+        raise ValueError("property value must be a canonical finite JSON scalar")
+    return value
+
+
+def property_scalar_grounding_reasons(
+    *, value_json: str, normalized_value_json: str, quote: str
+) -> tuple[str, ...]:
+    try:
+        value = decode_property_scalar(value_json)
+        decode_property_scalar(normalized_value_json)
+    except (TypeError, ValueError):
+        return ("PROPERTY_VALUE_INVALID",)
+    reasons: set[str] = set()
+    if value_json != normalized_value_json:
+        reasons.add("PROPERTY_NORMALIZATION_UNSUPPORTED")
+    if isinstance(value, str):
+        supported = value in quote if value else '""' in quote
+        if value and not supported and value.strip():
+            # Permit layout whitespace, not spelling, punctuation, case, or token edits.
+            pattern = "".join(
+                r"\s+" if part.isspace() else re.escape(part)
+                for part in re.split(r"(\s+)", value)
+            )
+            supported = re.search(pattern, quote) is not None
+    elif isinstance(value, bool):
+        supported = re.search(r"(?<!\w)" + value_json + r"(?!\w)", quote) is not None
+    else:
+        tokens = re.findall(
+            r"(?<![\w.,+-])[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?(?!\w|[.,]\d)",
+            quote,
+        )
+        supported = value_json in tokens
+    if not supported:
+        reasons.add("PROPERTY_VALUE_UNGROUNDED")
+    return sorted_reasons(reasons)
 
 
 def validate_property_observation(

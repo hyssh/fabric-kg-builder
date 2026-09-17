@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from fabric_kg_builder.contracts.base import canonical_sha256
+from fabric_kg_builder.contracts.base import canonical_json, canonical_sha256
 from fabric_kg_builder.contracts.identity import (
     CanonicalIdentityEnvelope,
     ImmutableSourceLocator,
@@ -35,7 +35,10 @@ from fabric_kg_builder.contracts.receipts import StageReceipt
 from fabric_kg_builder.contracts.resources import StageResourceMetrics
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.serving.lifecycle_projection import run_l4
-from fabric_kg_builder.semantic.source_tables import require_l5_publication_receipt
+from fabric_kg_builder.semantic.source_tables import (
+    decode_property_scalar,
+    require_l5_publication_receipt,
+)
 from fabric_kg_builder.serving.structured_publication import (
     L5A_MAX_FABRIC_CALLS,
     L5A_TARGET_ORDER,
@@ -56,6 +59,10 @@ from fabric_kg_builder.serving.structured_publication import (
     _expected_state,
     _required_member_snapshots,
     _table_snapshot,
+    _all_tables,
+    _load_source_tables,
+    _property_values,
+    _publication_authority,
 )
 from tests.unit.test_schema2_projection_stage import _l3_with_sealed_manifest
 from tests.unit.test_schema2_validation_stage import _l3, _pipeline
@@ -454,8 +461,8 @@ def _crosswalk_body(source) -> dict:
             physical_surrogate_key_bindings=(),
         ))
     relationship_definition = contract.candidate_model.relationship_types[0]
-    source_type = relationship_definition.source_type_ids[0]
-    target_type = relationship_definition.target_type_ids[0]
+    source_type = "semantic-type:manufacturing.record"
+    target_type = "semantic-type:manufacturing.subject"
     relationship_id = relationship_definition.relationship_type_id
     type_mapping_by_id = {
         item.canonical_semantic_type_id: item for item in type_mappings
@@ -560,6 +567,7 @@ def _inputs(
     extra_type_properties=None,
     extra_relationship_targets=False,
     identity_business_keys=None,
+    assert_property_values=True,
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
     l4 = run_l4(
@@ -592,6 +600,7 @@ def _inputs(
                 ),
             },
             inject_identity_keys=True,
+            assert_property_values=assert_property_values,
         ),
         state_root=tmp_path / ".fkg" / "l4",
     )
@@ -731,7 +740,10 @@ def test_l5a_persists_and_reads_back_all_structured_targets(tmp_path: Path) -> N
         assert mapping["physical_identity_column"] == "__canonical_id"
         table = result.compiled.tables[mapping["physical_table_id"]]
         for prop in mapping["properties"]:
-            assert table[prop["physical_column_id"]].null_count == table.num_rows
+            assert table[prop["physical_column_id"]].null_count == 0
+    relationship = result.compiled.tables["l5a_membership"].to_pylist()[0]
+    assert relationship["source_1"] == "governed record"
+    assert relationship["target_1"] == "governed subject"
     assert all(
         item["key_properties"] == ["__canonical_id"]
         for item in result.compiled.definitions["graph"]["node_types"]
@@ -927,7 +939,151 @@ def test_l5a_preserves_authoritative_inherited_endpoint_key_type(
     )
     relationship = compiled.tables["l5a_membership"]
     assert relationship.schema.field("source_1").type == pa.int64()
-    assert relationship.schema.field("target_1").type == pa.int64()
+    assert relationship.schema.field("target_1").type == pa.string()
+    assert relationship.to_pylist()[0]["source_1"] == 0
+    assert relationship.to_pylist()[0]["target_1"] == "governed subject"
+
+
+@pytest.mark.unit
+def test_l5a_materializes_all_proven_scalar_types(tmp_path: Path) -> None:
+    inputs = _all_property_types_inputs(tmp_path)
+    compiled = compile_l5a_publication(**inputs)
+    mapping = next(
+        item for item in inputs["crosswalks"][0].semantic_type_mappings
+        if item.canonical_semantic_type_id == "semantic-type:manufacturing.record"
+    )
+    row = compiled.tables[mapping.physical_table_id].to_pylist()[0]
+    expected = {
+        "string": "governed record",
+        "integer": 0,
+        "number": 0.5,
+        "boolean": False,
+        "date": date(2026, 8, 25),
+        "datetime": datetime(2026, 8, 25, 12, 30, tzinfo=timezone.utc),
+    }
+    for prop in mapping.physical_property_bindings:
+        assert row[prop.physical_column_id] == expected[prop.data_type]
+        assert type(row[prop.physical_column_id]) is type(expected[prop.data_type])
+    carried = compiled.tables["l4_semantic_asserted_properties"]
+    assert carried.num_rows == 8
+    assert carried["normalized_value_json"].null_count == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value_json", "value_type"),
+    [
+        ("null", "string"),
+        ("[]", "string"),
+        ('{"x": 1}', "string"),
+        ("NaN", "number"),
+        ("Infinity", "number"),
+        ("true", "integer"),
+        ("0", "boolean"),
+        ('"0"', "integer"),
+        ("0.0", "integer"),
+        (str(2**63), "integer"),
+        (str(-(2**63) - 1), "integer"),
+        (' "x"', "string"),
+        ('"2026-02-30"', "date"),
+        ('"20260825"', "date"),
+        ('"2026-08-25T12:30:00"', "datetime"),
+        ('"2026-08-25 12:30:00+00:00"', "datetime"),
+        ("0", "unknown"),
+    ],
+)
+def test_l5a_rejects_unproven_scalar_coercions(value_json, value_type) -> None:
+    with pytest.raises((ValueError, OverflowError)):
+        decode_property_scalar(value_json, value_type)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value_json", "value_type", "expected"),
+    [
+        ('""', "string", ""),
+        ("false", "boolean", False),
+        ("0", "integer", 0),
+        (str(-(2**63)), "integer", -(2**63)),
+        (str(2**63 - 1), "integer", 2**63 - 1),
+        (
+            '"2026-08-25T14:30:00.000+02:00"',
+            "datetime",
+            datetime(2026, 8, 25, 12, 30, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_l5a_preserves_falsy_and_temporal_scalars(value_json, value_type, expected) -> None:
+    assert decode_property_scalar(value_json, value_type) == expected
+
+
+@pytest.mark.unit
+def test_l5a_property_lookup_coalesces_only_identical_values(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    tables = _load_source_tables(inputs["source"])
+    contract, _ = _publication_authority(tables)
+    original = _property_values(tables, contract)
+    table = tables["semantic_asserted_properties"]
+    rows = table.to_pylist()
+    rows.append(dict(rows[0]))
+    tables["semantic_asserted_properties"] = pa.Table.from_pylist(rows, schema=table.schema)
+    assert _property_values(tables, contract) == original
+    assert tables["semantic_asserted_properties"].num_rows == len(rows)
+    rows[-1]["normalized_value_json"] = canonical_json("conflicting grounded value")
+    tables["semantic_asserted_properties"] = pa.Table.from_pylist(rows, schema=table.schema)
+    with pytest.raises(L5aPublicationError, match="L5A_PROPERTY_VALUE_CONFLICT"):
+        _property_values(tables, contract)
+
+
+@pytest.mark.unit
+def test_l5a_missing_optional_property_is_null(tmp_path: Path) -> None:
+    inputs = _all_property_types_inputs(tmp_path)
+    tables = _load_source_tables(inputs["source"])
+    contract, _ = _publication_authority(tables)
+    original = tables["semantic_asserted_properties"]
+    tables["semantic_asserted_properties"] = pa.Table.from_pylist(
+        [
+            row for row in original.to_pylist()
+            if row["semantic_property_id"] != "property:record:boolean"
+        ],
+        schema=original.schema,
+    )
+    crosswalk = inputs["crosswalks"][0]
+    typed = _all_tables(tables, crosswalk, contract)
+    mapping = next(
+        item for item in crosswalk.semantic_type_mappings
+        if item.canonical_semantic_type_id == "semantic-type:manufacturing.record"
+    )
+    prop = next(
+        item for item in mapping.physical_property_bindings
+        if item.canonical_property_id == "property:record:boolean"
+    )
+    assert typed[mapping.physical_table_id][prop.physical_column_id].null_count == 1
+
+
+@pytest.mark.unit
+def test_l5a_blocks_missing_required_properties_without_business_key_fallback(tmp_path: Path) -> None:
+    with pytest.raises(L5aPublicationError, match="L5A_REQUIRED_PROPERTY_MISSING"):
+        _inputs(tmp_path, assert_property_values=False)
+
+
+@pytest.mark.unit
+def test_l5a_endpoint_keys_remain_required_when_domain_properties_are_optional(tmp_path: Path) -> None:
+    optional_keys = {
+        f"semantic-type:manufacturing.{suffix}": ({
+            "property_id": f"property:{suffix}:canonical-id",
+            "display_name": f"{suffix.title()} ID",
+            "value_type": "string",
+            "required": False,
+        },)
+        for suffix in ("record", "subject")
+    }
+    with pytest.raises(L5aPublicationError, match="L5A_REQUIRED_PROPERTY_MISSING"):
+        _inputs(
+            tmp_path,
+            assert_property_values=False,
+            extra_type_properties=optional_keys,
+        )
 
 
 @pytest.mark.unit
@@ -1157,7 +1313,7 @@ def test_l5a_rejects_arbitrary_descendant_semantic_instance_key(
         "property:record-a:detail"
     ]
     relationship = values["relationship_mappings"][0]
-    assert relationship["target_semantic_type_id"] == child[
+    relationship["target_semantic_type_id"] = child[
         "canonical_semantic_type_id"
     ]
     relationship["target_canonical_key_property_ids"] = [
@@ -2423,6 +2579,19 @@ def _l3_without_manifest(tmp_path: Path):
                 f"property:{suffix}:canonical-id": candidate["local_id"]
             }
             values[index] = candidate
+        for owner in tuple(values):
+            if owner["candidate_kind"] != "entity":
+                continue
+            suffix = "record" if owner["local_id"].startswith("record") else "subject"
+            values.append({
+                "candidate_kind": "property",
+                "owner_local_id": owner["local_id"],
+                "observed_property": f"{suffix.title()} ID",
+                "value": f"governed {suffix}",
+                "normalized_value": f"governed {suffix}",
+                "temporal_key": None,
+                "anchor": owner["anchors"][0],
+            })
         return values
 
     l1_state_root, domain_path, l2 = _pipeline(

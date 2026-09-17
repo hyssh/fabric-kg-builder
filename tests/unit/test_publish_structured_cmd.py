@@ -60,7 +60,7 @@ def test_dry_run_is_the_default_and_seals_a_plan(sealed_run, tmp_path):
     assert result.exit_code == 0, result.output
     assert "mode=dry-run" in result.output
     plan = json.loads((tmp_path / "plan.json").read_text("utf-8"))
-    assert plan["release_version"] == "0.2.4"
+    assert plan["release_version"] == "0.2.6"
     assert plan["workspace_id"] == WORKSPACE_ID
     assert plan["plan_hash"] in result.output
 

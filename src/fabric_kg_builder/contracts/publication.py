@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal, Mapping
 from urllib.parse import parse_qsl, urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .base import (
     ContractModel,
@@ -797,6 +797,11 @@ class SemanticTypeProjectionMappingV1_1(ContractModel):
 
     @model_validator(mode="after")
     def _local_invariants(self) -> "SemanticTypeProjectionMappingV1_1":
+        return self._validate_local_invariants(source_identity=False)
+
+    def _validate_local_invariants(
+        self, *, source_identity: bool,
+    ) -> "SemanticTypeProjectionMappingV1_1":
         inherited_ids = [
             item.canonical_property_id for item in self.inherited_property_references
         ]
@@ -810,9 +815,9 @@ class SemanticTypeProjectionMappingV1_1(ContractModel):
         effective_ids = set(self.locally_owned_canonical_property_ids).union(
             inherited_ids
         )
-        if not effective_ids:
+        if not effective_ids and not source_identity:
             raise ValueError("each semantic type requires effective canonical properties")
-        if not self.canonical_instance_key_property_ids:
+        if not self.canonical_instance_key_property_ids and not source_identity:
             raise ValueError("each semantic type requires canonical instance key fields")
         if not set(self.canonical_instance_key_property_ids).issubset(effective_ids):
             raise ValueError("canonical instance keys must be effective canonical properties")
@@ -1021,6 +1026,16 @@ class PublicationCrosswalkV1_1(ContractModel):
     @model_validator(mode="after")
     def _invariants(self) -> "PublicationCrosswalkV1_1":
         _reject_secrets_in(self)
+        if self.identity.contract_version != "1.3.0" and any(
+            hasattr(item, "canonical_identity_binding")
+            for item in self.semantic_type_mappings
+        ):
+            raise ValueError("canonical identity bindings require crosswalk version 1.3.0")
+        if self.identity.contract_version != "1.3.0" and any(
+            hasattr(item, "source_identity_binding")
+            for item in self.relationship_mappings
+        ):
+            raise ValueError("canonical endpoint bindings require crosswalk version 1.3.0")
         if self.identity.semantic_contract_hash != self.semantic_contract_hash:
             raise ValueError("semantic contract hash differs from identity authority")
 
@@ -1285,6 +1300,150 @@ class PublicationCrosswalkV1_2(PublicationCrosswalkV1_1):
 
     identity: PublicationCrosswalkIdentityV1_2
     authority: PublicationAuthorityReferencesV1_2
+
+
+class CanonicalEntityIdentityBindingV1_3(ContractModel):
+    """Canonical L3 identity copied unchanged from its sealed L4 authority."""
+
+    binding_kind: Literal["sealed_canonical_entity_id"] = "sealed_canonical_entity_id"
+    semantic_role: Literal["canonical_identity"] = "canonical_identity"
+    identity_root_type_id: RequiredText
+    policy_mode: Literal["business_key", "stable_source_identity"]
+    root_policy_hash: Sha256
+    identity_policy_hash: Sha256
+    source_l4_manifest_id: RequiredText
+    source_l4_manifest_hash: Sha256
+    source_projection_id: RequiredText
+    source_projection_hash: Sha256
+    source_table_id: Literal["semantic_asserted_entities"] = "semantic_asserted_entities"
+    source_column_id: Literal["entity_id"] = "entity_id"
+    physical_column_id: Literal["__canonical_id"] = "__canonical_id"
+
+    @model_validator(mode="after")
+    def _secrets(self) -> "CanonicalEntityIdentityBindingV1_3":
+        _reject_secrets_in(self)
+        return self
+
+
+class SemanticTypeProjectionMappingV1_3(SemanticTypeProjectionMappingV1_1):
+    """Property keys describe the approved policy, not an invented identity field."""
+
+    canonical_identity_binding: CanonicalEntityIdentityBindingV1_3
+    model_config = ConfigDict(json_schema_extra={
+        "allOf": [{
+            "if": {"properties": {"canonical_identity_binding": {
+                "properties": {"policy_mode": {"const": "stable_source_identity"}},
+            }}},
+            "then": {"properties": {"canonical_instance_key_property_ids": {"maxItems": 0}}},
+            "else": {"properties": {"canonical_instance_key_property_ids": {"minItems": 1}}},
+        }],
+    })
+
+    @model_validator(mode="after")
+    def _local_invariants(self) -> "SemanticTypeProjectionMappingV1_3":
+        source_identity = self.canonical_identity_binding.policy_mode == "stable_source_identity"
+        if source_identity and self.canonical_instance_key_property_ids:
+            raise ValueError("stable source identity cannot declare business-key properties")
+        self._validate_local_invariants(source_identity=source_identity)
+        reserved = {
+            "__canonical_id", "__semantic_type_id", "__most_specific_type_id",
+            "__hierarchy_depth", "__label",
+        }
+        if any(
+            item.physical_column_id in reserved
+            for item in (*self.physical_property_bindings, *self.physical_surrogate_key_bindings)
+        ):
+            raise ValueError("semantic/surrogate properties cannot replace canonical structural columns")
+        return self
+
+
+class CanonicalEndpointIdentityBindingV1_3(ContractModel):
+    """Relationship-local canonical ID reference, never a surrogate/property key."""
+
+    binding_kind: Literal["sealed_canonical_entity_id"] = "sealed_canonical_entity_id"
+    semantic_role: Literal["canonical_identity"] = "canonical_identity"
+    physical_column_id: Literal["__source_entity_id", "__target_entity_id"]
+    referenced_identity_column_id: Literal["__canonical_id"] = "__canonical_id"
+    compatible_semantic_type_ids: Annotated[
+        tuple[RequiredText, ...], Field(min_length=1, json_schema_extra={"uniqueItems": True})
+    ]
+
+    @field_validator("compatible_semantic_type_ids", mode="before")
+    @classmethod
+    def _types(cls, value: object) -> object:
+        return _sorted_text_strict(value, field_name="compatible_semantic_type_ids")
+
+    @model_validator(mode="after")
+    def _invariants(self) -> "CanonicalEndpointIdentityBindingV1_3":
+        _reject_secrets_in(self)
+        if not self.compatible_semantic_type_ids:
+            raise ValueError("canonical endpoints require an explicit compatible type set")
+        return self
+
+
+class RelationshipProjectionMappingV1_3(RelationshipProjectionMappingV1_1):
+    """Canonical endpoint joins; business properties remain entity proof facts."""
+
+    source_identity_binding: CanonicalEndpointIdentityBindingV1_3
+    target_identity_binding: CanonicalEndpointIdentityBindingV1_3
+
+    @model_validator(mode="after")
+    def _local_invariants(self) -> "RelationshipProjectionMappingV1_3":
+        if self.source_key_bindings or self.target_key_bindings:
+            raise ValueError("canonical endpoint joins cannot substitute representative business/surrogate columns")
+        for side in ("source", "target"):
+            binding = getattr(self, f"{side}_identity_binding")
+            if binding.physical_column_id != f"__{side}_entity_id":
+                raise ValueError("canonical endpoint column disagrees with its direction")
+            if getattr(self, f"{side}_semantic_type_id") not in binding.compatible_semantic_type_ids:
+                raise ValueError("endpoint representative must belong to its declared compatible type set")
+        return self
+
+
+class PublicationCrosswalkIdentityV1_3(CanonicalIdentityEnvelope):
+    contract_kind: Literal["c0.publication_crosswalk"] = "c0.publication_crosswalk"
+    contract_version: Literal["1.3.0"] = "1.3.0"
+
+
+class PublicationCrosswalkV1_3(PublicationCrosswalkV1_2):
+    """Explicit canonical identity bindings rooted in the sealed L4 projection."""
+
+    identity: PublicationCrosswalkIdentityV1_3
+    source_l4_manifest_id: RequiredText
+    source_l4_manifest_hash: Sha256
+    semantic_type_mappings: tuple[SemanticTypeProjectionMappingV1_3, ...]
+    relationship_mappings: tuple[RelationshipProjectionMappingV1_3, ...]
+
+    @model_validator(mode="after")
+    def _identity_bindings(self) -> "PublicationCrosswalkV1_3":
+        types = {item.canonical_semantic_type_id: item for item in self.semantic_type_mappings}
+        for mapping in self.semantic_type_mappings:
+            binding = mapping.canonical_identity_binding
+            root = types.get(binding.identity_root_type_id)
+            if root is None or root.canonical_parent_semantic_type_id is not None:
+                raise ValueError("canonical identity root must resolve to a hierarchy root")
+            ancestor = mapping
+            while ancestor.canonical_parent_semantic_type_id is not None:
+                ancestor = types[ancestor.canonical_parent_semantic_type_id]
+            if ancestor.canonical_semantic_type_id != binding.identity_root_type_id:
+                raise ValueError("canonical identity root differs from the type's ancestry")
+            if (
+                binding.identity_policy_hash != self.identity_policy_hash
+                or binding.source_projection_id != self.source_projection_id
+                or binding.source_projection_hash != self.source_projection_hash
+                or binding.source_l4_manifest_id != self.source_l4_manifest_id
+                or binding.source_l4_manifest_hash != self.source_l4_manifest_hash
+                or binding.policy_mode != root.canonical_identity_binding.policy_mode
+                or binding.root_policy_hash != root.canonical_identity_binding.root_policy_hash
+                or mapping.canonical_instance_key_property_ids != root.canonical_instance_key_property_ids
+            ):
+                raise ValueError("canonical identity binding differs from sealed/root authority")
+        for relationship in self.relationship_mappings:
+            for side in ("source", "target"):
+                binding = getattr(relationship, f"{side}_identity_binding")
+                if not set(binding.compatible_semantic_type_ids).issubset(types):
+                    raise ValueError("canonical endpoint references an unknown semantic type")
+        return self
 
 
 class ProjectionEvidence(ContractModel):

@@ -9,6 +9,34 @@ from pathlib import Path
 import click
 from pydantic import ValidationError
 
+from .domain_assessment_cmd import (
+    domain_assess_cmd, domain_assessment_schema_cmd,
+    domain_review_assessment_cmd, domain_revise_cmd,
+)
+from .layout_cache_cmd import domain_analyze_layout_cmd
+from .domain_design_cmd import (
+    domain_accept_discovery_partial_cmd,
+    domain_discover_cmd,
+    domain_compile_design_cmd,
+    domain_design_cmd,
+    domain_design_schema_cmd,
+    domain_evaluate_design_cmd,
+    domain_question_context_cmd,
+)
+from .domain_io import load_cli_domain_contract
+from .domain_window_cmd import (
+    domain_window_bootstrap_cmd,
+    domain_window_align_cmd, domain_window_status_cmd, domain_window_history_cmd,
+    domain_review_window_mapping_cmd, domain_window_schema_cmd,
+)
+from .domain_window_run_cmd import (
+    domain_window_run_cmd, domain_window_run_status_cmd,
+    domain_window_run_history_cmd, domain_window_run_schema_cmd,
+)
+from .domain_window_run_review_cmd import domain_review_window_run_mapping_cmd
+from .domain_window_run_acceptance_cmd import domain_accept_window_run_partial_cmd
+from .domain_window_run_prefix_cmd import domain_accept_window_run_prefix_cmd
+from .domain_window_schema_projection_cmd import domain_retain_window_schema_cmd
 from fabric_kg_builder.domain import (
     ApprovalMetadata,
     DomainContract,
@@ -40,7 +68,10 @@ def _build_foundry_client(ctx_obj: dict):
     from ..enrichment.foundry_client import FoundryClient
 
     env = (ctx_obj or {}).get("env", "dev")
-    config = load_config(env=env)
+    config = load_config(
+        env=env,
+        yaml_path=Path(str((ctx_obj or {}).get("config", "fabric-kg.yaml"))),
+    )
     return FoundryClient(config.foundry)
 
 
@@ -147,6 +178,35 @@ def domain_cmd() -> None:
     """Author, validate, review, approve, and inspect domain.yaml contracts."""
 
 
+domain_cmd.add_command(domain_assess_cmd)
+domain_cmd.add_command(domain_review_assessment_cmd)
+domain_cmd.add_command(domain_revise_cmd)
+domain_cmd.add_command(domain_assessment_schema_cmd)
+domain_cmd.add_command(domain_analyze_layout_cmd)
+domain_cmd.add_command(domain_design_cmd)
+domain_cmd.add_command(domain_discover_cmd)
+domain_cmd.add_command(domain_accept_discovery_partial_cmd)
+domain_cmd.add_command(domain_accept_discovery_partial_cmd, "accept-discovery")
+domain_cmd.add_command(domain_design_schema_cmd)
+domain_cmd.add_command(domain_evaluate_design_cmd)
+domain_cmd.add_command(domain_compile_design_cmd)
+domain_cmd.add_command(domain_question_context_cmd)
+domain_cmd.add_command(domain_window_align_cmd)
+domain_cmd.add_command(domain_window_bootstrap_cmd)
+domain_cmd.add_command(domain_window_status_cmd)
+domain_cmd.add_command(domain_window_history_cmd)
+domain_cmd.add_command(domain_review_window_mapping_cmd)
+domain_cmd.add_command(domain_window_schema_cmd)
+domain_cmd.add_command(domain_window_run_cmd)
+domain_cmd.add_command(domain_window_run_status_cmd)
+domain_cmd.add_command(domain_window_run_history_cmd)
+domain_cmd.add_command(domain_window_run_schema_cmd)
+domain_cmd.add_command(domain_review_window_run_mapping_cmd)
+domain_cmd.add_command(domain_accept_window_run_partial_cmd)
+domain_cmd.add_command(domain_accept_window_run_prefix_cmd)
+domain_cmd.add_command(domain_retain_window_schema_cmd)
+
+
 @domain_cmd.command("init")
 @click.option("--interactive", is_flag=True, default=False, help="Prompt for contract values interactively.")
 @click.option(
@@ -185,7 +245,7 @@ def domain_init_cmd(interactive: bool, output_path: str, force: bool) -> None:
 )
 def domain_validate_cmd(contract_path: str) -> None:
     """Validate YAML syntax, schema conformance, and deterministic quality gates."""
-    contract = load_domain_contract(contract_path)
+    contract = load_cli_domain_contract(contract_path)
     findings, coverage = run_deterministic_validation(contract)
     error_count = sum(1 for finding in findings if finding.severity == "error")
     warning_count = sum(1 for finding in findings if finding.severity == "warning")
@@ -472,7 +532,7 @@ def domain_approve_cmd(
     "contract_path",
     default=None,
     type=click.Path(),
-    help="Optional explicit path to domain.yaml (or legacy domain.json for diagnostics).",
+    help="Optional path to domain.yaml, an unapproved design draft JSON, or legacy domain.json.",
 )
 @click.option(
     "--state-dir",
@@ -482,7 +542,95 @@ def domain_approve_cmd(
     help="Schema-2 L1 state directory containing approval artifacts.",
 )
 def domain_status_cmd(contract_path: str | None, state_dir: Path) -> None:
-    """Report contract, review, approval, and enrichment readiness status."""
+    """Report design or contract status without calls, writes, or approval."""
+    if contract_path is not None and Path(contract_path).is_file():
+        path = Path(contract_path)
+        try:
+            text = path.read_text(encoding="utf-8")
+            is_json = path.suffix.lower() == ".json" or text.lstrip().startswith("{")
+            raw = json.loads(text) if is_json else None
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(f"Invalid domain status input '{path}': {exc}") from exc
+        if is_json and not isinstance(raw, dict):
+            raise click.ClickException(f"Invalid domain status input '{path}': expected a JSON object")
+        is_design = isinstance(raw, dict) and (
+            raw.get("artifact_kind") == "domain.design_draft"
+            or "draft_id" in raw or "draft_hash" in raw
+        )
+        if is_design:
+            from collections import Counter
+
+            from fabric_kg_builder.domain.design import evaluate_domain_design, load_domain_design
+            from fabric_kg_builder.domain.discovery import discovery_grounding_report
+
+            del raw, text
+            try:
+                draft = load_domain_design(path)
+                evaluation = evaluate_domain_design(draft)
+            except (OSError, ValueError, TypeError) as exc:
+                raise click.ClickException(f"Invalid domain design draft '{path}': {exc}") from exc
+            click.echo(f"[domain status] design path           : {path}")
+            click.echo(f"[domain status] artifact kind         : {draft.artifact_kind}")
+            click.echo(f"[domain status] artifact version      : {draft.artifact_version}")
+            click.echo(f"[domain status] draft hash            : {draft.draft_hash}")
+            click.echo("[domain status] design status         : UNAPPROVED")
+            click.echo("[domain status] ready for enrichment : False")
+            click.echo("[domain status] evaluation            : local structural, not persisted")
+            click.echo(f"[domain status] evaluation hash       : {evaluation.evaluation_hash}")
+            question_counts = Counter(item.status for item in evaluation.questions)
+            click.echo(
+                "[domain status] question structure    : "
+                + ", ".join(f"{key}={question_counts[key]}" for key in (
+                    "supported", "partial", "unsupported", "review_needed",
+                ))
+            )
+            context = evaluation.question_routing
+            routed = context.questions if context is not None else []
+            click.echo(
+                f"[domain status] question context      : UNAPPROVED; "
+                f"routed={len(routed)}/{len(evaluation.questions)}, "
+                f"pending_requirements={sum(len(item.pending_requirements) for item in routed)}"
+            )
+            click.echo(f"[domain status] question context hash : {context.context_hash if context else 'not declared'}")
+            sql_count = sum(item.routing.backend == "lakehouse_sql" for item in routed)
+            click.echo(f"[domain status] SQL physical bindings : unresolved={sql_count}; execution not verified")
+            click.echo(f"[domain status] answer verification   : {evaluation.answer_verification}")
+            click.echo(f"[domain status] review findings       : {len(evaluation.findings)}")
+            click.echo(f"[domain status] compiler limitations  : {len(evaluation.compiler_limitations)}")
+            if draft.discovery is None:
+                click.echo("[domain status] discovery coverage    : absent; sample-only compatibility, not full corpus")
+            else:
+                discovery = draft.discovery
+                grounding = discovery_grounding_report(discovery)
+                sources = discovery.prepared.sources
+                prepared_count = sum(item.status in {"processed", "no_candidates"} for item in sources)
+                click.echo(f"[domain status] discovery hash        : {discovery.run_hash}")
+                click.echo(f"[domain status] corpus hash           : {discovery.prepared.corpus.corpus_hash}")
+                click.echo(f"[domain status] discovery status      : {discovery.status}")
+                click.echo(
+                    f"[domain status] discovery coverage    : declared_sources={len(sources)}, "
+                    f"prepared_sources={prepared_count}, source_units={len(discovery.prepared.source_units)}, "
+                    f"accounted_chunks={grounding['accounted_chunks']}/{grounding['total_chunks']}"
+                )
+                click.echo(
+                    f"[domain status] candidate grounding   : {grounding['grounding_quality']}; "
+                    f"raw={grounding['raw_candidate_count']}, "
+                    f"verified={grounding['verified_candidate_count']}, "
+                    f"quarantined={grounding['quarantined_candidate_count']}"
+                )
+                click.echo("[domain status] coverage authority    : sealed snapshot; current source bytes/OCR cache not rechecked")
+                click.echo("[domain status] semantic recall       : not claimed")
+            click.echo(
+                "[domain status] next steps: domain evaluate-design -> review evaluation -> "
+                "domain compile-design -> domain approve (compiled contract, not this draft)."
+            )
+            click.echo(
+                "[domain status] use each command's --help for required paths and the exact "
+                "--accept-evaluation-hash acknowledgment; domain question-context --file exports context."
+            )
+            return
+        if isinstance(raw, dict) and raw.get("artifact_kind") is not None:
+            raise click.ClickException(f"Unsupported domain status artifact kind: {raw['artifact_kind']}")
     status = evaluate_domain_guard_status(
         contract_path,
         l1_state_root=state_dir,

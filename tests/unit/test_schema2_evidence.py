@@ -15,6 +15,7 @@ from fabric_kg_builder.contracts.adapters import (
 )
 from fabric_kg_builder.contracts.base import (
     EvidencePurposePromotionError,
+    canonical_json,
     canonical_sha256,
     deterministic_contract_id,
 )
@@ -73,6 +74,7 @@ from fabric_kg_builder.enrichment.schema2_evidence import (
     classify_state,
     compile_hierarchy,
     compile_parent_closure,
+    decode_property_scalar,
     derived_stable_source_identity,
     deterministic_ancestor_path,
     evaluate_inherited_constraints,
@@ -81,6 +83,7 @@ from fabric_kg_builder.enrichment.schema2_evidence import (
     is_minted_contract_id,
     normalize_business_key,
     property_attribution_reasons,
+    property_scalar_grounding_reasons,
     recompute_entity_id,
     recompute_observation_entity_id,
     recompute_relationship_id,
@@ -978,6 +981,75 @@ def test_root_to_leaf_properties_and_constraints_form_one_conjunction() -> None:
         hierarchy,
         observed_property_ids=("property:x.serial", "property:x.foreign"),
     ) == ("INHERITED_PROPERTY_INVALID",)
+
+
+@pytest.mark.parametrize("encoded", ["null", "[]", "{}", "NaN", "Infinity", "1e999", " 0", '"\\u0061"'])
+def test_property_scalar_requires_canonical_finite_json(encoded: str) -> None:
+    with pytest.raises(ValueError):
+        decode_property_scalar(encoded)
+
+
+@pytest.mark.parametrize(("value", "quote", "supported"), [
+    (0, "owner has value 0.", True),
+    (0, "owner has value 10.", False),
+    (1, "owner has value 1,000.", False),
+    (123, "owner has value 1,123.", False),
+    (7, "owner has value -7.", False),
+    (7, "owner has value 7.5.", False),
+    (7, "owner has value 7e3.", False),
+    (7, "owner has reference x7.", False),
+    (False, "owner has value false.", True),
+    (False, "owner has value falsehood.", False),
+    (False, "owner has value no.", False),
+    ("ready", "owner status is ready", True),
+    ("Ready", "owner status is ready", False),
+    ("", "owner status is unknown", False),
+    ("", 'owner status is ""', True),
+])
+def test_property_scalar_requires_literal_whole_token_proof(value, quote, supported) -> None:
+    encoded = canonical_json(value)
+    reasons = property_scalar_grounding_reasons(
+        value_json=encoded, normalized_value_json=encoded, quote=quote,
+    )
+    assert reasons == (() if supported else ("PROPERTY_VALUE_UNGROUNDED",))
+
+
+def test_property_normalization_changes_are_unsupported_not_inferred() -> None:
+    reasons = property_scalar_grounding_reasons(
+        value_json='"5"', normalized_value_json="5", quote='owner reading is "5"',
+    )
+    assert reasons == ("PROPERTY_NORMALIZATION_UNSUPPORTED",)
+    assert classify_state(reasons) is AssertionState.UNSUPPORTED
+
+
+@pytest.mark.parametrize(("value_type", "value", "valid"), [
+    ("integer", 0, True), ("integer", False, False), ("integer", 2**63, False),
+    ("number", 1.5, True), ("number", float("inf"), False),
+    ("number", 10**400, False), ("boolean", False, True), ("boolean", 0, False),
+    ("date", "2026-07-01", True), ("date", "2026-02-30", False),
+    ("date", "not-a-date", False),
+    ("datetime", "2026-07-01T10:00:00Z", True),
+    ("datetime", "2026-07-01T10:00:00+09:00", True),
+    ("datetime", "2026-07-01T10:00:00", False),
+])
+def test_property_declared_type_validates_scalar_without_coercion(value_type, value, valid) -> None:
+    hierarchy = _compiled(
+        (_entity(
+            "semantic-type:x.root", policy=_policy("x.root"),
+            properties=(DomainPropertyV2(
+                property_id="property:x.reading", display_name="Reading", value_type=value_type,
+            ),),
+        ), _entity("semantic-type:x.other", policy=_policy("x.other"))),
+        (_relationship(
+            "relationship-type:x.link",
+            sources=("semantic-type:x.root",), targets=("semantic-type:x.other",),
+        ),),
+    )
+    reasons = validate_property_observation(
+        hierarchy=hierarchy, owner_type_id="semantic-type:x.root",
+        property_id="property:x.reading", value=value, value_available=True,
+    )
+    assert reasons == (() if valid else ("PROPERTY_VALUE_INVALID",))
 
 
 def test_property_observations_validate_id_value_and_sibling_state() -> None:

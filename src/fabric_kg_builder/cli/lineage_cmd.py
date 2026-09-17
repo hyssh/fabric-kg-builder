@@ -423,12 +423,27 @@ def lineage_cmd() -> None:
     show_default=True,
     help="Output format.",
 )
+@click.option("--l2-state", type=click.Path(file_okay=False, path_type=Path),
+              help="Trace Schema-2 extraction records instead of the legacy registry.")
+@click.option("--l1-state", type=click.Path(file_okay=False, path_type=Path),
+              help="Required with --l2-state: intact frozen L1 approval.")
+@click.option("--domain", type=click.Path(dir_okay=False, path_type=Path),
+              help="Required with --l2-state: exact approved domain contract.")
+@click.option("--l4-run", type=click.Path(file_okay=False, path_type=Path),
+              help="Optional sealed L4 run to include validated state and serving values.")
+@click.option("--l3-root", type=click.Path(file_okay=False, path_type=Path),
+              help="L3 manifest root backing --l4-run.")
 def trace_cmd(
     record_id: str,
     registry: str,
     table_name: str | None,
     direction: str,
     output_format: str,
+    l2_state: Path | None = None,
+    l1_state: Path | None = None,
+    domain: Path | None = None,
+    l4_run: Path | None = None,
+    l3_root: Path | None = None,
 ) -> None:
     """Trace the lineage provenance chain for RECORD_ID.
 
@@ -440,7 +455,45 @@ def trace_cmd(
       fabric-kg lineage trace <record-id>
       fabric-kg lineage trace <record-id> --format json
       fabric-kg lineage trace <record-id> --table entities
+      fabric-kg lineage trace <candidate-id> --l2-state .fkg/l2 \\
+        --l1-state .fkg/l1 --domain domain.yaml --format json
+
+    Schema-2 data lineage starts with extraction after verified L1 approval.
+    Working-schema changes remain in domain window-run-history, not data lineage.
     """
+    if l2_state is not None:
+        if l1_state is None or domain is None:
+            raise click.ClickException("--l2-state requires --l1-state and --domain")
+        if direction != "backward" or table_name is not None or registry != _DEFAULT_REGISTRY:
+            raise click.ClickException(
+                "Schema-2 tracing supports backward provenance, without --table or --registry."
+            )
+        from fabric_kg_builder.lineage.schema2 import trace_schema2_record
+
+        try:
+            result = trace_schema2_record(
+                record_id, l1_state=l1_state, domain=domain, l2_state=l2_state,
+                l4_run=l4_run, l3_root=l3_root,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        if output_format == "json":
+            click.echo(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            click.echo(f"record_id: {record_id}")
+            click.echo(f"schema_state: {result['authority']['schema_state']}")
+            click.echo(f"domain_contract_hash: {result['authority']['domain_contract_hash']}")
+            click.echo(f"validation_state: {result['validation_state']}")
+            for observation in result["observations"]:
+                candidate = observation["candidate"]
+                source = observation["source"]
+                click.echo(
+                    f"  {candidate['candidate_kind']} {candidate['candidate_id']} -> "
+                    f"{source['relative_source_ref']} [{source['source_unit_id']}]"
+                )
+        return
+    if any(value is not None for value in (l1_state, domain, l4_run, l3_root)):
+        raise click.ClickException("Schema-2 lineage options require --l2-state")
     try:
         from fabric_kg_builder.lineage.trace import trace_record  # type: ignore[import]
     except ImportError as exc:

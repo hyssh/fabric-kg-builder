@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from fabric_kg_builder.contracts.base import (
+    canonical_json,
     canonical_sha256,
     deterministic_contract_id,
     normalize_nfc,
@@ -53,9 +54,10 @@ from fabric_kg_builder.domain.models import (
 from fabric_kg_builder.domain.service import compute_contract_hash
 
 from .schema2_sources import L2StageError
+from .schema2_collections import CollectionDeferral, observed_order_reasons
 
-L2_PROMPT_VERSION = "l2-schema-constrained/1.1.0"
-L2_EXTRACTOR_VERSION = "1.2.0"
+L2_PROMPT_VERSION = "l2-schema-constrained/1.3.0"
+L2_EXTRACTOR_VERSION = "1.4.0"
 UNKNOWN_SEMANTIC_TYPE = {
     "entity": "unapproved-observation:entity",
     "relationship": "unapproved-observation:relationship",
@@ -105,6 +107,9 @@ class RawRelationshipCandidate(_StrictProposal):
 
 
 class RawPropertyCandidate(_StrictProposal):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, str_strip_whitespace=False, allow_inf_nan=False
+    )
     candidate_kind: Literal["property"]
     owner_local_id: str = Field(min_length=1)
     observed_property: str = Field(min_length=1)
@@ -112,6 +117,12 @@ class RawPropertyCandidate(_StrictProposal):
     normalized_value: str | int | float | bool
     temporal_key: str | None = None
     anchor: ProposedAnchor | None = None
+
+    @field_validator("owner_local_id", "observed_property", "temporal_key", mode="before")
+    @classmethod
+    def _normalize_references(cls, value: object) -> object:
+        # References retain legacy trimming; scalar whitespace is source evidence.
+        return value.strip() if isinstance(value, str) else value
 
 
 RawCandidate = Annotated[
@@ -171,6 +182,11 @@ class ProposedCandidateRecord:
     #: ``business_key`` identity policy. L3 cannot reproduce a business-key
     #: entity ID without it, so the carrier must persist it verbatim.
     normalized_business_key: tuple[tuple[str, str], ...] | None = None
+    proposed_owner_entity_id: str | None = None
+    value_json: str | None = None
+    normalized_value_json: str | None = None
+    temporal_key: str | None = None
+    proposed_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +366,9 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
                 label="entity",
             )
 
+    from .window_run_reuse import projected_id_only_relationship_aliases
+
+    id_only_relationship_aliases = projected_id_only_relationship_aliases(contract)
     relationships_by_alias: dict[str, DomainRelationshipTypeV2] = {}
     for relationship in contract.candidate_model.relationship_types:
         for alias in (
@@ -357,6 +376,8 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             relationship.predicate_id,
             relationship.display_name,
         ):
+            if normalize_nfc(alias).casefold() in id_only_relationship_aliases:
+                continue
             _add_unique_alias(
                 relationships_by_alias,
                 alias=alias,
@@ -403,6 +424,7 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             {
                 "type_id": entity.type_id,
                 "display_name": entity.display_name,
+                "description": entity.description,
                 "aliases": entity.aliases,
                 "abstract": entity.abstract,
                 "parent_type_id": entity.parent_type_id,
@@ -418,6 +440,12 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
                         entity.type_id
                     ]
                 ),
+                "effective_properties": [
+                    declared_properties[property_id].model_dump(mode="json")
+                    for property_id in contract.hierarchy_closure.effective_property_ids_by_type[
+                        entity.type_id
+                    ]
+                ],
             }
             for entity in contract.candidate_model.entity_types
         ],
@@ -426,6 +454,7 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
                 "relationship_type_id": relationship.relationship_type_id,
                 "predicate_id": relationship.predicate_id,
                 "display_name": relationship.display_name,
+                "description": relationship.description,
                 "direction": relationship.direction,
                 "endpoint_policy": relationship.endpoint_policy,
                 "source_type_ids": relationship.source_type_ids,
@@ -444,6 +473,23 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
             "Proposed source anchors use Unicode codepoint offsets and are not verified evidence.",
             "Do not return asserted state, verified evidence IDs, or publication fields.",
             "Do not truncate candidates.",
+            "An entity label is a concise instance mention, not its supporting quote, "
+            "a generated summary, or a semantic type name. Copy a readable name or title "
+            "as a verbatim substring of that entity's supporting anchor quote (at most "
+            "120 characters, allowing whitespace normalization). Preserve source wording; "
+            "numbering may remain in the quote without being part of the label.",
+            "A generic source mention does not establish canonical product identity. "
+            "Do not expand a generic mention into a specific product or model name, "
+            "or infer identity-key values not explicitly supported by the source.",
+            "Emit explicit property candidates for observed declared attributes, "
+            "including identity-key values when supported by the source quote. "
+            "Use each effective property's declared value_type; entity identity_key "
+            "strings are not a substitute for typed, evidence-backed property observations.",
+            "Inspect every required declared effective property for each instance and "
+            "emit a separate property candidate with field-level exact source evidence "
+            "when present. A label does not satisfy a declared name or title property. "
+            "Never fabricate a missing required value or use a generated summary as an "
+            "exact quote; retain missingness for validation.",
         ],
         "max_relations_per_work_unit": (
             contract.reasoning_policy.max_relations_per_work_unit
@@ -453,6 +499,28 @@ def compile_closed_vocabulary(contract: DomainContractV2) -> ClosedVocabulary:
         ),
         "approved_max_hops": contract.reasoning_policy.max_hops,
     }
+    from fabric_kg_builder.domain.question_routing import question_routing_context
+
+    if id_only_relationship_aliases:
+        prompt_payload["id_only_relationship_display_names"] = sorted(id_only_relationship_aliases)
+        prompt_payload["rules"].append(
+            "Shared relationship display names in id_only_relationship_display_names are not aliases. "
+            "Use the exact approved relationship_type_id with its declared endpoints; ambiguous bare names remain unresolved."
+        )
+    routing_context = question_routing_context(contract)
+    if routing_context is not None:
+        prompt_payload["question_routing_context"] = routing_context
+        prompt_payload["approved_business_context"] = contract.business.model_dump(mode="json")
+        prompt_payload["approved_problem_context"] = contract.problem.model_dump(mode="json")
+        prompt_payload["rules"].extend([
+            "Question routing and business background are context, not source evidence "
+            "or additional ontology vocabulary.",
+            "Lakehouse SQL population, grain, filters, time and source requirements "
+            "remain unresolved execution intentions. Do not invent physical bindings, "
+            "analytic entities, metrics, rows or aggregate answers from them.",
+            "Preserve observed numeric values for approved properties, including "
+            "legitimate identities and ordinals; SQL routing is not a numeric-data ban.",
+        ])
     return ClosedVocabulary(
         contract_hash=contract_hash,
         entities_by_alias=entities_by_alias,
@@ -666,6 +734,10 @@ def _make_candidate_record(
     proposed_member_role_id: str | None = None
     proposed_member_order: int | None = None
     normalized_business_key: tuple[tuple[str, str], ...] | None = None
+    proposed_owner_entity_id: str | None = None
+    value_json: str | None = None
+    normalized_value_json: str | None = None
+    temporal_key: str | None = None
     identity_policy_mismatch = False
     if isinstance(raw, RawEntityCandidate):
         definition = vocabulary.entities_by_alias.get(raw.observed_type.casefold())
@@ -789,6 +861,10 @@ def _make_candidate_record(
             )
         )
         owner_type_id = owner[1] if owner is not None else None
+        proposed_owner_entity_id = owner_id
+        value_json = canonical_json(raw.value)
+        normalized_value_json = canonical_json(raw.normalized_value)
+        temporal_key = raw.temporal_key
         property_ = (
             vocabulary.properties_by_type_and_alias.get(owner_type_id or "", {}).get(
                 raw.observed_property.casefold()
@@ -827,6 +903,12 @@ def _make_candidate_record(
             "semantic_id": semantic_id,
             "approved_semantic_id": approved_id,
             "raw": raw.model_dump(mode="json"),
+            **({"property_carrier": {
+                "proposed_owner_entity_id": proposed_owner_entity_id,
+                "value_json": value_json,
+                "normalized_value_json": normalized_value_json,
+                "temporal_key": temporal_key,
+            }} if isinstance(raw, RawPropertyCandidate) else {}),
         }
     )
     candidate_version_id = deterministic_contract_id(
@@ -861,6 +943,11 @@ def _make_candidate_record(
         proposed_member_role_id=proposed_member_role_id,
         proposed_member_order=proposed_member_order,
         normalized_business_key=normalized_business_key,
+        proposed_owner_entity_id=proposed_owner_entity_id,
+        value_json=value_json,
+        normalized_value_json=normalized_value_json,
+        temporal_key=temporal_key,
+        proposed_label=raw.label if isinstance(raw, RawEntityCandidate) else None,
     )
 
 
@@ -1242,6 +1329,7 @@ def build_required_member_set_proposals(
     contract: DomainContractV2,
     authority_factory: Any,
     base_identity: CanonicalIdentityEnvelope,
+    deferrals: list[CollectionDeferral] | None = None,
 ) -> tuple[ProposedRequiredMemberSetView, ...]:
     """Merge full-manifest collection fragments without another model call."""
 
@@ -1325,10 +1413,7 @@ def build_required_member_set_proposals(
                 unresolved.add("L2_ORDER_ROLE_INVALID")
             if fact_set.member_role_ids and member.member_role_id is None:
                 unresolved.add("L2_ORDER_ROLE_UNSPECIFIED")
-            if fact_set.ordering_policy.mode == "ordered":
-                if member.member_order is None:
-                    unresolved.add("L2_ORDER_ROLE_INVALID")
-            elif member.member_order is not None:
+            if fact_set.ordering_policy.mode != "ordered" and member.member_order is not None:
                 unresolved.add("L2_ORDER_ROLE_INVALID")
             prior = member_by_identity.get(member.member_entity_id)
             if prior is not None and prior != member:
@@ -1360,12 +1445,6 @@ def build_required_member_set_proposals(
                     "L2_ORDER_ROLE_INVALID",
                     "C0 1.1 requires approved unique contiguous ordered-member semantics",
                 )
-            observed_orders = [member.member_order for member in ordered_members]
-            if observed_orders != list(range(len(ordered_members))):
-                raise L2StageError(
-                    "L2_ORDER_ROLE_INVALID",
-                    "ordered members require observed unique contiguous zero-based positions",
-                )
         if fact_set.member_role_ids:
             observed_roles = {member.member_role_id for member in ordered_members}
             if None in observed_roles or observed_roles != set(fact_set.member_role_ids):
@@ -1386,6 +1465,8 @@ def build_required_member_set_proposals(
                 + ", ".join(sorted(unresolved & structural_errors)),
             )
 
+        # Validate C0 member syntax and sentinel restrictions before partitioning;
+        # only collection-level observed ordering failures may be deferred.
         c0_members = tuple(
             RequiredMemberReferenceV1_1.seal(
                 member_canonical_id=member.member_entity_id,
@@ -1397,6 +1478,22 @@ def build_required_member_set_proposals(
             )
             for member in ordered_members
         )
+        if ordering.mode == "ordered" and observed_order_reasons(
+            [member.member_order for member in ordered_members]
+        ):
+            if deferrals is None:
+                raise L2StageError(
+                    "L2_ORDER_ROLE_INVALID",
+                    "ordered members require observed unique contiguous zero-based positions",
+                )
+            deferrals.append(CollectionDeferral.seal(
+                authority=authority,
+                scope_canonical_id=aggregate_id,
+                leaves=leaves,
+                members=members,
+            ))
+            continue
+
         if not c0_members:
             raise L2StageError(
                 "L2_REQUIRED_MEMBER_SET_INVALID",

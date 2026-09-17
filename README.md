@@ -4,10 +4,15 @@
 
 📄 **Project site:** [hyssh.github.io/fabric-kg-builder](https://hyssh.github.io/fabric-kg-builder/) · ✉️ Questions: [https://github.com/hyssh/fabric-kg-builder/issues](mailto:https://github.com/hyssh/fabric-kg-builder/issues)
 
-📋 **Current release:** `0.2.4` — strict L7 planning and installed-CLI gates.
-See [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md). The validated
+📋 **Current development version:** `0.2.6` — corpus-first discovery, reusable
+candidates, separate design/question evaluation, and explicit Schema-2 approval.
+See [`docs/SCHEMA2-PROTOTYPE.md`](docs/SCHEMA2-PROTOTYPE.md).
+Historical L7 evidence remains in [`docs/RELEASE-0.2.4-PROOF.md`](docs/RELEASE-0.2.4-PROOF.md); it is not proof of a 0.2.6 live deployment. The validated
 0.2.3 assessment remains at
 [`docs/ASSESSMENT-0.2.3.md`](docs/ASSESSMENT-0.2.3.md).
+
+See the [development roadmap](docs/ROADMAP.md) for corpus-first processing, the
+SQL question-context flow and the deferred shared-Lakehouse, multi-ontology investigation.
 
 ---
 
@@ -29,6 +34,48 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 
 ---
 
+## Explicit existing-data partial handoff (zero new model calls)
+
+`handoff-partial` creates a **new** L2 snapshot from a sealed approved-extraction
+donor and its verified response/review ancestry. The approved domain is unchanged.
+Only fully response-backed roots are included; incomplete split roots are excluded
+in their entirety, not treated as empty. Every included response is parsed in full
+by the canonical extractor. A parsing failure blocks the handoff.
+
+```bash
+fabric-kg handoff-partial \
+  --input <original-source-path> --domain-file <approved-domain.yaml> \
+  --l1-state <approved-l1> --l2-state <fresh-partial-l2> \
+  --window-run <approved-window-run> --reuse-approved-run <sealed-donor-l2> \
+  --approved-quote-review <latest-source-exact-review.json> --dry-run
+```
+
+Review the returned `plan_hash`, `included_roots`, `excluded_roots`,
+`outside_contract_ranges`, root/leaf counts, source inventory and prior spending.
+Repeat the same command replacing `--dry-run` with
+`--materialize --approve-plan-hash <exact-plan_hash> --approval-actor <actor>
+--approval-rationale <explicit-partial-data-authorization>`.
+Omit `--approved-quote-review` for donors without reviewed corrections; use
+`--discovery` instead of `--window-run` for approved complete-discovery sources.
+Supply `--approved-few-shot` if the donor used replacement examples.
+
+To explicitly withhold complete roots, repeat `--exclude-completed-root <root_work_unit_id>`
+and supply `--exclusion-rationale <global-reason>` on both the dry-run and materialization.
+Only IDs from the verified donor's complete roots are accepted; duplicates, unknown or
+incomplete roots, and excluding every complete root are rejected. Review each excluded
+tree's unchanged nodes/ranges and reason in `excluded_roots`. The plan binds the exact
+selection and rationale, distinguishing originally complete, selected, operator-excluded,
+and missing roots. No individual assertion is filtered. Use another fresh state directory
+and rerun all canonical evidence, serving, and quality gates; exclusion is not a quality waiver.
+
+The command never resumes a failed extraction or constructs a remote model client.
+It preserves originals and writes an independently sealed scope/approval snapshot.
+Run the normal `validate-evidence`, `project-serving`, and business-quality gates
+against that new L2 state before deployment. The sealed scope is carried through
+L3/L4 into publication and agent context: selected schema scope, completed roots,
+completed leaves, and retained responses are distinct counts. Unprocessed data
+remains unknown; partial-data authorization does not waive quality/evidence gates.
+
 ## Features
 
 - **End-to-end CLI** — single command (`build-deploy`) or fine-grained stage-by-stage control  
@@ -38,7 +85,12 @@ The tool is a **reusable framework**, not a demo. Every domain (hardware support
 - **Fabric Ontology** — generates Ontology definition parts deployable to any Fabric workspace  
 - **Azure AI Search** — vector (text-embedding-3-large, 1536 dims) + keyword indexes for grounded retrieval  
 - **Layered ontology** — common entities, common relationships, and domain-specific nouns/verbs
-- **Evidence-based domain design** — complete corpus inventory, bounded design sampling, deterministic N/K, and one-summary schema-2 approval
+- **Corpus-first ontology design** — full chunk discovery and document/corpus consolidation before business/seed-driven design; separate question-gap evaluation and explicit approval
+- **Reusable observations** — preserve raw candidates and grounding diagnostics; reuse prepared sources after approval and target only missing/unmapped work for additional model calls
+- **Windowed common schema** — freeze one version per batch, persist schema snapshots and mapping decisions through the last chunk, and explicitly review final mappings before replay; see [window commands](docs/SCHEMA2-PROTOTYPE.md#windowed-common-schema-alignment-and-snapshots)
+- **Complete-document schema windows** — new `domain window-run` runs give each complete document the prior schema and intake, generalize reusable types across documents, then review/freeze once before bounded extraction of all authorized documents and lineage; [operator workflow](docs/specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md#default-whole-document-schema-discovery)
+- **GPT-5.4 token headroom** — new whole-document/design runs and fresh GPT-5.4 approved extraction use 32,768 output tokens; explicit ceilings reach 128,000 within reviewed context limits. Historical budgets remain sealed; incomplete responses stay unapproved with retained diagnostics.
+- **Question execution context** — analytical questions retain Lakehouse SQL routing, scope, source needs and pending decisions through approval and serving; routing is not SQL execution
 - **Generated connection guide** — packaged `ONTOLOGY_SEARCH_CONNECTION.md` explains Ontology → Graph → Search identity, source quotations, and reliable query flow
 - **fabric-cicd deployment** — Lakehouse, Ontology, and Search deployed deterministically  
 - **Multi-environment** — `dev` / `test` / `prod` configs in `ontology/environments/`  
@@ -85,7 +137,7 @@ Source files (PDF / DOCX / HTML / CSV)
 | Python | ≥ 3.10 |
 | Azure subscription | Required for all Azure services |
 | Azure CLI (`az`) | `az login` for DefaultAzureCredential in dev |
-| Azure AI Foundry project | Chat model (`gpt-5-4-mini`) + embedding model (`text-embedding-3-large`) |
+| Azure AI Foundry project | Recommended chat model (`gpt-5.4`) + embedding model (`text-embedding-3-large`); whole-document discovery requires reviewed deployment capabilities |
 | Azure AI Document Intelligence | Layout model — PDF/image table and figure extraction |
 | Azure AI Search | Standard tier recommended; index prefix configured per-env |
 | Azure Blob Storage | Container for visual assets (images, figures) |
@@ -142,6 +194,19 @@ Key variables (see `.env.example` for the full list):
 
 Controls model deployments, embedding dimensions, blob container, and search index prefix. `${ENV_VAR}` references are interpolated from `.env` at runtime. **Secrets are never stored here.**
 
+New loaded configurations recommend GPT-5.4; explicit deployment settings (including
+GPT-4) and historical run identities are preserved. For custom deployment aliases,
+set `AZURE_AI_CHAT_MODEL` to the verified underlying model; do not infer it from an
+alias or leave an old value when switching models. A new `domain window-run`
+defaults to one complete document per schema window and requires an explicit
+`--model-capabilities` profile even for planning. Use `--discovery-mode chunked`
+for legacy chunked discovery. Resume retains the recorded mode and prompt rather
+than applying new defaults. See the [schema workflow](docs/specs/SPEC-WINDOW-SCHEMA-OPERATIONS.md#default-whole-document-schema-discovery)
+for the separate schema review/freeze and all-authorized-document extraction passes.
+Version 1.1.0 carries accepted common/domain layers across documents and guards
+against structural narrowing and incompatible updates. Semantic generalization
+remains model-proposed and human-reviewed; these guards do not guarantee meaning.
+
 ### 3. `ontology/environments/{env}.json` — per-environment resource IDs
 
 Each file (`dev.json`, `test.json`, `prod.json`) contains workspace IDs, lakehouse IDs, OneLake paths, AI Search index names, Foundry project references, and Blob Storage account details for that environment. The **shape** of each file is:
@@ -165,7 +230,10 @@ Each file (`dev.json`, `test.json`, `prod.json`) contains workspace IDs, lakehou
 
 ## Quickstart — End-to-End Example
 
-The `sample_data\Surface_Troubleshootings` directory contains 22 Surface service-guide PDFs. This walkthrough runs the full pipeline against that dataset.
+This walkthrough uses Surface service-guide PDFs that you supply locally in
+`sample_data/Surface_Troubleshootings`. The PDFs are not distributed with the
+repository; follow the [download instructions](sample_data/Surface_Troubleshootings/README.md)
+before running ingestion.
 
 ### Step 1 — Authenticate
 
@@ -638,7 +706,7 @@ fabric-kg-builder/
 ├── ontology/
 │   └── environments/       # dev.json, test.json, prod.json — per-env resource config
 ├── sample_data/
-│   └── Surface_Troubleshootings/   # 22 Surface service-guide PDFs
+│   └── Surface_Troubleshootings/   # Download instructions; local PDFs are gitignored
 ├── data/                   # Build outputs (gitignored)
 ├── dist/                   # Packaged artifacts (gitignored)
 ├── fabric-kg.yaml          # Non-secret project config

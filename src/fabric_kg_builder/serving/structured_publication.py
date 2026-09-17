@@ -36,6 +36,7 @@ from fabric_kg_builder.contracts.publication import (
     ProjectionEquivalenceV1_1,
     ProjectionEvidence,
     PublicationCrosswalkV1_2,
+    PublicationCrosswalkV1_3,
     StorageReference,
 )
 from fabric_kg_builder.contracts.receipts import (
@@ -50,11 +51,14 @@ from fabric_kg_builder.contracts.resources import (
 from fabric_kg_builder.domain.models import DomainContractV2
 from fabric_kg_builder.domain.service import compute_contract_hash
 from fabric_kg_builder.platform import process_resource_usage
-from fabric_kg_builder.semantic.source_tables import SealedL4ServingSource
+from fabric_kg_builder.semantic.source_tables import (
+    SealedL4ServingSource,
+    decode_property_scalar,
+)
 
 L5A_STAGE_NAME = "schema2-structured-publication"
 L5A_STAGE_CONTRACT_VERSION = "1.0.0"
-L5A_PUBLICATION_CODE_VERSION = "0.2.3/l5a-2"
+L5A_PUBLICATION_CODE_VERSION = "l5a-publication/1.2.0"
 L5A_STATE_DIR = Path(".fkg") / "l5a"
 L5A_TARGET_VERSION = "1.0.0"
 L5A_TARGET_ORDER = ("parquet", "semantic_model", "ontology", "graph")
@@ -102,6 +106,16 @@ L5A_ACCEPTED_VERSIONS = {
     "c0.stage_receipt": "1.0.0",
     "c0.stage_resource_metrics": "1.0.0",
 }
+
+
+def _accepted_versions(crosswalks: Sequence[PublicationCrosswalkV1_2]) -> dict[str, str]:
+    versions = {item.identity.contract_version for item in crosswalks}
+    if len(versions) != 1:
+        raise L5aPublicationError("L5A_CROSSWALK_VERSION_MISMATCH", "crosswalk versions must agree")
+    return {
+        **L5A_ACCEPTED_VERSIONS,
+        **({"c0.publication_crosswalk": "1.3.0"} if versions == {"1.3.0"} else {}),
+    }
 
 _SOURCE_TABLES = (
     "semantic_publication_authority",
@@ -471,6 +485,12 @@ class L5aCompiledPublication:
     required_member_manifest_rows: tuple[Mapping[str, Any], ...]
     required_member_rows: tuple[Mapping[str, Any], ...]
     required_member_snapshots: tuple[L5aRequiredMemberSnapshot, ...]
+    business_quality_report: Mapping[str, Any] | None = None
+
+    @property
+    def question_routing_context(self) -> dict[str, Any] | None:
+        """Recover approved context without changing physical publication definitions."""
+        return export_serving_question_context(self.source)["question_routing_context"]
 
 
 @dataclass(frozen=True)
@@ -783,10 +803,13 @@ def _typed_table_fingerprint_rows(table: pa.Table) -> list[dict[str, Any]]:
 
 
 def _table_snapshot(table_id: str, table: pa.Table) -> L5aTableSnapshot:
+    from fabric_kg_builder.serving.business_quality import DERIVED_ENTITY_TABLE
+
     id_column = "__canonical_id" if "__canonical_id" in table.column_names else None
     if id_column is None:
         source_id_field = {
             "l4_semantic_asserted_entities": "entity_id",
+            DERIVED_ENTITY_TABLE: "entity_id",
             "l4_semantic_asserted_relationships": "relationship_id",
             "l4_semantic_asserted_properties": "property_assertion_id",
         }.get(table_id)
@@ -909,6 +932,110 @@ def _publication_authority(
     return contract, row
 
 
+def discovery_coverage_context(acceptance) -> dict[str, Any]:
+    """Project reviewed coverage counts, never evidence or completeness clearance."""
+    unknown = acceptance.total_chunks - acceptance.accounted_chunks
+    return {
+        "status": "pending_review",
+        "acceptance_hash": acceptance.acceptance_hash,
+        "discovery_run_hash": acceptance.discovery_run_hash,
+        "accounted_chunks": acceptance.accounted_chunks,
+        "total_chunks": acceptance.total_chunks,
+        "unknown_chunk_count": unknown,
+        "reason_counts": {"discovery_coverage_waived_pending": unknown},
+        "count_basis": "reviewed_discovery_chunks_not_candidates",
+        "completeness_asserted": False,
+        "quarantine_and_summary_gaps_cleared": False,
+        "candidate_mapping_or_evidence_approved": False,
+    }
+
+
+def _window_run_scope_context(contract: DomainContractV2) -> dict[str, Any] | None:
+    acceptance = getattr(contract, "window_run_acceptance", None)
+    if acceptance is None:
+        return None
+    is_prefix = acceptance.authority == "limited_committed_prefix_only"
+    selected = (
+        len(acceptance.selected_committed_chunk_ids)
+        if is_prefix else acceptance.coverage.processed_chunks
+    )
+    total = acceptance.coverage.total_chunks
+    notice = acceptance.scope_notice if is_prefix else (
+        f"PARTIAL WINDOW-RUN COVERAGE: only {selected} of {total} full-corpus planned chunks "
+        f"were processed; {total - selected} chunks remain excluded, not observed empty. "
+        "The original run remains partial. This is a processing-coverage waiver, not a committed-prefix "
+        "scope, full-corpus ontology coverage, semantic recall, evidence approval or verified answers. "
+        "Answer only from cited validated evidence; identify scope gaps and abstain from full-corpus claims."
+    )
+    return {
+        "kind": acceptance.artifact_kind,
+        "authority": acceptance.authority,
+        "domain_contract_hash": compute_contract_hash(contract),
+        "acceptance_hash": acceptance.acceptance_hash,
+        "scope_notice": notice,
+        "selected_chunk_count": selected,
+        "total_chunk_count": total,
+        "omitted_chunk_count": total - selected,
+    }
+
+
+def export_serving_question_context(source: SealedL4ServingSource) -> dict[str, Any]:
+    """Read question intentions from existing sealed authority, not new serving rows."""
+    from fabric_kg_builder.domain.question_routing import question_routing_context
+
+    contract, row = _publication_authority(_load_source_tables(source))
+    if row["domain_contract_hash"] != source.projection.sealed_domain_contract_hash:
+        raise L5aPublicationError(
+            "L5A_DOMAIN_AUTHORITY_MISMATCH", "question context differs from sealed L4 authority",
+        )
+    context = question_routing_context(contract)
+    routed = {item["question_id"] for item in context["questions"]} if context else set()
+    values = {
+        "artifact_kind": "domain.question_context",
+        "artifact_version": "1.0.0",
+        "source_kind": "sealed_l4",
+        "source_hash": source.manifest.manifest_hash,
+        "source_projection_hash": source.projection.projection_hash,
+        "domain_contract_hash": compute_contract_hash(contract),
+        "approval_status": contract.approval.status,
+        "question_routing_context": context,
+        "unrouted_question_ids": sorted(
+            question.id for question in contract.competency_questions if question.id not in routed
+        ),
+        "business_context": contract.business.model_dump(mode="json"),
+        "problem_context": contract.problem.model_dump(mode="json"),
+        "execution_verified": False,
+    }
+    acceptance = getattr(contract, "discovery_acceptance", None)
+    if acceptance is not None:
+        values["discovery_acceptance"] = acceptance.model_dump(mode="json")
+        values["discovery_coverage"] = discovery_coverage_context(acceptance)
+    window_scope = _window_run_scope_context(contract)
+    if window_scope is not None:
+        values["window_run_scope"] = window_scope
+    from fabric_kg_builder.enrichment.approved_partial_handoff import read_scope, scope_context
+    partial_scope = read_scope(source.root, source.manifest)
+    if partial_scope is not None:
+        values["partial_extraction_scope"] = scope_context(partial_scope)
+        if window_scope is not None:
+            values["window_run_scope"] = {
+                **window_scope,
+                "scope_notice": (
+                    partial_scope["plan"]["scope_notice"]
+                    + " The window-run acceptance below is only the schema/source ceiling, "
+                    "not this extraction's processing coverage."
+                ),
+            }
+        else:
+            # Existing agent publishers consume this scope-warning carrier.
+            values["window_run_scope"] = {
+                "kind": "partial-extraction-scope",
+                "authority": "explicit_completed_response_roots_only",
+                "scope_notice": partial_scope["plan"]["scope_notice"],
+            }
+    return {**values, "export_hash": canonical_sha256(values)}
+
+
 def _validate_publish_authority(
     source: SealedL4ServingSource,
     tables: Mapping[str, pa.Table],
@@ -1011,12 +1138,6 @@ def _validate_publish_authority(
     observed_property_ids = {
         str(row["semantic_property_id"]) for row in property_rows
     }
-    if property_rows:
-        raise L5aPublicationError(
-            "L5A_PROPERTY_MATERIALIZATION_UNSUPPORTED",
-            "sealed L4 property assertions do not carry owner/value fields and "
-            "cannot be materialized without invention",
-        )
 
     expected_lineage = _identity_lineage(source.receipt.identity)
     expected_crosswalk_lineage = {
@@ -1024,6 +1145,23 @@ def _validate_publish_authority(
         "contract_version": "1.2.0",
     }
     for crosswalk in crosswalks:
+        from fabric_kg_builder.contracts.registry import parse_contract
+
+        validated_crosswalk = parse_contract(canonical_json(crosswalk))
+        if validated_crosswalk != crosswalk:
+            raise L5aPublicationError("L5A_CROSSWALK_INVALID", "crosswalk differs from its registered contract")
+        if crosswalk.identity.contract_version not in ("1.2.0", "1.3.0"):
+            raise L5aPublicationError("L5A_CROSSWALK_VERSION_UNSUPPORTED", "L5a requires crosswalk 1.2 or 1.3")
+        expected_crosswalk_lineage = {
+            **expected_crosswalk_lineage, "contract_version": crosswalk.identity.contract_version,
+        }
+        if isinstance(crosswalk, PublicationCrosswalkV1_3) and (
+            crosswalk.source_l4_manifest_id != source.manifest.artifact_manifest_id
+            or crosswalk.source_l4_manifest_hash != source.manifest.manifest_hash
+        ):
+            raise L5aPublicationError(
+                "L5A_CANONICAL_IDENTITY_AUTHORITY_MISMATCH", "canonical IDs must bind the exact sealed L4 manifest"
+            )
         authority = crosswalk.authority
         if (
             authority.source_artifact_manifest_id
@@ -1151,6 +1289,22 @@ def _validate_publish_authority(
                     f"type {definition.type_id} has no canonical root key policy",
                 )
             key_policy = root.identity_key_policy
+            if isinstance(crosswalk, PublicationCrosswalkV1_3):
+                binding = mapping.canonical_identity_binding
+                if (
+                    binding.identity_root_type_id != root.type_id
+                    or binding.policy_mode != key_policy.key_mode
+                    or binding.root_policy_hash != canonical_sha256(key_policy.model_dump(mode="json"))
+                    or binding.identity_policy_hash != contract.identity_policy_hash
+                    or binding.source_projection_id != source.projection.projection_id
+                    or binding.source_projection_hash != source.projection.projection_hash
+                    or binding.source_l4_manifest_id != source.manifest.artifact_manifest_id
+                    or binding.source_l4_manifest_hash != source.manifest.manifest_hash
+                ):
+                    raise L5aPublicationError(
+                        "L5A_CANONICAL_IDENTITY_AUTHORITY_MISMATCH",
+                        f"identity binding for {definition.type_id} differs from its approved root policy/L4 authority",
+                    )
             expected_keys = set(key_policy.business_key_fields)
             local_properties = set(
                 mapping.locally_owned_canonical_property_ids
@@ -1300,6 +1454,13 @@ def _validate_publish_authority(
                     definition.relationship_type_id
                 ]
             )
+            if isinstance(crosswalk, PublicationCrosswalkV1_3) and (
+                set(relationship.source_identity_binding.compatible_semantic_type_ids) != compatible_sources
+                or set(relationship.target_identity_binding.compatible_semantic_type_ids) != compatible_targets
+            ):
+                raise L5aPublicationError(
+                    "L5A_RELATIONSHIP_ENDPOINT_MISMATCH", "canonical endpoint type sets differ from sealed authority"
+                )
             for row in relationship_rows:
                 if (
                     row["semantic_relationship_id"]
@@ -1351,9 +1512,81 @@ def _canonical_crosswalk(
     return first
 
 
+def _property_values(
+    source_tables: Mapping[str, pa.Table],
+    contract: DomainContractV2,
+) -> dict[tuple[str, str], Any]:
+    definitions = {
+        prop.property_id: prop
+        for entity in contract.candidate_model.entity_types
+        for prop in entity.declared_properties
+    }
+    entities = {
+        row["entity_id"]: row
+        for row in source_tables["semantic_asserted_entities"].to_pylist()
+    }
+    normalized: dict[tuple[str, str], str] = {}
+    values: dict[tuple[str, str], Any] = {}
+    for row in source_tables["semantic_asserted_properties"].to_pylist():
+        key = (row.get("entity_id"), row["semantic_property_id"])
+        owner = entities.get(key[0])
+        prop = definitions.get(key[1])
+        if (
+            owner is None
+            or prop is None
+            or row["value_type"] != prop.value_type
+            or key[1] not in contract.hierarchy_closure.effective_property_ids_by_type.get(
+                owner["most_specific_type_id"], ()
+            )
+        ):
+            raise L5aPublicationError(
+                "L5A_PROPERTY_AUTHORITY_MISMATCH",
+                f"asserted property {key!r} lacks approved owner/type authority",
+            )
+        value_json = row.get("normalized_value_json")
+        try:
+            value = _canonical_typed_value(
+                prop.value_type,
+                decode_property_scalar(value_json, prop.value_type),
+            )
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise L5aPublicationError(
+                "L5A_PROPERTY_VALUE_INVALID",
+                f"asserted property {key!r} has invalid normalized scalar JSON",
+            ) from exc
+        if key in normalized and normalized[key] != value_json:
+            raise L5aPublicationError(
+                "L5A_PROPERTY_VALUE_CONFLICT",
+                f"multiple normalized values for asserted property {key!r}",
+            )
+        normalized[key] = value_json
+        values[key] = value
+    return values
+
+
+def _property_value(
+    values: Mapping[tuple[str, str], Any],
+    entity_id: str,
+    property_id: str,
+    *,
+    required: bool,
+) -> Any:
+    key = (entity_id, property_id)
+    if required and key not in values:
+        raise L5aPublicationError(
+            "L5A_REQUIRED_PROPERTY_MISSING",
+            f"required property or endpoint key {key!r} has no asserted value",
+        )
+    return values.get(key)
+
+
 def _entity_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
+    values: Mapping[tuple[str, str], Any],
+    required_properties: frozenset[str],
+    *,
+    derived_display_labels: Mapping[str, str] | None = None,
 ) -> dict[str, pa.Table]:
     entities = {
         str(row["entity_id"]): row
@@ -1394,14 +1627,14 @@ def _entity_tables(
                 "__semantic_type_id": mapping.canonical_semantic_type_id,
                 "__most_specific_type_id": entity["most_specific_type_id"],
                 "__hierarchy_depth": assertion["hierarchy_depth"],
-                "__label": entity.get("label"),
+                "__label": (derived_display_labels or {}).get(entity_id, entity.get("label")),
             }
             for prop in mapping.physical_property_bindings:
-                # Property values still come from semantic_asserted_properties,
-                # which is empty upstream; see the null-stub note in #105.
-                row[prop.physical_column_id] = _canonical_typed_value(
-                    prop.data_type,
-                    None,
+                row[prop.physical_column_id] = _property_value(
+                    values,
+                    entity_id,
+                    prop.canonical_property_id,
+                    required=prop.canonical_property_id in required_properties,
                 )
             rows.append(row)
         result[mapping.physical_table_id] = pa.Table.from_pylist(
@@ -1414,6 +1647,7 @@ def _entity_tables(
 def _relationship_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
+    values: Mapping[tuple[str, str], Any],
 ) -> dict[str, pa.Table]:
     rows_by_type: dict[str, list[dict[str, Any]]] = {}
     for row in source_tables["semantic_asserted_relationships"].to_pylist():
@@ -1457,16 +1691,20 @@ def _relationship_tables(
                 "__target_entity_id": relationship["target_entity_id"],
             }
             row.update({
-                key.physical_column_id: _canonical_typed_value(
-                    ownership_by_id[key.canonical_property_id].data_type,
-                    None,
+                key.physical_column_id: _property_value(
+                    values,
+                    relationship["source_entity_id"],
+                    key.canonical_property_id,
+                    required=True,
                 )
                 for key in mapping.source_key_bindings
             })
             row.update({
-                key.physical_column_id: _canonical_typed_value(
-                    ownership_by_id[key.canonical_property_id].data_type,
-                    None,
+                key.physical_column_id: _property_value(
+                    values,
+                    relationship["target_entity_id"],
+                    key.canonical_property_id,
+                    required=True,
                 )
                 for key in mapping.target_key_bindings
             })
@@ -1481,15 +1719,55 @@ def _relationship_tables(
 def _all_tables(
     source_tables: Mapping[str, pa.Table],
     crosswalk: PublicationCrosswalkV1_2,
+    contract: DomainContractV2,
+    *,
+    derived_display_labels: Mapping[str, str] | None = None,
 ) -> dict[str, pa.Table]:
+    values = _property_values(source_tables, contract)
+    required_properties = frozenset(
+        prop.property_id
+        for entity in contract.candidate_model.entity_types
+        for prop in entity.declared_properties
+        if prop.required
+    )
+    if isinstance(crosswalk, PublicationCrosswalkV1_3):
+        required_properties = required_properties.union(
+            property_id
+            for entity in contract.candidate_model.entity_types
+            if entity.identity_key_policy is not None
+            and entity.identity_key_policy.key_mode == "business_key"
+            for property_id in entity.identity_key_policy.business_key_fields
+        )
     typed = {
-        **_entity_tables(source_tables, crosswalk),
-        **_relationship_tables(source_tables, crosswalk),
+        **_entity_tables(
+            source_tables, crosswalk, values, required_properties,
+            derived_display_labels=derived_display_labels,
+        ),
+        **_relationship_tables(source_tables, crosswalk, values),
     }
     carried = {
         f"l4_{name}": table
         for name, table in source_tables.items()
     }
+    if derived_display_labels is not None:
+        from fabric_kg_builder.serving.business_quality import DERIVED_ENTITY_TABLE
+
+        if DERIVED_ENTITY_TABLE in typed or DERIVED_ENTITY_TABLE in carried:
+            raise L5aPublicationError(
+                "L5A_PHYSICAL_TABLE_COLLISION", "Derived presentation table collides with a physical mapping",
+            )
+        typed[DERIVED_ENTITY_TABLE] = pa.Table.from_pylist([
+            {
+                "entity_id": row["entity_id"],
+                "label": derived_display_labels.get(row["entity_id"], row.get("label")),
+                "original_mention": row.get("label"),
+            }
+            for row in source_tables["semantic_asserted_entities"].to_pylist()
+        ], schema=pa.schema([
+            pa.field("entity_id", pa.string(), nullable=False),
+            pa.field("label", pa.string(), nullable=True),
+            pa.field("original_mention", pa.string(), nullable=True),
+        ]))
     if set(typed).intersection(carried):
         raise L5aPublicationError(
             "L5A_PHYSICAL_TABLE_COLLISION",
@@ -1649,6 +1927,8 @@ def _definitions(
     target_ids: Mapping[L5ATargetKind, str],
     access_policy: AccessPolicy,
 ) -> dict[L5ATargetKind, dict[str, Any]]:
+    from fabric_kg_builder.deploy.ontology_names import readable_catalog_from_domain
+
     crosswalk = _canonical_crosswalk(crosswalks)
     authorities = [
         item.authority.model_dump(mode="json")
@@ -1694,6 +1974,23 @@ def _definitions(
             }),
         },
     }
+    if isinstance(crosswalk, PublicationCrosswalkV1_3):
+        common["canonical_identity_bindings"] = {
+            "contract_version": "1.3.0",
+            "source_l4_manifest_id": crosswalk.source_l4_manifest_id,
+            "source_l4_manifest_hash": crosswalk.source_l4_manifest_hash,
+            "semantic_types": {
+                item.canonical_semantic_type_id: item.canonical_identity_binding.model_dump(mode="json")
+                for item in crosswalk.semantic_type_mappings
+            },
+            "relationships": {
+                item.canonical_semantic_relationship_id: {
+                    "source": item.source_identity_binding.model_dump(mode="json"),
+                    "target": item.target_identity_binding.model_dump(mode="json"),
+                }
+                for item in crosswalk.relationship_mappings
+            },
+        }
     type_by_id = {
         item.canonical_semantic_type_id: item
         for item in crosswalk.semantic_type_mappings
@@ -1769,7 +2066,7 @@ def _definitions(
                     "data_type": owner.data_type,
                     "physical_table_id": item.physical_table_id,
                     "physical_column_id": prop.physical_column_id,
-                    "materialization": "schema_only",
+                    "materialization": "asserted_properties",
                 }
                 for property_id in (
                     contract.hierarchy_closure.effective_property_ids_by_type[
@@ -1833,7 +2130,7 @@ def _definitions(
                 {
                     "physical_column_id": field.physical_column_id,
                     "semantic_role": "physical_projection_only",
-                    "materialization": "schema_only",
+                    "materialization": "asserted_properties",
                 }
                 for field in item.source_key_bindings
             ],
@@ -1841,7 +2138,7 @@ def _definitions(
                 {
                     "physical_column_id": field.physical_column_id,
                     "semantic_role": "physical_projection_only",
-                    "materialization": "schema_only",
+                    "materialization": "asserted_properties",
                 }
                 for field in item.target_key_bindings
             ],
@@ -1870,6 +2167,7 @@ def _definitions(
             "target_kind": "ontology",
             "target_id": target_ids["ontology"],
             "native_inheritance_assumed": False,
+            "presentation_catalog": readable_catalog_from_domain(contract),
             "entity_types": [
                 {
                     "id": str(item.ontology_bigint_id),
@@ -1900,7 +2198,7 @@ def _definitions(
                             "data_type": owner.data_type,
                             "physical_table_id": item.physical_table_id,
                             "physical_column_id": prop.physical_column_id,
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for property_id in (
                             contract.hierarchy_closure
@@ -2006,7 +2304,7 @@ def _definitions(
                             "physical_table_id": item.physical_table_id,
                             "graph_property": owner.graph_property,
                             "physical_column_id": prop.physical_column_id,
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for property_id in (
                             contract.hierarchy_closure
@@ -2081,7 +2379,7 @@ def _definitions(
                         {
                             "physical_column_id": field.physical_column_id,
                             "semantic_role": "physical_projection_only",
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for field in item.source_key_bindings
                     ],
@@ -2089,7 +2387,7 @@ def _definitions(
                         {
                             "physical_column_id": field.physical_column_id,
                             "semantic_role": "physical_projection_only",
-                            "materialization": "schema_only",
+                            "materialization": "asserted_properties",
                         }
                         for field in item.target_key_bindings
                     ],
@@ -2220,6 +2518,23 @@ def _validate_governed_assets(
             ) from exc
 
 
+def _bind_instance_presentation(
+    definitions: Mapping[str, dict[str, Any]], report: Mapping[str, Any] | None,
+) -> None:
+    from fabric_kg_builder.serving.business_quality import (
+        DERIVED_ENTITY_TABLE, derived_instance_display_labels,
+    )
+
+    if derived_instance_display_labels(report) is not None:
+        for definition in definitions.values():
+            definition["business_quality"] = report
+        definitions["ontology"]["instance_presentation"] = {
+            "base_entity_table": DERIVED_ENTITY_TABLE,
+            "policy_hash": report["policy_hash"],
+            "report_hash": report["report_hash"],
+        }
+
+
 def build_l5a_governed_assets(
     source: SealedL4ServingSource,
     *,
@@ -2228,6 +2543,7 @@ def build_l5a_governed_assets(
     target_ids: Mapping[L5ATargetKind, str],
     storage_references: Mapping[L5ATargetKind, StorageReference],
     immutable_locators: Mapping[L5ATargetKind, ImmutableSourceLocator],
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> tuple[GovernedAssetReference, ...]:
     """Build output asset references from exact compiled target definitions."""
 
@@ -2251,7 +2567,17 @@ def build_l5a_governed_assets(
         ordered_crosswalks,
         access_policy,
     )
-    tables = _all_tables(source_tables, _canonical_crosswalk(ordered_crosswalks))
+    from fabric_kg_builder.serving.business_quality import (
+        derived_instance_display_labels, require_business_quality,
+    )
+
+    quality_report = require_business_quality(
+        source, policy=quality_policy, crosswalks=ordered_crosswalks,
+    ) if quality_policy is not None else None
+    tables = _all_tables(
+        source_tables, _canonical_crosswalk(ordered_crosswalks), authority,
+        derived_display_labels=derived_instance_display_labels(quality_report),
+    )
     snapshots = tuple(
         _table_snapshot(table_id, table)
         for table_id, table in sorted(tables.items())
@@ -2266,6 +2592,7 @@ def build_l5a_governed_assets(
         target_ids,
         access_policy,
     )
+    _bind_instance_presentation(definitions, quality_report)
     result = []
     for kind in L5A_TARGET_ORDER:
         storage = storage_references[kind]
@@ -2321,7 +2648,14 @@ def l5a_input_fingerprint(
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> str:
+    quality_binding = {}
+    if quality_policy is not None:
+        from fabric_kg_builder.serving.business_quality import require_business_quality
+
+        report = require_business_quality(source, policy=quality_policy, crosswalks=crosswalks)
+        quality_binding = {"business_quality_report_hash": report["report_hash"]}
     return canonical_sha256({
         "stage": L5A_STAGE_NAME,
         "stage_contract_version": L5A_STAGE_CONTRACT_VERSION,
@@ -2337,6 +2671,7 @@ def l5a_input_fingerprint(
             item.asset_reference_hash for item in governed_assets
         ),
         "target_ids": dict(sorted(target_ids.items())),
+        **quality_binding,
     })
 
 
@@ -2347,6 +2682,7 @@ def compile_l5a_publication(
     access_policy: AccessPolicy,
     governed_assets: Sequence[GovernedAssetReference],
     target_ids: Mapping[L5ATargetKind, str],
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> L5aCompiledPublication:
     """Compile deterministic L5a physical tables and structured definitions."""
 
@@ -2381,7 +2717,19 @@ def compile_l5a_publication(
         access_policy,
     )
     crosswalk = _canonical_crosswalk(ordered_crosswalks)
-    tables = _all_tables(source_tables, crosswalk)
+    quality_report = None
+    if quality_policy is not None:
+        from fabric_kg_builder.serving.business_quality import require_business_quality
+
+        quality_report = require_business_quality(
+            source, policy=quality_policy, crosswalks=ordered_crosswalks,
+        )
+    from fabric_kg_builder.serving.business_quality import derived_instance_display_labels
+
+    tables = _all_tables(
+        source_tables, crosswalk, authority,
+        derived_display_labels=derived_instance_display_labels(quality_report),
+    )
     snapshots = tuple(
         _table_snapshot(table_id, table)
         for table_id, table in sorted(tables.items())
@@ -2409,6 +2757,7 @@ def compile_l5a_publication(
         typed_target_ids,
         access_policy,
     )
+    _bind_instance_presentation(definitions, quality_report)
     _validate_governed_assets(
         source,
         definitions,
@@ -2416,6 +2765,9 @@ def compile_l5a_publication(
         access_policy,
         ordered_assets,
     )
+    if quality_report is not None:
+        for definition in definitions.values():
+            definition["business_quality"] = quality_report
     return L5aCompiledPublication(
         source=source,
         fingerprint=l5a_input_fingerprint(
@@ -2424,6 +2776,7 @@ def compile_l5a_publication(
             access_policy=access_policy,
             governed_assets=ordered_assets,
             target_ids=typed_target_ids,
+            quality_policy=quality_policy,
         ),
         crosswalks=ordered_crosswalks,
         access_policy=access_policy,
@@ -2435,6 +2788,7 @@ def compile_l5a_publication(
         required_member_manifest_rows=required_member_manifest_rows,
         required_member_rows=required_member_rows,
         required_member_snapshots=required_member_snapshots,
+        business_quality_report=quality_report,
     )
 
 
@@ -2794,10 +3148,13 @@ def _output_manifest(
             root / "publication-crosswalks.json",
             canonical_sha256({
                 "type": "array",
-                "items": PublicationCrosswalkV1_2.model_json_schema(),
+                "items": (
+                    PublicationCrosswalkV1_3 if isinstance(compiled.crosswalks[0], PublicationCrosswalkV1_3)
+                    else PublicationCrosswalkV1_2
+                ).model_json_schema(),
             }),
             len(compiled.crosswalks),
-            "1.1.0",
+            "1.3.0" if isinstance(compiled.crosswalks[0], PublicationCrosswalkV1_3) else "1.1.0",
         ),
         (
             "l5a-access-policy",
@@ -2966,7 +3323,7 @@ def _receipt(
             output_manifest.manifest_hash if output_manifest else None
         ),
         "skip_key": compiled.fingerprint,
-        "accepted_contract_versions": L5A_ACCEPTED_VERSIONS,
+        "accepted_contract_versions": _accepted_versions(compiled.crosswalks),
         "resource_metrics_id": metrics.resource_metrics_id,
         "resource_metrics_hash": metrics.metrics_hash,
         "attempt_count": 1,
@@ -3067,7 +3424,7 @@ def _existing_is_intact(
         or receipt.output_manifest_id != manifest.artifact_manifest_id
         or receipt.output_manifest_hash != manifest.manifest_hash
         or receipt.skip_key != compiled.fingerprint
-        or dict(receipt.accepted_contract_versions) != L5A_ACCEPTED_VERSIONS
+        or dict(receipt.accepted_contract_versions) != _accepted_versions(compiled.crosswalks)
     ):
         return None
     expected_receipt_id = deterministic_contract_id(
@@ -3247,6 +3604,7 @@ def run_l5a(
     target_ids: Mapping[L5ATargetKind, str],
     client: L5aTargetClient,
     state_root: Path = L5A_STATE_DIR,
+    quality_policy: Mapping[str, Any] | None = None,
 ) -> L5aStageResult:
     """Persist, publish, and read back all four L5a structured targets."""
 
@@ -3259,6 +3617,7 @@ def run_l5a(
         access_policy=access_policy,
         governed_assets=governed_assets,
         target_ids=target_ids,
+        quality_policy=quality_policy,
     )
     run_root = state_root / "runs" / compiled.fingerprint
     accounting = _CallAccounting()
@@ -3365,6 +3724,13 @@ def run_l5a(
                 raise L5aPublicationError(
                     "L5A_TARGET_VERSION_UNSUPPORTED",
                     f"{kind} has unsupported version {prior.target_version!r}",
+                )
+            if prior is not None and prior.definition.get("business_quality") is not None and (
+                compiled.business_quality_report is None
+            ):
+                raise L5aPublicationError(
+                    "L5A_BUSINESS_QUALITY_DOWNGRADE",
+                    f"{kind} is quality-enabled; refusing to replace it without a quality policy",
                 )
             prior_states[kind] = prior
 
@@ -3784,7 +4150,7 @@ def require_l5a_publication_receipt(
         or result.receipt.status not in {"succeeded", "skipped"}
         or result.receipt.skip_key != result.compiled.fingerprint
         or dict(result.receipt.accepted_contract_versions)
-        != L5A_ACCEPTED_VERSIONS
+        != _accepted_versions(result.compiled.crosswalks)
         or result.receipt.input_manifest_id != source.manifest.artifact_manifest_id
         or result.receipt.input_manifest_hash != source.manifest.manifest_hash
         or result.receipt.output_manifest_id

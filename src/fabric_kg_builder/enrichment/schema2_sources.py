@@ -1,11 +1,11 @@
-"""L2-only input gates and complete-corpus SourceUnit materialization."""
+"""L2 input gates and shared, domain-neutral SourceUnit materialization."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -13,6 +13,7 @@ from fabric_kg_builder.contracts.base import (
     canonical_json,
     canonical_sha256,
     deterministic_contract_id,
+    normalize_nfc,
 )
 from fabric_kg_builder.contracts.evidence import EvidenceSpan, SourceUnit
 from fabric_kg_builder.contracts.identity import (
@@ -139,7 +140,7 @@ class SourceCorpusReader(Protocol):
     """Resolve one manifest entry from immutable Asset/AssetVersion authority."""
 
     def read(self, entry: SourceCorpusEntry) -> CorpusAsset:
-        """Read exact landed bytes and dispatch the approved existing adapter."""
+        """Read exact landed bytes and dispatch the registered existing adapter."""
 
 
 class IndexedSourceCorpusReader:
@@ -156,11 +157,20 @@ class IndexedSourceCorpusReader:
         assets: tuple[AssetRow, ...],
         versions: tuple[AssetVersionRow, ...],
         adapter_versions: dict[str, str] | None = None,
+        layout_cache: Path | None = None,
+        layout_identity: dict[str, Any] | None = None,
     ) -> None:
         self._source_root = source_root.resolve()
         self._assets = {item.asset_id: item for item in assets}
         self._versions = {item.asset_version_id: item for item in versions}
         self._adapter_versions = adapter_versions or {}
+        if (layout_cache is None) != (layout_identity is None):
+            raise ValueError("layout cache and extractor identity must be supplied together")
+        if layout_identity is not None:
+            from fabric_kg_builder.sources.docintel_cache import validate_extractor_identity
+            validate_extractor_identity(layout_identity)
+        self._layout_cache = layout_cache
+        self._layout_identity = layout_identity
         if len(self._assets) != len(assets) or len(self._versions) != len(versions):
             raise L2StageError(
                 "L2_CORPUS_INVENTORY_INVALID",
@@ -194,8 +204,15 @@ class IndexedSourceCorpusReader:
                 source_path,
                 entry=entry,
             ) as snapshot:
+                if self._layout_cache is not None and (
+                    entry.media_type == "application/pdf"
+                    or entry.media_type.startswith("image/")
+                ):
+                    return self._read_layout(entry, asset, version, snapshot.path)
                 extraction = extract_verified_source_snapshot(snapshot)
                 adapted = extraction.adapter_result
+        except L2StageError:
+            raise
         except AdapterError as exc:
             if isinstance(exc, SourceSnapshotIntegrityError):
                 raise L2StageError(
@@ -246,6 +263,64 @@ class IndexedSourceCorpusReader:
             adapter_name=adapter_name,
             adapter_version=adapter_version,
             elements=elements,
+        )
+
+    def _read_layout(
+        self, entry: SourceCorpusEntry, asset: AssetRow,
+        version: AssetVersionRow, snapshot_path: Path,
+    ) -> CorpusAsset:
+        """Use complete, source-bound cached pages, not detached per-line context."""
+        from fabric_kg_builder.sources.docintel_cache import (
+            layout_text_pages, load_cached_layout,
+        )
+        assert self._layout_cache is not None and self._layout_identity is not None
+        cached = load_cached_layout(
+            self._layout_cache, input_sha256=entry.original_byte_hash,
+            extractor_identity=self._layout_identity,
+        )
+        if cached is None:
+            raise L2StageError("L2_LAYOUT_CACHE_MISSING", f"no exact layout for {entry.relative_source_ref}")
+        pages = layout_text_pages(cached)
+        if entry.media_type == "application/pdf":
+            import fitz
+            with fitz.open(snapshot_path) as document:
+                expected_pages = set(range(1, document.page_count + 1))
+            raw_pages = cached.analyze_result.get("pages", ())
+            observed_pages = {
+                page.get("pageNumber", page.get("page_number"))
+                for page in raw_pages
+            }
+            if observed_pages != expected_pages:
+                raise L2StageError("L2_LAYOUT_COVERAGE_INCOMPLETE", entry.relative_source_ref)
+        elements = []
+        for index, (page, text) in enumerate(pages):
+            text = normalize_nfc(text).strip()
+            if not text:
+                continue
+            if page is None:
+                raise L2StageError("L2_LAYOUT_PAGE_UNPROVEN", entry.relative_source_ref)
+            element_id = deterministic_contract_id("source-element", {
+                "asset_version_id": version.asset_version_id,
+                "layout_cache_key": cached.cache_key, "page": page,
+                "normalization_version": "docintel-pages/1.0.0",
+            })
+            elements.append(SourceElement(
+                element_id=element_id, unit_kind="paragraph", text=text,
+                ordinal=index,
+                locator=ImmutableSourceLocator.from_authority(
+                    source_uri=version.source_uri, blob_uri=version.blob_uri,
+                    blob_version_id=version.blob_version_id, page=page,
+                    native_layer_id="docintel-pages/1.0.0",
+                    native_object_id=f"{cached.cache_key}/pages/{page}",
+                ),
+            ))
+        return CorpusAsset(
+            asset=asset, version=version,
+            consumed_byte_hash=entry.original_byte_hash,
+            consumed_byte_count=entry.byte_count,
+            adapter_name="docintel-layout-cache",
+            adapter_version="docintel-pages/1.0.0",
+            elements=tuple(elements),
         )
 
 
@@ -650,6 +725,49 @@ def _source_unit_manifest(
     return ArtifactManifest(**values, manifest_hash=canonical_sha256(values))
 
 
+def materialize_corpus_entry(
+    entry: SourceCorpusEntry, reader: SourceCorpusReader, *,
+    base_identity: CanonicalIdentityEnvelope, corpus_manifest_id: str,
+) -> tuple[tuple[SourceUnit, ...], str, str]:
+    """Parse exact source authority without requiring an approved L2 handoff."""
+    asset = reader.read(entry)
+    if (
+        asset.consumed_byte_hash != entry.original_byte_hash
+        or asset.consumed_byte_count != entry.byte_count
+        or asset.version.content_hash != entry.original_byte_hash
+        or asset.version.size_bytes != entry.byte_count
+    ):
+        raise L2StageError("L2_ASSET_CONTENT_MISMATCH", f"landed bytes differ for {entry.source_file_id}")
+    if (
+        asset.asset.asset_id != entry.asset_id
+        or asset.version.asset_version_id != entry.asset_version_id
+        or asset.version.asset_id != entry.asset_id
+    ):
+        raise L2StageError("L2_CORPUS_DISPOSITION_MISMATCH", f"asset authority differs for {entry.source_file_id}")
+    identity = base_identity.model_copy(update={
+        "contract_kind": "c0.source_unit", "asset_id": entry.asset_id,
+        "asset_version_id": entry.asset_version_id, "source_file_id": entry.source_file_id,
+        "source_unit_id": None, "content_hash": entry.original_byte_hash,
+        "immutable_locator": None, "parent_artifact_ids": (corpus_manifest_id,),
+    })
+    units, parents, seen = [], {}, set()
+    for element in sorted(asset.elements, key=lambda item: (item.ordinal, item.element_id)):
+        try:
+            unit = SourceUnit.mint(
+                identity=identity, unit_kind=element.unit_kind, text=element.text,
+                ordinal=element.ordinal, locator=element.locator,
+                parent_source_unit_id=parents.get(element.parent_element_id),
+            )
+        except (ValidationError, ValueError) as exc:
+            raise L2StageError("L2_SOURCE_UNIT_INVALID", f"invalid SourceUnit for {entry.source_file_id}: {exc}") from exc
+        if unit.source_unit_id in seen:
+            raise L2StageError("L2_SOURCE_UNIT_ID_COLLISION", unit.source_unit_id)
+        seen.add(unit.source_unit_id)
+        parents[element.element_id] = unit.source_unit_id
+        units.append(unit)
+    return tuple(units), asset.adapter_name, asset.adapter_version
+
+
 def materialize_source_corpus(
     inputs: L2Inputs,
     reader: SourceCorpusReader,
@@ -684,70 +802,17 @@ def materialize_source_corpus(
             )
             continue
 
-        asset = reader.read(entry)
-        if (
-            asset.consumed_byte_hash != entry.original_byte_hash
-            or asset.consumed_byte_count != entry.byte_count
-            or asset.version.content_hash != entry.original_byte_hash
-            or asset.version.size_bytes != entry.byte_count
-        ):
-            raise L2StageError(
-                "L2_ASSET_CONTENT_MISMATCH",
-                f"landed bytes differ for {entry.source_file_id}",
-            )
-        if (
-            asset.asset.asset_id != entry.asset_id
-            or asset.version.asset_version_id != entry.asset_version_id
-            or asset.version.asset_id != entry.asset_id
-        ):
-            raise L2StageError(
-                "L2_CORPUS_DISPOSITION_MISMATCH",
-                f"asset authority differs for {entry.source_file_id}",
-            )
-        identity = inputs.l1_receipt.identity.model_copy(
-            update={
-                "contract_kind": "c0.source_unit",
-                "asset_id": entry.asset_id,
-                "asset_version_id": entry.asset_version_id,
-                "source_file_id": entry.source_file_id,
-                "source_unit_id": None,
-                "content_hash": entry.original_byte_hash,
-                "immutable_locator": None,
-                "parent_artifact_ids": (
-                    inputs.corpus_manifest.source_corpus_manifest_id,
-                ),
-            }
+        entry_units, adapter_name, adapter_version = materialize_corpus_entry(
+            entry, reader, base_identity=inputs.l1_receipt.identity,
+            corpus_manifest_id=inputs.corpus_manifest.source_corpus_manifest_id,
         )
-        entry_units: list[SourceUnit] = []
-        parent_units: dict[str, str] = {}
-        for element in sorted(asset.elements, key=lambda item: (item.ordinal, item.element_id)):
-            parent_source_unit_id = (
-                parent_units.get(element.parent_element_id)
-                if element.parent_element_id is not None
-                else None
-            )
-            try:
-                unit = SourceUnit.mint(
-                    identity=identity,
-                    unit_kind=element.unit_kind,
-                    text=element.text,
-                    ordinal=element.ordinal,
-                    locator=element.locator,
-                    parent_source_unit_id=parent_source_unit_id,
-                )
-            except (ValidationError, ValueError) as exc:
-                raise L2StageError(
-                    "L2_SOURCE_UNIT_INVALID",
-                    f"invalid SourceUnit for {entry.source_file_id}: {exc}",
-                ) from exc
+        for unit in entry_units:
             if unit.source_unit_id in seen_unit_ids:
                 raise L2StageError(
                     "L2_SOURCE_UNIT_ID_COLLISION",
                     f"duplicate SourceUnit ID {unit.source_unit_id}",
                 )
             seen_unit_ids.add(unit.source_unit_id)
-            parent_units[element.element_id] = unit.source_unit_id
-            entry_units.append(unit)
         units.extend(entry_units)
         counts_by_version[entry.asset_version_id] = len(entry_units)
         dispositions.append(
@@ -758,8 +823,8 @@ def materialize_source_corpus(
                 source_unit_ids=tuple(
                     sorted(unit.source_unit_id for unit in entry_units)
                 ),
-                adapter_name=asset.adapter_name,
-                adapter_version=asset.adapter_version,
+                adapter_name=adapter_name,
+                adapter_version=adapter_version,
             )
         )
 
@@ -843,6 +908,7 @@ def l2_input_fingerprint(
     extractor_version: str,
     response_schema_hash: str,
     split_policy_version: str,
+    collection_partition_version: str | None = None,
 ) -> str:
     """Bind every semantic input; design-sample hash is context, never coverage."""
 
@@ -878,6 +944,10 @@ def l2_input_fingerprint(
             "extractor": [extractor_name, extractor_version],
             "response_schema_hash": response_schema_hash,
             "split_policy_version": split_policy_version,
+            **(
+                {"collection_partition_version": collection_partition_version}
+                if collection_partition_version is not None else {}
+            ),
             "accepted_contract_versions": L2_ACCEPTED_VERSIONS,
         }
     )

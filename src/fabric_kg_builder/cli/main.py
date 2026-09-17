@@ -19,6 +19,8 @@ from fabric_kg_builder.cli.semantic_cmd import (
     validate_artifacts_cmd,
 )
 from fabric_kg_builder.cli.enrich_cmd import enrich_cmd
+from fabric_kg_builder.cli.partial_handoff_cmd import handoff_partial_cmd
+from fabric_kg_builder.cli.business_quality_cmd import assess_business_quality_cmd
 from fabric_kg_builder.cli.densify_cmd import densify_cmd
 from fabric_kg_builder.cli.compile_data_cmd import compile_data_cmd
 from fabric_kg_builder.cli.schema2_stages_cmd import (
@@ -43,6 +45,11 @@ from fabric_kg_builder.cli.lineage_cmd import assets_cmd, lineage_cmd, trace_cmd
 from fabric_kg_builder.cli.infra_cmd import infra_cmd
 from fabric_kg_builder.cli.knowledge_cmd import knowledge_group
 from fabric_kg_builder.cli.app_cmd import app_cmd
+from fabric_kg_builder.cli.graph_presentation_cmd import repair_graph_labels_cmd
+from fabric_kg_builder.cli.prototype_reconcile_cmd import (
+    reconcile_prototype_create_cmd, verify_prototype_companion_cmd,
+)
+from fabric_kg_builder.cli.ontology_presentation_cmd import repair_ontology_names_cmd
 from fabric_kg_builder.cli.runtime_cmd import (
     collect_evidence_cmd,
     evaluate_cmd,
@@ -54,9 +61,47 @@ from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 
 
 _GROUP_EPILOG = """\b
-Recommended production pipeline (run in dependency order):
+Default: corpus-first Schema-2 pipeline (explicit approval and state bindings):
+  domain discover --input <sources> --out <discovery.json> [--intake <intake>]
+  -> domain design --input <sources> --intake <intake>
+       --discovery <discovery.json> --out <design-draft.json>
+  -> domain evaluate-design -> review evaluation -> domain compile-design
+  -> domain approve -> enrich --reextract-approved
+       --discovery <approved-discovery.json> --l2-state <fresh-state>
+  -> validate-evidence -> project-serving -> assess-business-quality
+  Discover accounts for the entire declared corpus before design. Intake is
+  optional during discovery; business context/questions guide subsequent design.
+  Discovery defaults to a no-call/no-write plan; --live and explicit budgets
+  authorize execution. Resume reuses received observations. Approval binds the
+  exact discovery hash. Final-data extraction explicitly revisits cached source
+  text under the frozen contract. Processing coverage is not semantic recall.
+  Evaluate locally, review findings, compile with the exact evaluation-hash
+  acknowledgment, then explicitly approve the compiled contract, not the draft.
+  Use enrich --reextract-approved with that discovery or accepted --window-run,
+  a fresh --l2-state and bounded call budgets. This reuses cached source text,
+  not prior candidate values, without rerunning OCR. Freeze the final schema
+  before this second pass and revisit all source units in the approved scope.
+  Without --reextract-approved, enrichment retains its candidate-replay behavior;
+  replay alone cannot populate fields newly introduced by final design.
+  Assess business quality locally; use app publish-structured --quality-policy
+  to bind and enforce the reviewed policy before publication writes.
+
+\b
+Explicit compatibility only (not the default corpus-first workflow):
+  domain design --sample-only
+  Or the existing direct-L1 assessment/revision path:
+  init-domain --input <sources> --intake <intake> --non-interactive
+  -> domain assess -> domain review-assessment -> [domain revise]
+  -> domain approve -> enrich -> validate-evidence -> project-serving
+  Assessment and revision default to no-call/no-write planning. Use their help
+  for live/fixture modes and bounded calls. A revision creates separate L1 state;
+  do not silently replace the parent's artifacts.
+
+\b
+Legacy semantic-bundle pipeline (not a direct continuation of schema-2 L4):
   1. Author and approve
-     init -> init-domain --input <source-path> -> domain review -> domain approve -> inspect-ontology
+     init -> init-domain --legacy-schema-1 --input <source-path>
+     -> domain review -> domain approve -> inspect-ontology
   2. Extract and compile
      enrich -> [densify] -> compile-data -> compile-semantic
      -> compile-ontology + compile-graph + compile-agent + compile-search
@@ -89,14 +134,15 @@ Recommended production pipeline (run in dependency order):
 
 \b
 Guidance for Copilot and other AI agents:
-  Prefer the ordered workflow above. For large document sets, choose Blob +
+  Prefer the default corpus-first workflow; legacy steps are a separate
+  compatibility path. For large Search document sets, choose Blob +
   indexer ingestion with --integrated-vectorization; do not default to repeated
   direct Search uploads. Never invent or bypass projection receipts, deploy a
   Foundry agent before its Fabric Data Agent dependency, or treat a CLI polling
   timeout as an indexer failure without checking indexer status.
 
 \b
-PowerShell example (large document set):
+Legacy semantic-bundle PowerShell example (compatibility only):
   fabric-kg init --target .\\my-kg-project
   fabric-kg domain review --file .\\my-kg-project\\domain.yaml
   fabric-kg domain approve --file .\\my-kg-project\\domain.yaml
@@ -158,10 +204,12 @@ def cli(
     Transforms heterogeneous domain assets into traceable Search, Lakehouse,
     Graph, and Ontology artifacts plus a deployable agent experience.
 
-    Graph quality depends on an approved domain contract. Capture the business
-    context, problem, entity and relationship concepts, constraints, and
-    competency questions before enrichment. Optional densification is driven by
-    explicit domain configuration; no sample taxonomy is applied implicitly.
+    Default to corpus discovery, then business/question-driven design using
+    --discovery. Evaluate and review the design, compile it, and explicitly
+    approve the contract before explicit --reextract-approved extraction from
+    that exact cached discovery or approved window prefix.
+    Sample-only design, direct init-domain, and the legacy semantic-bundle
+    pipeline are explicit compatibility paths, not the default workflow.
 
     Run any subcommand with --help for options, defaults, and a usage example.
 
@@ -185,8 +233,10 @@ cli.add_command(inspect_source_cmd, name="inspect-source")
 cli.add_command(inspect_ontology_cmd, name="inspect-ontology")
 cli.add_command(compile_semantic_cmd, name="compile-semantic")
 cli.add_command(enrich_cmd, name="enrich")
+cli.add_command(handoff_partial_cmd)
 cli.add_command(validate_evidence_cmd, name="validate-evidence")  # schema-2 L3
 cli.add_command(project_serving_cmd, name="project-serving")  # schema-2 L4
+cli.add_command(assess_business_quality_cmd)
 cli.add_command(densify_cmd, name="densify")
 cli.add_command(compile_data_cmd, name="compile-data")
 cli.add_command(compile_ontology_cmd, name="compile-ontology")
@@ -210,6 +260,10 @@ cli.add_command(lineage_cmd, name="lineage")
 cli.add_command(trace_cmd, name="trace")
 cli.add_command(infra_cmd, name="infra")
 cli.add_command(knowledge_group, name="knowledge")
+app_cmd.add_command(reconcile_prototype_create_cmd)
+app_cmd.add_command(verify_prototype_companion_cmd)
+app_cmd.add_command(repair_ontology_names_cmd)
+app_cmd.add_command(repair_graph_labels_cmd)
 cli.add_command(app_cmd, name="app")  # M8: Foundry agent + reference app
 cli.add_command(validate_deployment_cmd, name="validate-deployment")
 cli.add_command(collect_evidence_cmd, name="collect-evidence")

@@ -36,11 +36,11 @@ from fabric_kg_builder.enrichment.schema2_sources import IndexedSourceCorpusRead
 from fabric_kg_builder.enrichment.schema2_stage import run_l2
 from fabric_kg_builder.enrichment import schema2_validation_stage
 from fabric_kg_builder.enrichment.schema2_validation_stage import (
-    L3_ACCEPTED_VERSIONS,
     REMOTE_METRIC_DIMENSIONS,
     RequiredMemberOutcomeRecord,
     assert_l2_did_not_mint_l3_artifacts,
     l3_input_fingerprint,
+    l3_accepted_versions,
     l3_leaf_checkpoint_path,
     l3_run_root,
     load_l3_inputs,
@@ -364,7 +364,7 @@ class _Service:
                 "candidate_kind": "entity",
                 "local_id": "record-1",
                 "observed_type": "Record",
-                "label": "Record 1",
+                "label": "governed record",
                 "aliases": [],
                 "identity_key": {},
                 "stable_source_identity": None,
@@ -374,7 +374,7 @@ class _Service:
                 "candidate_kind": "entity",
                 "local_id": "subject-1",
                 "observed_type": "Subject",
-                "label": "Subject 1",
+                "label": "governed subject",
                 "aliases": [],
                 "identity_key": {},
                 "stable_source_identity": None,
@@ -601,7 +601,7 @@ def test_l3_asserts_grounded_candidates_with_local_1_1_evidence(
     assert result.receipt.status == "succeeded"
     assert result.receipt.stage_id == "L3"
     assert result.receipt.stage_name == L3_STAGE_NAME
-    assert result.receipt.accepted_contract_versions == L3_ACCEPTED_VERSIONS
+    assert result.receipt.accepted_contract_versions == l3_accepted_versions(result.inputs)
     states_by_kind: dict[str, set[str]] = {}
     for item in result.candidate_results:
         states_by_kind.setdefault(item.candidate_kind, set()).add(item.current_state)
@@ -1158,6 +1158,7 @@ def test_l3_prefers_the_most_specific_concrete_classification(tmp_path: Path) ->
         first = text.find("governed record")
         specialized = dict(candidates[0])
         specialized["observed_type"] = "Record A"
+        specialized["label"] = "record"
         specialized["anchors"] = [
             {
                 "span_start": offset + first + len("governed "),
@@ -1379,19 +1380,327 @@ def test_l3_governs_property_observations_against_effective_properties(
     assert len(observations) == 2
     by_property = {item.effective_property_id: item for item in observations}
     approved = by_property["property:records.member-order"]
-    # The frozen carrier persists neither the property owner nor the observed
-    # value, so inherited-property validity and value conformance are recorded
-    # as an explicit capability gap instead of being claimed as validated.
-    assert approved.observation_state == "unsupported"
+    # An owner-only quote does not prove the now-persisted scalar.
+    assert approved.observation_state == "rejected"
     assert approved.value_type == "integer"
-    assert approved.constraint_outcome == ()
-    assert "EVIDENCE_MODALITY_UNSUPPORTED" in approved.reason_codes
+    assert approved.constraint_outcome == ("PROPERTY_VALUE_UNGROUNDED",)
+    assert "PROPERTY_VALUE_UNGROUNDED" in approved.reason_codes
     assert approved.evidence_span_ids
     unknown = by_property[None]
     assert unknown.observation_state == "discovery"
     assert unknown.constraint_outcome == ("UNKNOWN_PROPERTY",)
     assert "EVIDENCE_MODALITY_UNSUPPORTED" not in unknown.reason_codes
     assert "DOMAIN_REREVIEW_REQUESTED" in unknown.reason_codes
+
+
+def _scalar_pipeline(
+    tmp_path, monkeypatch, *, value=0, value_type="integer",
+    normalized_value=None, source_literal=None, quote=None, inherited=False,
+    unasserted_owner=False, owner_context=False,
+):
+    from fabric_kg_builder.contracts.base import canonical_json
+
+    literal = canonical_json(value) if source_literal is None else source_literal
+    monkeypatch.setitem(
+        globals(), "_SENTENCE",
+        f"A governed record describes a governed subject with reading {literal}.",
+    )
+
+    def mutate(candidates, work_unit):
+        if owner_context:
+            text = work_unit.text.rstrip()
+            candidates[0]["anchors"] = [{
+                "span_start": work_unit.slice_start,
+                "span_end": work_unit.slice_start + len(text),
+                "quote": text,
+                "model_authored_evidence_id": None,
+            }]
+        if inherited:
+            candidates[0]["observed_type"] = "Record A"
+        if unasserted_owner:
+            candidates[0]["anchors"][0]["quote"] = "absent owner"
+        text = work_unit.text.rstrip() if quote is None else quote
+        start = work_unit.text.index(text)
+        return candidates + [{
+            "candidate_kind": "property",
+            "owner_local_id": "record-1",
+            "observed_property": "Reading",
+            "value": value,
+            "normalized_value": value if normalized_value is None else normalized_value,
+            "temporal_key": "measurement:morning",
+            "anchor": {
+                "span_start": work_unit.slice_start + start,
+                "span_end": work_unit.slice_start + start + len(text),
+                "quote": text,
+                "model_authored_evidence_id": None,
+            },
+        }]
+
+    declaration = ({
+        "property_id": "property:records.reading",
+        "display_name": "Reading",
+        "value_type": value_type,
+        "required": False,
+    },)
+    l1_root, domain_path, l2 = _pipeline(
+        tmp_path, "records", mutate=mutate,
+        type_properties={"semantic-type:records.record": declaration},
+        extra_types=_subtypes("records") if inherited else (),
+    )
+    return l1_root, domain_path, l2
+
+
+@pytest.mark.parametrize(("value", "value_type"), [
+    (0, "integer"), (False, "boolean"), (1.5, "number"),
+    ("ready", "string"), ("", "string"),
+    ("2026-07-01", "date"), ("2026-07-01T10:00:00Z", "datetime"),
+])
+def test_l3_asserts_only_proven_scalar_owner_value(
+    tmp_path, monkeypatch, value, value_type,
+) -> None:
+    from fabric_kg_builder.contracts.base import canonical_json, deterministic_contract_id
+
+    l1_root, domain_path, _ = _scalar_pipeline(
+        tmp_path, monkeypatch, value=value, value_type=value_type,
+    )
+    result = _l3(tmp_path, l1_root, domain_path)
+    observation = next(item for leaf in result.leaves for item in leaf.property_observations)
+    assert observation.observation_state == "asserted"
+    assert observation.value_json == observation.normalized_value_json == canonical_json(value)
+    assert observation.value_type == value_type
+    assert observation.temporal_key == "measurement:morning"
+    assert observation.entity_id in {
+        item.semantic_id for item in result.candidate_results
+        if item.candidate_kind == "entity" and item.current_state == "asserted"
+    }
+    assert observation.property_observation_id == deterministic_contract_id(
+        "property-observation", {
+            "entity_id": observation.entity_id,
+            "property_id": observation.effective_property_id,
+            "normalized_value": value,
+            "temporal_key": observation.temporal_key,
+        },
+    )
+    entry = next(
+        item for item in result.output_manifest.entries
+        if item.contract_kind == "l3.property_observation"
+    )
+    assert entry.contract_version == "1.1.0"
+    assert entry.schema_hash == schema2_validation_stage.property_observation_schema_hash("1.1.0")
+
+
+@pytest.mark.parametrize(("options", "reason"), [
+    ({"quote": "reading 0."}, "ENDPOINT_EVIDENCE_UNGROUNDED"),
+    ({"source_literal": "10"}, "PROPERTY_VALUE_UNGROUNDED"),
+    ({"unasserted_owner": True}, "ENDPOINT_UNRESOLVED"),
+    ({"value": "", "value_type": "string", "source_literal": "unknown"}, "PROPERTY_VALUE_UNGROUNDED"),
+    ({"value": False, "value_type": "boolean", "source_literal": "no"}, "PROPERTY_VALUE_UNGROUNDED"),
+    ({"value": "0"}, "PROPERTY_VALUE_INVALID"),
+    ({"normalized_value": 1}, "PROPERTY_NORMALIZATION_UNSUPPORTED"),
+])
+def test_l3_refuses_unproven_or_transformed_property(tmp_path, monkeypatch, options, reason) -> None:
+    l1_root, domain_path, _ = _scalar_pipeline(tmp_path, monkeypatch, **options)
+    result = _l3(tmp_path, l1_root, domain_path)
+    observation = next(item for leaf in result.leaves for item in leaf.property_observations)
+    assert observation.observation_state != "asserted"
+    assert reason in observation.reason_codes
+    if reason == "PROPERTY_NORMALIZATION_UNSUPPORTED":
+        assert observation.observation_state == "unsupported"
+
+
+def test_l3_asserts_field_inside_grounded_owner_context(tmp_path, monkeypatch):
+    l1_root, domain_path, _ = _scalar_pipeline(
+        tmp_path, monkeypatch, owner_context=True, quote="reading 0.",
+    )
+    result = _l3(tmp_path, l1_root, domain_path)
+    observation = next(item for leaf in result.leaves for item in leaf.property_observations)
+    assert observation.observation_state == "asserted"
+    assert observation.evidence_span_ids
+    assert observation.entity_id is not None
+
+
+def test_l3_property_uses_effective_inherited_owner_classification(tmp_path, monkeypatch) -> None:
+    l1_root, domain_path, _ = _scalar_pipeline(tmp_path, monkeypatch, inherited=True)
+    result = _l3(tmp_path, l1_root, domain_path)
+    observation = next(item for leaf in result.leaves for item in leaf.property_observations)
+    assert observation.observation_state == "asserted"
+    owner = next(
+        item for item in result.candidate_results
+        if item.candidate_kind == "entity" and item.semantic_id == observation.entity_id
+    )
+    assert owner.approved_semantic_id == "semantic-type:records.record-a"
+
+
+@pytest.mark.parametrize(("changes", "reason"), [
+    ({"semantic_id": "property-observation:forged"}, "SEMANTIC_ID_MISMATCH"),
+    ({"normalized_value_json": "1", "value_json": "1"}, "SEMANTIC_ID_MISMATCH"),
+    ({"temporal_key": "measurement:evening"}, "SEMANTIC_ID_MISMATCH"),
+    ({"proposed_owner_entity_id": "entity:absent"}, "ENDPOINT_UNRESOLVED"),
+    ({"proposed_owner_entity_id": None, "value_json": None, "normalized_value_json": None, "temporal_key": None}, "EVIDENCE_MODALITY_UNSUPPORTED"),
+    ({"value_json": "null", "normalized_value_json": "null"}, "PROPERTY_VALUE_INVALID"),
+])
+def test_l3_recomputes_property_identity_and_keeps_missing_proof_nonasserting(
+    tmp_path, monkeypatch, changes, reason,
+) -> None:
+    l1_root, domain_path, _ = _scalar_pipeline(tmp_path, monkeypatch)
+    result = _l3(tmp_path, l1_root, domain_path)
+    inputs = result.inputs
+    leaf = next(item for item in result.leaves if item.property_observations)
+    batch_id = leaf.extraction_candidate_batch_id
+    records = tuple(
+        item.model_copy(update=changes) if item.candidate_kind == "property" else item
+        for item in inputs.proposed_partitions[batch_id]
+    )
+    revalidated = schema2_validation_stage._validate_leaf(
+        batch=inputs.batch_by_id[batch_id], records=records,
+        lifecycle_by_candidate={
+            item.candidate_id: item for item in inputs.lifecycle_partitions[batch_id]
+        },
+        inputs=inputs, shared=schema2_validation_stage._build_shared_context(inputs),
+        lifecycle_identity=leaf.lifecycle_records[0].identity,
+        occurred_at_utc=datetime.now(timezone.utc), leaf_fingerprint=leaf.leaf_fingerprint,
+    )
+    observation = revalidated.property_observations[0]
+    assert observation.observation_state != "asserted"
+    assert reason in observation.reason_codes
+
+
+@pytest.mark.parametrize("historical", [True, False])
+def test_l3_carrier_field_presence_is_versioned_and_historical_hashes_are_preserved(
+    tmp_path, monkeypatch, historical,
+) -> None:
+    from fabric_kg_builder.contracts.base import canonical_json
+    from fabric_kg_builder.enrichment.schema2_stage import _manifest
+
+    _, _, l2 = _scalar_pipeline(tmp_path, monkeypatch)
+    root = tmp_path / ".fkg" / "l2"
+    entries = []
+    raw_by_batch = {}
+    for entry in l2.output_manifest.entries:
+        if entry.contract_kind != "l2.proposed_candidate_partition":
+            entries.append(entry)
+            continue
+        batch_id = entry.artifact_id.rpartition(":")[0]
+        path = root / "proposed-candidates" / f"{schema2_validation_stage._safe_id(batch_id)}.json"
+        raw = json.loads(path.read_text("utf-8"))
+        for record in raw:
+            record.pop("proposed_label")
+            for field in ("proposed_owner_entity_id", "value_json", "normalized_value_json", "temporal_key"):
+                record.pop(field)
+        raw_by_batch[batch_id] = raw
+        payload = canonical_json(raw)
+        path.write_text(payload, encoding="utf-8")
+        version = "1.0.0" if historical else "1.1.0"
+        entries.append(entry.model_copy(update={
+            "contract_version": version,
+            "schema_hash": schema2_validation_stage.proposed_candidate_schema_hash(version),
+            "content_hash": canonical_sha256(raw),
+            "byte_count": len(payload.encode("utf-8")),
+        }))
+    manifest = _manifest(
+        identity=l2.output_manifest.identity, label="historical-fixture", entries=tuple(entries),
+    )
+    if not historical:
+        with pytest.raises(L3StageError, match="successor carrier fields are missing"):
+            schema2_validation_stage._load_candidate_partitions(root, manifest)
+        return
+    _, _, proposals, _ = schema2_validation_stage._load_candidate_partitions(root, manifest)
+    for batch_id, records in proposals.items():
+        restored = [schema2_validation_stage.proposed_candidate_payload(item) for item in records]
+        assert restored == raw_by_batch[batch_id]
+        assert canonical_sha256(restored) == canonical_sha256(raw_by_batch[batch_id])
+        assert canonical_json(restored) == canonical_json(raw_by_batch[batch_id])
+        assert canonical_sha256([item.model_dump(mode="json") for item in records]) != canonical_sha256(restored)
+        assert all(item.value_json is None for item in records)
+
+
+def test_property_observation_payload_preserves_legacy_format_without_dropping_proof() -> None:
+    from dataclasses import replace
+    from fabric_kg_builder.contracts.base import canonical_json
+
+    raw = {
+        "property_observation_id": "property-observation:legacy",
+        "candidate_id": "candidate:legacy",
+        "effective_property_id": "property:records.reading",
+        "observed_term": "Reading",
+        "value_type": "integer",
+        "observation_state": "unsupported",
+        "constraint_outcome": [],
+        "evidence_span_ids": ["evidence-span:legacy"],
+        "reason_codes": ["EVIDENCE_MODALITY_UNSUPPORTED"],
+    }
+    record = schema2_validation_stage.PropertyObservationRecord(**raw)
+    legacy = schema2_validation_stage.property_observation_payload(
+        record, contract_version="1.0.0",
+    )
+    assert canonical_json(legacy) == canonical_json(raw)
+    assert canonical_sha256(legacy) == canonical_sha256(raw)
+    current = schema2_validation_stage.property_observation_payload(
+        record, contract_version="1.1.0",
+    )
+    assert current["entity_id"] is None
+    assert current["normalized_value_json"] is None
+    assert canonical_sha256(current) != canonical_sha256(raw)
+    for field, value in (
+        ("entity_id", "entity:owner"), ("value_json", "0"),
+        ("normalized_value_json", "false"), ("temporal_key", "morning"),
+    ):
+        with pytest.raises(ValueError, match="cannot carry successor proof"):
+            schema2_validation_stage.property_observation_payload(
+                replace(record, **{field: value}), contract_version="1.0.0",
+            )
+    with pytest.raises(ValueError, match="re-run evidence validation"):
+        schema2_validation_stage.property_observation_payload(record, contract_version="9.0.0")
+
+
+def test_l3_property_fingerprint_binds_carrier_and_owner_identity_context(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    l1_root, domain_path, _ = _scalar_pipeline(tmp_path, monkeypatch)
+    result = _l3(tmp_path, l1_root, domain_path)
+    inputs = result.inputs
+    leaf = next(item for item in result.leaves if item.property_observations)
+    batch_id = leaf.extraction_candidate_batch_id
+    record = next(
+        item for item in inputs.proposed_partitions[batch_id]
+        if item.candidate_kind == "property"
+    )
+    shared = schema2_validation_stage._build_shared_context(inputs)
+    property_inputs = replace(inputs, proposed_partitions={batch_id: (record,)})
+    baseline = schema2_validation_stage._leaf_fingerprint(
+        inputs=property_inputs, shared=shared, batch_id=batch_id,
+    )
+    changed_value_inputs = replace(
+        property_inputs,
+        proposed_partitions={batch_id: (record.model_copy(update={"value_json": "1"}),)},
+    )
+    assert schema2_validation_stage._leaf_fingerprint(
+        inputs=changed_value_inputs, shared=shared, batch_id=batch_id,
+    ) != baseline
+    changed_owner_context = replace(
+        shared, identity_conflict_entity_ids=frozenset({record.proposed_owner_entity_id}),
+    )
+    assert schema2_validation_stage._leaf_fingerprint(
+        inputs=property_inputs, shared=changed_owner_context, batch_id=batch_id,
+    ) != baseline
+
+
+@pytest.mark.parametrize("field", ["entity_id", "normalized_value_json", "temporal_key"])
+def test_l3_rejects_resealed_property_scalar_output_tampering(tmp_path, monkeypatch, field) -> None:
+    l1_root, domain_path, _ = _scalar_pipeline(tmp_path, monkeypatch)
+    first = _l3(tmp_path, l1_root, domain_path)
+    target = next(item for item in first.candidate_results if item.candidate_kind == "property")
+    checkpoint = _checkpoint_for(first, target.candidate_id)
+
+    def forge(raw):
+        for observation in raw["property_observations"]:
+            if observation["candidate_id"] == target.candidate_id:
+                observation[field] = "1"
+
+    _interrupt_run(first)
+    _rewrite_leaf(checkpoint, forge, reseal=True)
+    with pytest.raises(L3StageError, match="does not re-derive from its sealed inputs"):
+        _l3(tmp_path, l1_root, domain_path)
 
 
 def test_l3_modules_stay_isolated_from_cli_serving_and_schema1() -> None:
@@ -1662,7 +1971,7 @@ def test_l3_proves_relationship_direction_from_ontology_admissibility(
     }
     for item in relationships:
         assert sealed[item.candidate_id].to_state is AssertionState.ASSERTED
-    # Properties still carry no persisted owner attribution or observed value,
+    # Owner-only property evidence still cannot prove an observed value,
     # so they remain an explicit capability gap rather than an assertion.
     assert not any(
         record.current_state == "asserted"
@@ -1721,10 +2030,9 @@ def test_l3_never_asserts_a_property_without_owner_and_value_proof(
     observation = properties[0]
     assert observation.approved_semantic_id == "property:records.member-order"
     assert observation.evidence_span_ids
-    # Owner attribution and observed value are not persisted, so inheritance and
-    # value conformance are never claimed as validated.
-    assert observation.current_state == "unsupported"
-    assert "EVIDENCE_MODALITY_UNSUPPORTED" in observation.reason_codes
+    # Persisting zero is not enough: this quote contains only the owner.
+    assert observation.current_state == "rejected"
+    assert "PROPERTY_VALUE_UNGROUNDED" in observation.reason_codes
     assert "INHERITED_PROPERTY_INVALID" not in observation.reason_codes
     assert "PROPERTY_VALUE_INVALID" not in observation.reason_codes
 
@@ -2245,8 +2553,8 @@ def test_l3_rejects_a_fully_resealed_property_upgrade(tmp_path: Path) -> None:
         for item in first.candidate_results
         if item.candidate_kind == "property"
     )
-    assert target.current_state == "unsupported"
-    assert _published_state(first, target.candidate_id) == "unsupported"
+    assert target.current_state == "rejected"
+    assert _published_state(first, target.candidate_id) == "rejected"
     checkpoint = _checkpoint_for(first, target.candidate_id)
 
     def forge(raw: dict) -> None:
@@ -2284,7 +2592,7 @@ def test_l3_rejects_a_fully_resealed_property_upgrade(tmp_path: Path) -> None:
         for item in leaf.property_observations
         if item.candidate_id == target.candidate_id
     )
-    assert observation.observation_state == "unsupported"
+    assert observation.observation_state == "rejected"
 
 
 # ---------------------------------------------------------------------------

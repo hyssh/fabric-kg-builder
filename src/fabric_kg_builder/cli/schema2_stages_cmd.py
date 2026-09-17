@@ -119,6 +119,12 @@ def validate_evidence_cmd(
         f"evidence spans: {len(result.evidence_spans)}, "
         f"required-member manifests: {len(result.required_member_manifests)}"
     )
+    if result.blocked_completeness_scopes:
+        click.echo(
+            f"  completeness/readiness blocked: {len(result.blocked_completeness_scopes)} scopes "
+            f"(collection deferrals: {len(result.inputs.collection_deferrals)}); "
+            "atomic validation does not establish complete collections"
+        )
     _echo_receipt("L3", result.receipt)
     click.echo(f"  run root: {result.run_root}")
     if result.receipt.status != "succeeded":

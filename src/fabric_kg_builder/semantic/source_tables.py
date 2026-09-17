@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -35,6 +37,9 @@ from fabric_kg_builder.contracts.receipts import ArtifactManifest, StageReceipt
 from fabric_kg_builder.contracts.resources import (
     StageResourceMetrics,
     validate_receipt_resources,
+)
+from fabric_kg_builder.enrichment.schema2_evidence import (
+    decode_property_scalar as decode_scalar_json,
 )
 from fabric_kg_builder.model.arrow_schemas import L4_PROJECTION_TABLE_SCHEMAS
 
@@ -106,7 +111,7 @@ _L4_STAGE_FILES = {
     "resource-metrics.json",
     "stage-receipt.json",
 }
-L4_PROJECTION_CODE_VERSION = "l4-projection/1.0.0"
+L4_PROJECTION_CODE_VERSION = "l4-projection/1.1.0"
 L4_ACCEPTED_VERSIONS = {
     "c0.artifact_manifest": "1.0.0",
     "c0.candidate_accounting_disposition": "1.0.0",
@@ -124,12 +129,55 @@ L4_ACCEPTED_VERSIONS = {
     "domain.contract": "2.0.0",
     "l1.design_sample_manifest": "1.0.0",
     "l1.source_corpus_manifest": "1.0.0",
-    "l2.proposed_candidate_partition": "1.0.0",
+    "l2.proposed_candidate_partition": "1.1.0",
     "l2.required_member_set_view": "1.1.0",
     "l3.classification_assertion": "1.0.0",
-    "l3.property_observation": "1.0.0",
+    "l3.property_observation": "1.1.0",
     "l4.projection_code": L4_PROJECTION_CODE_VERSION,
 }
+
+
+def l4_accepted_versions(*, qualified_witness=False):
+    if not qualified_witness:
+        return dict(L4_ACCEPTED_VERSIONS)
+    from fabric_kg_builder.enrichment.approved_partial_handoff import (
+        WITNESS_KIND, WITNESS_FILE_KIND, WITNESS_VERSION,
+    )
+    return {
+        **L4_ACCEPTED_VERSIONS, WITNESS_KIND: WITNESS_VERSION, WITNESS_FILE_KIND: WITNESS_VERSION,
+    }
+
+
+def decode_property_scalar(value_json: str, value_type: str) -> object:
+    """Decode an asserted canonical scalar without implicit value coercion."""
+    if not isinstance(value_json, str):
+        raise ValueError("asserted property lacks normalized scalar JSON; re-extract")
+    value = decode_scalar_json(value_json)
+    if value_type == "string" and isinstance(value, str):
+        return value
+    if value_type == "boolean" and type(value) is bool:
+        return value
+    if value_type == "integer" and type(value) is int:
+        if -(2**63) <= value < 2**63:
+            return value
+    if value_type == "number" and type(value) in (int, float):
+        try:
+            if math.isfinite(float(value)):
+                return value
+        except OverflowError:
+            pass
+    if value_type == "date" and isinstance(value, str):
+        parsed_date = date.fromisoformat(value)
+        if parsed_date.isoformat() == value:
+            return parsed_date
+    if value_type == "datetime" and isinstance(value, str) and "T" in value:
+        parsed_time = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed_time.tzinfo is not None and parsed_time.utcoffset() is not None:
+            try:
+                return parsed_time.astimezone(timezone.utc)
+            except OverflowError as exc:
+                raise ValueError("asserted datetime is outside the supported UTC range") from exc
+    raise ValueError(f"asserted property scalar is incompatible with {value_type!r}")
 
 
 def _schema_hash(table_name: str) -> str:
@@ -296,9 +344,14 @@ class SealedL4ServingSource:
             or self.receipt.stage_contract_version != "1.0.0"
             or self.receipt.status != "succeeded"
             or dict(self.receipt.accepted_contract_versions)
-            != L4_ACCEPTED_VERSIONS
+            != l4_accepted_versions(qualified_witness=any(
+                entry.artifact_id == "partial-extraction-witnesses" for entry in self.manifest.entries
+            ))
         ):
-            raise ValueError("schema-2 serving requires a successful L4 receipt")
+            raise ValueError(
+                "schema-2 serving requires a successful L4 receipt for the current version; "
+                "re-extract and re-project unsupported historical artifacts"
+            )
         if (
             self.receipt.output_manifest_id != self.manifest.artifact_manifest_id
             or self.receipt.output_manifest_hash != self.manifest.manifest_hash
@@ -391,6 +444,18 @@ class SealedL4ServingSource:
             raise ValueError("sealed L4 stage lineage or local metrics differ")
 
     def _validate_complete_artifact_set(self) -> None:
+        from fabric_kg_builder.enrichment.approved_partial_handoff import (
+            SCOPE_FILE, SCOPE_ID, WITNESS_ID, WITNESS_PREFIX, read_scope, witness_artifact_path,
+        )
+        partial_scope = read_scope(self.root, self.manifest)
+        input_scope_entries = [
+            entry for entry in self.input_manifest.entries if entry.artifact_id == SCOPE_ID
+        ]
+        output_scope_entries = [
+            entry for entry in self.manifest.entries if entry.artifact_id == SCOPE_ID
+        ]
+        if input_scope_entries != output_scope_entries:
+            raise ValueError("L4 partial extraction scope differs from sealed L3 input")
         expected_files = set(_L4_STAGE_FILES)
         expected_artifact_ids = {
             *(
@@ -399,6 +464,13 @@ class SealedL4ServingSource:
             ),
             *_L4_PROJECTION_FILES,
         }
+        if partial_scope is not None:
+            expected_files.add(SCOPE_FILE)
+            expected_artifact_ids.add(SCOPE_ID)
+        for entry in self.manifest.entries:
+            if entry.artifact_id == WITNESS_ID or entry.artifact_id.startswith(WITNESS_PREFIX):
+                expected_artifact_ids.add(entry.artifact_id)
+                expected_files.add(str(witness_artifact_path(entry.artifact_id)))
         if {entry.artifact_id for entry in self.manifest.entries} != (
             expected_artifact_ids
         ):
@@ -571,6 +643,27 @@ class SealedL4ServingSource:
             raise ValueError("sealed L4 publication authority hashes differ")
         relationship_rows = tables["semantic_asserted_relationships"]
         property_rows = tables["semantic_asserted_properties"]
+        entities_by_id = {row["entity_id"]: row for row in entity_rows}
+        properties_by_id = {
+            prop.property_id: prop
+            for definition in domain_contract.candidate_model.entity_types
+            for prop in definition.declared_properties
+        }
+        effective = domain_contract.hierarchy_closure.effective_property_ids_by_type
+        for row in property_rows:
+            owner = entities_by_id.get(row.get("entity_id"))
+            prop = properties_by_id.get(row["semantic_property_id"])
+            if (
+                owner is None
+                or prop is None
+                or row["semantic_property_id"]
+                not in effective.get(owner["most_specific_type_id"], ())
+                or row["value_type"] != prop.value_type
+                or row["domain_contract_hash"] != serving.sealed_domain_contract_hash
+                or row["semantic_contract_hash"] != serving.sealed_semantic_contract_hash
+            ):
+                raise ValueError("sealed L4 property owner/type authority differs")
+            decode_property_scalar(row.get("normalized_value_json"), prop.value_type)
         serving_specs = {
             "entity": (entity_rows, "entity_id"),
             "relationship": (relationship_rows, "relationship_id"),
@@ -1376,6 +1469,10 @@ class SealedL4ServingSource:
                 f"sealed L4 table differs from its artifact manifest: {path}"
             )
         return path, rows
+
+    def audit_rows(self) -> tuple[dict[str, object], ...]:
+        """Read sealed lifecycle rows without admitting them as serving facts."""
+        return self._validate_table_artifact("audit_candidates")[1]
 
     def resolve(self, source_table_name: str) -> Path:
         table_name = source_table_name.removesuffix(".parquet")

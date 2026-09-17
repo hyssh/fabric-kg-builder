@@ -653,8 +653,12 @@ def test_enrich_without_blob_reports_visual_extraction_skip(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
-def test_enrich_without_di_reports_visual_extraction_skip(tmp_path: Path) -> None:
+def test_enrich_without_di_reports_visual_extraction_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Missing DI configuration is explicit instead of a silent zero-row result."""
+    from fabric_kg_builder.cli import enrich_cmd as command
+    monkeypatch.setattr(command, "_build_di_layout_client", lambda _ctx: None)
     pdf_path = tmp_path / "tiny.pdf"
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"
@@ -696,8 +700,13 @@ def test_enrich_without_di_reports_visual_extraction_skip(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_enrich_without_di_and_blob_exits_zero(tmp_path: Path) -> None:
+def test_enrich_without_di_and_blob_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Pipeline works end-to-end without DI or blob — exit 0, canonical JSON written."""
+    from fabric_kg_builder.cli import enrich_cmd as command
+    monkeypatch.setattr(command, "_build_di_layout_client", lambda _ctx: None)
+    monkeypatch.setattr(command, "_build_blob_uploader", lambda _ctx: None)
     pdf_path = tmp_path / "tiny.pdf"
     pdf_path.write_bytes(_MINIMAL_PDF)
     out_dir = tmp_path / "enriched"

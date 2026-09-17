@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 from pydantic_core import PydanticCustomError
+
+from .question_routing import QuestionRouting, is_sql_question
+from .discovery_acceptance import DiscoveryAcceptanceBinding
+from .window_run_acceptance import WindowRunAcceptance, WindowRunPrefixAcceptance
+from .compiler_capacity import CompilerCapability, relationship_capacity
 
 
 DOMAIN_SCHEMA_VERSION = "1.0"
@@ -421,7 +426,6 @@ class DomainEntityTypeV2(V2StrictModel):
             )
         return self
 
-
 class RelationshipIdentityPolicyV2(V2StrictModel):
     seed_fields: list[
         Literal[
@@ -501,11 +505,43 @@ class CandidateModelSectionV2(V2StrictModel):
     entity_types: list[DomainEntityTypeV2] = Field(min_length=1)
     relationship_types: list[DomainRelationshipTypeV2] = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def _validate_property_root_ownership(self) -> "CandidateModelSectionV2":
+        roots_by_property: dict[str, str] = {}
+        for entity in self.entity_types:
+            for prop in entity.declared_properties:
+                previous_root = roots_by_property.setdefault(
+                    prop.property_id, entity.identity_root_type_id
+                )
+                if previous_root != entity.identity_root_type_id:
+                    raise PydanticCustomError(
+                        "property_id_multiple_identity_roots",
+                        "Property {property_id} is declared under unrelated identity "
+                        "roots {first_root} and {second_root}; use distinct type-qualified IDs",
+                        {
+                            "property_id": prop.property_id,
+                            "first_root": previous_root,
+                            "second_root": entity.identity_root_type_id,
+                        },
+                    )
+        return self
+
 
 class CompetencyQuestionV2(V2StrictModel):
     id: CompetencyQuestionId
     question: str = Field(min_length=15, pattern=r"\S")
     business_critical: bool = True
+    routing: QuestionRouting | None = None
+    pending_requirements: list[V2RequiredText] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.routing is None:
+            values.pop("routing", None)
+        if not self.pending_requirements:
+            values.pop("pending_requirements", None)
+        return values
 
 
 class QuestionPathStepV2(V2StrictModel):
@@ -552,13 +588,14 @@ class K4RationaleV2(V2StrictModel):
 
 
 class ReasoningPolicyV2(V2StrictModel):
-    relationship_type_count: int = Field(ge=1, le=24)
+    relationship_type_count: int = Field(ge=1, le=64)
     recommended_relationship_type_range: list[int] = Field(
         default_factory=lambda: [8, 20],
         min_length=2,
         max_length=2,
     )
-    max_relationship_types: Literal[24] = 24
+    max_relationship_types: Literal[24, 64] = 24
+    compiler_capability: CompilerCapability | None = None
     retained_type_rationales: dict[RelationshipTypeId, list[V2RequiredText]] = Field(
         default_factory=dict
     )
@@ -573,12 +610,13 @@ class ReasoningPolicyV2(V2StrictModel):
         if not isinstance(data, dict):
             return data
         relationship_count = data.get("relationship_type_count")
+        capacity = relationship_capacity(data.get("compiler_capability"))
         if (
             isinstance(relationship_count, int)
             and not isinstance(relationship_count, bool)
-            and not 1 <= relationship_count <= 24
+            and not 1 <= relationship_count <= capacity
         ):
-            raise ValueError("[DOM-103] N must be between 1 and 24")
+            raise ValueError(f"[DOM-103] N must be between 1 and {capacity}")
         max_hops = data.get("max_hops")
         if (
             isinstance(max_hops, int)
@@ -588,14 +626,24 @@ class ReasoningPolicyV2(V2StrictModel):
             raise ValueError("[DOM-105] K must be between 1 and 4")
         return data
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.compiler_capability is None:
+            values.pop("compiler_capability", None)
+        return values
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> "ReasoningPolicyV2":
+        capacity = relationship_capacity(self.compiler_capability)
+        if self.max_relationship_types != capacity:
+            raise ValueError("[DOM-103] max_relationship_types must match compiler capability")
         if self.recommended_relationship_type_range != [8, 20]:
             raise ValueError("recommended relationship range must remain [8, 20]")
         if self.relationship_type_count <= 20 and self.retained_type_rationales:
-            raise ValueError("retained_type_rationales are only used for N=21..24")
+            raise ValueError(f"retained_type_rationales are only used for N=21..{capacity}")
         if self.relationship_type_count > 20 and not self.retained_type_rationales:
-            raise ValueError("[DOM-103] N=21..24 requires per-type rationales")
+            raise ValueError(f"[DOM-103] N=21..{capacity} requires per-type rationales")
         if self.max_hops == 4 and not self.k4_rationales:
             raise ValueError("[DOM-105] K=4 requires exact cited rationale")
         if self.max_hops < 4 and self.k4_rationales:
@@ -929,10 +977,117 @@ class ApprovalMetadataV2(V2StrictModel):
         return self
 
 
+class WindowRunBinding(V2StrictModel):
+    """Exact integrated observation authority reviewed with the final domain."""
+
+    window_run_hash: Sha256Text
+    prepared_corpus_hash: Sha256Text
+    context_hash: Sha256Text
+    snapshot_hash: Sha256Text
+    final_mapping_hash: Sha256Text
+    coverage_acceptance_hash: Sha256Text | None = None
+    scope_acceptance_hash: Sha256Text | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        values = handler(self)
+        if self.coverage_acceptance_hash is None:
+            values.pop("coverage_acceptance_hash", None)
+        if self.scope_acceptance_hash is None:
+            values.pop("scope_acceptance_hash", None)
+        return values
+
+
+class WindowSchemaProjectionBinding(V2StrictModel):
+    projection_hash: Sha256Text
+    parent_draft_hash: Sha256Text
+    window_run_hash: Sha256Text
+    snapshot_hash: Sha256Text
+    retained_concept_keys: dict[V2RequiredText, V2RequiredText]
+    unsupported_concepts: dict[V2RequiredText, V2RequiredText]
+    required_retained_type_ids: list[V2RequiredText] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        values = handler(self)
+        if self.required_retained_type_ids is None:
+            values.pop("required_retained_type_ids", None)
+        return values
+
+    @model_validator(mode="after")
+    def _partition(self):
+        if set(self.retained_concept_keys) & set(self.unsupported_concepts):
+            raise ValueError("Projected concepts cannot be both retained and unsupported")
+        if self.required_retained_type_ids is not None and (
+            self.required_retained_type_ids != sorted(set(self.required_retained_type_ids))
+            or not set(self.required_retained_type_ids) <= {
+                "semantic-type:" + key for key in self.retained_concept_keys.values()
+            }
+        ):
+            raise ValueError("Required source type retention differs from projected schema keys")
+        return self
+
+
 class DomainContractV2(V2StrictModel):
     """New-project-only domain authority sealed by L1 approval."""
 
     schema_version: Literal[DOMAIN_SCHEMA_V2_VERSION]
+    discovery_run_hash: Sha256Text | None = None
+    discovery_acceptance: DiscoveryAcceptanceBinding | None = None
+    window_run_binding: WindowRunBinding | None = None
+    window_run_acceptance: WindowRunAcceptance | None = None
+    window_schema_projection: WindowSchemaProjectionBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        values = handler(self)
+        if self.discovery_run_hash is None:
+            values.pop("discovery_run_hash", None)
+        if self.discovery_acceptance is None:
+            values.pop("discovery_acceptance", None)
+        if self.window_run_binding is None:
+            values.pop("window_run_binding", None)
+        if self.window_run_acceptance is None:
+            values.pop("window_run_acceptance", None)
+        if self.window_schema_projection is None:
+            values.pop("window_schema_projection", None)
+        return values
+
+    @model_validator(mode="after")
+    def _discovery_acceptance_binding(self):
+        binding = self.window_run_binding
+        acceptance = self.window_run_acceptance
+        projection = self.window_schema_projection
+        if projection is not None and (
+            binding is None or projection.window_run_hash != binding.window_run_hash
+            or projection.snapshot_hash != binding.snapshot_hash
+        ):
+            raise ValueError("Window schema projection differs from the exact run/snapshot binding")
+        if projection is not None and projection.required_retained_type_ids is not None and not set(
+            projection.required_retained_type_ids
+        ) <= {item.type_id for item in self.candidate_model.entity_types}:
+            raise ValueError("Required projected source types were dropped from the domain")
+        hashes = [] if binding is None else [
+            value for value in (binding.coverage_acceptance_hash, binding.scope_acceptance_hash) if value is not None
+        ]
+        if len(hashes) != int(acceptance is not None):
+            raise ValueError("window-run binding requires exactly its attached acceptance")
+        if acceptance is not None and (
+            acceptance.acceptance_hash != (
+                binding.scope_acceptance_hash if isinstance(acceptance, WindowRunPrefixAcceptance)
+                else binding.coverage_acceptance_hash
+            )
+            or any(getattr(acceptance, field) != getattr(binding, field) for field in (
+                "window_run_hash", "prepared_corpus_hash", "context_hash", "snapshot_hash", "final_mapping_hash",
+            ))
+        ):
+            raise ValueError("window-run acceptance differs from contract binding")
+        if self.window_run_binding is not None and self.discovery_run_hash is not None:
+            raise ValueError("Choose discovery or integrated window-run authority, not both")
+        if self.discovery_acceptance is not None and self.discovery_acceptance.discovery_run_hash != self.discovery_run_hash:
+            raise ValueError("partial acceptance differs from contract discovery binding")
+        return self
+
     domain: DomainSectionV2
     business: BusinessSectionV2
     problem: ProblemSectionV2
@@ -1157,7 +1312,9 @@ class DomainContractV2(V2StrictModel):
         if len(relationships) > 20 and set(
             self.reasoning_policy.retained_type_rationales
         ) != known_relationships:
-            raise ValueError("[DOM-103] N=21..24 requires rationale for every type")
+            raise ValueError(
+                f"[DOM-103] N=21..{self.reasoning_policy.max_relationship_types} requires rationale for every type"
+            )
         if derived_k == 4:
             rationale_by_question = {
                 item.question_id: item for item in self.reasoning_policy.k4_rationales
@@ -1262,6 +1419,10 @@ class DomainContractV2(V2StrictModel):
         for question_id, coverage in coverage_by_id.items():
             if not set(coverage.requirement_ids) <= set(requirement_by_id):
                 raise ValueError("completeness coverage references unknown requirement")
+            if is_sql_question(questions_by_id[question_id]):
+                if plans_by_id[question_id].covered or coverage.coverage_status == "covered":
+                    raise ValueError("SQL-directed questions cannot claim ontology path/completeness coverage")
+                continue
             if (
                 questions_by_id[question_id].business_critical
                 and (
@@ -1270,7 +1431,9 @@ class DomainContractV2(V2StrictModel):
                 )
             ):
                 raise ValueError(
-                    "business-critical questions require path and completeness coverage"
+                    "business-critical questions require path and completeness coverage: "
+                    f"question_id={question_id}; path_covered={plans_by_id[question_id].covered}; "
+                    f"completeness_status={coverage.coverage_status}"
                 )
         return self
 

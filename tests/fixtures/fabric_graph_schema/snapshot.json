@@ -1,0 +1,46 @@
+{
+  "captured_on": "2026-09-12",
+  "documents": [
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/item/graphIndex/definition/dataSources/1.1.0/schema.json",
+      "file": "item__graphIndex__definition__dataSources__1.1.0__schema.json",
+      "sha256": "cef37ca55f3829be1bfbc5742e5751577b812539f2e9d81086fc87ccbbd12eb5"
+    },
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/item/graphIndex/definition/graphDefinition/1.0.0/schema.json",
+      "file": "item__graphIndex__definition__graphDefinition__1.0.0__schema.json",
+      "sha256": "16db2f4646aa858667d890936bd4143c5ec9db1f19808b22eacbc7caf5b33e26"
+    },
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/item/graphIndex/definition/graphType/1.0.0/schema.json",
+      "file": "item__graphIndex__definition__graphType__1.0.0__schema.json",
+      "sha256": "ed4c2e5cdc33d1e36c07b1bd2cb1df7f6ffca8907ea90215f5d7fd421840fb6a"
+    },
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/item/graphIndex/definition/stylingConfiguration/1.0.0/schema.json",
+      "file": "item__graphIndex__definition__stylingConfiguration__1.0.0__schema.json",
+      "sha256": "4168288e329d51abe17bf0ddc0e95f10e34f1d319196285523a48114c544466d"
+    },
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/common/itemReference/1.0.0/schema.json",
+      "file": "common__itemReference__1.0.0__schema.json",
+      "sha256": "92242caf1406298ca5b6ddac827677da7b0975f74e9d129b823712263a4dadb5"
+    },
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/common/auxiliaryTypes/1.0.0/schema.json",
+      "file": "common__auxiliaryTypes__1.0.0__schema.json",
+      "sha256": "52533dbaa0635ea25199096bf9448b72eccb7d57962afe56d716e90e784be564"
+    },
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/common/variableReference/1.0.0/schema.json",
+      "file": "common__variableReference__1.0.0__schema.json",
+      "sha256": "82cf6feeb3151b2ee16a173a1bad52a4c978dc0f8ea911ba1eb02a9720b8f7fc"
+    }
+  ],
+  "unavailable_references": [
+    {
+      "url": "https://developer.microsoft.com/json-schemas/fabric/item/graphIndex/common/identifiers/1.0.0/schema.json",
+      "http_status": 404
+    }
+  ]
+}

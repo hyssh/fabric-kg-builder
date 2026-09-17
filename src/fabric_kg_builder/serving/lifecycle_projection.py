@@ -61,15 +61,28 @@ from fabric_kg_builder.enrichment.schema2_evidence import (
     L3_EXTRACTION_PURPOSE,
     resolve_most_specific_classification,
 )
-from fabric_kg_builder.enrichment.schema2_stage import L2_RESPONSE_SCHEMA_HASH
+from fabric_kg_builder.enrichment.schema2_stage import proposed_candidate_schema_hash
+from fabric_kg_builder.enrichment.schema2_collections import (
+    COLLECTION_DEFERRAL_KIND,
+    COLLECTION_DEFERRAL_VERSION,
+    CollectionDeferral,
+)
 from fabric_kg_builder.enrichment.schema2_validation_stage import (
-    L3_ACCEPTED_VERSIONS,
     L3_EVIDENCE_SPAN_VERSION,
     L3_STAGE_NAME,
+    L3_LABEL_VALIDATION_VERSION,
     CandidateValidationRecord,
     L3LeafResult,
     L3StageResult,
     l3_input_fingerprint,
+    l3_accepted_versions,
+    validate_collection_partition,
+    _reason_code_index,
+    _reconcile_collection_partition,
+    proposed_candidate_payload,
+    property_observation_payload,
+    property_observation_schema_hash,
+    grounded_instance_label,
 )
 from fabric_kg_builder.model.arrow_schemas import L4_PROJECTION_TABLE_SCHEMAS
 from fabric_kg_builder.platform import process_resource_usage
@@ -77,6 +90,8 @@ from fabric_kg_builder.semantic.source_tables import (
     L4_ACCEPTED_VERSIONS,
     L4_PROJECTION_CODE_VERSION,
     SealedL4ServingSource,
+    decode_property_scalar,
+    l4_accepted_versions,
 )
 
 L4_STAGE_NAME = "schema2-audit-serving-projection"
@@ -180,14 +195,23 @@ def _schema_hash(schema: pa.Schema) -> str:
     return canonical_sha256(_schema_descriptor(schema))
 
 
+def _accepted_versions(source):
+    from fabric_kg_builder.enrichment.approved_partial_handoff import has_qualified_scope
+    return l4_accepted_versions(qualified_witness=has_qualified_scope(source.inputs.partial_extraction_scope))
+
+
 def l4_input_fingerprint(source: L3StageResult) -> str:
     """Bind L4 reuse to L3, all sealed authorities, code, and physical schemas."""
 
+    from fabric_kg_builder.enrichment.approved_partial_handoff import has_qualified_scope, WITNESS_VERSION
+    qualified = has_qualified_scope(source.inputs.partial_extraction_scope)
     return canonical_sha256({
         "stage": L4_STAGE_NAME,
         "stage_contract_version": L4_STAGE_CONTRACT_VERSION,
         "projection_code_version": L4_PROJECTION_CODE_VERSION,
-        "accepted_contract_versions": L4_ACCEPTED_VERSIONS,
+        "evidence_index_version": "exact-span-union/1.0.0",
+        "accepted_contract_versions": l4_accepted_versions(qualified_witness=qualified),
+        **({"qualified_witness_version": WITNESS_VERSION} if qualified else {}),
         "l3_receipt_hash": source.receipt.receipt_hash,
         "l3_output_manifest_hash": source.output_manifest.manifest_hash,
         "authorities": source.inputs.authority_hashes,
@@ -319,38 +343,7 @@ def _l3_current_state_index(source: L3StageResult) -> dict[str, Any]:
 
 
 def _l3_reason_code_index(source: L3StageResult) -> dict[str, Any]:
-    by_reason: defaultdict[str, set[str]] = defaultdict(set)
-    for leaf in source.leaves:
-        for result in leaf.candidate_results:
-            for reason in result.reason_codes:
-                by_reason[reason].add(result.candidate_id)
-    collection_reasons: defaultdict[str, set[str]] = defaultdict(set)
-    for record in source.required_member_outcomes:
-        for reason in record.outcome.reason_codes:
-            collection_reasons[reason].add(
-                record.outcome.required_member_set_proposal_id
-            )
-    return {
-        "candidate_reason_counts": [
-            [reason, len(candidate_ids)]
-            for reason, candidate_ids in sorted(by_reason.items())
-        ],
-        "candidate_ids_by_reason": {
-            reason: sorted(candidate_ids)
-            for reason, candidate_ids in sorted(by_reason.items())
-        },
-        "collection_reason_counts": [
-            [reason, len(proposal_ids)]
-            for reason, proposal_ids in sorted(collection_reasons.items())
-        ],
-        "proposal_ids_by_reason": {
-            reason: sorted(proposal_ids)
-            for reason, proposal_ids in sorted(collection_reasons.items())
-        },
-        "domain_rereview_requested": sorted(
-            by_reason.get("DOMAIN_REREVIEW_REQUESTED", set())
-        ),
-    }
+    return _reason_code_index(source.leaves, source.required_member_outcomes)
 
 
 def _l3_identity_index(source: L3StageResult) -> dict[str, Any]:
@@ -476,10 +469,11 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
             "L4_INPUT_RECEIPT_INVALID",
             "L4 requires one succeeded L3 receipt",
         )
-    if dict(receipt.accepted_contract_versions) != dict(L3_ACCEPTED_VERSIONS):
+    if dict(receipt.accepted_contract_versions) != l3_accepted_versions(source.inputs):
         raise L4ProjectionError(
             "L4_CONTRACT_VERSION_UNSUPPORTED",
-            "L3 receipt did not bind the exact accepted contract versions",
+            "L3 receipt did not bind the exact accepted contract versions; "
+            "re-extract and re-run evidence validation for historical artifacts",
         )
     if (
         receipt.output_manifest_id != source.output_manifest.artifact_manifest_id
@@ -589,15 +583,20 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
             code="L4_INPUT_MANIFEST_INVALID",
         )
         proposal_payload = [
-            proposal.model_dump(mode="json") for proposal in proposals
+            proposed_candidate_payload(proposal) for proposal in proposals
         ]
+        try:
+            proposal_schema_hash = proposed_candidate_schema_hash(
+                proposal_entry.contract_version
+            )
+        except ValueError as exc:
+            raise L4ProjectionError("L4_INPUT_MANIFEST_INVALID", str(exc)) from exc
         proposal_checks: dict[str, tuple[Any, Any]] = {
             "contract_kind": (
                 proposal_entry.contract_kind,
                 "l2.proposed_candidate_partition",
             ),
-            "contract_version": (proposal_entry.contract_version, "1.0.0"),
-            "schema_hash": (proposal_entry.schema_hash, L2_RESPONSE_SCHEMA_HASH),
+            "schema_hash": (proposal_entry.schema_hash, proposal_schema_hash),
             "content_hash": (
                 proposal_entry.content_hash,
                 canonical_sha256(proposal_payload),
@@ -649,6 +648,35 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
                     f"L3 candidate result {result.candidate_id} reinterprets "
                     "its sealed L2 proposal",
                 )
+            if proposal.candidate_kind == "entity" and "proposed_label" in proposal.model_fields_set:
+                label_proofs = [
+                    (label, span.evidence_span_id)
+                    for span in leaf.evidence_spans
+                    if span.evidence_span_id in result.evidence_span_ids
+                    and span.identity.source_unit_id == proposal.source_unit_id
+                    and (label := grounded_instance_label(proposal.proposed_label, span.quote)) is not None
+                ]
+                label_proof = (result.verified_label, result.label_evidence_span_id)
+                if (
+                    result.label_validation_version != L3_LABEL_VALIDATION_VERSION
+                    or (label_proofs and label_proof not in label_proofs)
+                    or (not label_proofs and (
+                        label_proof != (None, None)
+                        or "ENTITY_LABEL_UNGROUNDED" not in result.reason_codes
+                        or result.current_state == AssertionState.ASSERTED.value
+                    ))
+                ):
+                    raise L4ProjectionError(
+                        "L4_INPUT_MANIFEST_INVALID",
+                        f"L3 label for {result.candidate_id} lacks sealed source grounding",
+                    )
+            elif any(value is not None for value in (
+                result.label_validation_version, result.verified_label, result.label_evidence_span_id,
+            )):
+                raise L4ProjectionError(
+                    "L4_INPUT_MANIFEST_INVALID",
+                    f"historical or non-entity candidate {result.candidate_id} cannot carry successor label proof",
+                )
 
         if {
             candidate.candidate_id for candidate in batch.candidates
@@ -661,6 +689,15 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
             )
 
     _validate_l3_indexes(source)
+    try:
+        validate_collection_partition(source.inputs)
+        _reconcile_collection_partition(
+            proposals=source.inputs.required_member_proposals,
+            deferrals=source.inputs.collection_deferrals,
+            outcomes=source.required_member_outcomes,
+        )
+    except ValueError as exc:
+        raise L4ProjectionError("L4_REQUIRED_MEMBER_EQUIVALENCE_FAILED", str(exc)) from exc
 
     proposal_by_id = {
         proposal.required_member_set_proposal_id: proposal
@@ -706,35 +743,41 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
                 f"RequiredMemberSetProposal {proposal_id} does not bind "
                 f"its candidate batch: {exc}",
             ) from exc
+    deferral_ids = set()
+    for deferral in source.inputs.collection_deferrals:
+        deferral_ids.add(deferral.collection_deferral_id)
+        entry = _artifact_by_id(
+            source.inputs.l2_output_manifest, deferral.collection_deferral_id,
+            code="L4_INPUT_MANIFEST_INVALID",
+        )
+        if (
+            entry.contract_kind != COLLECTION_DEFERRAL_KIND
+            or entry.contract_version != COLLECTION_DEFERRAL_VERSION
+            or entry.schema_hash != canonical_sha256(CollectionDeferral.model_json_schema())
+            or entry.content_hash != deferral.deferral_hash
+            or entry.byte_count != _canonical_json_size(deferral)
+            or entry.row_count != len(deferral.observations)
+            or entry.canonical_id_set_hash is not None
+        ):
+            raise L4ProjectionError("L4_INPUT_MANIFEST_INVALID", "collection deferral differs from L2 manifest")
     outcome_by_id = {
-        record.outcome.required_member_set_proposal_id: record
+        record.collection_id: record
         for record in source.required_member_outcomes
     }
     if (
         len(proposal_by_id) != len(source.inputs.required_member_proposals)
         or len(outcome_by_id) != len(source.required_member_outcomes)
-        or set(outcome_by_id) != set(proposal_by_id)
+        or set(outcome_by_id) != set(proposal_by_id) | deferral_ids
     ):
         raise L4ProjectionError(
             "L4_REQUIRED_MEMBER_EQUIVALENCE_FAILED",
-            "L3 required-member outcomes do not partition the proposal set",
+            "L3 required-member outcomes do not partition proposals and deferrals",
         )
 
     manifest_ids: set[str] = set()
     for proposal_id, record in outcome_by_id.items():
         outcome = record.outcome
-        outcome_payload = {
-            key: (list(value) if isinstance(value, tuple) else value)
-            for key, value in outcome.__dict__.items()
-        }
-        outcome_payload["role_coverage"] = [
-            list(item) for item in outcome.role_coverage
-        ]
-        outcome_payload["required_member_manifest_id"] = (
-            record.manifest.required_member_manifest_id
-            if record.manifest is not None
-            else None
-        )
+        outcome_payload = record.payload()
         outcome_entry = _artifact_by_id(
             source.output_manifest,
             f"{proposal_id}:outcome",
@@ -742,11 +785,11 @@ def _validate_l3_artifacts(source: L3StageResult) -> None:
         )
         if (
             outcome_entry.contract_kind != "l3.required_member_outcome"
-            or outcome_entry.contract_version != "1.0.0"
+            or outcome_entry.contract_version != record.contract_version
             or outcome_entry.schema_hash
             != canonical_sha256({
                 "contract_kind": "l3.required_member_outcome",
-                "version": "1.0.0",
+                "version": record.contract_version,
             })
             or outcome_entry.content_hash != canonical_sha256(outcome_payload)
             or outcome_entry.byte_count != _canonical_json_size(outcome_payload)
@@ -837,6 +880,20 @@ def _validate_leaf_manifest(
     leaf: L3LeafResult,
 ) -> None:
     batch_id = leaf.extraction_candidate_batch_id
+    property_entry = _artifact_by_id(
+        manifest,
+        f"{batch_id}:property-observations",
+        code="L4_INPUT_MANIFEST_INVALID",
+    )
+    property_version = property_entry.contract_version
+    try:
+        property_schema_hash = property_observation_schema_hash(property_version)
+        property_payload = [
+            property_observation_payload(item, contract_version=property_version)
+            for item in leaf.property_observations
+        ]
+    except ValueError as exc:
+        raise L4ProjectionError("L4_INPUT_MANIFEST_INVALID", str(exc)) from exc
     payloads = (
         (
             f"{batch_id}:evidence",
@@ -883,12 +940,9 @@ def _validate_leaf_manifest(
         (
             f"{batch_id}:property-observations",
             "l3.property_observation",
-            "1.0.0",
-            canonical_sha256({
-                "contract_kind": "l3.property_observation",
-                "version": "1.0.0",
-            }),
-            [item.__dict__ for item in leaf.property_observations],
+            property_version,
+            property_schema_hash,
+            property_payload,
             len(leaf.property_observations),
             canonical_sha256(
                 sorted(
@@ -1102,12 +1156,24 @@ def _audit_rows_and_dispositions(
 
 
 def _verified_evidence(source: L3StageResult) -> dict[str, Any]:
+    from fabric_kg_builder.enrichment.window_prefix import prefix_span_allowed
+
     spans: dict[str, Any] = {}
     for span in source.evidence_spans:
-        if span.evidence_span_id in spans:
+        if not prefix_span_allowed(
+            source.inputs.domain_contract, source_unit_id=span.source_unit_id,
+            span_start=span.span_start, span_end=span.span_end,
+            source_text_hash=span.source_text_content_hash,
+        ):
+            raise L4ProjectionError(
+                "L4_EVIDENCE_OUTSIDE_APPROVED_PREFIX",
+                f"evidence span {span.evidence_span_id} exceeds the approved committed-prefix scope",
+            )
+        prior = spans.get(span.evidence_span_id)
+        if prior is not None and prior != span:
             raise L4ProjectionError(
                 "L4_EVIDENCE_INVALID",
-                f"duplicate evidence span {span.evidence_span_id}",
+                f"conflicting evidence span {span.evidence_span_id}",
             )
         if (
             span.purpose != L3_EXTRACTION_PURPOSE
@@ -1118,6 +1184,7 @@ def _verified_evidence(source: L3StageResult) -> dict[str, Any]:
                 "L4_EVIDENCE_INVALID",
                 f"evidence span {span.evidence_span_id} is not verified extraction evidence",
             )
+        # Overlapping extraction leaves can mint the same exact evidence record.
         spans[span.evidence_span_id] = span
     return spans
 
@@ -1272,7 +1339,23 @@ def _serving_rows(
             most_specific,
             *hierarchy.ancestors_by_type.get(most_specific, ()),
         )
-        label, label_span_id = _derive_label(evidence_ids, evidence)
+        verified_labels = [
+            (len(item.verified_label), item.verified_label, item.label_evidence_span_id)
+            for item in group
+            if item.label_validation_version == L3_LABEL_VALIDATION_VERSION
+            and item.verified_label is not None
+            and item.label_evidence_span_id in item.evidence_span_ids
+        ]
+        if any(item.label_validation_version is not None for item in group):
+            if not verified_labels:
+                raise L4ProjectionError(
+                    "L4_ASSERTED_LABEL_INVALID",
+                    f"asserted entity {entity_id} has no verified instance label",
+                )
+            _, label, label_span_id = min(verified_labels)
+        else:
+            # Only historical carriers retain the legacy quote-derived display.
+            label, label_span_id = _derive_label(evidence_ids, evidence)
         entity_rows.append(_seal_row({
             "entity_id": entity_id,
             "most_specific_type_id": most_specific,
@@ -1387,17 +1470,57 @@ def _serving_rows(
         ]
         property_ids = {item.effective_property_id for item in observed}
         value_types = {item.value_type for item in observed}
+        owner_ids = {item.entity_id for item in observed}
+        normalized_values = {item.normalized_value_json for item in observed}
         if (
             len(observed) != len(group)
             or len(property_ids) != 1
             or None in property_ids
             or len(value_types) != 1
             or None in value_types
+            or len(owner_ids) != 1
+            or None in owner_ids
+            or len(normalized_values) != 1
+            or None in normalized_values
+            or any(item.value_json != item.normalized_value_json for item in observed)
         ):
             raise L4ProjectionError(
                 "L4_ASSERTED_PROPERTY_INVALID",
                 f"asserted property {property_assertion_id} lacks exact L3 validation",
             )
+        owner_id = next(iter(owner_ids))
+        property_id = next(iter(property_ids))
+        value_type = next(iter(value_types))
+        normalized_json = next(iter(normalized_values))
+        owner_type = entity_type_by_id.get(owner_id)
+        if (
+            owner_type is None
+            or property_id not in hierarchy.effective_property_ids(owner_type)
+            or hierarchy.property_by_id[property_id].value_type != value_type
+        ):
+            raise L4ProjectionError(
+                "L4_ASSERTED_PROPERTY_INVALID",
+                f"asserted property {property_assertion_id} lacks an applicable asserted owner",
+            )
+        try:
+            decode_property_scalar(normalized_json, value_type)
+            for observation in observed:
+                recomputed = deterministic_contract_id(
+                    "property-observation",
+                    {
+                        "entity_id": owner_id,
+                        "property_id": property_id,
+                        "normalized_value": json.loads(normalized_json),
+                        "temporal_key": observation.temporal_key,
+                    },
+                )
+                if recomputed != property_assertion_id:
+                    raise ValueError("property assertion identity differs from proven value")
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise L4ProjectionError(
+                "L4_ASSERTED_PROPERTY_INVALID",
+                f"asserted property {property_assertion_id}: {exc}",
+            ) from exc
         evidence_ids = sorted({
             evidence_id
             for item in group
@@ -1405,9 +1528,11 @@ def _serving_rows(
         })
         property_rows.append(_seal_row({
             "property_assertion_id": property_assertion_id,
-            "semantic_property_id": str(next(iter(property_ids))),
+            "entity_id": owner_id,
+            "semantic_property_id": property_id,
             "candidate_ids": sorted(item.candidate_id for item in group),
-            "value_type": str(next(iter(value_types))),
+            "value_type": value_type,
+            "normalized_value_json": normalized_json,
             "evidence_span_ids": evidence_ids,
             "domain_contract_hash": domain_hash,
             "semantic_contract_hash": domain_hash,
@@ -2254,7 +2379,7 @@ def _receipt(
         "output_manifest_id": output_manifest.artifact_manifest_id,
         "output_manifest_hash": output_manifest.manifest_hash,
         "skip_key": fingerprint,
-        "accepted_contract_versions": L4_ACCEPTED_VERSIONS,
+        "accepted_contract_versions": _accepted_versions(source),
         "resource_metrics_id": metrics.resource_metrics_id,
         "resource_metrics_hash": metrics.metrics_hash,
         "attempt_count": 1,
@@ -2274,6 +2399,13 @@ def _receipt(
 
 
 def _artifact_relative_path(artifact_id: str) -> Path:
+    from fabric_kg_builder.enrichment.approved_partial_handoff import (
+        WITNESS_ID, WITNESS_PREFIX, witness_artifact_path,
+    )
+    if artifact_id == WITNESS_ID or artifact_id.startswith(WITNESS_PREFIX):
+        return witness_artifact_path(artifact_id)
+    if artifact_id == "partial-extraction-scope":
+        return Path("partial-extraction-scope.json")
     if artifact_id.startswith("l4-table:"):
         return Path(f"{artifact_id.removeprefix('l4-table:')}.parquet")
     try:
@@ -2335,7 +2467,7 @@ def _existing_is_intact(
         or receipt.input_manifest_hash != source.output_manifest.manifest_hash
         or receipt.output_manifest_id != manifest.artifact_manifest_id
         or receipt.output_manifest_hash != manifest.manifest_hash
-        or dict(receipt.accepted_contract_versions) != L4_ACCEPTED_VERSIONS
+        or dict(receipt.accepted_contract_versions) != _accepted_versions(source)
         or receipt.resource_metrics_id != expected_metrics_id
         or receipt.attempt_count != 1
         or receipt.remote_operation_refs
@@ -2403,6 +2535,11 @@ def _existing_is_intact(
             or hashlib.sha256(payload).hexdigest() != entry.content_hash
         ):
             return None
+    from fabric_kg_builder.enrichment.approved_partial_handoff import read_scope
+    try:
+        read_scope(run_root, manifest)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
     return manifest, metrics, receipt
 
 
@@ -2456,6 +2593,14 @@ def run_l4(
     temp_root = Path(tempfile.mkdtemp(prefix=f".l4-{fingerprint[:12]}-", dir=state_root))
     try:
         entries: list[ArtifactEntry] = []
+        if source.inputs.partial_extraction_scope is not None:
+            from fabric_kg_builder.enrichment.approved_partial_handoff import (
+                SCOPE_FILE, _scope_entry, export_qualified_witnesses,
+            )
+            scope = source.inputs.partial_extraction_scope
+            payload = _write_json(temp_root / SCOPE_FILE, scope)
+            entries.append(_scope_entry(scope, payload))
+            entries.extend(export_qualified_witnesses(source, temp_root))
         for name, table_rows in rows.tables().items():
             schema = L4_PROJECTION_TABLE_SCHEMAS[name]
             payload = _write_parquet(

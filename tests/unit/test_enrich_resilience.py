@@ -390,7 +390,9 @@ class TestEnrichBatchSurfacePdfPattern:
 class TestEnrichCmdSurfacePdfPattern:
     """enrich command must exit 0 when the LLM returns Surface PDF pattern output."""
 
-    def test_enrich_cmd_exits_0_with_evidence_no_hints(self, tmp_path: Path) -> None:
+    def test_enrich_cmd_exits_0_with_evidence_no_hints(
+        self, tmp_path: Path, offline_enrichment_clients,
+    ) -> None:
         """CLI enrich must exit 0 when evidence items have no id_hint or source_type."""
         from click.testing import CliRunner
         from fabric_kg_builder.cli import cli

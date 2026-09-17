@@ -29,7 +29,10 @@ from fabric_kg_builder.enrichment.schema2_extraction import (
     raw_candidate_response_schema,
 )
 from fabric_kg_builder.enrichment.schema2_stage import (
+    L2_LEGACY_RESPONSE_SCHEMA_HASH,
+    L2_PROPOSED_CANDIDATE_VERSION,
     L2_RESPONSE_SCHEMA_HASH,
+    proposed_candidate_schema_hash,
     dry_run_l2,
     run_l2,
 )
@@ -404,6 +407,23 @@ def test_l2_run_is_proposed_only_and_exact_rerun_skips_remote_work(
 
     assert first.receipt.status == "succeeded"
     assert first.receipt.receipt_hash == second.receipt.receipt_hash
+    partitions = [
+        entry for entry in first.output_manifest.entries
+        if entry.contract_kind == "l2.proposed_candidate_partition"
+    ]
+    assert partitions
+    assert L2_EXTRACTOR_VERSION == "1.4.0"
+    assert L2_PROPOSED_CANDIDATE_VERSION == "1.2.0"
+    assert all(entry.contract_version == L2_PROPOSED_CANDIDATE_VERSION for entry in partitions)
+    assert all(entry.schema_hash == L2_RESPONSE_SCHEMA_HASH for entry in partitions)
+    assert first.receipt.accepted_contract_versions["l2.proposed_candidate_partition"] == "1.2.0"
+    assert proposed_candidate_schema_hash("1.0.0") == L2_LEGACY_RESPONSE_SCHEMA_HASH
+    assert proposed_candidate_schema_hash("1.1.0") == "b13b4ebe78f1f8728e69d2996fae683c8aa0ce6b1725b103a1dd5118abc4de08"
+    assert proposed_candidate_schema_hash("1.2.0") == L2_RESPONSE_SCHEMA_HASH
+    assert proposed_candidate_schema_hash("1.1.0") != L2_RESPONSE_SCHEMA_HASH
+    assert L2_RESPONSE_SCHEMA_HASH != L2_LEGACY_RESPONSE_SCHEMA_HASH
+    with pytest.raises(ValueError, match="re-extract"):
+        proposed_candidate_schema_hash("9.0.0")
     assert first_service.calls == len(first.materialized.source_units)
     assert second_service.calls == 0
     assert first.materialized.report.ineligible_corpus_entry_count == 2

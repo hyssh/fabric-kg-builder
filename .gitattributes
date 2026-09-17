@@ -7,3 +7,9 @@
 # Keep shell scripts LF (break under CRLF); keep PowerShell scripts CRLF
 *.sh text eol=lf
 *.ps1 text eol=crlf
+
+# Public schema snapshots are hash-checked against their original download bytes.
+tests/fixtures/fabric_graph_schema/*__schema.json -text whitespace=cr-at-eol
+
+# Source manuals are local-only; do not render their removal as a text diff.
+sample_data/**/*.pdf binary

@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from fabric_kg_builder.cli import cli
 from fabric_kg_builder.serving.graph_model import (
     _graph_alias,
+    _graph_property_names,
     _stable_id,
     build_graph_model_parts,
     encode_parts_for_api,
@@ -17,6 +18,7 @@ from fabric_kg_builder.serving.graph_model import (
     extract_relationship_pairs_from_parquet,
     onelake_abfss_path,
     validate_graph_data_source_paths,
+    validate_graph_model_schema,
     write_graph_mapping_artifact,
 )
 
@@ -71,6 +73,104 @@ class TestGraphAlias:
         result = _graph_alias("")
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+def test_graph_property_names_are_deterministic_and_preserve_valid_columns():
+    columns = [
+        "__canonical_id", "__label", "__semantic_relationship_id",
+        "__source_entity_id", "__target_entity_id", "canonical_id", "label",
+        "bad-name", "bad name", "1start", "é", "___", "a" * 150 + "-",
+        _graph_alias("__canonical_id"), _graph_alias("__canonical_id") + "_2",
+    ]
+    names = _graph_property_names(columns)
+    assert names == _graph_property_names(list(reversed(columns)) + columns)
+    assert len(names) == len(set(names.values()))
+    assert all(_graph_alias(name) == name for name in names.values())
+    assert names["canonical_id"] == "canonical_id"
+    assert names[_graph_alias("__canonical_id")] == _graph_alias("__canonical_id")
+    assert names["__canonical_id"] == _graph_alias("__canonical_id") + "_3"
+    assert names["__label"] == _graph_alias("__label")
+
+
+@pytest.mark.parametrize("columns", [[""], [None]])
+def test_graph_property_names_reject_empty_source_columns(columns):
+    with pytest.raises(ValueError, match="nonempty"):
+        _graph_property_names(columns)
+
+
+def test_graph_property_mappings_include_implicit_identity_and_preserve_source():
+    binding = {"table": "nodes", "entity_id_column": "__canonical_id", "property_columns": ["__label"]}
+    parts = build_graph_model_parts(
+        entity_types=["Node"], node_table_bindings={"Node": binding},
+        relationship_pairs=[{
+            "name": "Link", "source_type": "Node", "target_type": "Node",
+            "property_columns": ["__canonical_id", "__source_entity_id", "__target_entity_id"],
+            "source_entity_id_column": "__source_entity_id",
+            "target_entity_id_column": "__target_entity_id",
+        }],
+    )
+    assert binding["property_columns"] == ["__label"]
+    decoded = {part["path"]: part["payload_json"] for part in parts}
+    node = decoded["graphType.json"]["nodeTypes"][0]
+    node_binding = decoded["graphDefinition.json"]["nodeTables"][0]
+    mapped = {item["sourceColumn"]: item["propertyName"] for item in node_binding["propertyMappings"]}
+    assert node["primaryKeyProperties"] == [mapped["__canonical_id"]]
+    assert {prop["name"] for prop in node["properties"]} == set(mapped.values())
+    edge_binding = decoded["graphDefinition.json"]["edgeTables"][0]
+    assert edge_binding["sourceNodeKeyColumns"] == ["__source_entity_id"]
+    assert edge_binding["destinationNodeKeyColumns"] == ["__target_entity_id"]
+    assert edge_binding["propertyMappings"][0] == {
+        "sourceColumn": "__canonical_id", "propertyName": mapped["__canonical_id"],
+    }
+
+
+@pytest.mark.parametrize("label", ["_Node", "__Node", "1Node", "Node-name"])
+def test_graph_rejects_invalid_contract_owned_labels(label):
+    with pytest.raises(ValueError, match="Invalid contract-owned Graph .* label"):
+        build_graph_model_parts(entity_types=["Node"], node_labels={"Node": label})
+    with pytest.raises(ValueError, match="Invalid contract-owned Graph .* label"):
+        build_graph_model_parts(entity_types=["Node"], relationship_pairs=[{
+            "name": "Link", "source_type": "Node", "target_type": "Node", "graph_label": label,
+        }])
+
+
+def test_graph_rejects_alias_collisions_and_native_schema_type_conflicts():
+    with pytest.raises(ValueError, match="Duplicate Graph type alias"):
+        build_graph_model_parts(entity_types=["Node"], relationship_pairs=[{
+            "name": "Node", "source_type": "Node", "target_type": "Node", "graph_alias": "Node_nodeType",
+        }])
+    parts = build_graph_model_parts(entity_types=["A", "B"])
+    graph = next(part["payload_json"] for part in parts if part["path"] == "graphType.json")
+    graph["nodeTypes"][0]["properties"][0]["type"] = "INTEGER"
+    with pytest.raises(ValueError, match="Unsupported native Graph property type: INTEGER"):
+        validate_graph_model_schema(parts)
+    graph["nodeTypes"][0]["properties"][0]["type"] = "INT"
+    with pytest.raises(ValueError, match="conflicting types"):
+        validate_graph_model_schema(parts)
+
+
+@pytest.mark.parametrize("change", ["limit", "key", "mapping", "endpoint", "arity", "empty-column"])
+def test_graph_schema_rejects_invalid_native_bindings(change):
+    parts = build_graph_model_parts(entity_types=["Node"], relationship_pairs=[{
+        "name": "Link", "source_type": "Node", "target_type": "Node",
+    }])
+    decoded = {part["path"]: part["payload_json"] for part in parts}
+    graph = decoded["graphType.json"]
+    definition = decoded["graphDefinition.json"]
+    if change == "limit":
+        graph["nodeTypes"] *= 1001
+    elif change == "key":
+        graph["nodeTypes"][0]["primaryKeyProperties"] = []
+    elif change == "mapping":
+        definition["nodeTables"][0]["propertyMappings"].pop()
+    elif change == "endpoint":
+        graph["edgeTypes"][0]["sourceNodeType"]["alias"] = "Missing"
+    elif change == "arity":
+        definition["edgeTables"][0]["sourceNodeKeyColumns"] = []
+    else:
+        definition["edgeTables"][0]["destinationNodeKeyColumns"] = [""]
+    with pytest.raises(ValueError):
+        validate_graph_model_schema(parts)
 
 
 # ---------------------------------------------------------------------------

@@ -2197,7 +2197,7 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         baseline=PRE_RDF_BASELINE,
     )
     assert PRE_RDF_BASELINE["registry_version"] == "1.6.0"
-    assert current_registry["registry_version"] == "1.8.0"
+    assert current_registry["registry_version"] == "1.9.0"
     baseline_keys = {
         (entry["contract_kind"], entry["contract_version"])
         for entry in PRE_RDF_BASELINE["registry_entries"]
@@ -2213,10 +2213,11 @@ def test_schema_generation_is_additive_and_existing_schema_bytes_are_identical(
         ("c0.rdf_validation_receipt", "1.0.0"),
         ("c0.projection_equivalence", "1.1.0"),
         ("c0.publication_crosswalk", "1.2.0"),
+        ("c0.publication_crosswalk", "1.3.0"),
     }
     assert len(current_registry["schemas"]) == len(
         PRE_RDF_BASELINE["registry_entries"]
-    ) + 6
+    ) + 7
 
 
 @pytest.mark.contract

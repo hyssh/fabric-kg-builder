@@ -20,6 +20,17 @@ import yaml
 from fabric_kg_builder.config.loader import _interpolate, _interpolate_deep, load_config
 
 
+def test_whole_document_timeout_is_explicit_and_bounded():
+    from fabric_kg_builder.config.schema import FoundryConfig
+
+    settings = {"endpoint": "https://offline.invalid"}
+    assert FoundryConfig(**settings).request_timeout_seconds == 120
+    assert FoundryConfig(**settings, request_timeout_seconds=1200).request_timeout_seconds == 1200
+    assert FoundryConfig(**settings, request_timeout_seconds=1800).request_timeout_seconds == 1800
+    with pytest.raises(ValueError, match="less than or equal to 1800"):
+        FoundryConfig(**settings, request_timeout_seconds=1801)
+
+
 # ---------------------------------------------------------------------------
 # Interpolation unit tests
 # ---------------------------------------------------------------------------
@@ -137,6 +148,53 @@ def test_chat_deployment_environment_override_wins(
     monkeypatch.setenv("AZURE_AI_CHAT_DEPLOYMENT", "gpt-4-1")
     cfg = load_config(env="dev")
     assert cfg.foundry.chat_deployment == "gpt-4-1"
+
+
+def test_fresh_loaded_config_recommends_gpt54_without_inventing_model_identity(tmp_path, monkeypatch):
+    from fabric_kg_builder.config.schema import FoundryConfig
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://test.openai.azure.com")
+    monkeypatch.delenv("AZURE_AI_CHAT_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("AZURE_AI_CHAT_MODEL", raising=False)
+    cfg = load_config().foundry
+    assert cfg.chat_deployment == "gpt-5.4"
+    assert cfg.chat_model == ""
+    assert FoundryConfig(endpoint=cfg.endpoint).chat_deployment == "gpt-5-4-mini"
+
+
+@pytest.mark.parametrize("source", ["environment", "environment-json", "foundry-yaml", "enrichment-yaml"])
+@pytest.mark.parametrize("deployment", ["gpt-4.1", "custom-alias"])
+def test_explicit_deployment_is_not_retargeted_or_mislabeled(tmp_path, monkeypatch, source, deployment):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://test.openai.azure.com")
+    monkeypatch.delenv("AZURE_AI_CHAT_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("AZURE_AI_CHAT_MODEL", raising=False)
+    settings = {"chat_deployment": deployment}
+    raw = {"foundry": {"chat_model": "${AZURE_AI_CHAT_MODEL}"}}
+    if source == "environment":
+        monkeypatch.setenv("AZURE_AI_CHAT_DEPLOYMENT", deployment)
+    elif source == "environment-json":
+        envs = tmp_path / "ontology" / "environments"
+        envs.mkdir(parents=True)
+        (envs / "dev.json").write_text(json.dumps({"foundry": settings}))
+    else:
+        raw.setdefault("foundry" if source == "foundry-yaml" else "enrichment", {}).update(settings)
+    (tmp_path / "fabric-kg.yaml").write_text(yaml.safe_dump(raw))
+    cfg = load_config().foundry
+    assert cfg.chat_deployment == deployment
+    assert cfg.chat_model == ""
+
+
+@pytest.mark.parametrize("model", ["gpt-4.1", "gpt-5.4"])
+def test_explicit_underlying_model_is_preserved(tmp_path, monkeypatch, model):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AZURE_AI_FOUNDRY_ENDPOINT", "https://test.openai.azure.com")
+    monkeypatch.setenv("AZURE_AI_CHAT_DEPLOYMENT", "custom-alias")
+    monkeypatch.setenv("AZURE_AI_CHAT_MODEL", model)
+    cfg = load_config().foundry
+    assert cfg.chat_deployment == "custom-alias"
+    assert cfg.chat_model == model
 
 
 def test_load_config_reads_secret_from_env(tmp_project, monkeypatch):

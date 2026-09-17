@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from fabric_kg_builder.contracts.base import canonical_sha256
-from fabric_kg_builder.version import RELEASE_VERSION
+from fabric_kg_builder.version import L7_CONTRACT_RELEASE
 
 
 _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
@@ -124,7 +124,7 @@ def _effective_uid() -> int:
 
 
 class FabricOwnershipReceipt(_StrictModel):
-    release: Literal["0.2.4"] = RELEASE_VERSION
+    release: Literal["0.2.4"] = L7_CONTRACT_RELEASE
     attempt_id: str = Field(pattern=r"^op-[0-9a-f]{64}$")
     authority_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     item_id: str = Field(min_length=1)
@@ -267,7 +267,7 @@ class FoundryTarget(_StrictModel):
 
 
 class L7ReleaseConfig(_StrictModel):
-    release: Literal["0.2.4"] = RELEASE_VERSION
+    release: Literal["0.2.4"] = L7_CONTRACT_RELEASE
     tenant_id: str = Field(min_length=1)
     subscription_id: str = Field(min_length=1)
     resource_group: str = Field(min_length=1)
@@ -383,7 +383,7 @@ class DeploymentAction(_StrictModel):
 
 class L7DeploymentPlan(_StrictModel):
     schema_version: Literal["1.0.0"] = "1.0.0"
-    release: Literal["0.2.4"] = RELEASE_VERSION
+    release: Literal["0.2.4"] = L7_CONTRACT_RELEASE
     attempt_id: str = Field(pattern=r"^op-[0-9a-f]{64}$")
     config_hash: str
     tenant_id: str
@@ -428,7 +428,7 @@ class JournalEntry(_StrictModel):
 
 
 class L7DeploymentReceipt(_StrictModel):
-    release: Literal["0.2.4"] = RELEASE_VERSION
+    release: Literal["0.2.4"] = L7_CONTRACT_RELEASE
     attempt_id: str = Field(pattern=r"^op-[0-9a-f]{64}$")
     plan_hash: str
     status: Literal["succeeded", "rolled-back", "failed"]
@@ -2714,7 +2714,7 @@ class AzureL7Backend:
                 continue
             action, observed = mutation
             values: dict[str, Any] = {
-                "release": RELEASE_VERSION,
+                "release": L7_CONTRACT_RELEASE,
                 "attempt_id": plan.attempt_id,
                 "authority_hash": config.authority_hash,
                 "item_id": observed.stable_id,
