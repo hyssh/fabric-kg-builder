@@ -1,0 +1,15 @@
+[
+  {
+    "evidence_id": "e2e:ev:figure12:calloutB",
+    "source_file_id": "sf:e2e:sample.docx",
+    "source_type": "figure_callout",
+    "document_element_id": "de:e2e:figure12",
+    "chunk_id": null,
+    "page_number": 42,
+    "figure_id": "e2e:va:figure12",
+    "visual_region_id": "e2e:vr:figure12:calloutB",
+    "callout_id": "e2e:vr:figure12:calloutB",
+    "blob_url": "https://fake.blob.core.windows.net/kg-assets/e2e/figure12.png",
+    "text": "Callout B identifies the battery connector."
+  }
+]

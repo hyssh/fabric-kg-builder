@@ -1,0 +1,109 @@
+schema_version: '1.0'
+contract_version: 1.0.0
+name: clinical-operations semantic contract
+description: Synthetic clinical-operations ontology for contract tests.
+entity_types:
+- id: entity-type:business-object
+  name: BusinessObject
+  business_name: BusinessObject
+  description: Business definition for BusinessObject.
+  abstract: false
+  parent: null
+  identifiers:
+  - entity_id
+  aliases: []
+  properties:
+  - name: entity_id
+    type: string
+    required: true
+    description: ''
+    aliases: []
+  - name: display_name
+    type: string
+    required: true
+    description: ''
+    aliases: []
+  lineage_properties:
+  - asset_id
+  - asset_version_id
+  - run_id
+  publication_status: core
+- id: entity-type:clinical-operations-subject
+  name: Patient
+  business_name: Patient
+  description: Business definition for Patient.
+  abstract: false
+  parent: entity-type:business-object
+  identifiers:
+  - entity_id
+  aliases: []
+  properties:
+  - name: entity_id
+    type: string
+    required: true
+    description: ''
+    aliases: []
+  - name: display_name
+    type: string
+    required: true
+    description: ''
+    aliases: []
+  lineage_properties:
+  - asset_id
+  - asset_version_id
+  - run_id
+  publication_status: core
+- id: entity-type:clinical-operations-event
+  name: ClinicalEvent
+  business_name: ClinicalEvent
+  description: Business definition for ClinicalEvent.
+  abstract: false
+  parent: entity-type:business-object
+  identifiers:
+  - entity_id
+  aliases: []
+  properties:
+  - name: entity_id
+    type: string
+    required: true
+    description: ''
+    aliases: []
+  - name: display_name
+    type: string
+    required: true
+    description: ''
+    aliases: []
+  lineage_properties:
+  - asset_id
+  - asset_version_id
+  - run_id
+  publication_status: core
+relationship_types:
+- id: relationship-type:clinical-operations-has-event
+  predicate: has_event
+  business_name: has event
+  description: Association between subject and event.
+  source_type: entity-type:clinical-operations-subject
+  target_type: entity-type:clinical-operations-event
+  direction: source_to_target
+  inverse:
+    predicate: event_of
+    materialization: virtual
+  cardinality:
+    source: many
+    target: many
+  evidence_policy: required_for_asserted
+  assertion_policy:
+    allowed_statuses:
+    - asserted
+    - unresolved
+    default_status: unresolved
+  temporal: optional
+  publication_status: core
+approval:
+  status: draft
+  approved_by: null
+  approved_at_utc: null
+  contract_hash: null
+  notes: []
+metadata: {}

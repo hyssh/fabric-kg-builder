@@ -1,0 +1,22 @@
+{
+  "name": "fabric-kg",
+  "description": "Guide the installed fabric-kg CLI through corpus-first design, approved extraction, evidence validation, optional native Leiden, and explicitly approved Fabric prototype publication. Includes the pipeline skill, an optional Surface service-guide example, and the KG-builder agent.",
+  "version": "0.2.7",
+  "author": {
+    "name": "hyssh"
+  },
+  "homepage": "https://hyssh.github.io/fabric-kg-builder/",
+  "repository": "https://github.com/hyssh/fabric-kg-builder",
+  "license": "MIT",
+  "keywords": [
+    "microsoft-fabric",
+    "knowledge-graph",
+    "ontology",
+    "ai-search",
+    "data-agent",
+    "rca"
+  ],
+  "category": "data",
+  "agents": "agents/",
+  "skills": "skills/"
+}

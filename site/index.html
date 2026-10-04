@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fabric-kg-builder — Evidence-backed knowledge graphs</title>
+  <meta name="description" content="Corpus-first knowledge graphs for Microsoft Fabric. Explore development version 0.2.7, native Hierarchical Leiden, source installation, and the Copilot CLI plugin.">
+  <script>
+    (() => {
+      const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+      const theme = param === "light" || param === "dark" ? param :
+        (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --cp-bg: #f7f4ef;
+      --cp-bg-elevated: #fcfbf8;
+      --cp-surface: #ffffff;
+      --cp-surface-soft: #f5f5f5;
+      --cp-border: #dedede;
+      --cp-border-strong: #919191;
+      --cp-text: #242424;
+      --cp-text-muted: #5c5c5c;
+      --cp-text-soft: #6f6f6f;
+      --cp-accent: #b11f4b;
+      --cp-accent-hover: #9a1a41;
+      --cp-accent-soft: rgba(177, 31, 75, 0.08);
+      --cp-accent-fg: #ffffff;
+      --cp-success: #16a34a;
+      --cp-danger: #dc2626;
+      --cp-warning: #f59e0b;
+      --cp-link: #0078d4;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+      --cp-overlay: rgba(255, 255, 255, 0.8);
+      --cp-panel: rgba(255, 255, 255, 0.86);
+      --cp-panel-strong: rgba(255, 255, 255, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.55);
+      --cp-highlight: rgba(177, 31, 75, 0.12);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --cp-bg: #3d3b3a;
+      --cp-bg-elevated: #343231;
+      --cp-surface: #292929;
+      --cp-surface-soft: #2e2e2e;
+      --cp-border: #474747;
+      --cp-border-strong: #5f5f5f;
+      --cp-text: #dedede;
+      --cp-text-muted: #919191;
+      --cp-text-soft: #b0b0b0;
+      --cp-accent: #fd8ea1;
+      --cp-accent-hover: #fb7b91;
+      --cp-accent-soft: rgba(253, 142, 161, 0.14);
+      --cp-accent-fg: #1a1a1a;
+      --cp-success: #4ade80;
+      --cp-danger: #f87171;
+      --cp-warning: #fbbf24;
+      --cp-link: #4da6ff;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+      --cp-overlay: rgba(41, 41, 41, 0.88);
+      --cp-panel: rgba(41, 41, 41, 0.72);
+      --cp-panel-strong: rgba(41, 41, 41, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.04);
+      --cp-highlight: rgba(253, 142, 161, 0.12);
+    }
+  </style>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#overview">fabric-kg-builder</a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav" hidden>Menu</button>
+      <nav id="primary-nav" aria-label="Main navigation">
+        <a href="#whats-new">What's new</a>
+        <a href="#leiden">Leiden</a>
+        <a href="#get-started">Get started</a>
+        <a href="#copilot">Copilot</a>
+        <a href="https://github.com/hyssh/fabric-kg-builder">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero container" id="overview" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">From your corpus.<br>Grounded in evidence.</h1>
+        <p class="hero-lede">Build a domain-fit knowledge graph for Microsoft Fabric. Discover, design, and evaluate first. Extract and publish only with explicit approval.</p>
+        <p>Drive the <code>fabric-kg</code> Python CLI directly or with GitHub Copilot CLI. Keep your source evidence traceable from extraction to a sealed serving graph.</p>
+        <div class="actions">
+          <a class="button button-primary" href="#get-started">Install from source <span aria-hidden="true">↓</span></a>
+          <a class="text-link" href="https://github.com/hyssh/fabric-kg-builder/blob/main/README.md">Read the README <span aria-hidden="true">↗</span></a>
+        </div>
+        <p class="version-note"><strong>0.2.7 · Development version</strong><br>Native Hierarchical Leiden is now opt-in. Not a PyPI release.</p>
+      </div>
+      <figure class="topology">
+        <svg viewBox="0 0 460 390" role="img" aria-labelledby="topology-title topology-desc">
+          <title id="topology-title">Existing facts, derived community grouping</title>
+          <desc id="topology-desc">A conceptual graph has two connected communities and an isolated node. Dashed outlines show derived grouping around the same nodes and directed edges. Grouping adds organization, not new relationships.</desc>
+          <defs>
+            <marker id="edge-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 z"></path></marker>
+          </defs>
+          <text class="diagram-heading" x="28" y="36">A sealed graph, another way to see it.</text>
+          <rect class="community" x="26" y="65" width="185" height="230" rx="30"></rect>
+          <rect class="community" x="243" y="80" width="190" height="175" rx="30"></rect>
+          <rect class="community isolate-group" x="270" y="282" width="88" height="74" rx="24"></rect>
+          <g class="edges" marker-end="url(#edge-arrow)">
+            <path d="M 92 127 L 159 173"></path>
+            <path d="M 160 199 L 108 249"></path>
+            <path d="M 86 241 L 77 140"></path>
+            <path d="M 184 184 L 280 152"></path>
+            <path d="M 310 153 L 372 198"></path>
+            <path d="M 371 173 L 314 129"></path>
+          </g>
+          <g class="nodes">
+            <circle cx="78" cy="118" r="20"></circle><circle cx="170" cy="187" r="20"></circle>
+            <circle cx="95" cy="258" r="20"></circle><circle cx="299" cy="140" r="20"></circle>
+            <circle cx="387" cy="187" r="20"></circle><circle cx="314" cy="319" r="17"></circle>
+          </g>
+          <g class="node-labels">
+            <text x="78" y="124">A</text><text x="170" y="193">B</text><text x="95" y="264">C</text>
+            <text x="299" y="146">D</text><text x="387" y="193">E</text><text x="314" y="325">F</text>
+          </g>
+          <text class="diagram-label" x="45" y="88">Community</text>
+          <text class="diagram-label" x="266" y="105">Community</text>
+          <text class="diagram-label" x="365" y="324">Isolate</text>
+        </svg>
+        <figcaption>Conceptual topology, not corpus data. Original nodes and directed relationships stay intact; dashed outlines represent derived communities.</figcaption>
+      </figure>
+    </section>
+
+    <section class="workflow-section" aria-labelledby="workflow-title">
+      <div class="container">
+        <h2 id="workflow-title">Design before extraction. Evidence before serving.</h2>
+        <p class="section-intro">A domain-agnostic workflow shaped by your documents and questions—not a fixed set of entity types.</p>
+        <ol class="workflow">
+          <li><h3>Discover &amp; design</h3><p>Gather reusable corpus observations. Propose a schema, evaluate question gaps, and explicitly approve the design.</p></li>
+          <li><h3>Extract &amp; validate</h3><p>L2 captures entities and relationships. L3 validates their evidence before compilation into a sealed L4 serving projection.</p></li>
+          <li><h3>Derive or publish</h3><p>Optionally derive communities locally. Review a separate plan before publishing a create-only Fabric prototype.</p></li>
+        </ol>
+        <div class="publication-note">
+          <h3>The default Fabric path</h3>
+          <p><strong>Lakehouse + Ontology → ontology-only Data Agent.</strong> The publisher does not create a standalone GraphModel; Fabric still manages the Ontology companion graph. The Agent uses Ontology v1 as its sole structured source, not Lakehouse SQL. Azure AI Search is separate and is not automatically attached.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="container section" id="whats-new" aria-labelledby="release-title">
+      <div class="section-heading">
+        <h2 id="release-title">What's new in 0.2.7</h2>
+        <a class="text-link" href="https://github.com/hyssh/fabric-kg-builder/blob/main/CHANGELOG.md">Full changelog <span aria-hidden="true">↗</span></a>
+      </div>
+      <p class="section-intro">More faithful extraction, fewer avoidable publication failures, and a new way to organize the graph you already have.</p>
+      <dl class="release-list">
+        <div><dt>Native Hierarchical Leiden</dt><dd>Opt-in derivation from sealed L4, with immutable output and its own receipt. Optional Ontology grouping and offline v2 TMDL conversion keep default publication on v1.</dd></div>
+        <div><dt>Relationship fidelity</dt><dd>The serialized direction/context witness 1.3.0 fails closed with historical compatibility. Cross-leaf endpoints and duplicate local IDs are explicitly rejected.</dd></div>
+        <div><dt>Better extraction context</dt><dd>Bounded ancestor headings inform default extraction; cached layout headings carry across pages. Heading context guides interpretation—it is not evidence. Historical re-extraction, donor continuation, and discovery reuse do not receive the new headings.</dd></div>
+        <div><dt>Reliable reuse &amp; identity</dt><dd>Discovery resume no longer uses stale prepared cache. Corrected re-extraction fragment keys preserve the same semantic entity with different approved types per leaf, rather than last-wins loss.</dd></div>
+        <div><dt>Schema &amp; property handling</dt><dd>A configurable relationship-type range retains the 8–20 default with compiler capacity support. Publication safely maps native dates and deterministically coalesces scoped property variants. An opt-in, evidence-grounded label fallback handles missing required non-key strings—not missing keys.</dd></div>
+      </dl>
+    </section>
+
+    <section class="leiden-section" id="leiden" aria-labelledby="leiden-title">
+      <div class="container section">
+        <div class="section-heading"><h2 id="leiden-title">Group existing facts.<br>Keep their evidence intact.</h2><span class="feature-tag">Native Hierarchical Leiden</span></div>
+        <p class="section-intro">Partition a sorted, undirected projection of your sealed graph. Preserve the original directed, typed relationships, IDs, and evidence. No remote calls. No mutation of approved inputs.</p>
+        <div class="split-layout">
+          <div>
+            <h3>A reproducible local derivation</h3>
+            <p>This example needs a <strong>pre-existing sealed L4</strong> at <code>.fkg/l4/approved-run</code> and validated manifests under <code>.fkg/l3</code>. Replace these illustrative paths with your artifacts and use a new output directory.</p>
+            <div class="code-block">
+              <div class="code-heading"><span>Terminal · Python 3.10–3.13 with the leiden extra</span><button class="copy-button" type="button" aria-label="Copy hierarchy command" hidden>Copy</button></div>
+              <pre tabindex="0" aria-label="Hierarchy derivation command"><code>fabric-kg derive-hierarchy \
+  --source .fkg/l4/approved-run \
+  --input-manifest-search-root .fkg/l3 \
+  --out .fkg/derived-hierarchy/communities-1 \
+  --run-id hier-run-1 --policy-id default \
+  --seed 3735928559 --max-cluster-size 10</code></pre>
+            </div>
+            <p class="small-note">The result is a separately receipted, immutable three-Parquet derived artifact, not a replacement for sealed L4.</p>
+          </div>
+          <div class="hierarchy-details">
+            <h3>Structure you can inspect</h3>
+            <ul>
+              <li>All connected components are covered; isolates form singleton communities.</li>
+              <li>Duplicate IDs and unknown endpoints are rejected.</li>
+              <li>Exactly-once terminal membership and deterministic community identity are validated.</li>
+              <li>SHA256 binds graph, evidence, configuration, and seed; ancestors retain evidence.</li>
+            </ul>
+            <p><strong>Organization, not new knowledge.</strong> It does not recover missing relationships, discover procedural order, or prove semantic inheritance or better answers. A/B quality evaluation is deferred.</p>
+          </div>
+        </div>
+        <div class="faq">
+          <details><summary>Is max-cluster-size a hard limit?</summary><p>No. It is a split trigger. Oversized terminal communities are retained and flagged. A <code>COMPLETE</code> result means structural validity, not semantic utility.</p></details>
+          <details><summary>What if native Leiden cannot run?</summary><p>The optional extra pins <code>graspologic-native==1.2.5</code>, supported here on Python 3.10–3.13, not 3.14. Results explicitly distinguish <code>empty</code>, <code>insufficient</code>, <code>native_unavailable</code>, and <code>failed</code> states. There is no fallback algorithm.</p></details>
+          <details><summary>Does community grouping assert inheritance?</summary><p>No. Opt-in <code>--ontology-inheritance</code> projects communities as abstract <code>group_&lt;dominant type&gt;</code> bases for display grouping. These are not assertions of true “is-a” meaning.</p></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="container section example-section" id="example" aria-labelledby="example-title">
+      <div class="split-layout">
+        <div>
+          <h2 id="example-title">A real Data Agent example</h2>
+          <p class="section-intro">An ontology explorer alongside a conversation about Surface Go 2 kickstand servicing.</p>
+          <p>This user-supplied screenshot shows Fabric Data Agent answers about tools, components, and precautions. It illustrates a document-grounded use case, not a benchmark or proof that Hierarchical Leiden improves answer quality.</p>
+          <p><strong>Verify the source service guide before performing any repair.</strong> The example is not authoritative repair guidance.</p>
+          <a class="text-link" href="images/surface-go-2-data-agent.png">View full screenshot <span aria-hidden="true">↗</span></a>
+        </div>
+        <figure class="example-figure">
+          <a href="images/surface-go-2-data-agent.png" aria-label="View the full Surface Go 2 Data Agent screenshot">
+            <img src="images/surface-go-2-data-agent.png" width="1071" height="1887" loading="lazy" decoding="async" alt="Fabric Data Agent with an ontology explorer and answers about Surface Go 2 kickstand tools, components, and precautions.">
+          </a>
+          <figcaption>Original user-supplied capture, shown in full at reduced size. Open the screenshot to read the details.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="container section" id="get-started" aria-labelledby="install-title">
+      <h2 id="install-title">Start locally. Add cloud services when needed.</h2>
+      <p class="section-intro">Install 0.2.7 from the new public source repository. The project requires Python 3.10+; choose Python 3.10–3.13 for the optional native Leiden provider.</p>
+      <div class="split-layout">
+        <div class="code-block">
+          <div class="code-heading"><span>Terminal · macOS / Linux</span><button class="copy-button" type="button" aria-label="Copy source installation commands" hidden>Copy</button></div>
+          <pre tabindex="0" aria-label="Source installation commands"><code>git clone https://github.com/hyssh/fabric-kg-builder.git
+cd fabric-kg-builder
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[leiden]'
+fabric-kg --version</code></pre>
+        </div>
+        <div class="install-notes">
+          <h3>Only the prerequisites you need</h3>
+          <p>Without native Leiden, install with <code>python -m pip install -e .</code>. On Windows, activate with <code>.venv\Scripts\Activate.ps1</code> in PowerShell.</p>
+          <p>Local hierarchy and offline conversion need artifacts, not Azure credentials or a <code>.env</code>. OCR and enrichment need configured services, authentication, and explicit budget/approval. Use <code>.env.example</code> for guidance and keep secrets uncommitted.</p>
+        </div>
+      </div>
+      <h3 class="help-title">Inspect the workflow before running it</h3>
+      <div class="code-block">
+        <div class="code-heading"><span>Terminal · command reference</span><button class="copy-button" type="button" aria-label="Copy workflow help commands" hidden>Copy</button></div>
+        <pre tabindex="0" aria-label="Workflow help commands"><code>fabric-kg domain discover --help
+fabric-kg domain design --help
+fabric-kg enrich --help
+fabric-kg validate-evidence --help
+fabric-kg project-serving --help
+fabric-kg app publish-structured --help
+fabric-kg app publish-prototype-agent --help
+fabric-kg app convert-ontology-v2 --help</code></pre>
+      </div>
+      <div class="publication-boundaries">
+        <h3>Publication is a separate decision</h3>
+        <p>Use an authorized Fabric workspace and review the default dry-run plan. Live publication requires explicit approval of its exact plan hash through <code>--approve-live</code>. This is a <strong>create-only, nontransactional prototype</strong>: partial resources are retained and there is no automatic rollback. Creating a draft Agent does not complete answer-quality evaluation; general transactional production deployment is not verified.</p>
+        <p>The ontology-only v1 Agent receives GQL instructions using <code>FILTER</code> rather than <code>WHERE</code>, entity/relationship type label names, backtick-quoted <code>label</code>, and explicit guidance against unsupported facts.</p>
+        <p><code>convert-ontology-v2</code> converts emitted parts to TMDL offline, preserving inheritance and bindings. It is not full default v2 deployment or v2 Data Agent support.</p>
+      </div>
+    </section>
+
+    <section class="copilot-section" id="copilot" aria-labelledby="copilot-title">
+      <div class="container section split-layout">
+        <div>
+          <h2 id="copilot-title">Your CLI workflow,<br>guided by Copilot.</h2>
+          <p>The customer-facing plugin helps GitHub Copilot CLI drive the installed <code>fabric-kg</code> tool. The Python CLI is installed separately.</p>
+          <p>Ask Copilot to discover a schema from your corpus, evaluate question gaps, and prepare a plan for review. Keep model spending, schema approval, extraction, and publication as distinct decisions.</p>
+          <a class="text-link" href="https://github.com/hyssh/fabric-kg-builder/blob/main/plugins/fabric-kg/README.md">Plugin guide &amp; installation options <span aria-hidden="true">↗</span></a>
+        </div>
+        <div>
+          <div class="code-block">
+            <div class="code-heading"><span>Terminal · install the plugin</span><button class="copy-button" type="button" aria-label="Copy Copilot plugin installation commands" hidden>Copy</button></div>
+            <pre tabindex="0" aria-label="Copilot plugin installation commands"><code>copilot plugin marketplace add hyssh/fabric-kg-builder
+copilot plugin install fabric-kg@fabric-kg-builder</code></pre>
+          </div>
+          <p>In Copilot CLI, verify with <code>/plugin list</code> and <code>/skills list</code>. Use <code>/agent</code> to select <code>kg-builder</code>.</p>
+        </div>
+      </div>
+    </section>
+    <section class="container support section" aria-labelledby="support-title">
+      <h2 id="support-title">Review the facts. Test the answers.</h2>
+      <p>Evidence validation is not a promise of complete extraction, injection immunity, or correct business answers. Inspect gaps and unsupported facts, then evaluate representative questions before relying on a deployed Agent.</p>
+      <p>For development, install <code>python -m pip install -e '.[dev]'</code> and run <code>python -m pytest</code>. The default suite excludes slow and integration tests.</p>
+      <a class="text-link" href="https://github.com/hyssh/fabric-kg-builder/issues">Questions or a reproducible issue? <span aria-hidden="true">↗</span></a>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <div class="container footer-inner"><span>fabric-kg-builder · 0.2.7 development</span><a href="#overview">Back to top ↑</a></div>
+  </footer>
+  <p id="copy-status" class="copy-status" role="status" aria-live="polite" aria-atomic="true"></p>
+</body>
+</html>

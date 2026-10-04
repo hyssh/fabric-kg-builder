@@ -1,0 +1,238 @@
+---
+name: fabric-kg-pipeline
+description: Use the installed fabric-kg CLI to design from business intent, seed YAML and documents, evaluate question gaps separately, and compile reviewed designs into evidence-governed extraction. Separately authorize model spending, approval and deployment.
+---
+
+## Purpose
+
+Propose the ontology the business needs, then let documents challenge it.
+Drive the installed CLI; do not implement another pipeline in chat or hand-edit
+receipts, hashes, manifests or asserted data to make a command pass.
+
+## Confirm capabilities and intent first
+
+Run `fabric-kg --version`, then help for the exact commands below. Prototype
+commands may differ between builds with the same version number. If a command
+is unavailable, report that incompatibility; do not silently use legacy commands.
+
+Classify intent as design-only, prepare, assess, review/revise, extract, deploy,
+or update. A design-only conversation does not authorize creating project files,
+model calls, loading data or deployment. Ask only for missing high-impact inputs.
+
+Collect roles, decisions, domain, competency questions, expected answers, source
+paths and access/retention requirements. Do not default to a sample taxonomy.
+
+Classify question intent while collecting that context. Use ontology/graph for
+entities, relationships, applicability and procedural retrieval; numerical,
+count and trend analysis should be routed to Lakehouse SQL. A SKU, model number
+or numeric safety threshold in a question does not by itself make it analytical.
+Preserve both needs in mixed requests or require review instead of silently
+discarding one part.
+
+Keep the question ID, text, criticality, routing rationale, population/scope,
+grain, filters, time context and required source information as execution context.
+Keep unresolved decisions in per-question `pending_requirements`; do not drop
+them after evaluation or mark them solved merely because compilation succeeds.
+Do not add quantity/metric/trend ontology types or properties merely to satisfy
+an SQL-directed question. Preserve ordinary source facts and quotations.
+Distinct SKU counts and physical occurrences are not interchangeable, and
+truncated chat results are not a valid counting population.
+
+Inspect `domain question-context --help` and export the actual retained context
+when handing work to another pipeline stage or agent. A route to Lakehouse SQL
+is a plan, not verified table/column bindings, SQL execution or answer readiness.
+If the configured consumer cannot execute that route, report the capability
+gap rather than substitute a graph query or invent a count.
+
+## Corpus-first workflow (0.2.7)
+
+Collect intent first, then use `domain discover` to prepare the complete corpus
+and collect open candidates before `domain design`. Consolidate results per
+document and across the corpus, then evaluate and compile the discovery-bound
+design before the existing approval/extraction workflow. Read each command's
+help for its exact options. Live discovery/generation require explicit model
+authorization; evaluation and compilation are not deployment.
+
+Inspect actual file/chunk coverage, failed/unsupported/deferred work and resume
+bindings. A partial discovery is not full-corpus understanding. Do not quietly
+substitute a small sample, truncate the corpus or label an empty failed response
+as successful discovery. The old bounded design route is explicit `--sample-only`
+compatibility mode, not the normal full-corpus path.
+
+Use prepared parsing/OCR and grounded candidate responses again after approval
+through `enrich --discovery`. Do not automatically send every chunk to the model
+a second time. Reuse only unambiguously compatible observations; expose unmapped
+or missing work and authorize only the necessary targeted re-extraction.
+Discovery is not approval or final semantic evidence: existing L3 verification
+still applies. Never edit caches, IDs or receipts to raise the reuse rate.
+
+Pass an existing YAML design through the dedicated seed input. Preserve the full
+design intent, not only its description. A user sketch is reference material;
+its example identifiers and safety statements are not source evidence. An
+approved seed does not automatically approve the generated design.
+
+Keep common concepts and useful independent types even when they do not support
+a current example question. Question references may be empty or contain multiple
+IDs. Do not invent tags, remove questions or downgrade criticality to pass a gate.
+Assess ontology answer fields, applicability and ordering separately from SQL
+source requirements, calculation grain and time scope, not just graph connectivity.
+
+A design draft is not an approved Schema-2 domain. Gaps and compiler limitations
+must remain visible in the separate evaluation. If compilation is blocked,
+retain the draft and explain the specific unsupported capability; do not shorten
+its meaning to fit a hop limit or add fake completeness evidence. Never pass a
+design draft directly to `enrich` or describe structural support as live answer
+correctness.
+
+The older `init-domain` path is a strict compatibility workflow, not the preferred
+way to explore an incomplete design. Do not assume its legacy seed/profile
+options work in Schema-2; follow the installed CLI's explicit capability checks.
+
+## Supported schema-2 local workflow
+
+| Operation | Command | Boundary |
+|---|---|---|
+| Discover corpus | `fabric-kg domain discover --help` | Full source/chunk accounting and cached unapproved observations; explicit partial state |
+| Infer initial schema | `fabric-kg domain window-bootstrap --help` | Empty schema plus one document's complete cached text; no approved seed or prior model candidates; provisional concepts only |
+| Run integrated windows | `fabric-kg domain window-run --help` | Full intake plus raw chunks; empty schema, extraction and schema proposals in one pass; bounded calls and durable transitions |
+| Inspect integrated run | `fabric-kg domain window-run-status --state ...` / `domain window-run-history --state ...` | Committed raw-window progress; a document stop does not shrink the corpus or approve a partial run |
+| Review integrated mappings | `fabric-kg domain review-window-run-mapping --help` | Final approved domain and five-hash source/context/schema binding before zero-call `enrich --window-run` |
+| Review partial integrated coverage | `fabric-kg domain accept-window-run-partial --help` | Explicit >=99% processing waiver; preserves the original partial run, missing chunks and quarantine |
+| Align windows | `fabric-kg domain window-align --help` | One working-schema version per batch; explicit deterministic/model mode; snapshots are not ontology approval |
+| Inspect window history | `fabric-kg domain window-status --state ...` / `domain window-history --state ...` | Read-only progress and version transitions through the last committed chunk |
+| Review mappings | `fabric-kg domain review-window-mapping --help` | Explicit target-domain-bound mapping acceptance before `enrich --mapping-review`; new concepts stay pending |
+| Explore design | `fabric-kg domain design --help` | Discovery-bound, seed-aware unapproved design; explicit sample-only compatibility |
+| Evaluate design | `fabric-kg domain evaluate-design --help` | Separate structural question report; not factual answer acceptance |
+| Inspect question context | `fabric-kg domain question-context --help` | Read-only routing and data-requirement handoff; not a query executor |
+| Compile design | `fabric-kg domain compile-design --help` | Local strict Schema-2 handoff; does not approve or deploy |
+| Strict proposal (compatibility) | `fabric-kg init-domain --input ... --intake ... --non-interactive` | Model calls; strict Schema-2 draft requiring approval. `--dry-run` inventories only |
+| Plan document assessment | `fabric-kg domain assess --file ... --input ...` | Default mode: no model calls or output-file writes |
+| Execute assessment | `fabric-kg domain assess --file ... --input ... --live --max-calls ... --out ...` | Explicit model authorization; inspect complete/partial coverage and findings |
+| Offline assessment | Same command with `--responses ...` instead of `--live` | Fixture/replay mode is not live model validation |
+| Record decisions | `fabric-kg domain review-assessment --file ... --assessment ... --decisions ... --actor ... --out ... --revision-out ...` | Every finding gets accepted/rejected/deferred plus rationale; does not approve an ontology |
+| Regenerate draft | `fabric-kg domain revise --parent-state ... --input ... --assessment ... --review ... --request ... --out-state ... --live --max-calls ...` | New, separate unapproved L1 state; parent remains unchanged. No execution mode means dry-run |
+| Approve exact draft | `fabric-kg domain approve --file ... --state-dir ... --approved-by ... --project-id ... --run-id ... --proposal-hash ...` | Use actual anchors from the draft; obtain explicit user approval |
+| Reuse/extract | `fabric-kg enrich --input ... --domain-file ... --l1-state ... --l2-state ... --discovery ...` | Consumes exact approved L1; reuse candidates and scope additional work; inspect help and dry-run before calls |
+| Verify evidence | `fabric-kg validate-evidence --l1-state ... --l2-state ... --state ... --domain ...` | Local L3; inspect unresolved/unsupported outcomes, not just exit status |
+| Materialize serving | `fabric-kg project-serving --l1-state ... --l2-state ... --l3-state ... --state ... --domain ...` | Local L4 asserted/audit tables |
+
+Read each command's help before constructing its arguments. Pass a revision's
+separate `--l1-state` and choose a fresh `--l2-state`; `--domain-file` alone does
+not select state. Keep L1/domain/source paths separate from L2 output.
+Do not copy or rewrite sealed artifacts to hide a mismatch. Explicit state roots
+cannot be deleted with `--force`; retain prior runs and use a new output root.
+
+Use `domain assessment-schema` for machine-readable assessment/review contracts.
+For OCR, `domain analyze-layout` plans by default; `--live` permits one capped
+analysis POST using Azure CLI credentials. It preserves the complete raw response.
+`domain assess --ocr-cache ... --ocr-identity ...` reads exact cached responses
+without DI calls. A cached-layout read is not proof OCR interpreted every fact
+correctly, and incomplete/unsupported OCR provenance must remain visible.
+
+## Review, cost and replay
+
+For first-document schema inference, use `domain window-bootstrap` rather than
+constraining the model with the already approved domain. It consumes the cached
+raw source chunks of one explicitly identified document, not other documents or
+previous model summaries. Show the selected file, exact chunk coverage, inferred
+concepts/typed relationships and unresolved decisions. Source quotations support
+schema proposals, not asserted relationship instances. Do not advance to another
+document or approve the result when the user asked only to inspect the first.
+
+For the full domain/questions/schema/extraction loop, use `domain window-run`
+with the original intake and prepared sources (or discovery as a source cache).
+The standalone bootstrap and cached-candidate alignment commands are not
+equivalent to that loop. The integrated run retains all question context and
+uses frozen schema versions across each batch, including bounded repairs.
+Use a document stop for staged inspection, but do not send an unreviewed partial
+run into design/approval. A partial run needs explicit >=99% full-scope processing
+acceptance with `accept-window-run-partial --accept` and design's
+`--window-run-acceptance`; preparation gaps with unknown denominators cannot be
+waived. Complete runs enter `domain design --window-run`;
+final approval and `review-window-run-mapping --accept` are still explicit.
+
+For windowed alignment, keep the working schema in versioned CLI snapshots.
+Every worker in a batch uses one frozen version; aggregate and evaluate changes
+before committing the next. Preserve before/after hashes, original observations,
+mapping decisions, pending conflicts and model context. Conversation memory is
+not the registry. Inspect actual command availability before using window
+operations; do not imitate them with hand-edited candidate files.
+Use `domain window-schema` for exact artifact contracts. `window-align` plans by
+default; `--live` persists work. Deterministic mode makes no model calls and
+handles unique formatting equivalence only, not arbitrary synonyms. Model mode
+uses bounded alignment calls. Complete windows resume without repeated calls.
+Final replay uses the exact accepted mapping review and `--window-state`; changed
+mapping authority requires fresh L2 state rather than stale checkpoints.
+
+Ontology holds core concepts, relationships, procedure structure and retrieval
+keys, not necessarily every detail from the documents. Foundry Agent orchestration
+can use those keys to retrieve detailed text from AI Search. Preserve scope,
+document revision and permissions, and retrieve parent paragraphs/table rows and
+headers when the short hit does not establish an owner/value relationship.
+Similarity is not proof. Do not automatically write a retrieved answer back into
+the ontology or treat an optional unstructured detail as a mandatory graph field.
+
+For separate Foundry/Search orchestration, the required original content must
+actually be indexed and access-controlled; an asserted-evidence-only index is
+not assumed to contain omitted detail. Review source coverage, permissions,
+bindings, and answer evidence before enabling that integration. Index expansion
+and runtime evidence adjudication are not silently supplied by the window CLI
+or automatically attached to the ontology-only Data Agent.
+
+- `complete` assessment means window/file accounting, not perfect semantic recall.
+- Keep deferred windows, unsupported images, unread documents and remaining
+  questions visible. Do not approve because no findings were returned.
+- Distinguish OCR/extraction failure, source conflict, scope differences and
+  ontology omission. Silence is not a negative fact.
+- Review recommendations are not authority to change a deployed contract.
+- Specify a model-call limit, input bound and output-token bound. Obtain a spend
+  budget; request limits are not exact billing measurements.
+- Retain response cache artifacts; use `--response-cache` or an exact-input
+  `--checkpoint` for assessment replay. Never overwrite an earlier report.
+- A 401/403 is not transient: stop, show the permission category, and do not list
+  keys, switch identities or retry a different resource to evade the denial.
+- Stop on failure. Resume only when recorded input/contract/model identities
+  match; a previous success status alone is insufficient.
+
+## Deployment is separate and capability-gated
+
+`fabric-kg app publish-structured --help` describes the schema-2 L5a planning
+surface. Default transactional live publication remains capability NO-GO.
+An explicit create-only prototype path, where available, is not transactional
+deployment or recovery. Inspect its exact plan, owned-item journal and readback
+requirements before separately authorizing any live call. Do not remove guards,
+create fake receipts or describe a dry-run as deployment. Fabric workspace
+authority is separate from Azure resource groups.
+
+The 0.2.7 structured prototype creates Lakehouse + Ontology, not a standalone
+GraphModel. Fabric manages the Ontology companion graph. The prototype Data
+Agent uses Ontology v1 as its sole structured source, with GQL instructions;
+Lakehouse SQL and AI Search are not automatically attached. Partial resources
+are retained without automatic rollback.
+
+Optional `derive-hierarchy` consumes sealed L4 and writes a new, separately
+receipted local artifact. Native Leiden requires the optional extra on Python
+3.10–3.13 and has no fallback. It groups existing facts; it does not establish
+better answers, restore missing relationships, or prove semantic inheritance.
+Offline `app convert-ontology-v2` emits TMDL; it is not default v2 publication
+or v2 Data Agent support.
+
+Existing semantic-bundle deployment commands remain compatibility paths; they
+are not an automatic continuation from L4. Obtain the exact supported target,
+resource ownership, readback/recovery plan and explicit deployment approval.
+Do not replace shared resources to work around an integration gap.
+
+Postdeployment fixes are versioned proposals. Preserve the previous release and
+require approval for changed meaning, identity keys, withdrawals and live writes.
+Do not claim estate-wide rollback from Search alias rollback alone.
+
+## Legacy compatibility commands and examples
+
+`set-domain` is deprecated. `densify` consumes legacy canonical JSON and explicit
+schema-1 rules; it is not mandatory or a schema-2 step. The `surface-repro` skill
+applies the current workflow to user-downloaded service guides. It is optional
+and does not prescribe a fixed taxonomy or authorize remote work.
+
+Never print or commit credentials. Keep resource-specific configuration and
+customer evidence outside tracked source. Cite actual command outputs and
+artifact paths, distinguishing offline, model-tested and deployed results.

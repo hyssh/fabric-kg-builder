@@ -1,0 +1,81 @@
+# deployment.yaml — Fabric item naming authority
+#
+# This file is the SINGLE authority for Fabric item display names. Every deploy
+# command resolves item names through this manifest. Conflicting names in
+# generated metadata or command flags raise NAME_AUTHORITY_CONFLICT errors.
+#
+# ${ENV_VAR} placeholders are interpolated from the environment at load time.
+#
+# Usage:
+#   fabric-kg deploy-ontology --env dev --manifest deployment.yaml --no-mock
+#   fabric-kg deploy-lakehouse --env dev --manifest deployment.yaml --no-mock
+#   fabric-kg deploy-graph --env dev --manifest deployment.yaml --no-dry-run
+#   fabric-kg deploy-data-agent --env dev --manifest deployment.yaml --mode update
+#   fabric-kg build-deploy --env dev --manifest deployment.yaml --dry-run
+#
+# Distinct from infra/environments/<env>.yaml (InfraManifest = Azure resource
+# provisioning). This manifest governs Fabric item identity only.
+#
+# Migration from legacy env JSON:
+#   If you previously set fabric.ontology_display_name / fabric.lakehouse_display_name
+#   / etc. in ontology/environments/{env}.json, those values are used automatically
+#   when --manifest is NOT supplied (legacy mode). To migrate:
+#
+#   1. Copy the display names from your env JSON into this file.
+#   2. Pass --manifest deployment.yaml to your deploy commands.
+#   3. Remove the legacy display_name fields from the env JSON to silence
+#      migration warnings.
+#
+#   Precedence when --manifest is supplied:
+#     deployment.yaml    → AUTHORITATIVE (always wins)
+#     env JSON names     → migration warning emitted; manifest wins
+#     --*-name CLI flags → must match manifest or NAME_AUTHORITY_CONFLICT raised
+#
+# Naming rules:
+#   ontology / lakehouse / semantic_model display_name:
+#     Must start with a letter; only letters, numbers, underscores (no spaces
+#     or hyphens). Example: Building_Operations_Ontology
+#   graph_model display_name:
+#     May contain spaces; must not exceed 256 characters.
+#   data_agent / search_index:
+#     No Fabric identifier restrictions; use descriptive names.
+
+workspace: ${FABRIC_WORKSPACE_ID}   # Fabric workspace ID (required for deployment)
+
+items:
+  ontology:
+    display_name: kg_ontology          # Fabric Ontology item name
+    configured_id: ""                  # Leave empty to discover by name; set after first deploy
+
+  lakehouse:
+    display_name: kg_lakehouse         # Fabric Lakehouse item name
+    configured_id: ""
+
+  semantic_model:
+    display_name: kg_semantic          # Fabric Semantic Model display name
+    configured_id: ""
+
+  graph_model:
+    display_name: KG Graph             # Fabric GraphModel display name (spaces allowed)
+    configured_id: ""
+
+  data_agent:
+    display_name: fkg-dev-data-agent   # Fabric Data Agent display name
+    configured_id: ""
+
+  search_index:
+    prefix: kg-dev-                    # AI Search index prefix (prepended to each index name)
+    display_name: kg-chunks            # Base name for the primary chunks index
+    configured_id: ""
+
+# Manifest-driven dependency order for orchestrated deployment.
+# The orchestrator respects these when planning the deployment sequence.
+dependencies:
+  - item: graph_model
+    depends_on:
+      - ontology
+  - item: data_agent
+    depends_on:
+      - ontology
+      - semantic_model
+      - graph_model

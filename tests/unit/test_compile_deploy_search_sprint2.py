@@ -1,0 +1,997 @@
+"""Sprint 2 unit tests: compile-search (full document generation) + deploy-search (mock).
+
+Coverage:
+  - compile-search with a small canonical fixture writes index.schema.json
+    (1536 dims, entity_ids filterable, entity_aliases searchable) + docs.json
+    with derived linkage fields
+  - deploy-search mock reads dev.json (example-search) and reports index+doc counts
+    with no network call; respects ai_search.enabled flag
+  - search.linkage: derive_chunk_doc / derive_document_element_doc fields
+  - search.push: PushResult, push_from_build_dir mock
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from click.testing import CliRunner
+
+from fabric_kg_builder.cli.compile_search_cmd import (
+    _build_chunks_schema,
+    _build_document_elements_schema,
+    _build_visual_assets_schema,
+    _reuse_unchanged_vectors,
+    compile_search_cmd,
+)
+from fabric_kg_builder.cli.deploy_cmd import deploy_search_cmd, _read_search_env_config
+from fabric_kg_builder.search.linkage import (
+    derive_chunk_doc,
+    derive_document_element_doc,
+    derive_visual_docs,
+    build_entity_lookup,
+)
+from fabric_kg_builder.search.push import PushResult, push_from_build_dir
+from fabric_kg_builder.semantic import (
+    compile_semantic_bundle,
+    load_semantic_bundle,
+)
+from tests.unit.test_semantic_contract import (
+    _approve,
+    _contract,
+    _write_bundle,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures helpers
+# ---------------------------------------------------------------------------
+
+_ENTITY_ROW = {
+    "entity_id": "ent-001",
+    "entity_type": "Device",
+    "display_name": "Surface Pro 11",
+    "canonical_key": "surface_pro_11",
+    "search_aliases": ["Surface Pro 11", "SP11"],
+    "aliases": ["SP11"],
+}
+
+_CHUNK_ROW = {
+    "chunk_id": "chk-001",
+    "source_file_id": "src-001",
+    "chunk_type": "section_text",
+    "content": "The Surface Pro 11 features a USB-C port.",
+    "embedding_text": "Surface Pro 11 features USB-C port.",
+    "blob_url": None,
+    "related_entity_ids": ["ent-001"],
+    "entity_search_keys": ["Surface Pro 11", "SP11"],
+    "content_hash": "abc123",
+    "created_at": "2026-06-24T00:00:00+00:00",
+}
+
+_DOC_ELEMENT_ROW = {
+    "document_element_id": "de-001",
+    "source_file_id": "src-001",
+    "element_type": "section",
+    "content": "Troubleshooting connectivity issues.",
+    "content_html": "<p>Troubleshooting connectivity issues.</p>",
+    "blob_url": None,
+    "page_number": 3,
+    "section_path": "Chapter 2 > Connectivity",
+    "content_hash": "def456",
+    "extracted_at": "2026-06-24T00:00:00+00:00",
+}
+
+_VISUAL_ASSET_ROW = {
+    "image_id": "img-001",
+    "source_file_id": "src-001",
+    "document_element_id": "de-001",
+    "asset_type": "figure",
+    "page_number": 3,
+    "section_path": "Chapter 2 > Connectivity",
+    "caption": "Figure 1: USB-C connector",
+    "alt_text": "A close-up of the USB-C connector",
+    "description": "The connector is located on the left side.",
+    "blob_url": "https://example.blob.core.windows.net/images/img-001.png",
+    "created_at": "2026-06-24T00:00:00+00:00",
+}
+
+_VISUAL_REGION_ROW = {
+    "visual_region_id": "vr-001",
+    "image_id": "img-001",
+    "region_type": "ocr_text",
+    "label": "USB-C",
+    "text": "USB-C charging port",
+    "normalized_polygon_json": "[[0,0],[1,0],[1,1],[0,1]]",
+    "identified_entity_id": "ent-001",
+    "created_at": "2026-06-24T00:00:00+00:00",
+}
+
+
+def _write_parquet(directory: Path, table_name: str, rows: list[dict]) -> None:
+    """Write rows as a real Parquet file using pyarrow."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    if not rows:
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pylist(rows)
+    pq.write_table(table, str(directory / f"{table_name}.parquet"))
+
+
+def _make_parquet_input(tmp: Path) -> Path:
+    """Write minimal chunks + entities Parquet fixtures."""
+    parquet_dir = tmp / "build" / "parquet"
+    _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+    _write_parquet(parquet_dir, "entities", [_ENTITY_ROW])
+    return parquet_dir
+
+
+def _make_env_json_with_search(
+    tmp: Path,
+    env: str = "dev",
+    enabled: bool = True,
+    service_name: str = "example-search",
+) -> Path:
+    """Write a minimal environments/{env}.json with ai_search section."""
+    envs_dir = tmp / "ontology" / "environments"
+    envs_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "env": env,
+        "fabric": {
+            "workspace_id": "ws-test-1234",
+            "lakehouse_item_id": "lh-test-5678",
+        },
+        "ai_search": {
+            "enabled": enabled,
+            "service_name": service_name,
+            "endpoint": f"https://{service_name}.search.windows.net",
+            "index_prefix": "kg-dev-",
+            "index_chunks": "kg-chunks",
+            "index_document_elements": "kg-document-elements",
+            "index_visual_assets": "kg-visual-assets",
+        },
+    }
+    path = envs_dir / f"{env}.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+# ===========================================================================
+# search.linkage — unit tests
+# ===========================================================================
+
+
+class TestLinkageDerivation:
+    """Tests for derive_chunk_doc and derive_document_element_doc."""
+
+    def test_derive_chunk_doc_has_all_required_fields(self):
+        """derive_chunk_doc returns a doc with all required AI Search fields."""
+        doc = derive_chunk_doc(_CHUNK_ROW)
+        for field in ("chunk_id", "content", "embedding_text", "entity_ids",
+                      "entity_aliases", "canonical_key", "entity_types",
+                      "graph_path", "blob_url", "source_path",
+                      "last_modified", "content_type"):
+            assert field in doc, f"Missing field: {field}"
+
+
+    def test_reuse_unchanged_vectors_streams_prior_documents(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        prior_path = tmp_path / "docs.json"
+        prior_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "chunk_id": "unchanged",
+                        "embedding_text": "same",
+                        "chunk_vector": [0.1, 0.2],
+                    },
+                    {
+                        "chunk_id": "changed",
+                        "embedding_text": "",
+                        "content": "old fallback",
+                        "chunk_vector": [0.3, 0.4],
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        docs = [
+            {"chunk_id": "unchanged", "embedding_text": "same"},
+            {
+                "chunk_id": "changed",
+                "embedding_text": "",
+                "content": "new fallback",
+            },
+        ]
+
+        reused = _reuse_unchanged_vectors(
+            docs,
+            prior_docs_path=prior_path,
+            id_field="chunk_id",
+            text_field="embedding_text",
+            vector_field="chunk_vector",
+            dimensions=2,
+        )
+
+        assert reused == 1
+        assert docs[0]["chunk_vector"] == [0.1, 0.2]
+        assert "chunk_vector" not in docs[1]
+
+    def test_derive_chunk_doc_entity_ids_populated(self):
+        """entity_ids comes from related_entity_ids."""
+        doc = derive_chunk_doc(_CHUNK_ROW)
+        assert doc["entity_ids"] == ["ent-001"]
+
+    def test_derive_chunk_doc_entity_aliases_populated(self):
+        """entity_aliases comes from entity_search_keys."""
+        doc = derive_chunk_doc(_CHUNK_ROW)
+        assert "Surface Pro 11" in doc["entity_aliases"]
+
+    def test_derive_chunk_doc_canonical_key_from_entities(self):
+        """canonical_key is resolved from entities_by_id lookup."""
+        lookup = build_entity_lookup([_ENTITY_ROW])
+        doc = derive_chunk_doc(_CHUNK_ROW, lookup)
+        assert doc["canonical_key"] == "surface_pro_11"
+
+    def test_derive_chunk_doc_entity_types_from_entities(self):
+        """entity_types populated when entities_by_id is provided."""
+        lookup = build_entity_lookup([_ENTITY_ROW])
+        doc = derive_chunk_doc(_CHUNK_ROW, lookup)
+        assert "Device" in doc["entity_types"]
+
+    def test_derive_chunk_doc_graph_path_none(self):
+        """graph_path is None at compile time (injected at push time)."""
+        doc = derive_chunk_doc(_CHUNK_ROW)
+        assert doc["graph_path"] is None
+
+    def test_derive_chunk_doc_no_entities_lookup(self):
+        """derive_chunk_doc works without an entity lookup (canonical_key='')."""
+        doc = derive_chunk_doc(_CHUNK_ROW)
+        assert doc["canonical_key"] == ""
+        assert doc["entity_types"] == []
+
+    def test_derive_doc_element_doc_fields(self):
+        """derive_document_element_doc has all required fields."""
+        doc = derive_document_element_doc(_DOC_ELEMENT_ROW)
+        for field in ("document_element_id", "content", "content_html",
+                      "element_type", "page_number", "section_path",
+                      "entity_ids", "entity_aliases", "canonical_key",
+                      "graph_path", "blob_url"):
+            assert field in doc, f"Missing field: {field}"
+
+    def test_derive_doc_element_doc_page_number(self):
+        """page_number is preserved correctly."""
+        doc = derive_document_element_doc(_DOC_ELEMENT_ROW)
+        assert doc["page_number"] == 3
+
+    def test_derive_doc_element_doc_section_path(self):
+        """section_path is preserved correctly."""
+        doc = derive_document_element_doc(_DOC_ELEMENT_ROW)
+        assert doc["section_path"] == "Chapter 2 > Connectivity"
+
+    @pytest.mark.parametrize(
+        ("element", "expected"),
+        [
+            (
+                {
+                    **_DOC_ELEMENT_ROW,
+                    "content": None,
+                    "title": "Overview",
+                    "content_html": None,
+                },
+                "Overview",
+            ),
+            (
+                {
+                    **_DOC_ELEMENT_ROW,
+                    "content": None,
+                    "title": None,
+                    "content_html": "<table><tr><td>Original value</td></tr></table>",
+                },
+                "Original value",
+            ),
+        ],
+    )
+    def test_derive_doc_element_source_quote_fallbacks(
+        self,
+        element,
+        expected,
+    ):
+        doc = derive_document_element_doc(element)
+        assert doc["content"] == expected
+        assert doc["source_quote"] == expected
+        assert doc["source_quote_is_verbatim"] is True
+
+    def test_derive_visual_docs_returns_asset_and_region_docs_with_complete_fields(self):
+        """Visual search docs retain image, region, text, Blob, and entity context."""
+        docs = derive_visual_docs(
+            [_VISUAL_ASSET_ROW], [_VISUAL_REGION_ROW], build_entity_lookup([_ENTITY_ROW])
+        )
+        asset_doc, region_doc = docs
+        assert asset_doc["visual_id"] == "img-001"
+        assert asset_doc["blob_url"] == _VISUAL_ASSET_ROW["blob_url"]
+        assert "USB-C connector" in asset_doc["content"]
+        assert region_doc["visual_id"] == "vr-001"
+        assert region_doc["image_id"] == "img-001"
+        assert region_doc["visual_region_id"] == "vr-001"
+        assert region_doc["blob_url"] == _VISUAL_ASSET_ROW["blob_url"]
+        assert region_doc["page_number"] == 3
+        assert region_doc["entity_ids"] == ["ent-001"]
+
+    def test_build_entity_lookup_keyed_by_entity_id(self):
+        """build_entity_lookup returns dict keyed by entity_id."""
+        lookup = build_entity_lookup([_ENTITY_ROW])
+        assert "ent-001" in lookup
+        assert lookup["ent-001"]["display_name"] == "Surface Pro 11"
+
+
+# ===========================================================================
+# search.push — unit tests
+# ===========================================================================
+
+
+class TestSearchPush:
+    """Tests for PushResult and push_from_build_dir in mock mode."""
+
+    def test_push_result_mock_str(self):
+        """PushResult.__str__ includes MOCK, index name, and doc count."""
+        r = PushResult(index_name="kg-chunks", doc_count=42, mock=True)
+        s = str(r)
+        assert "MOCK" in s
+        assert "kg-chunks" in s
+        assert "42" in s
+
+    def test_push_result_succeeded_default(self):
+        """PushResult.succeeded defaults to True."""
+        r = PushResult(index_name="kg-chunks", doc_count=0, mock=True)
+        assert r.succeeded is True
+
+    def test_push_from_build_dir_mock_returns_results(self, tmp_path):
+        """push_from_build_dir mock returns (schema_result, docs_result)."""
+        # Scaffold minimal build/search/kg-chunks/
+        idx_dir = tmp_path / "kg-chunks"
+        idx_dir.mkdir()
+        (idx_dir / "index.schema.json").write_text('{"name":"kg-chunks","fields":[]}')
+        (idx_dir / "docs.json").write_text('[{"chunk_id":"c1","content":"hello"}]')
+
+        schema_r, docs_r = push_from_build_dir(tmp_path, "kg-chunks", "kg-dev-chunks", mock=True)
+        assert schema_r.mock is True
+        assert docs_r.mock is True
+        assert docs_r.doc_count == 1
+
+    def test_push_from_build_dir_missing_schema_raises(self, tmp_path):
+        """push_from_build_dir raises FileNotFoundError when schema is missing."""
+        with pytest.raises(FileNotFoundError):
+            push_from_build_dir(tmp_path, "kg-chunks", "kg-dev-chunks", mock=True)
+
+    def test_push_from_build_dir_no_docs_json(self, tmp_path):
+        """push_from_build_dir works when docs.json is absent (0 docs)."""
+        idx_dir = tmp_path / "kg-chunks"
+        idx_dir.mkdir()
+        (idx_dir / "index.schema.json").write_text('{"name":"kg-chunks","fields":[]}')
+
+        schema_r, docs_r = push_from_build_dir(tmp_path, "kg-chunks", "kg-dev-chunks", mock=True)
+        assert docs_r.doc_count == 0
+
+
+# ===========================================================================
+# compile_search_cmd — Sprint 2 full document generation
+# ===========================================================================
+
+
+class TestCompileSearchSprint2:
+    """Tests for compile-search full document generation from Parquet fixtures."""
+
+    def test_all_generated_schemas_have_unique_declared_fields(self):
+        for schema_builder in (
+            _build_chunks_schema,
+            _build_document_elements_schema,
+            _build_visual_assets_schema,
+        ):
+            field_names = [field["name"] for field in schema_builder()["fields"]]
+            assert len(field_names) == len(set(field_names))
+
+    def test_compile_search_with_parquet_writes_docs_json(self, tmp_path):
+        """compile-search writes docs.json when Parquet input is present."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        result = runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir),
+            "--out", str(out),
+            "--indexes", "kg-chunks",
+        ])
+        assert result.exit_code == 0, f"Expected 0:\n{result.output}"
+        docs_path = out / "kg-chunks" / "docs.json"
+        assert docs_path.exists(), "docs.json not written"
+
+    def test_compile_search_docs_json_has_chunk_doc(self, tmp_path):
+        """docs.json for kg-chunks contains a document with chunk_id."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir),
+            "--out", str(out),
+            "--indexes", "kg-chunks",
+        ])
+        docs = json.loads((out / "kg-chunks" / "docs.json").read_text())
+        assert len(docs) == 1
+        assert docs[0]["chunk_id"] == "chk-001"
+
+    def test_compile_search_visual_assets_generates_asset_and_region_records(self, tmp_path):
+        """compile-search emits retrievable asset and region records."""
+        parquet_dir = tmp_path / "build" / "parquet"
+        _write_parquet(parquet_dir, "visual_assets", [_VISUAL_ASSET_ROW])
+        _write_parquet(parquet_dir, "visual_regions", [_VISUAL_REGION_ROW])
+        _write_parquet(parquet_dir, "entities", [_ENTITY_ROW])
+        out = tmp_path / "search"
+        result = CliRunner().invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-visual-assets",
+        ])
+        assert result.exit_code == 0, result.output
+        schema = json.loads((out / "kg-visual-assets" / "index.schema.json").read_text())
+        assert {f["name"] for f in schema["fields"]} >= {
+            "visual_id", "image_id", "visual_region_id", "blob_url", "page_number",
+        }
+        docs = json.loads((out / "kg-visual-assets" / "docs.json").read_text())
+        assert {doc["visual_id"] for doc in docs} == {"img-001", "vr-001"}
+
+    def test_compile_search_docs_json_entity_ids_filterable(self, tmp_path):
+        """docs.json chunk doc has entity_ids populated from related_entity_ids."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        docs = json.loads((out / "kg-chunks" / "docs.json").read_text())
+        assert docs[0]["entity_ids"] == ["ent-001"]
+
+    def test_compile_search_docs_json_entity_aliases_searchable(self, tmp_path):
+        """docs.json chunk doc has entity_aliases from entity_search_keys."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        docs = json.loads((out / "kg-chunks" / "docs.json").read_text())
+        assert "Surface Pro 11" in docs[0]["entity_aliases"]
+
+    def test_compile_search_docs_json_canonical_key_resolved(self, tmp_path):
+        """canonical_key in docs.json is resolved via entities Parquet."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        docs = json.loads((out / "kg-chunks" / "docs.json").read_text())
+        assert docs[0]["canonical_key"] == "surface_pro_11"
+
+    def test_compile_search_schema_written_even_with_parquet(self, tmp_path):
+        """index.schema.json is written alongside docs.json."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        assert (out / "kg-chunks" / "index.schema.json").exists()
+
+    def test_compile_search_schema_1536_dims(self, tmp_path):
+        """index.schema.json still has 1536-dim vector field when docs are present."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        schema = json.loads((out / "kg-chunks" / "index.schema.json").read_text())
+        vec_fields = [f for f in schema["fields"] if f.get("dimensions")]
+        assert vec_fields[0]["dimensions"] == 1536
+
+    def test_compile_search_schema_entity_ids_filterable_in_schema(self, tmp_path):
+        """index.schema.json entity_ids field is filterable (not searchable)."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        schema = json.loads((out / "kg-chunks" / "index.schema.json").read_text())
+        field = next(f for f in schema["fields"] if f["name"] == "entity_ids")
+        assert field["filterable"] is True
+        assert field.get("searchable", True) is False
+
+    def test_compile_search_schema_entity_aliases_searchable_in_schema(self, tmp_path):
+        """index.schema.json entity_aliases field is searchable (not filterable)."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        schema = json.loads((out / "kg-chunks" / "index.schema.json").read_text())
+        field = next(f for f in schema["fields"] if f["name"] == "entity_aliases")
+        assert field["searchable"] is True
+        assert field.get("filterable", True) is False
+
+    def test_compile_search_no_parquet_no_docs_json(self, tmp_path):
+        """compile-search skips docs.json when Parquet tables are absent."""
+        empty_input = tmp_path / "empty"
+        empty_input.mkdir()
+        out = tmp_path / "search"
+        runner = CliRunner()
+        result = runner.invoke(compile_search_cmd, [
+            "--input", str(empty_input),
+            "--out", str(out),
+            "--indexes", "kg-chunks",
+        ])
+        assert result.exit_code == 0
+        # Schema is always written
+        assert (out / "kg-chunks" / "index.schema.json").exists()
+        # docs.json skipped when no Parquet
+        assert not (out / "kg-chunks" / "docs.json").exists()
+
+    def test_compile_search_required_visual_assets_rejects_zero_rows(self, tmp_path):
+        empty_input = tmp_path / "empty"
+        empty_input.mkdir()
+        out = tmp_path / "search"
+        visual_dir = out / "kg-visual-assets"
+        visual_dir.mkdir(parents=True)
+        stale_docs = visual_dir / "docs.json"
+        stale_docs.write_text('[{"visual_id":"stale"}]', encoding="utf-8")
+
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(empty_input),
+                "--out",
+                str(out),
+                "--indexes",
+                "kg-visual-assets",
+                "--require-visual-assets",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "kg-visual-assets is required" in result.output
+        assert "visual_extraction status" in result.output
+        assert not stale_docs.exists()
+
+    def test_compile_search_summary_line_has_doc_count(self, tmp_path):
+        """SUCCESS line in output includes the document count."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        runner = CliRunner()
+        result = runner.invoke(compile_search_cmd, [
+            "--input", str(parquet_dir), "--out", str(out), "--indexes", "kg-chunks",
+        ])
+        assert "SUCCESS" in result.output
+        assert "1" in result.output  # 1 document derived
+
+    def test_compile_search_no_network_calls_with_parquet(self, tmp_path):
+        """compile-search (even with Parquet) never makes network calls."""
+        parquet_dir = _make_parquet_input(tmp_path)
+        out = tmp_path / "search"
+        with patch("socket.getaddrinfo", side_effect=AssertionError("NETWORK BLOCKED")):
+            runner = CliRunner()
+            result = runner.invoke(compile_search_cmd, [
+                "--input", str(parquet_dir), "--out", str(out),
+            ])
+        assert result.exit_code == 0
+
+    def test_compile_search_rejects_stale_authoritative_entity_metadata(
+        self,
+        tmp_path,
+    ):
+        parquet_dir = tmp_path / "build" / "parquet"
+        stale_entity = {
+            **_ENTITY_ROW,
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": "entity-type:device",
+                    "semantic_contract_hash": "sha256:stale",
+                }
+            ),
+        }
+        _write_parquet(parquet_dir, "entities", [stale_entity])
+        _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+        semantic_dir = tmp_path / "build" / "semantic"
+        semantic_dir.mkdir(parents=True)
+        (semantic_dir / "semantic-manifest.json").write_text(
+            json.dumps({"contract_hash": "sha256:active"}),
+            encoding="utf-8",
+        )
+        (semantic_dir / "normalized-contract.json").write_text(
+            json.dumps(
+                {
+                    "entity_types": [
+                        {"id": "entity-type:device", "name": "Device"}
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(parquet_dir),
+                "--out",
+                str(tmp_path / "search"),
+                "--indexes",
+                "kg-chunks",
+                "--semantic-manifest",
+                str(semantic_dir / "semantic-manifest.json"),
+                "--require-semantic-contract",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "sha256:stale" in result.output
+        assert "sha256:active" in result.output
+
+    def test_compile_search_projects_crosswalk_property_and_relationship_ids(
+        self,
+        tmp_path,
+    ):
+        contract = _approve(_contract("search-linkage"))
+        paths = _write_bundle(tmp_path, contract)
+        semantic_dir = compile_semantic_bundle(
+            load_semantic_bundle(
+                contract_path=paths[0],
+                mappings_path=paths[1],
+                vocabulary_path=paths[2],
+                ids_lock_path=paths[3],
+            )
+        ).write(tmp_path / "build" / "semantic")
+        subject = next(
+            entity
+            for entity in contract.entity_types
+            if entity.name == "Subject"
+        )
+        relationship = contract.relationship_types[0]
+        parquet_dir = tmp_path / "build" / "parquet"
+        entity_row = {
+            **_ENTITY_ROW,
+            "entity_type": "Subject",
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": subject.id,
+                    "semantic_contract_hash": (
+                        contract.approval.contract_hash
+                    ),
+                }
+            ),
+        }
+        _write_parquet(parquet_dir, "entities", [entity_row])
+        _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+        _write_parquet(
+            parquet_dir,
+            "evidence",
+            [
+                {
+                    "evidence_id": "ev-001",
+                    "chunk_id": "chk-001",
+                    "document_element_id": None,
+                }
+            ],
+        )
+        _write_parquet(
+            parquet_dir,
+            "semantic_relationships",
+            [
+                {
+                    "semantic_relationship_id": relationship.id,
+                    "evidence_ids_json": json.dumps(["ev-001"]),
+                }
+            ],
+        )
+
+        out = tmp_path / "search"
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(parquet_dir),
+                "--out",
+                str(out),
+                "--indexes",
+                "kg-chunks",
+                "--semantic-manifest",
+                str(semantic_dir / "semantic-manifest.json"),
+                "--semantic-model-manifest",
+                str(semantic_dir / "semantic-model-manifest.json"),
+                "--semantic-crosswalk",
+                str(semantic_dir / "semantic-crosswalk.json"),
+                "--require-semantic-contract",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        docs = json.loads(
+            (out / "kg-chunks" / "docs.json").read_text(encoding="utf-8")
+        )
+        assert docs[0]["semantic_relationship_ids"] == [relationship.id]
+        expected_property_ids = sorted(
+            prop.property_id
+            for prop in compile_semantic_bundle(
+                load_semantic_bundle(
+                    contract_path=paths[0],
+                    mappings_path=paths[1],
+                    vocabulary_path=paths[2],
+                    ids_lock_path=paths[3],
+                )
+            ).semantic_model_manifest.property_definitions
+            if prop.owner_type_id == subject.id
+        )
+        assert docs[0]["semantic_property_ids"] == expected_property_ids
+        manifest = json.loads(
+            (out / "search-manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["semantic_model_manifest_hash"]
+        assert manifest["semantic_crosswalk_hash"]
+
+    def test_compile_search_materializes_orphan_relationship_evidence(
+        self,
+        tmp_path,
+    ):
+        contract = _approve(_contract("relationship-evidence"))
+        paths = _write_bundle(tmp_path, contract)
+        semantic_dir = compile_semantic_bundle(
+            load_semantic_bundle(
+                contract_path=paths[0],
+                mappings_path=paths[1],
+                vocabulary_path=paths[2],
+                ids_lock_path=paths[3],
+            )
+        ).write(tmp_path / "build" / "semantic")
+        subject = next(
+            entity
+            for entity in contract.entity_types
+            if entity.name == "Subject"
+        )
+        target = next(
+            entity
+            for entity in contract.entity_types
+            if entity.id != subject.id
+        )
+        relationship = contract.relationship_types[0]
+        parquet_dir = tmp_path / "build" / "parquet"
+        source_entity = {
+            **_ENTITY_ROW,
+            "entity_id": "entity:source",
+            "entity_type": "Subject",
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": subject.id,
+                    "semantic_contract_hash": contract.approval.contract_hash,
+                }
+            ),
+        }
+        target_entity = {
+            **_ENTITY_ROW,
+            "entity_id": "entity:target",
+            "entity_type": target.name,
+            "properties_json": json.dumps(
+                {
+                    "semantic_lane": "authoritative",
+                    "semantic_type_id": target.id,
+                    "semantic_contract_hash": contract.approval.contract_hash,
+                }
+            ),
+        }
+        _write_parquet(
+            parquet_dir,
+            "entities",
+            [source_entity, target_entity],
+        )
+        _write_parquet(parquet_dir, "chunks", [_CHUNK_ROW])
+        _write_parquet(
+            parquet_dir,
+            "evidence",
+            [
+                {
+                    "evidence_id": "evid:relationship",
+                    "chunk_id": None,
+                    "document_element_id": None,
+                    "text": "Source has a verified relationship to target.",
+                    "source_file_id": "src:source",
+                    "asset_version_id": "asset-version-1",
+                    "source_locator_json": json.dumps(
+                        {"blob_uri": "https://example.test/source.pdf"}
+                    ),
+                }
+            ],
+        )
+        _write_parquet(
+            parquet_dir,
+            "semantic_relationships",
+            [
+                {
+                    "semantic_relationship_id": relationship.id,
+                    "source_entity_id": "entity:source",
+                    "target_entity_id": "entity:target",
+                    "evidence_ids_json": json.dumps(
+                        ["evid:relationship"]
+                    ),
+                }
+            ],
+        )
+
+        out = tmp_path / "search"
+        result = CliRunner().invoke(
+            compile_search_cmd,
+            [
+                "--input",
+                str(parquet_dir),
+                "--out",
+                str(out),
+                "--indexes",
+                "kg-chunks",
+                "--semantic-manifest",
+                str(semantic_dir / "semantic-manifest.json"),
+                "--semantic-model-manifest",
+                str(semantic_dir / "semantic-model-manifest.json"),
+                "--semantic-crosswalk",
+                str(semantic_dir / "semantic-crosswalk.json"),
+                "--require-semantic-contract",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        docs = json.loads(
+            (out / "kg-chunks" / "docs.json").read_text(encoding="utf-8")
+        )
+        evidence_doc = next(
+            doc
+            for doc in docs
+            if doc["content_type"] == "relationship_evidence"
+        )
+        assert evidence_doc["evidence_ids"] == ["evid:relationship"]
+        assert evidence_doc["entity_ids"] == [
+            "entity:source",
+            "entity:target",
+        ]
+        assert evidence_doc["semantic_relationship_ids"] == [
+            relationship.id
+        ]
+        assert evidence_doc["source_file_id"] == "src:source"
+        assert evidence_doc["asset_version_id"] == "asset-version-1"
+        assert (
+            evidence_doc["blob_url"]
+            == "https://example.test/source.pdf"
+        )
+
+
+# ===========================================================================
+# deploy_search_cmd — mock mode
+# ===========================================================================
+
+
+class TestDeploySearchCmd:
+    """Tests for fabric-kg deploy-search mock implementation."""
+
+    def test_deploy_search_exits_0(self, tmp_path, monkeypatch):
+        """deploy-search exits 0 when env JSON present."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert result.exit_code == 0, f"Expected 0:\n{result.output}"
+
+    def test_deploy_search_reports_service_name(self, tmp_path, monkeypatch):
+        """deploy-search output contains service name from env JSON."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path, service_name="example-search")
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert "example-search" in result.output
+
+    def test_deploy_search_reports_index_names(self, tmp_path, monkeypatch):
+        """deploy-search output names the deployed index (with prefix)."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert "kg-dev-kg-chunks" in result.output
+        assert "kg-dev-kg-document-elements" in result.output
+        assert "kg-dev-kg-visual-assets" in result.output
+
+    def test_deploy_search_disabled_skips_push(self, tmp_path, monkeypatch):
+        """deploy-search exits 0 immediately when ai_search.enabled=false."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path, enabled=False)
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert result.exit_code == 0
+        assert "enabled=false" in result.output.lower() or "enabled" in result.output
+
+    def test_deploy_search_with_docs_reports_doc_count(self, tmp_path, monkeypatch):
+        """deploy-search reports doc count from docs.json."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path)
+
+        # Write minimal build/search/kg-chunks/
+        idx_dir = tmp_path / "build" / "search" / "kg-chunks"
+        idx_dir.mkdir(parents=True)
+        (idx_dir / "index.schema.json").write_text('{"name":"kg-chunks","fields":[]}')
+        (idx_dir / "docs.json").write_text('[{"chunk_id":"c1"},{"chunk_id":"c2"}]')
+
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock",
+                                                    "--dist", str(tmp_path / "build" / "search")])
+        assert "2" in result.output  # 2 docs reported
+
+    def test_deploy_search_no_network_call(self, tmp_path, monkeypatch):
+        """deploy-search mock never makes any network calls."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path)
+        with patch("socket.getaddrinfo", side_effect=AssertionError("NETWORK BLOCKED")):
+            runner = CliRunner()
+            result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert result.exit_code == 0
+
+    def test_deploy_search_missing_env_json_exits_1(self, tmp_path, monkeypatch):
+        """deploy-search exits 1 when env JSON is missing."""
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev"])
+        assert result.exit_code == 1
+
+    def test_deploy_search_success_message(self, tmp_path, monkeypatch):
+        """deploy-search prints SUCCESS message."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert "SUCCESS" in result.output
+
+    def test_read_search_env_config_returns_ai_search(self, tmp_path, monkeypatch):
+        """_read_search_env_config returns ai_search dict from env JSON."""
+        monkeypatch.chdir(tmp_path)
+        _make_env_json_with_search(tmp_path, service_name="my-search")
+        cfg = _read_search_env_config(
+            "dev", environments_dir=tmp_path / "ontology" / "environments"
+        )
+        assert cfg["ai_search"]["service_name"] == "my-search"
+        assert cfg["ai_search"]["enabled"] is True
+
+    def test_deploy_search_reads_real_dev_json(self, tmp_path, monkeypatch):
+        """deploy-search reads a dev.json env config and surfaces its service name.
+
+        Uses the committed dev.json.example template copied into a temp working
+        dir, so the test does not depend on the developer's real (gitignored)
+        dev.json and stays CI-safe.
+        """
+        import shutil
+
+        repo_root = Path(__file__).parents[2]
+        env_dir = tmp_path / "ontology" / "environments"
+        env_dir.mkdir(parents=True)
+        shutil.copy(
+            repo_root / "ontology" / "environments" / "dev.json.example",
+            env_dir / "dev.json",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        # Run against the example dev.json — mock mode, no network
+        with patch("socket.getaddrinfo", side_effect=AssertionError("NETWORK BLOCKED")):
+            result = runner.invoke(deploy_search_cmd, ["--env", "dev", "--mock"])
+        assert result.exit_code == 0
+        # service_name placeholder from the example template appears in the output
+        assert "<your-search-service>" in result.output

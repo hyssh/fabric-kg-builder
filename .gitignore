@@ -1,0 +1,63 @@
+# Internal workspace material (kept in the private development repository)
+.squad/
+.squad-workstream
+.copilot/
+docs/
+
+# Python build artifacts
+build/
+dist/
+
+# Pipeline working outputs (enriched JSON, parquet, search, deploy dist)
+data/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.fkg/
+*.egg
+.eggs/
+
+# Locally supplied source corpora; keep only setup documentation.
+/sample_data/**
+!/sample_data/**/
+!/sample_data/**/README.md
+!/sample_data/.gitkeep
+
+# Local debugging and validation outputs, not reusable test fixtures.
+/.core-compile-debug/
+/.crosswalk-validation/
+/.test-*/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Per-environment resource config — contains real subscription/workspace IDs
+# and resource names. Keep local; commit only the sanitized *.json.example.
+ontology/environments/*.json
+!ontology/environments/*.json.example
+
+# L7 target configuration contains real stable resource IDs.
+.foundry/l7-*.json
+!.foundry/l7-*.json.example
+
+# Generated Parquet files (build-time artifacts)
+build/**/*.parquet
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp

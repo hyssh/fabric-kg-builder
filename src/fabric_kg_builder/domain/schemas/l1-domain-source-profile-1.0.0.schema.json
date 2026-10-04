@@ -1,0 +1,662 @@
+{
+  "$defs": {
+    "CanonicalIdentityEnvelope": {
+      "additionalProperties": false,
+      "description": "Shared identity references; contract-specific IDs remain authoritative.",
+      "properties": {
+        "contract_kind": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Contract Kind",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "project_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asset Id"
+        },
+        "asset_version_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asset Version Id"
+        },
+        "run_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "source_file_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source File Id"
+        },
+        "source_unit_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Unit Id"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Content Hash"
+        },
+        "domain_schema_version": {
+          "enum": [
+            "1.0",
+            "2.0"
+          ],
+          "title": "Domain Schema Version",
+          "type": "string"
+        },
+        "domain_contract_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Domain Contract Hash",
+          "type": "string"
+        },
+        "semantic_contract_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Semantic Contract Hash"
+        },
+        "canonical_schema_version": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Canonical Schema Version",
+          "type": "string"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Version"
+        },
+        "prompt_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Hash"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Version"
+        },
+        "model_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Hash"
+        },
+        "extractor_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extractor Name"
+        },
+        "extractor_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extractor Version"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "parent_record_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Record Ids",
+          "type": "array"
+        },
+        "immutable_locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImmutableSourceLocator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contract_kind",
+        "project_id",
+        "asset_id",
+        "asset_version_id",
+        "run_id",
+        "source_file_id",
+        "source_unit_id",
+        "content_hash",
+        "domain_schema_version",
+        "domain_contract_hash",
+        "semantic_contract_hash",
+        "canonical_schema_version",
+        "prompt_version",
+        "prompt_hash",
+        "model_version",
+        "model_hash",
+        "extractor_name",
+        "extractor_version",
+        "immutable_locator"
+      ],
+      "title": "CanonicalIdentityEnvelope",
+      "type": "object"
+    },
+    "ImmutableSourceLocator": {
+      "additionalProperties": false,
+      "description": "Typed immutable adapter over ``build_source_locator``.",
+      "properties": {
+        "locator_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Locator Version",
+          "type": "string"
+        },
+        "blob_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blob Uri"
+        },
+        "blob_version_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blob Version Id"
+        },
+        "source_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Uri"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet"
+        },
+        "slide": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slide"
+        },
+        "section_path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Path"
+        },
+        "cell_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cell Range"
+        },
+        "char_start": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char Start"
+        },
+        "char_end": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char End"
+        },
+        "polygon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sheet_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet Zone"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "coordinate_system": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coordinate System"
+        },
+        "transform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "native_layer_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Layer Id"
+        },
+        "native_object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Object Id"
+        },
+        "locator_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Locator Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_hash"
+      ],
+      "title": "ImmutableSourceLocator",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "SourceProfileWarning": {
+      "additionalProperties": false,
+      "properties": {
+        "warning_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Warning Id",
+          "type": "string"
+        },
+        "warning_type": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Warning Type",
+          "type": "string"
+        },
+        "source_file_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source File Id"
+        },
+        "message": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "warning_id",
+        "warning_type",
+        "message"
+      ],
+      "title": "SourceProfileWarning",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "identity": {
+      "$ref": "#/$defs/CanonicalIdentityEnvelope"
+    },
+    "contract_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "domain_source_profile_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Source Profile Id",
+      "type": "string"
+    },
+    "source_corpus_manifest_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Source Corpus Manifest Id",
+      "type": "string"
+    },
+    "source_corpus_manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Corpus Manifest Hash",
+      "type": "string"
+    },
+    "design_sample_manifest_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Design Sample Manifest Id",
+      "type": "string"
+    },
+    "design_sample_manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Design Sample Manifest Hash",
+      "type": "string"
+    },
+    "budget_snapshot_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Budget Snapshot Hash",
+      "type": "string"
+    },
+    "complete_source_count": {
+      "minimum": 0,
+      "title": "Complete Source Count",
+      "type": "integer"
+    },
+    "eligible_source_count": {
+      "minimum": 0,
+      "title": "Eligible Source Count",
+      "type": "integer"
+    },
+    "excluded_source_count": {
+      "minimum": 0,
+      "title": "Excluded Source Count",
+      "type": "integer"
+    },
+    "blocked_source_count": {
+      "minimum": 0,
+      "title": "Blocked Source Count",
+      "type": "integer"
+    },
+    "observed_media_types": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Observed Media Types",
+      "type": "array"
+    },
+    "observed_schema_fields": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Observed Schema Fields",
+      "type": "array"
+    },
+    "inferred_suggestions": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Inferred Suggestions",
+      "type": "array"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SourceProfileWarning"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "completeness_disclaimer": {
+      "const": "design samples are bounded proposal support, not the complete source universe",
+      "default": "design samples are bounded proposal support, not the complete source universe",
+      "title": "Completeness Disclaimer",
+      "type": "string"
+    },
+    "profile_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Profile Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "identity",
+    "domain_source_profile_id",
+    "source_corpus_manifest_id",
+    "source_corpus_manifest_hash",
+    "design_sample_manifest_id",
+    "design_sample_manifest_hash",
+    "budget_snapshot_hash",
+    "complete_source_count",
+    "eligible_source_count",
+    "excluded_source_count",
+    "blocked_source_count",
+    "profile_hash"
+  ],
+  "title": "DomainSourceProfile",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "l1-domain-source-profile-1.0.0.schema.json"
+}

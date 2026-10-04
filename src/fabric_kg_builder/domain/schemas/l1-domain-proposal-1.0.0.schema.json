@@ -1,0 +1,3072 @@
+{
+  "$defs": {
+    "AmbiguousTermV2": {
+      "additionalProperties": false,
+      "properties": {
+        "term": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Term",
+          "type": "string"
+        },
+        "meanings": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Meanings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "term",
+        "meanings"
+      ],
+      "title": "AmbiguousTermV2",
+      "type": "object"
+    },
+    "ApprovalMetadataV2": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "default": "draft",
+          "enum": [
+            "draft",
+            "needs_review",
+            "approved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "approved_by": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved By"
+        },
+        "approved_at_utc": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved At Utc"
+        },
+        "contract_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract Hash"
+        },
+        "domain_approval_context_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Domain Approval Context Id"
+        },
+        "domain_approval_context_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Domain Approval Context Hash"
+        },
+        "notes": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "title": "ApprovalMetadataV2",
+      "type": "object"
+    },
+    "ApprovedExternalSemanticReferenceV2": {
+      "additionalProperties": false,
+      "properties": {
+        "reference_id": {
+          "pattern": "^external-reference:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Reference Id",
+          "type": "string"
+        },
+        "source_uri": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Source Uri",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Version",
+          "type": "string"
+        },
+        "content_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "retrieved_at_utc": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Retrieved At Utc",
+          "type": "string"
+        },
+        "provenance": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "license_classification": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "License Classification",
+          "type": "string"
+        },
+        "allowed_use_decision": {
+          "const": "approved",
+          "title": "Allowed Use Decision",
+          "type": "string"
+        },
+        "reviewer": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Reviewer",
+          "type": "string"
+        },
+        "approval_reference": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Approval Reference",
+          "type": "string"
+        },
+        "semantic_target_ids": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Semantic Target Ids",
+          "type": "array"
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "rationale": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference_id",
+        "source_uri",
+        "version",
+        "content_hash",
+        "retrieved_at_utc",
+        "provenance",
+        "license_classification",
+        "allowed_use_decision",
+        "reviewer",
+        "approval_reference",
+        "semantic_target_ids",
+        "rationale"
+      ],
+      "title": "ApprovedExternalSemanticReferenceV2",
+      "type": "object"
+    },
+    "BusinessSectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "organization_context": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Organization Context",
+          "type": "string"
+        },
+        "users": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Users",
+          "type": "array"
+        },
+        "decisions": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Decisions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "organization_context",
+        "users",
+        "decisions"
+      ],
+      "title": "BusinessSectionV2",
+      "type": "object"
+    },
+    "CandidateAuditV2": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "candidate_kind": {
+          "enum": [
+            "domain_boundary",
+            "semantic_type",
+            "generalization",
+            "relationship",
+            "completeness",
+            "external_reference"
+          ],
+          "title": "Candidate Kind",
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "selected",
+            "proposed",
+            "unresolved",
+            "rejected"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateScoreV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason_codes": {
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "evidence_span_ids": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "competency_question_ids": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "governance_references": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Governance References",
+          "type": "array"
+        },
+        "merge_representative_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Merge Representative Id"
+        },
+        "conflict_candidate_ids": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Conflict Candidate Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "candidate_kind",
+        "disposition",
+        "reason_codes"
+      ],
+      "title": "CandidateAuditV2",
+      "type": "object"
+    },
+    "CandidateModelSectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_types": {
+          "items": {
+            "$ref": "#/$defs/DomainEntityTypeV2"
+          },
+          "minItems": 1,
+          "title": "Entity Types",
+          "type": "array"
+        },
+        "relationship_types": {
+          "items": {
+            "$ref": "#/$defs/DomainRelationshipTypeV2"
+          },
+          "minItems": 1,
+          "title": "Relationship Types",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_types",
+        "relationship_types"
+      ],
+      "title": "CandidateModelSectionV2",
+      "type": "object"
+    },
+    "CandidateScoreV2": {
+      "additionalProperties": false,
+      "properties": {
+        "scorer_version": {
+          "const": "l1-domain-candidate-scorer/1.0.0",
+          "default": "l1-domain-candidate-scorer/1.0.0",
+          "title": "Scorer Version",
+          "type": "string"
+        },
+        "scorer_hash": {
+          "default": "cba8c680b7dcd6c2a3c7f90c0c87c21d47784560c596e3004c6ae0b703e4d0ce",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Scorer Hash",
+          "type": "string"
+        },
+        "evidence_quality_score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Evidence Quality Score",
+          "type": "number"
+        },
+        "cq_coverage_score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Cq Coverage Score",
+          "type": "number"
+        },
+        "ambiguity_conflict_penalty": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Ambiguity Conflict Penalty",
+          "type": "number"
+        },
+        "common_domain_fit_score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Common Domain Fit Score",
+          "type": "number"
+        },
+        "ip_governance_eligible": {
+          "title": "Ip Governance Eligible",
+          "type": "boolean"
+        },
+        "total_score": {
+          "title": "Total Score",
+          "type": "number"
+        },
+        "gate_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gate Reason"
+        }
+      },
+      "required": [
+        "evidence_quality_score",
+        "cq_coverage_score",
+        "ambiguity_conflict_penalty",
+        "common_domain_fit_score",
+        "ip_governance_eligible",
+        "total_score"
+      ],
+      "title": "CandidateScoreV2",
+      "type": "object"
+    },
+    "CanonicalIdentityEnvelope": {
+      "additionalProperties": false,
+      "description": "Shared identity references; contract-specific IDs remain authoritative.",
+      "properties": {
+        "contract_kind": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Contract Kind",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "project_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asset Id"
+        },
+        "asset_version_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asset Version Id"
+        },
+        "run_id": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "source_file_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source File Id"
+        },
+        "source_unit_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Unit Id"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Content Hash"
+        },
+        "domain_schema_version": {
+          "enum": [
+            "1.0",
+            "2.0"
+          ],
+          "title": "Domain Schema Version",
+          "type": "string"
+        },
+        "domain_contract_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Domain Contract Hash",
+          "type": "string"
+        },
+        "semantic_contract_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Semantic Contract Hash"
+        },
+        "canonical_schema_version": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
+          "title": "Canonical Schema Version",
+          "type": "string"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Version"
+        },
+        "prompt_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Hash"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Version"
+        },
+        "model_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Hash"
+        },
+        "extractor_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extractor Name"
+        },
+        "extractor_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extractor Version"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "parent_record_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Record Ids",
+          "type": "array"
+        },
+        "immutable_locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImmutableSourceLocator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contract_kind",
+        "project_id",
+        "asset_id",
+        "asset_version_id",
+        "run_id",
+        "source_file_id",
+        "source_unit_id",
+        "content_hash",
+        "domain_schema_version",
+        "domain_contract_hash",
+        "semantic_contract_hash",
+        "canonical_schema_version",
+        "prompt_version",
+        "prompt_hash",
+        "model_version",
+        "model_hash",
+        "extractor_name",
+        "extractor_version",
+        "immutable_locator"
+      ],
+      "title": "CanonicalIdentityEnvelope",
+      "type": "object"
+    },
+    "CanonicalTermV2": {
+      "additionalProperties": false,
+      "properties": {
+        "term": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Term",
+          "type": "string"
+        },
+        "definition": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Definition",
+          "type": "string"
+        },
+        "synonyms": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Synonyms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "term",
+        "definition"
+      ],
+      "title": "CanonicalTermV2",
+      "type": "object"
+    },
+    "CardinalityExpectationV2": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Count"
+        },
+        "minimum_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Count"
+        },
+        "maximum_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum Count"
+        },
+        "count_basis": {
+          "const": "distinct_members_per_aggregate",
+          "default": "distinct_members_per_aggregate",
+          "title": "Count Basis",
+          "type": "string"
+        },
+        "source_kind": {
+          "enum": [
+            "competency_question",
+            "source_evidence",
+            "governance_rule"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_question_ids": {
+          "items": {
+            "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Source Question Ids",
+          "type": "array"
+        },
+        "source_evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Source Evidence Span Ids",
+          "type": "array"
+        },
+        "reviewed_rationale": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reviewed Rationale"
+        }
+      },
+      "required": [
+        "source_kind"
+      ],
+      "title": "CardinalityExpectationV2",
+      "type": "object"
+    },
+    "CollectionIdentityPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate_identity_included": {
+          "const": true,
+          "default": true,
+          "title": "Aggregate Identity Included",
+          "type": "boolean"
+        },
+        "membership_relationship_included": {
+          "const": true,
+          "default": true,
+          "title": "Membership Relationship Included",
+          "type": "boolean"
+        },
+        "member_identities_included": {
+          "const": true,
+          "default": true,
+          "title": "Member Identities Included",
+          "type": "boolean"
+        },
+        "member_roles_included": {
+          "title": "Member Roles Included",
+          "type": "boolean"
+        },
+        "ordinals_included": {
+          "title": "Ordinals Included",
+          "type": "boolean"
+        },
+        "preserve_member_order": {
+          "title": "Preserve Member Order",
+          "type": "boolean"
+        },
+        "hash_algorithm": {
+          "const": "sha256",
+          "default": "sha256",
+          "title": "Hash Algorithm",
+          "type": "string"
+        }
+      },
+      "required": [
+        "member_roles_included",
+        "ordinals_included",
+        "preserve_member_order"
+      ],
+      "title": "CollectionIdentityPolicyV2",
+      "type": "object"
+    },
+    "CompetencyQuestionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 15,
+          "pattern": "\\S",
+          "title": "Question",
+          "type": "string"
+        },
+        "business_critical": {
+          "default": true,
+          "title": "Business Critical",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "question"
+      ],
+      "title": "CompetencyQuestionV2",
+      "type": "object"
+    },
+    "CompletenessQuestionCoverageV2": {
+      "additionalProperties": false,
+      "properties": {
+        "question_id": {
+          "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Question Id",
+          "type": "string"
+        },
+        "requirement_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requirement Ids",
+          "type": "array"
+        },
+        "covered_role_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered Role Ids",
+          "type": "array"
+        },
+        "missing_role_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Role Ids",
+          "type": "array"
+        },
+        "coverage_status": {
+          "enum": [
+            "covered",
+            "unsupported"
+          ],
+          "title": "Coverage Status",
+          "type": "string"
+        },
+        "unsupported_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unsupported Reason"
+        }
+      },
+      "required": [
+        "question_id",
+        "coverage_status"
+      ],
+      "title": "CompletenessQuestionCoverageV2",
+      "type": "object"
+    },
+    "CompletenessRequirementV2": {
+      "additionalProperties": false,
+      "properties": {
+        "requirement_id": {
+          "pattern": "^completeness-requirement:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "competency_question_ids": {
+          "items": {
+            "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "requirement_kind": {
+          "enum": [
+            "required_role_set",
+            "structured_fact_set"
+          ],
+          "title": "Requirement Kind",
+          "type": "string"
+        },
+        "scope_type_id": {
+          "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Scope Type Id",
+          "type": "string"
+        },
+        "scoped_subtype_id": {
+          "anyOf": [
+            {
+              "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scoped Subtype Id"
+        },
+        "scoped_filter": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scoped Filter"
+        },
+        "rationale": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Rationale",
+          "type": "string"
+        },
+        "source_kind": {
+          "enum": [
+            "competency_question",
+            "source_evidence",
+            "governance_rule"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_question_ids": {
+          "items": {
+            "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Source Question Ids",
+          "type": "array"
+        },
+        "governance_references": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Governance References",
+          "type": "array"
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "coverage_status": {
+          "enum": [
+            "covered",
+            "unsupported"
+          ],
+          "title": "Coverage Status",
+          "type": "string"
+        },
+        "unsupported_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unsupported Reason"
+        },
+        "required_roles": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequiredRoleCoverageV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "structured_fact_set": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StructuredFactSetV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "requirement_id",
+        "competency_question_ids",
+        "requirement_kind",
+        "scope_type_id",
+        "rationale",
+        "source_kind",
+        "coverage_status"
+      ],
+      "title": "CompletenessRequirementV2",
+      "type": "object"
+    },
+    "ConstraintsSectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "temporal": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Temporal",
+          "type": "array"
+        },
+        "regulatory": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Regulatory",
+          "type": "array"
+        },
+        "privacy": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Privacy",
+          "type": "array"
+        },
+        "safety": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Safety",
+          "type": "array"
+        }
+      },
+      "title": "ConstraintsSectionV2",
+      "type": "object"
+    },
+    "DomainConstraintV2": {
+      "additionalProperties": false,
+      "properties": {
+        "constraint_id": {
+          "pattern": "^constraint:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Constraint Id",
+          "type": "string"
+        },
+        "expression": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Expression",
+          "type": "string"
+        },
+        "severity": {
+          "default": "error",
+          "enum": [
+            "error",
+            "warning"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "constraint_id",
+        "expression"
+      ],
+      "title": "DomainConstraintV2",
+      "type": "object"
+    },
+    "DomainContractV2": {
+      "additionalProperties": false,
+      "description": "New-project-only domain authority sealed by L1 approval.",
+      "properties": {
+        "schema_version": {
+          "const": "2.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "domain": {
+          "$ref": "#/$defs/DomainSectionV2"
+        },
+        "business": {
+          "$ref": "#/$defs/BusinessSectionV2"
+        },
+        "problem": {
+          "$ref": "#/$defs/ProblemSectionV2"
+        },
+        "competency_questions": {
+          "items": {
+            "$ref": "#/$defs/CompetencyQuestionV2"
+          },
+          "maxItems": 10,
+          "minItems": 5,
+          "title": "Competency Questions",
+          "type": "array"
+        },
+        "terminology": {
+          "$ref": "#/$defs/TerminologySectionV2"
+        },
+        "candidate_model": {
+          "$ref": "#/$defs/CandidateModelSectionV2"
+        },
+        "constraints": {
+          "$ref": "#/$defs/ConstraintsSectionV2"
+        },
+        "examples": {
+          "$ref": "#/$defs/ExamplesSectionV2"
+        },
+        "completeness_requirements": {
+          "items": {
+            "$ref": "#/$defs/CompletenessRequirementV2"
+          },
+          "title": "Completeness Requirements",
+          "type": "array"
+        },
+        "completeness_question_coverage": {
+          "items": {
+            "$ref": "#/$defs/CompletenessQuestionCoverageV2"
+          },
+          "title": "Completeness Question Coverage",
+          "type": "array"
+        },
+        "hierarchy_closure": {
+          "$ref": "#/$defs/TypeHierarchyClosureV2"
+        },
+        "identity_policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Identity Policy Hash",
+          "type": "string"
+        },
+        "completeness_requirement_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Completeness Requirement Hash",
+          "type": "string"
+        },
+        "approved_external_references": {
+          "items": {
+            "$ref": "#/$defs/ApprovedExternalSemanticReferenceV2"
+          },
+          "title": "Approved External References",
+          "type": "array"
+        },
+        "external_reference_decision_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "External Reference Decision Hash",
+          "type": "string"
+        },
+        "reasoning_policy": {
+          "$ref": "#/$defs/ReasoningPolicyV2"
+        },
+        "extraction_policy": {
+          "$ref": "#/$defs/ExtractionPolicyV2"
+        },
+        "publication_policy": {
+          "$ref": "#/$defs/PublicationPolicyV2"
+        },
+        "question_plans": {
+          "items": {
+            "$ref": "#/$defs/QuestionPlanV2"
+          },
+          "title": "Question Plans",
+          "type": "array"
+        },
+        "drift_policy": {
+          "$ref": "#/$defs/DomainDriftPolicyV2"
+        },
+        "approval": {
+          "$ref": "#/$defs/ApprovalMetadataV2"
+        }
+      },
+      "required": [
+        "schema_version",
+        "domain",
+        "business",
+        "problem",
+        "competency_questions",
+        "terminology",
+        "candidate_model",
+        "constraints",
+        "examples",
+        "completeness_question_coverage",
+        "hierarchy_closure",
+        "identity_policy_hash",
+        "completeness_requirement_hash",
+        "external_reference_decision_hash",
+        "reasoning_policy",
+        "question_plans",
+        "drift_policy"
+      ],
+      "title": "DomainContractV2",
+      "type": "object"
+    },
+    "DomainDriftPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "triggers": {
+          "items": {
+            "enum": [
+              "corpus_manifest_changed",
+              "sustained_unresolved_semantic_observation",
+              "competency_question_coverage_failed",
+              "identity_collision",
+              "cardinality_or_order_failed",
+              "external_reference_version_changed",
+              "governance_changed"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Triggers",
+          "type": "array"
+        },
+        "signal": {
+          "const": "DOMAIN_REREVIEW_REQUESTED",
+          "default": "DOMAIN_REREVIEW_REQUESTED",
+          "title": "Signal",
+          "type": "string"
+        },
+        "automatic_schema_mutation": {
+          "const": false,
+          "default": false,
+          "title": "Automatic Schema Mutation",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "triggers"
+      ],
+      "title": "DomainDriftPolicyV2",
+      "type": "object"
+    },
+    "DomainEntityTypeV2": {
+      "additionalProperties": false,
+      "description": "Stable semantic type independent of labels and physical projections.",
+      "properties": {
+        "type_id": {
+          "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Type Id",
+          "type": "string"
+        },
+        "semantic_key": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Semantic Key",
+          "type": "string"
+        },
+        "display_name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Description",
+          "type": "string"
+        },
+        "aliases": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "classification": {
+          "enum": [
+            "common",
+            "domain",
+            "domain_specialization"
+          ],
+          "title": "Classification",
+          "type": "string"
+        },
+        "parent_type_id": {
+          "anyOf": [
+            {
+              "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Type Id"
+        },
+        "abstract": {
+          "default": false,
+          "title": "Abstract",
+          "type": "boolean"
+        },
+        "identity_root_type_id": {
+          "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Identity Root Type Id",
+          "type": "string"
+        },
+        "identity_key_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityKeyPolicyV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "declared_properties": {
+          "items": {
+            "$ref": "#/$defs/DomainPropertyV2"
+          },
+          "title": "Declared Properties",
+          "type": "array"
+        },
+        "declared_constraints": {
+          "items": {
+            "$ref": "#/$defs/DomainConstraintV2"
+          },
+          "title": "Declared Constraints",
+          "type": "array"
+        },
+        "sibling_classification_policy": {
+          "$ref": "#/$defs/SiblingClassificationPolicyV2"
+        },
+        "generalization_basis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeneralizationBasisV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "competency_question_ids": {
+          "items": {
+            "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "governance_rationale": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Governance Rationale"
+        },
+        "tombstoned": {
+          "default": false,
+          "title": "Tombstoned",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type_id",
+        "semantic_key",
+        "display_name",
+        "description",
+        "classification",
+        "identity_root_type_id",
+        "sibling_classification_policy"
+      ],
+      "title": "DomainEntityTypeV2",
+      "type": "object"
+    },
+    "DomainPropertyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "property_id": {
+          "pattern": "^property:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Property Id",
+          "type": "string"
+        },
+        "display_name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "value_type": {
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "date",
+            "datetime"
+          ],
+          "title": "Value Type",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "property_id",
+        "display_name",
+        "value_type"
+      ],
+      "title": "DomainPropertyV2",
+      "type": "object"
+    },
+    "DomainRelationshipTypeV2": {
+      "additionalProperties": false,
+      "properties": {
+        "relationship_type_id": {
+          "pattern": "^relationship-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Relationship Type Id",
+          "type": "string"
+        },
+        "predicate_id": {
+          "pattern": "^predicate:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Predicate Id",
+          "type": "string"
+        },
+        "display_name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Description",
+          "type": "string"
+        },
+        "source_type_ids": {
+          "items": {
+            "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Source Type Ids",
+          "type": "array"
+        },
+        "target_type_ids": {
+          "items": {
+            "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Target Type Ids",
+          "type": "array"
+        },
+        "direction": {
+          "const": "source_to_target",
+          "default": "source_to_target",
+          "title": "Direction",
+          "type": "string"
+        },
+        "endpoint_policy": {
+          "default": "allow_subtypes",
+          "enum": [
+            "allow_subtypes",
+            "exact"
+          ],
+          "title": "Endpoint Policy",
+          "type": "string"
+        },
+        "evidence_policy": {
+          "const": "exact_span_required",
+          "default": "exact_span_required",
+          "title": "Evidence Policy",
+          "type": "string"
+        },
+        "publication_policy": {
+          "const": "asserted_only",
+          "default": "asserted_only",
+          "title": "Publication Policy",
+          "type": "string"
+        },
+        "identity_policy": {
+          "$ref": "#/$defs/RelationshipIdentityPolicyV2"
+        },
+        "competency_question_ids": {
+          "items": {
+            "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "governance_rationale": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Governance Rationale"
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "relationship_type_id",
+        "predicate_id",
+        "display_name",
+        "description",
+        "source_type_ids",
+        "target_type_ids",
+        "identity_policy"
+      ],
+      "title": "DomainRelationshipTypeV2",
+      "type": "object"
+    },
+    "DomainSectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Description",
+          "type": "string"
+        },
+        "subdomains": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Subdomains",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "DomainSectionV2",
+      "type": "object"
+    },
+    "ExamplesSectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "positive": {
+          "items": {
+            "$ref": "#/$defs/PositiveExampleV2"
+          },
+          "title": "Positive",
+          "type": "array"
+        },
+        "negative": {
+          "items": {
+            "$ref": "#/$defs/NegativeExampleV2"
+          },
+          "title": "Negative",
+          "type": "array"
+        }
+      },
+      "title": "ExamplesSectionV2",
+      "type": "object"
+    },
+    "ExtractionPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "vocabulary_mode": {
+          "const": "closed",
+          "default": "closed",
+          "title": "Vocabulary Mode",
+          "type": "string"
+        },
+        "exact_evidence_span_required": {
+          "const": true,
+          "default": true,
+          "title": "Exact Evidence Span Required",
+          "type": "boolean"
+        },
+        "abstain_without_evidence": {
+          "const": true,
+          "default": true,
+          "title": "Abstain Without Evidence",
+          "type": "boolean"
+        },
+        "allow_subtype_endpoints": {
+          "default": true,
+          "title": "Allow Subtype Endpoints",
+          "type": "boolean"
+        },
+        "unknown_observation_policy": {
+          "const": "audit_and_request_rereview",
+          "default": "audit_and_request_rereview",
+          "title": "Unknown Observation Policy",
+          "type": "string"
+        }
+      },
+      "title": "ExtractionPolicyV2",
+      "type": "object"
+    },
+    "GeneralizationBasisV2": {
+      "additionalProperties": false,
+      "properties": {
+        "competency_question_ids": {
+          "items": {
+            "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Competency Question Ids",
+          "type": "array"
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "governance_rationale": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Governance Rationale"
+        }
+      },
+      "title": "GeneralizationBasisV2",
+      "type": "object"
+    },
+    "IdentityKeyPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Authority",
+          "type": "string"
+        },
+        "namespace": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Namespace",
+          "type": "string"
+        },
+        "key_mode": {
+          "enum": [
+            "business_key",
+            "stable_source_identity"
+          ],
+          "title": "Key Mode",
+          "type": "string"
+        },
+        "business_key_fields": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Business Key Fields",
+          "type": "array"
+        },
+        "normalization_version": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Normalization Version",
+          "type": "string"
+        },
+        "collision_behavior": {
+          "enum": [
+            "block",
+            "unresolved"
+          ],
+          "title": "Collision Behavior",
+          "type": "string"
+        },
+        "missing_key_behavior": {
+          "enum": [
+            "block",
+            "unresolved"
+          ],
+          "title": "Missing Key Behavior",
+          "type": "string"
+        },
+        "type_independent": {
+          "const": true,
+          "default": true,
+          "title": "Type Independent",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "authority",
+        "namespace",
+        "key_mode",
+        "normalization_version",
+        "collision_behavior",
+        "missing_key_behavior"
+      ],
+      "title": "IdentityKeyPolicyV2",
+      "type": "object"
+    },
+    "ImmutableSourceLocator": {
+      "additionalProperties": false,
+      "description": "Typed immutable adapter over ``build_source_locator``.",
+      "properties": {
+        "locator_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Locator Version",
+          "type": "string"
+        },
+        "blob_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blob Uri"
+        },
+        "blob_version_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blob Version Id"
+        },
+        "source_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Uri"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet"
+        },
+        "slide": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slide"
+        },
+        "section_path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Path"
+        },
+        "cell_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cell Range"
+        },
+        "char_start": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char Start"
+        },
+        "char_end": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char End"
+        },
+        "polygon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sheet_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet Zone"
+        },
+        "tile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tile Id"
+        },
+        "coordinate_system": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coordinate System"
+        },
+        "transform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "native_layer_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Layer Id"
+        },
+        "native_object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Object Id"
+        },
+        "locator_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Locator Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_hash"
+      ],
+      "title": "ImmutableSourceLocator",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "K4RationaleV2": {
+      "additionalProperties": false,
+      "properties": {
+        "question_id": {
+          "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Question Id",
+          "type": "string"
+        },
+        "hop_relationship_type_ids": {
+          "items": {
+            "pattern": "^relationship-type:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Hop Relationship Type Ids",
+          "type": "array"
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "minItems": 4,
+          "title": "Evidence Span Ids",
+          "type": "array"
+        },
+        "rationale": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "hop_relationship_type_ids",
+        "evidence_span_ids",
+        "rationale"
+      ],
+      "title": "K4RationaleV2",
+      "type": "object"
+    },
+    "NegativeExampleV2": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Text",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "reason"
+      ],
+      "title": "NegativeExampleV2",
+      "type": "object"
+    },
+    "OrderingPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "unordered",
+            "ordered"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "ordinal_property_id": {
+          "anyOf": [
+            {
+              "pattern": "^property:[a-z0-9][a-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ordinal Property Id"
+        },
+        "ordinal_value_type": {
+          "anyOf": [
+            {
+              "const": "integer",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ordinal Value Type"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "enum": [
+                "ascending",
+                "descending"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction"
+        },
+        "unique_ordinals": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unique Ordinals"
+        },
+        "contiguous": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contiguous"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "OrderingPolicyV2",
+      "type": "object"
+    },
+    "PositiveExampleV2": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Text",
+          "type": "string"
+        },
+        "expected": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Expected",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "PositiveExampleV2",
+      "type": "object"
+    },
+    "ProblemSectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "statement": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Statement",
+          "type": "string"
+        },
+        "desired_outcomes": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Desired Outcomes",
+          "type": "array"
+        },
+        "in_scope": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "In Scope",
+          "type": "array"
+        },
+        "out_of_scope": {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "title": "Out Of Scope",
+          "type": "array"
+        }
+      },
+      "required": [
+        "statement",
+        "desired_outcomes",
+        "in_scope"
+      ],
+      "title": "ProblemSectionV2",
+      "type": "object"
+    },
+    "PublicationPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "included_states": {
+          "items": {
+            "const": "asserted",
+            "type": "string"
+          },
+          "title": "Included States",
+          "type": "array"
+        },
+        "excluded_states": {
+          "items": {
+            "enum": [
+              "unresolved",
+              "rejected"
+            ],
+            "type": "string"
+          },
+          "title": "Excluded States",
+          "type": "array"
+        },
+        "source_table": {
+          "const": "semantic_relationships",
+          "default": "semantic_relationships",
+          "title": "Source Table",
+          "type": "string"
+        }
+      },
+      "title": "PublicationPolicyV2",
+      "type": "object"
+    },
+    "QuestionPathStepV2": {
+      "additionalProperties": false,
+      "properties": {
+        "from_type_id": {
+          "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "From Type Id",
+          "type": "string"
+        },
+        "relationship_type_id": {
+          "pattern": "^relationship-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Relationship Type Id",
+          "type": "string"
+        },
+        "to_type_id": {
+          "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "To Type Id",
+          "type": "string"
+        },
+        "traversal": {
+          "enum": [
+            "forward",
+            "reverse"
+          ],
+          "title": "Traversal",
+          "type": "string"
+        },
+        "evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Evidence Span Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "from_type_id",
+        "relationship_type_id",
+        "to_type_id",
+        "traversal"
+      ],
+      "title": "QuestionPathStepV2",
+      "type": "object"
+    },
+    "QuestionPlanV2": {
+      "additionalProperties": false,
+      "properties": {
+        "question_id": {
+          "pattern": "^cq:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Question Id",
+          "type": "string"
+        },
+        "required_path": {
+          "items": {
+            "$ref": "#/$defs/QuestionPathStepV2"
+          },
+          "title": "Required Path",
+          "type": "array"
+        },
+        "hop_count": {
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Hop Count",
+          "type": "integer"
+        },
+        "covered": {
+          "title": "Covered",
+          "type": "boolean"
+        },
+        "shortest_path": {
+          "const": true,
+          "default": true,
+          "title": "Shortest Path",
+          "type": "boolean"
+        },
+        "unsupported_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unsupported Reason"
+        }
+      },
+      "required": [
+        "question_id",
+        "hop_count",
+        "covered"
+      ],
+      "title": "QuestionPlanV2",
+      "type": "object"
+    },
+    "ReasoningPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "relationship_type_count": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Relationship Type Count",
+          "type": "integer"
+        },
+        "recommended_relationship_type_range": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Recommended Relationship Type Range",
+          "type": "array"
+        },
+        "max_relationship_types": {
+          "default": 24,
+          "enum": [
+            24,
+            64
+          ],
+          "title": "Max Relationship Types",
+          "type": "integer"
+        },
+        "compiler_capability": {
+          "anyOf": [
+            {
+              "const": "reviewed-design-64/v1",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compiler Capability"
+        },
+        "retained_type_rationales": {
+          "patternProperties": {
+            "^relationship-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Retained Type Rationales",
+          "type": "object"
+        },
+        "max_hops": {
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Max Hops",
+          "type": "integer"
+        },
+        "absolute_max_hops": {
+          "const": 4,
+          "default": 4,
+          "title": "Absolute Max Hops",
+          "type": "integer"
+        },
+        "k4_rationales": {
+          "items": {
+            "$ref": "#/$defs/K4RationaleV2"
+          },
+          "title": "K4 Rationales",
+          "type": "array"
+        },
+        "max_relations_per_work_unit": {
+          "default": 25,
+          "minimum": 1,
+          "title": "Max Relations Per Work Unit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relationship_type_count",
+        "max_hops"
+      ],
+      "title": "ReasoningPolicyV2",
+      "type": "object"
+    },
+    "RelationshipIdentityPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "seed_fields": {
+          "items": {
+            "enum": [
+              "predicate_id",
+              "source_entity_id",
+              "target_entity_id",
+              "governed_context"
+            ],
+            "type": "string"
+          },
+          "title": "Seed Fields",
+          "type": "array"
+        },
+        "excludes_display_labels": {
+          "const": true,
+          "default": true,
+          "title": "Excludes Display Labels",
+          "type": "boolean"
+        },
+        "excludes_endpoint_type_labels": {
+          "const": true,
+          "default": true,
+          "title": "Excludes Endpoint Type Labels",
+          "type": "boolean"
+        },
+        "context_policy": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Context Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_policy"
+      ],
+      "title": "RelationshipIdentityPolicyV2",
+      "type": "object"
+    },
+    "RequiredRoleCoverageV2": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "all_of",
+          "default": "all_of",
+          "title": "Mode",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/RequiredRoleV2"
+          },
+          "minItems": 1,
+          "title": "Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "roles"
+      ],
+      "title": "RequiredRoleCoverageV2",
+      "type": "object"
+    },
+    "RequiredRoleV2": {
+      "additionalProperties": false,
+      "properties": {
+        "role_id": {
+          "pattern": "^role:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Role Id",
+          "type": "string"
+        },
+        "relationship_type_id": {
+          "pattern": "^relationship-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Relationship Type Id",
+          "type": "string"
+        },
+        "allowed_target_type_ids": {
+          "items": {
+            "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Target Type Ids",
+          "type": "array"
+        },
+        "satisfaction": {
+          "enum": [
+            "one_allowed_type",
+            "all_allowed_types"
+          ],
+          "title": "Satisfaction",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role_id",
+        "relationship_type_id",
+        "allowed_target_type_ids",
+        "satisfaction"
+      ],
+      "title": "RequiredRoleV2",
+      "type": "object"
+    },
+    "SiblingClassificationPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "exclusive",
+            "overlap_allowed",
+            "discriminator",
+            "unresolved"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "discriminator_property_id": {
+          "anyOf": [
+            {
+              "pattern": "^property:[a-z0-9][a-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Discriminator Property Id"
+        },
+        "rationale": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "rationale"
+      ],
+      "title": "SiblingClassificationPolicyV2",
+      "type": "object"
+    },
+    "StructuredFactSetV2": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate_type_id": {
+          "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Aggregate Type Id",
+          "type": "string"
+        },
+        "membership_relationship_type_id": {
+          "pattern": "^relationship-type:[a-z0-9][a-z0-9._:-]*$",
+          "title": "Membership Relationship Type Id",
+          "type": "string"
+        },
+        "allowed_member_type_ids": {
+          "items": {
+            "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Member Type Ids",
+          "type": "array"
+        },
+        "member_role_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Member Role Ids",
+          "type": "array"
+        },
+        "ordering_policy": {
+          "$ref": "#/$defs/OrderingPolicyV2"
+        },
+        "cardinality": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CardinalityExpectationV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "collection_identity_policy": {
+          "$ref": "#/$defs/CollectionIdentityPolicyV2"
+        },
+        "membership_source_kind": {
+          "enum": [
+            "competency_question",
+            "source_evidence",
+            "governance_rule"
+          ],
+          "title": "Membership Source Kind",
+          "type": "string"
+        },
+        "membership_evidence_span_ids": {
+          "items": {
+            "pattern": "^evidence-span:[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "title": "Membership Evidence Span Ids",
+          "type": "array"
+        },
+        "membership_rationale": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Membership Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "aggregate_type_id",
+        "membership_relationship_type_id",
+        "allowed_member_type_ids",
+        "ordering_policy",
+        "collection_identity_policy",
+        "membership_source_kind",
+        "membership_rationale"
+      ],
+      "title": "StructuredFactSetV2",
+      "type": "object"
+    },
+    "TerminologySectionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_terms": {
+          "items": {
+            "$ref": "#/$defs/CanonicalTermV2"
+          },
+          "title": "Canonical Terms",
+          "type": "array"
+        },
+        "ambiguous_terms": {
+          "items": {
+            "$ref": "#/$defs/AmbiguousTermV2"
+          },
+          "title": "Ambiguous Terms",
+          "type": "array"
+        }
+      },
+      "title": "TerminologySectionV2",
+      "type": "object"
+    },
+    "TypeHierarchyClosureV2": {
+      "additionalProperties": false,
+      "properties": {
+        "direct_parent_by_type": {
+          "patternProperties": {
+            "^semantic-type:[a-z0-9][a-z0-9._:-]*$": {
+              "anyOf": [
+                {
+                  "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "Direct Parent By Type",
+          "type": "object"
+        },
+        "ancestors_by_type": {
+          "patternProperties": {
+            "^semantic-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Ancestors By Type",
+          "type": "object"
+        },
+        "descendants_by_type": {
+          "patternProperties": {
+            "^semantic-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Descendants By Type",
+          "type": "object"
+        },
+        "effective_property_ids_by_type": {
+          "patternProperties": {
+            "^semantic-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Effective Property Ids By Type",
+          "type": "object"
+        },
+        "effective_constraint_ids_by_type": {
+          "patternProperties": {
+            "^semantic-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Effective Constraint Ids By Type",
+          "type": "object"
+        },
+        "compatible_source_type_ids_by_relationship": {
+          "patternProperties": {
+            "^relationship-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Compatible Source Type Ids By Relationship",
+          "type": "object"
+        },
+        "compatible_target_type_ids_by_relationship": {
+          "patternProperties": {
+            "^relationship-type:[a-z0-9][a-z0-9._:-]*$": {
+              "items": {
+                "pattern": "^semantic-type:[a-z0-9][a-z0-9._:-]*$",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "title": "Compatible Target Type Ids By Relationship",
+          "type": "object"
+        },
+        "hierarchy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Hierarchy Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "direct_parent_by_type",
+        "ancestors_by_type",
+        "descendants_by_type",
+        "effective_property_ids_by_type",
+        "effective_constraint_ids_by_type",
+        "compatible_source_type_ids_by_relationship",
+        "compatible_target_type_ids_by_relationship",
+        "hierarchy_hash"
+      ],
+      "title": "TypeHierarchyClosureV2",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "identity": {
+      "$ref": "#/$defs/CanonicalIdentityEnvelope"
+    },
+    "contract_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "domain_proposal_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Proposal Id",
+      "type": "string"
+    },
+    "domain_design_context_id": {
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "title": "Domain Design Context Id",
+      "type": "string"
+    },
+    "domain_design_context_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Domain Design Context Hash",
+      "type": "string"
+    },
+    "draft_contract": {
+      "$ref": "#/$defs/DomainContractV2"
+    },
+    "domain_contract_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Domain Contract Hash",
+      "type": "string"
+    },
+    "candidate_count": {
+      "minimum": 1,
+      "title": "Candidate Count",
+      "type": "integer"
+    },
+    "selected_candidate_count": {
+      "minimum": 1,
+      "title": "Selected Candidate Count",
+      "type": "integer"
+    },
+    "relationship_merge_groups": {
+      "patternProperties": {
+        ".*\\S.*": {
+          "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "propertyNames": {
+        "minLength": 1
+      },
+      "title": "Relationship Merge Groups",
+      "type": "object"
+    },
+    "selected_relationship_type_ids": {
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Selected Relationship Type Ids",
+      "type": "array"
+    },
+    "completeness_requirement_ids": {
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Completeness Requirement Ids",
+      "type": "array"
+    },
+    "competency_question_coverage_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Competency Question Coverage Hash",
+      "type": "string"
+    },
+    "candidate_audit": {
+      "items": {
+        "$ref": "#/$defs/CandidateAuditV2"
+      },
+      "title": "Candidate Audit",
+      "type": "array"
+    },
+    "assumptions": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "evidence_span_ids": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Evidence Span Ids",
+      "type": "array"
+    },
+    "proposal_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Proposal Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "identity",
+    "domain_proposal_id",
+    "domain_design_context_id",
+    "domain_design_context_hash",
+    "draft_contract",
+    "domain_contract_hash",
+    "candidate_count",
+    "selected_candidate_count",
+    "relationship_merge_groups",
+    "selected_relationship_type_ids",
+    "completeness_requirement_ids",
+    "competency_question_coverage_hash",
+    "candidate_audit",
+    "proposal_hash"
+  ],
+  "title": "DomainProposal",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "l1-domain-proposal-1.0.0.schema.json"
+}

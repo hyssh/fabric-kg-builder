@@ -1,0 +1,10 @@
+{
+  "domain": "clinical",
+  "requirement_id": "completeness-requirement:clinical.care-team",
+  "aggregate_type_id": "semantic-type:clinical.encounter",
+  "member_type_id": "semantic-type:clinical.practitioner",
+  "membership_relationship_type_id": "relationship-type:clinical.has-participant",
+  "member_role_id": "role:clinical.participant",
+  "ordering": "unordered",
+  "expected_count": null
+}

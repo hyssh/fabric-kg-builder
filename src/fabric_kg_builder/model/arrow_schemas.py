@@ -1,0 +1,639 @@
+"""PyArrow schemas for canonical Parquet tables and lineage v2 contracts."""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+_TS = pa.timestamp("us", tz="UTC")
+_STR = pa.string()
+_INT32 = pa.int32()
+_INT64 = pa.int64()
+_FLOAT64 = pa.float64()
+_BOOL = pa.bool_()
+_LIST_STR = pa.list_(pa.string())
+
+_COMMON_LINEAGE_FIELDS = [
+    pa.field("project_id", _STR, nullable=False),
+    pa.field("asset_id", _STR, nullable=False),
+    pa.field("asset_version_id", _STR, nullable=False),
+    pa.field("run_id", _STR, nullable=False),
+    pa.field("parent_record_id", _STR, nullable=True),
+    pa.field("source_locator_json", _STR, nullable=True),
+    pa.field("schema_version", _STR, nullable=False),
+    pa.field("domain_hash", _STR, nullable=True),
+]
+
+SOURCE_FILES_SCHEMA = pa.schema([
+    pa.field("source_file_id", _STR, nullable=False),
+    pa.field("path", _STR, nullable=False),
+    pa.field("filename", _STR, nullable=False),
+    pa.field("source_type", _STR, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("byte_size", _INT64, nullable=True),
+    pa.field("ingested_at", _TS, nullable=False),
+    pa.field("schema_profile_path", _STR, nullable=True),
+    pa.field("row_count", _INT64, nullable=True),
+    pa.field("notes", _STR, nullable=True),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+DOCUMENT_ELEMENTS_SCHEMA = pa.schema([
+    pa.field("document_element_id", _STR, nullable=False),
+    pa.field("source_file_id", _STR, nullable=False),
+    pa.field("element_type", _STR, nullable=False),
+    pa.field("parent_element_id", _STR, nullable=True),
+    pa.field("title", _STR, nullable=True),
+    pa.field("content", _STR, nullable=True),
+    pa.field("content_html", _STR, nullable=True),
+    pa.field("blob_url", _STR, nullable=True),
+    pa.field("page_number", _INT32, nullable=True),
+    pa.field("section_path", _STR, nullable=True),
+    pa.field("sort_order", _INT32, nullable=True),
+    pa.field("row_index", _INT32, nullable=True),
+    pa.field("col_index", _INT32, nullable=True),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("extracted_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+CHUNKS_SCHEMA = pa.schema([
+    pa.field("chunk_id", _STR, nullable=False),
+    pa.field("source_file_id", _STR, nullable=False),
+    pa.field("document_element_id", _STR, nullable=True),
+    pa.field("chunk_type", _STR, nullable=False),
+    pa.field("content", _STR, nullable=False),
+    pa.field("content_html", _STR, nullable=True),
+    pa.field("embedding_text", _STR, nullable=True),
+    pa.field("blob_url", _STR, nullable=True),
+    pa.field("page_number", _INT32, nullable=True),
+    pa.field("section_path", _STR, nullable=True),
+    pa.field("table_id", _STR, nullable=True),
+    pa.field("figure_id", _STR, nullable=True),
+    pa.field("image_id", _STR, nullable=True),
+    pa.field("related_entity_ids", _LIST_STR, nullable=True),
+    pa.field("entity_search_keys", _LIST_STR, nullable=True),
+    pa.field("previous_chunk_id", _STR, nullable=True),
+    pa.field("next_chunk_id", _STR, nullable=True),
+    pa.field("token_count", _INT32, nullable=True),
+    pa.field("token_start", _INT32, nullable=True),
+    pa.field("token_end", _INT32, nullable=True),
+    pa.field("overlap_token_count", _INT32, nullable=True),
+    pa.field("chunk_strategy_version", _STR, nullable=True),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+ENTITIES_SCHEMA = pa.schema([
+    pa.field("entity_id", _STR, nullable=False),
+    pa.field("entity_type", _STR, nullable=False),
+    pa.field("display_name", _STR, nullable=False),
+    pa.field("canonical_key", _STR, nullable=False),
+    pa.field("aliases", _LIST_STR, nullable=True),
+    pa.field("search_aliases", _LIST_STR, nullable=True),
+    pa.field("description", _STR, nullable=True),
+    pa.field("properties_json", _STR, nullable=True),
+    pa.field("evidence_ids", _LIST_STR, nullable=True),
+    pa.field("resolution_context_key", _STR, nullable=True),
+    pa.field("cannot_link_keys", _LIST_STR, nullable=True),
+    pa.field("source_file_id", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("is_placeholder", _BOOL, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    pa.field("updated_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+RELATIONSHIPS_SCHEMA = pa.schema([
+    pa.field("relationship_id", _STR, nullable=False),
+    pa.field("relationship_type", _STR, nullable=False),
+    pa.field("source_entity_id", _STR, nullable=False),
+    pa.field("target_entity_id", _STR, nullable=False),
+    pa.field("evidence_id", _STR, nullable=True),
+    pa.field("evidence_ids", _LIST_STR, nullable=True),
+    pa.field("source_span_ids", _LIST_STR, nullable=True),
+    pa.field("semantic_relationship_id", _STR, nullable=True),
+    pa.field("assertion_state", _STR, nullable=True),
+    pa.field("direction", _STR, nullable=True),
+    pa.field("relationship_category", _STR, nullable=True),
+    pa.field("review_status", _STR, nullable=True),
+    pa.field("valid_from", _TS, nullable=True),
+    pa.field("valid_to", _TS, nullable=True),
+    pa.field("temporal_precision", _STR, nullable=True),
+    pa.field("description", _STR, nullable=True),
+    pa.field("properties_json", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("is_placeholder", _BOOL, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+PROPERTY_OBSERVATIONS_SCHEMA = pa.schema([
+    pa.field("observation_id", _STR, nullable=False),
+    pa.field("entity_id", _STR, nullable=False),
+    pa.field("entity_type_id", _STR, nullable=False),
+    pa.field("property_id", _STR, nullable=False),
+    pa.field("value_json", _STR, nullable=False),
+    pa.field("value_type", _STR, nullable=False),
+    pa.field("normalized_value_json", _STR, nullable=False),
+    pa.field("unit", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=False),
+    pa.field("assertion_state", _STR, nullable=False),
+    pa.field("evidence_ids", _LIST_STR, nullable=False),
+    pa.field("source_span_ids", _LIST_STR, nullable=False),
+    pa.field("observed_at", _TS, nullable=True),
+    pa.field("temporal_precision", _STR, nullable=False),
+    pa.field("semantic_lane", _STR, nullable=False),
+    pa.field("review_status", _STR, nullable=False),
+    pa.field("conflict_id", _STR, nullable=True),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+PROPERTY_CONFLICTS_SCHEMA = pa.schema([
+    pa.field("conflict_id", _STR, nullable=False),
+    pa.field("entity_id", _STR, nullable=False),
+    pa.field("property_id", _STR, nullable=False),
+    pa.field("observation_ids", _LIST_STR, nullable=False),
+    pa.field("resolution_state", _STR, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+EVIDENCE_SCHEMA = pa.schema([
+    pa.field("evidence_id", _STR, nullable=False),
+    pa.field("source_file_id", _STR, nullable=False),
+    pa.field("source_type", _STR, nullable=False),
+    pa.field("document_element_id", _STR, nullable=True),
+    pa.field("chunk_id", _STR, nullable=True),
+    pa.field("page_number", _INT32, nullable=True),
+    pa.field("section_path", _STR, nullable=True),
+    pa.field("table_id", _STR, nullable=True),
+    pa.field("row_index", _INT32, nullable=True),
+    pa.field("col_index", _INT32, nullable=True),
+    pa.field("figure_id", _STR, nullable=True),
+    pa.field("image_id", _STR, nullable=True),
+    pa.field("callout_id", _STR, nullable=True),
+    pa.field("visual_region_id", _STR, nullable=True),
+    pa.field("blob_url", _STR, nullable=True),
+    pa.field("text", _STR, nullable=True),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+VISUAL_ASSETS_SCHEMA = pa.schema([
+    pa.field("image_id", _STR, nullable=False),
+    pa.field("source_file_id", _STR, nullable=False),
+    pa.field("document_element_id", _STR, nullable=True),
+    pa.field("asset_type", _STR, nullable=False),
+    pa.field("page_number", _INT32, nullable=True),
+    pa.field("section_path", _STR, nullable=True),
+    pa.field("caption", _STR, nullable=True),
+    pa.field("alt_text", _STR, nullable=True),
+    pa.field("blob_url", _STR, nullable=True),
+    pa.field("image_path", _STR, nullable=True),
+    pa.field("image_hash", _STR, nullable=False),
+    pa.field("width", _INT32, nullable=True),
+    pa.field("height", _INT32, nullable=True),
+    pa.field("description", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("is_placeholder", _BOOL, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+VISUAL_REGIONS_SCHEMA = pa.schema([
+    pa.field("visual_region_id", _STR, nullable=False),
+    pa.field("image_id", _STR, nullable=False),
+    pa.field("region_type", _STR, nullable=False),
+    pa.field("label", _STR, nullable=True),
+    pa.field("text", _STR, nullable=True),
+    pa.field("polygon_json", _STR, nullable=True),
+    pa.field("normalized_polygon_json", _STR, nullable=True),
+    pa.field("identified_entity_id", _STR, nullable=True),
+    pa.field("blob_url", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+ASSETS_SCHEMA = pa.schema([
+    pa.field("asset_id", _STR, nullable=False),
+    pa.field("project_id", _STR, nullable=False),
+    pa.field("original_name", _STR, nullable=False),
+    pa.field("media_type", _STR, nullable=False),
+    pa.field("source_uri", _STR, nullable=False),
+    pa.field("classification_json", _STR, nullable=True),
+    pa.field("created_at", _TS, nullable=False),
+    pa.field("created_by", _STR, nullable=False),
+])
+
+ASSET_VERSIONS_SCHEMA = pa.schema([
+    pa.field("asset_version_id", _STR, nullable=False),
+    pa.field("asset_id", _STR, nullable=False),
+    pa.field("version_identity", _STR, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("size_bytes", _INT64, nullable=False),
+    pa.field("original_name", _STR, nullable=False),
+    pa.field("media_type", _STR, nullable=False),
+    pa.field("source_uri", _STR, nullable=False),
+    pa.field("blob_uri", _STR, nullable=False),
+    pa.field("blob_version_id", _STR, nullable=True),
+    pa.field("landing_path", _STR, nullable=False),
+    pa.field("metadata_json", _STR, nullable=True),
+    pa.field("registered_at", _TS, nullable=False),
+    pa.field("landing_timestamp", _TS, nullable=False),
+    pa.field("ingestion_status", _STR, nullable=False),
+])
+
+PROCESSING_RUNS_SCHEMA = pa.schema([
+    pa.field("run_id", _STR, nullable=False),
+    pa.field("environment", _STR, nullable=False),
+    pa.field("started_at", _TS, nullable=False),
+    pa.field("completed_at", _TS, nullable=True),
+    pa.field("status", _STR, nullable=False),
+    pa.field("domain_hash", _STR, nullable=True),
+    pa.field("domain_schema_version", _STR, nullable=True),
+    pa.field("pipeline_version", _STR, nullable=False),
+    pa.field("adapter_versions_json", _STR, nullable=True),
+    pa.field("prompt_versions_json", _STR, nullable=True),
+    pa.field("model_deployments_json", _STR, nullable=True),
+    pa.field("chunk_strategy_version", _STR, nullable=True),
+    pa.field("parent_run_id", _STR, nullable=True),
+    pa.field("stage_results_json", _STR, nullable=True),
+    pa.field("manifest_path", _STR, nullable=True),
+])
+
+CLAIMS_SCHEMA = pa.schema([
+    pa.field("claim_id", _STR, nullable=False),
+    pa.field("subject_entity_id", _STR, nullable=False),
+    pa.field("predicate", _STR, nullable=False),
+    pa.field("object_entity_id", _STR, nullable=True),
+    pa.field("value_json", _STR, nullable=True),
+    pa.field("status", _STR, nullable=False),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("valid_from", _TS, nullable=True),
+    pa.field("valid_to", _TS, nullable=True),
+    pa.field("observed_at", _TS, nullable=True),
+    pa.field("summary", _STR, nullable=True),
+    pa.field("review_state", _STR, nullable=True),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+CLAIM_EVIDENCE_SCHEMA = pa.schema([
+    pa.field("claim_id", _STR, nullable=False),
+    pa.field("evidence_id", _STR, nullable=False),
+    pa.field("occurrence_id", _STR, nullable=True),
+    pa.field("support_type", _STR, nullable=False),
+    pa.field("confidence", _FLOAT64, nullable=True),
+])
+
+# Deterministic serving projection.  These rows are derived from the canonical
+# observations and deliberately retain their IDs and lineage envelope.
+SEMANTIC_ENTITIES_SCHEMA = pa.schema([
+    pa.field("entity_id", _STR, nullable=False),
+    pa.field("entity_type", _STR, nullable=False),
+    pa.field("original_entity_type", _STR, nullable=True),
+    pa.field("semantic_contract_hash", _STR, nullable=True),
+    pa.field("semantic_type_id", _STR, nullable=True),
+    pa.field("semantic_lane", _STR, nullable=True),
+    pa.field("review_status", _STR, nullable=True),
+    pa.field("display_name", _STR, nullable=False),
+    pa.field("canonical_key", _STR, nullable=False),
+    pa.field("aliases", _LIST_STR, nullable=True),
+    pa.field("aliases_json", _STR, nullable=True),
+    pa.field("description", _STR, nullable=True),
+    pa.field("properties_json", _STR, nullable=True),
+    pa.field("action", _STR, nullable=True),
+    pa.field("status", _STR, nullable=True),
+    pa.field("event_date", _STR, nullable=True),
+    pa.field("evidence_ids_json", _STR, nullable=True),
+    pa.field("citation_json", _STR, nullable=True),
+    pa.field("source_file_id", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("is_placeholder", _BOOL, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    pa.field("updated_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+SEMANTIC_RELATIONSHIPS_SCHEMA = pa.schema([
+    pa.field("relationship_id", _STR, nullable=False),
+    pa.field("relationship_type", _STR, nullable=False),
+    pa.field("original_relationship_type", _STR, nullable=True),
+    pa.field("semantic_contract_hash", _STR, nullable=True),
+    pa.field("semantic_relationship_id", _STR, nullable=True),
+    pa.field("semantic_lane", _STR, nullable=True),
+    pa.field("review_status", _STR, nullable=True),
+    pa.field("source_entity_id", _STR, nullable=False),
+    pa.field("target_entity_id", _STR, nullable=False),
+    pa.field("evidence_id", _STR, nullable=True),
+    pa.field("evidence_ids_json", _STR, nullable=True),
+    pa.field("citation_json", _STR, nullable=True),
+    pa.field("assertion_status", _STR, nullable=False),
+    pa.field("event_date", _STR, nullable=True),
+    pa.field("properties_json", _STR, nullable=True),
+    pa.field("confidence", _FLOAT64, nullable=True),
+    pa.field("is_placeholder", _BOOL, nullable=False),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+AUDIT_CANDIDATES_SCHEMA = pa.schema([
+    pa.field("input_candidate_id", _STR, nullable=False),
+    pa.field("disposition", _STR, nullable=False),
+    pa.field("retained_candidate_id", _STR, nullable=True),
+    pa.field("deduplicated_into_candidate_id", _STR, nullable=True),
+    pa.field("candidate_id", _STR, nullable=True),
+    pa.field("candidate_kind", _STR, nullable=True),
+    pa.field("semantic_assertion_id", _STR, nullable=True),
+    pa.field("approved_semantic_id", _STR, nullable=True),
+    pa.field("lifecycle_state", _STR, nullable=True),
+    pa.field("reason_codes", _LIST_STR, nullable=False),
+    pa.field("evidence_span_ids", _LIST_STR, nullable=False),
+    pa.field("resolved_source_entity_id", _STR, nullable=True),
+    pa.field("resolved_target_entity_id", _STR, nullable=True),
+    pa.field("source_inheritance_path", _LIST_STR, nullable=False),
+    pa.field("target_inheritance_path", _LIST_STR, nullable=False),
+    pa.field("source_manifest_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_ASSERTED_ENTITIES_SCHEMA = pa.schema([
+    pa.field("entity_id", _STR, nullable=False),
+    pa.field("most_specific_type_id", _STR, nullable=False),
+    pa.field("asserted_type_ids", _LIST_STR, nullable=False),
+    pa.field("candidate_ids", _LIST_STR, nullable=False),
+    pa.field("evidence_span_ids", _LIST_STR, nullable=False),
+    # A verbatim mention taken from sealed evidence -- one phrase a source
+    # document uses for this entity, not an elected canonical name. Null when
+    # the entity has no span short enough to be a mention rather than prose.
+    pa.field("label", _STR, nullable=True),
+    pa.field("label_evidence_span_id", _STR, nullable=True),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("identity_policy_hash", _STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("semantic_contract_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_ENTITY_TYPE_ASSERTIONS_SCHEMA = pa.schema([
+    pa.field("entity_id", _STR, nullable=False),
+    pa.field("semantic_type_id", _STR, nullable=False),
+    pa.field("most_specific_type_id", _STR, nullable=False),
+    pa.field("is_most_specific", _BOOL, nullable=False),
+    pa.field("hierarchy_depth", _INT32, nullable=False),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("identity_policy_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_ASSERTED_RELATIONSHIPS_SCHEMA = pa.schema([
+    pa.field("relationship_id", _STR, nullable=False),
+    pa.field("semantic_relationship_id", _STR, nullable=False),
+    pa.field("source_entity_id", _STR, nullable=False),
+    pa.field("target_entity_id", _STR, nullable=False),
+    pa.field("candidate_ids", _LIST_STR, nullable=False),
+    pa.field("evidence_span_ids", _LIST_STR, nullable=False),
+    pa.field("source_inheritance_path", _LIST_STR, nullable=False),
+    pa.field("target_inheritance_path", _LIST_STR, nullable=False),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("semantic_contract_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_ASSERTED_PROPERTIES_SCHEMA = pa.schema([
+    pa.field("property_assertion_id", _STR, nullable=False),
+    pa.field("entity_id", _STR, nullable=True),
+    pa.field("semantic_property_id", _STR, nullable=False),
+    pa.field("candidate_ids", _LIST_STR, nullable=False),
+    pa.field("value_type", _STR, nullable=False),
+    pa.field("normalized_value_json", _STR, nullable=True),
+    pa.field("evidence_span_ids", _LIST_STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("semantic_contract_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_REQUIRED_MEMBER_MANIFESTS_SCHEMA = pa.schema([
+    pa.field("required_member_manifest_id", _STR, nullable=False),
+    pa.field("required_member_set_proposal_id", _STR, nullable=False),
+    pa.field("required_member_set_proposal_hash", _STR, nullable=False),
+    pa.field("scope_canonical_id", _STR, nullable=False),
+    pa.field("membership_semantic_relationship_id", _STR, nullable=False),
+    pa.field("ordering_mode", _STR, nullable=False),
+    pa.field("ordinal_property_id", _STR, nullable=True),
+    pa.field("ordinal_value_type", _STR, nullable=True),
+    pa.field("ordering_direction", _STR, nullable=True),
+    pa.field("unique_ordinals", _BOOL, nullable=True),
+    pa.field("contiguous", _BOOL, nullable=True),
+    pa.field("member_order_encoding", _STR, nullable=True),
+    pa.field("expected_cardinality", _INT32, nullable=True),
+    pa.field("minimum_cardinality", _INT32, nullable=True),
+    pa.field("maximum_cardinality", _INT32, nullable=True),
+    pa.field("required_role_ids", _LIST_STR, nullable=False),
+    pa.field("member_count", _INT32, nullable=False),
+    pa.field("member_set_hash", _STR, nullable=False),
+    pa.field("ordered_member_tuple_hash", _STR, nullable=True),
+    pa.field("authoritative_collection_hash", _STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("identity_policy_hash", _STR, nullable=False),
+    pa.field("completeness_requirement_id", _STR, nullable=False),
+    pa.field("completeness_requirement_hash", _STR, nullable=False),
+    pa.field("source_corpus_manifest_id", _STR, nullable=False),
+    pa.field("source_corpus_manifest_hash", _STR, nullable=False),
+    pa.field("source_unit_manifest_id", _STR, nullable=False),
+    pa.field("source_unit_manifest_hash", _STR, nullable=False),
+    pa.field("extraction_candidate_batch_id", _STR, nullable=False),
+    pa.field("extraction_candidate_batch_hash", _STR, nullable=False),
+    pa.field("validator_name", _STR, nullable=False),
+    pa.field("validator_version", _STR, nullable=False),
+    pa.field("manifest_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_REQUIRED_MEMBERS_SCHEMA = pa.schema([
+    pa.field("required_member_manifest_id", _STR, nullable=False),
+    pa.field("required_member_set_proposal_id", _STR, nullable=False),
+    pa.field("required_member_set_proposal_hash", _STR, nullable=False),
+    pa.field("manifest_member_index", _INT32, nullable=False),
+    pa.field("scope_canonical_id", _STR, nullable=False),
+    pa.field("membership_semantic_relationship_id", _STR, nullable=False),
+    pa.field("member_canonical_id", _STR, nullable=False),
+    pa.field("member_semantic_type_id", _STR, nullable=False),
+    pa.field("member_role_id", _STR, nullable=True),
+    pa.field("member_order", _INT32, nullable=True),
+    pa.field("candidate_id", _STR, nullable=False),
+    pa.field("supporting_evidence_span_ids", _LIST_STR, nullable=False),
+    pa.field("member_hash", _STR, nullable=False),
+    pa.field("ordering_mode", _STR, nullable=False),
+    pa.field("ordinal_property_id", _STR, nullable=True),
+    pa.field("ordinal_value_type", _STR, nullable=True),
+    pa.field("ordering_direction", _STR, nullable=True),
+    pa.field("unique_ordinals", _BOOL, nullable=True),
+    pa.field("contiguous", _BOOL, nullable=True),
+    pa.field("member_order_encoding", _STR, nullable=True),
+    pa.field("expected_cardinality", _INT32, nullable=True),
+    pa.field("minimum_cardinality", _INT32, nullable=True),
+    pa.field("maximum_cardinality", _INT32, nullable=True),
+    pa.field("required_role_ids", _LIST_STR, nullable=False),
+    pa.field("member_set_hash", _STR, nullable=False),
+    pa.field("ordered_member_tuple_hash", _STR, nullable=True),
+    pa.field("authoritative_collection_hash", _STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("identity_policy_hash", _STR, nullable=False),
+    pa.field("completeness_requirement_id", _STR, nullable=False),
+    pa.field("completeness_requirement_hash", _STR, nullable=False),
+    pa.field("source_corpus_manifest_id", _STR, nullable=False),
+    pa.field("source_corpus_manifest_hash", _STR, nullable=False),
+    pa.field("source_unit_manifest_id", _STR, nullable=False),
+    pa.field("source_unit_manifest_hash", _STR, nullable=False),
+    pa.field("extraction_candidate_batch_id", _STR, nullable=False),
+    pa.field("extraction_candidate_batch_hash", _STR, nullable=False),
+    pa.field("manifest_hash", _STR, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+SEMANTIC_PUBLICATION_AUTHORITY_SCHEMA = pa.schema([
+    pa.field("authority_id", _STR, nullable=False),
+    pa.field("domain_contract_json", _STR, nullable=False),
+    pa.field("domain_contract_hash", _STR, nullable=False),
+    pa.field("hierarchy_hash", _STR, nullable=False),
+    pa.field("identity_policy_hash", _STR, nullable=False),
+    pa.field("relationship_vocabulary_hash", _STR, nullable=False),
+    pa.field("graph_policy_hash", _STR, nullable=False),
+    pa.field("graph_max_hops", _INT32, nullable=False),
+    pa.field("row_hash", _STR, nullable=False),
+])
+
+L4_PROJECTION_TABLE_SCHEMAS: dict[str, pa.Schema] = {
+    "audit_candidates": AUDIT_CANDIDATES_SCHEMA,
+    "semantic_publication_authority": SEMANTIC_PUBLICATION_AUTHORITY_SCHEMA,
+    "semantic_asserted_entities": SEMANTIC_ASSERTED_ENTITIES_SCHEMA,
+    "semantic_entity_type_assertions": SEMANTIC_ENTITY_TYPE_ASSERTIONS_SCHEMA,
+    "semantic_asserted_relationships": SEMANTIC_ASSERTED_RELATIONSHIPS_SCHEMA,
+    "semantic_asserted_properties": SEMANTIC_ASSERTED_PROPERTIES_SCHEMA,
+    "semantic_required_member_manifests": SEMANTIC_REQUIRED_MEMBER_MANIFESTS_SCHEMA,
+    "semantic_required_members": SEMANTIC_REQUIRED_MEMBERS_SCHEMA,
+}
+
+CLUSTERS_SCHEMA = pa.schema([
+    pa.field("cluster_id", _STR, nullable=False),
+    pa.field("hierarchy_version", _STR, nullable=False),
+    pa.field("level", _INT32, nullable=False),
+    pa.field("parent_cluster_id", _STR, nullable=True),
+    pa.field("label", _STR, nullable=False),
+    pa.field("description", _STR, nullable=True),
+    pa.field("method", _STR, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+CLUSTER_MEMBERSHIPS_SCHEMA = pa.schema([
+    pa.field("cluster_id", _STR, nullable=False),
+    pa.field("entity_id", _STR, nullable=True),
+    pa.field("relationship_id", _STR, nullable=True),
+    pa.field("claim_id", _STR, nullable=True),
+    pa.field("score", _FLOAT64, nullable=True),
+    pa.field("rationale", _STR, nullable=True),
+    pa.field("evidence_ids", _LIST_STR, nullable=True),
+    pa.field("primary_membership", _BOOL, nullable=False),
+])
+
+DEPLOYMENTS_SCHEMA = pa.schema([
+    pa.field("deployment_id", _STR, nullable=False),
+    pa.field("run_id", _STR, nullable=False),
+    pa.field("environment", _STR, nullable=False),
+    pa.field("artifact_type", _STR, nullable=False),
+    pa.field("artifact_version", _STR, nullable=True),
+    pa.field("target_resource_id", _STR, nullable=True),
+    pa.field("target_name", _STR, nullable=True),
+    pa.field("target_record_locator", _STR, nullable=True),
+    pa.field("started_at", _TS, nullable=False),
+    pa.field("completed_at", _TS, nullable=True),
+    pa.field("status", _STR, nullable=False),
+    pa.field("operation_id", _STR, nullable=True),
+    pa.field("error_code", _STR, nullable=True),
+    pa.field("record_ids_json", _STR, nullable=True),
+])
+
+# Canonical 8 content tables used by compile-data / parquet writer / test_schemas.py.
+TABLE_SCHEMAS: dict[str, pa.Schema] = {
+    "source_files": SOURCE_FILES_SCHEMA,
+    "document_elements": DOCUMENT_ELEMENTS_SCHEMA,
+    "chunks": CHUNKS_SCHEMA,
+    "entities": ENTITIES_SCHEMA,
+    "relationships": RELATIONSHIPS_SCHEMA,
+    "evidence": EVIDENCE_SCHEMA,
+    "visual_assets": VISUAL_ASSETS_SCHEMA,
+    "visual_regions": VISUAL_REGIONS_SCHEMA,
+}
+
+# Drawing element and relationship schemas (M5 graph intelligence)
+DRAWING_ELEMENTS_SCHEMA = pa.schema([
+    pa.field("element_id", _STR, nullable=False),
+    pa.field("source_file_id", _STR, nullable=False),
+    pa.field("sheet_number", _INT32, nullable=False),
+    pa.field("element_type", _STR, nullable=False),
+    pa.field("label", _STR, nullable=True),
+    pa.field("geometry_json", _STR, nullable=False),
+    pa.field("method", _STR, nullable=False),
+    pa.field("confidence", _FLOAT64, nullable=False),
+    pa.field("review_state", _STR, nullable=False),
+    pa.field("provenance_origin", _STR, nullable=False),
+    pa.field("evidence_region_ids", _LIST_STR, nullable=True),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+DRAWING_RELATIONSHIPS_SCHEMA = pa.schema([
+    pa.field("drawing_relationship_id", _STR, nullable=False),
+    pa.field("relationship_type", _STR, nullable=False),
+    pa.field("source_element_id", _STR, nullable=False),
+    pa.field("target_element_id", _STR, nullable=False),
+    pa.field("sheet_number", _INT32, nullable=True),
+    pa.field("geometry_json", _STR, nullable=True),
+    pa.field("method", _STR, nullable=False),
+    pa.field("confidence", _FLOAT64, nullable=False),
+    pa.field("review_state", _STR, nullable=False),
+    pa.field("provenance_origin", _STR, nullable=False),
+    pa.field("evidence_region_ids", _LIST_STR, nullable=True),
+    pa.field("content_hash", _STR, nullable=False),
+    pa.field("created_at", _TS, nullable=False),
+    *_COMMON_LINEAGE_FIELDS,
+])
+
+DRAWING_TABLE_SCHEMAS: dict[str, pa.Schema] = {
+    "drawing_elements": DRAWING_ELEMENTS_SCHEMA,
+    "drawing_relationships": DRAWING_RELATIONSHIPS_SCHEMA,
+}
+
+# Extended registry includes lineage tracking tables (assets, runs, deployments, …).
+# Use this when you need all known schemas, e.g. for migration validation.
+ALL_TABLE_SCHEMAS: dict[str, pa.Schema] = {
+    **TABLE_SCHEMAS,
+    "assets": ASSETS_SCHEMA,
+    "asset_versions": ASSET_VERSIONS_SCHEMA,
+    "processing_runs": PROCESSING_RUNS_SCHEMA,
+    "claims": CLAIMS_SCHEMA,
+    "claim_evidence": CLAIM_EVIDENCE_SCHEMA,
+    "property_observations": PROPERTY_OBSERVATIONS_SCHEMA,
+    "property_conflicts": PROPERTY_CONFLICTS_SCHEMA,
+    "semantic_entities": SEMANTIC_ENTITIES_SCHEMA,
+    "semantic_relationships": SEMANTIC_RELATIONSHIPS_SCHEMA,
+    **L4_PROJECTION_TABLE_SCHEMAS,
+    "clusters": CLUSTERS_SCHEMA,
+    "cluster_memberships": CLUSTER_MEMBERSHIPS_SCHEMA,
+    "deployments": DEPLOYMENTS_SCHEMA,
+    **DRAWING_TABLE_SCHEMAS,
+}

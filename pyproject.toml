@@ -1,0 +1,122 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fabric-kg-builder"
+version = "0.2.7"
+description = "CLI tool to build and deploy knowledge graphs to Microsoft Fabric"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pyarrow>=14.0",
+    "tzdata>=2024.1; platform_system == 'Windows'",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "pdfplumber>=0.11",
+    "pymupdf>=1.24",
+    "python-docx>=1.1",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "python-dotenv>=1.0",
+    "openai>=1.0",
+    "azure-core>=1.30",
+    "azure-identity>=1.15",
+    "azure-search-documents>=11.4",
+    "azure-storage-blob>=12.19",
+    "azure-ai-documentintelligence>=1.0",
+    "deltalake>=1.6",
+    "requests>=2.31",
+    "pillow>=10.0",
+    "python-pptx>=0.6.23",
+    "tiktoken>=0.7",
+    "openpyxl>=3.1",
+    "xlrd>=2.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.3",
+    "httpx>=0.27",
+    "azure-ai-projects>=2.3.0",
+]
+agent = [
+    "azure-ai-projects>=2.3.0",
+    "azure-identity>=1.15",
+]
+app = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "PyJWT>=2.8",
+    "cryptography>=42.0",
+    "httpx>=0.27",
+]
+ui = [
+    "chainlit>=1.0",
+]
+# Native dependency for the v2 derived community hierarchy's production
+# provider (graph/community_provider.py:NativeLeidenProvider). Lazily
+# imported only inside that provider's partition() call — never required
+# to import graph/community_contracts.py, community_hierarchy_v2.py, or
+# any other v2 module. The legacy hierarchy_version = "1.0" builder
+# (graph/community.py) has no dependency on this package. Pinned exactly
+# per scope; no algorithmic fallback if unavailable (is_native_available()
+# reports its absence; HierarchyStatus.NATIVE_UNAVAILABLE is surfaced to
+# callers of build_derived_community_hierarchy_safe()).
+#
+# graspologic-native==1.2.5's own published wheels declare
+# `Requires-Python: >=3.8,<3.14`. Intersected with this project's own
+# `requires-python = ">=3.10"` (see top of file), the EFFECTIVE supported
+# range for native Leiden in this project is Python 3.10-3.13 inclusive.
+# The `python_version<'3.14'` marker below is NOT a statement that this
+# extra is otherwise unbounded below 3.10 — it exists only so that `uv`/pip
+# resolution on a project-supported-but-native-incompatible interpreter
+# (e.g. 3.14+) does not attempt to resolve/build this pin at all, rather
+# than failing opaquely or (worse) silently widening/changing the pin.
+# Selecting this extra on an unsupported interpreter does NOT grant native
+# availability: graph/community_provider.py explicitly detects an
+# out-of-range interpreter at runtime and fails closed with
+# NativeProviderUnsupportedInterpreterError (never a silent fallback), and
+# is_native_available()/HierarchyStatus.NATIVE_UNAVAILABLE surface this the
+# same way as "package not installed" to every caller. Do not widen or
+# change this pin without re-verifying against graspologic-native's actual
+# published interpreter support.
+leiden = [
+    "graspologic-native==1.2.5; python_version<'3.14'",
+]
+
+[project.scripts]
+fabric-kg = "fabric_kg_builder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Default run: fast unit + contract tests only.  slow/integration are opt-in.
+# Override with:  pytest -m integration   pytest -m slow   pytest -m ""
+# --cov-fail-under is intentionally ABSENT here; CI publishes coverage reports
+# without enforcing a hard global threshold.
+addopts = "--cov=fabric_kg_builder --cov-report=term-missing -m 'not slow and not integration'"
+markers = [
+    "unit: pure-function tests, no I/O (fast, no network)",
+    "contract: schema-conformance tests, fixture data only",
+    "integration: full-pipeline tests that read real sample_data files (opt-in)",
+    "offline: integration-scale tests that make no external network calls",
+    "slow: tests that take >2 s — real PDFs, large fixtures (opt-in, implies integration)",
+    "smoke: post-deploy live-environment checks (not part of merge gate)",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+# Targets: 80-90% on core modules.
+show_missing = true
+skip_covered = false
