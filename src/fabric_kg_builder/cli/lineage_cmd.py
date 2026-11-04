@@ -18,6 +18,7 @@ from pathlib import Path
 
 import click
 
+from fabric_kg_builder.cli.lineage_archive_cmd import archive_cmd, resolve_cmd
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -388,6 +389,9 @@ def assets_retry_cmd(
 )
 def lineage_cmd() -> None:
     """Inspect lineage paths from derived records to immutable originals."""
+
+lineage_cmd.add_command(archive_cmd)
+lineage_cmd.add_command(resolve_cmd)
 
 
 @click.command(
