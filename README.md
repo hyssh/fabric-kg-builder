@@ -146,6 +146,95 @@ Optional `--ontology-inheritance` projects communities as abstract
 `group_<dominant type>` bases for display grouping. These are not assertions of
 true “is-a” meaning; do not interpret topology as domain semantics.
 
+## Experimental Graphify import review
+
+`review-graphify-import` is an **offline, report-only interoperability check**,
+not a Graphify runtime integration, extraction validator, hierarchy builder,
+or performance/quality improvement. Native Leiden remains unchanged.
+It reads an already-created [Graphify export](https://github.com/Graphify-Labs/graphify/blob/59b5ab1151e031fb42e39cfc9a50bf96f2d57ae0/graphify/export.py#L399-L456)
+(`nodes` + `links`, not `edges`) and a project-owned binding sidecar.
+It never installs, imports, or runs Graphify and never opens exported
+`source_file` paths. Upstream `built_at_commit` refers to the target repository,
+not proof of the Graphify producer's version.
+
+```bash
+fabric-kg review-graphify-import \
+  --source .fkg/l4/approved-run \
+  --input-manifest-search-root .fkg/l3 \
+  --graph exports/graph.json --bindings exports/bindings.json \
+  --out build/graphify-reviews/review-1.json
+```
+
+The export must be directed, have `graph.schema_version: 1` (an integer),
+unique nonempty string node IDs, and a nonnegative integer `community` on every
+node. Hyperedges, unknown endpoints, missing assignments, and lost/extra facts
+are rejected, not repaired. Flat communities are reviewed as labels only;
+no parent nodes, semantic inheritance, or publication authority are inferred.
+Graphify's default undirected export is intentionally rejected: the reviewed
+artifact must actually retain directed links (for example an export of a graph
+built with upstream `directed=True`), not merely have its JSON flag edited.
+
+Prepare `bindings.json` by explicitly associating **every** exported node and
+link with the approved sealed facts. This is our sidecar format, **not an
+upstream Graphify schema**. The following example is illustrative: replace
+the hash/ID/type/evidence placeholders and add all remaining rows:
+
+```json
+{
+  "schema_version": "1.0",
+  "upstream_sha": "59b5ab1151e031fb42e39cfc9a50bf96f2d57ae0",
+  "graphify_version": "0.9.102",
+  "artifact_sha256": "<64 lowercase hex characters: SHA256 of graph.json bytes>",
+  "sealed_manifest_hash": "<manifest_hash of the sealed L4 artifact manifest>",
+  "entities": [
+    {
+      "graphify_id": "<nodes[i].id>",
+      "entity_id": "<sealed entity_id>",
+      "semantic_type_id": "<sealed most_specific_type_id>",
+      "evidence_span_ids": ["<sealed evidence_span_id>"]
+    }
+  ],
+  "relationships": [
+    {
+      "link_index": 0,
+      "relationship_id": "<sealed relationship_id>",
+      "semantic_relationship_id": "<sealed semantic_relationship_id>",
+      "evidence_span_ids": ["<sealed evidence_span_id>"]
+    }
+  ]
+}
+```
+
+Compute `artifact_sha256` from the exact export bytes (for example
+`shasum -a 256 exports/graph.json`). Copy authority values from the sealed
+L4 manifest and `semantic_asserted_entities.parquet` /
+`semantic_asserted_relationships.parquet`, not Graphify labels.
+`link_index` is the zero-based position in the exported `links` array; each
+link's mapped source/target must match the sealed directed endpoints and its
+`relation` must equal the sealed `semantic_relationship_id`. Parallel links
+need separate indices and separate canonical relationship bindings; any
+upstream collapse or rekey without a complete bijection fails review.
+Types and nonempty, unique evidence-ID sets must match the sealed rows exactly.
+Do not fabricate matches or relabel incompatible exports to pass this check.
+
+Each input JSON is limited to 16 MiB. Malformed JSON, duplicate keys,
+non-finite numbers, invalid scalar IDs, unknown sidecar fields, and mismatched
+hashes fail explicitly. Outputs are create-only; sealed L4, L3 search roots,
+default L1-L4 state, native derived-hierarchy, and release directories are
+protected through resolved-path collision checks, including symlinks. Use
+repeatable `--protected-root` for additional custom authority directories.
+
+The review binds the export bytes, bindings bytes, sealed manifest/receipt,
+input graph hash, and any sealed partial scope. A successful exit means only
+that these **caller-declared associations** matched: the report always says
+`shadow_review_only`, `publishable: false`, and
+`producer_provenance_verified: false`. The pinned upstream SHA/version are
+claims, not producer attestation. Evidence-ID agreement does not prove
+Graphify's extraction or source content. DI table/cell anchors remain subject
+to existing L3 checks; preserved figures/images do **not** make image-only
+claims supported by L3. This report is not accepted as `--hierarchy-state`,
+does not mint evidence, and cannot authorize Lakehouse/Ontology publication.
+
 ## Fabric publication and v2 conversion
 
 The current default structured publisher creates a **Lakehouse + Ontology**,

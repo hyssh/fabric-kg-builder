@@ -60,6 +60,7 @@ from fabric_kg_builder.cli.runtime_cmd import (
 from fabric_kg_builder.cli.diagnostics_cmd import inspect_diagnostics_cmd
 from fabric_kg_builder.cli.init_domain_cmd import init_domain_cmd
 from fabric_kg_builder.cli.derive_hierarchy_cmd import derive_hierarchy_cmd
+from fabric_kg_builder.cli.graphify_review_cmd import review_graphify_import_cmd
 
 
 _GROUP_EPILOG = """\b
@@ -239,6 +240,7 @@ cli.add_command(handoff_partial_cmd)
 cli.add_command(validate_evidence_cmd, name="validate-evidence")  # schema-2 L3
 cli.add_command(project_serving_cmd, name="project-serving")  # schema-2 L4
 cli.add_command(derive_hierarchy_cmd, name="derive-hierarchy")  # schema-2 offline L4 hierarchy adapter (W3)
+cli.add_command(review_graphify_import_cmd)
 cli.add_command(assess_business_quality_cmd)
 cli.add_command(densify_cmd, name="densify")
 cli.add_command(compile_data_cmd, name="compile-data")
