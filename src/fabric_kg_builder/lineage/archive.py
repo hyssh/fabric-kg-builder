@@ -414,6 +414,15 @@ def _observation(
         status, raw = "NOT_ARCHIVED", None
     from fabric_kg_builder.lineage.layout_bridge import raw_layout_location
 
+    local_location: dict[str, Any] = {"status": "NO_VERIFIED_SOURCE_BYTES"}
+    if status == "VERIFIED" and raw is not None:
+        local_location = {"status": "UNSUPPORTED_MEDIA_TYPE"}
+        if entry.media_type == "application/pdf":
+            from fabric_kg_builder.lineage.local_source_location import pdf_source_location
+
+            local_location = pdf_source_location(
+                raw, page_number=unit.locator.page, quote=span.quote if span is not None else None,
+            )
     return {
         "evidence": span.model_dump(mode="json") if span is not None else None,
         "verified_assertion_evidence": span is not None,
@@ -427,6 +436,7 @@ def _observation(
                 for relative in index["cache_members"].values()
             ], entry.original_byte_hash,
         ),
+        "local_source_location": local_location,
         "semantic_accuracy": "not_assessed",
     }
 
@@ -511,6 +521,12 @@ def resolve_archive(
     return {
         "archive_version": ARCHIVE_VERSION, "archive_hash": index["archive_hash"],
         "publication_version": publication_version, "publication_scope": index["publication_scope"],
+        "table": table,
+        "table_artifact": (
+            {"archive_member": f"tables/{table}.parquet",
+             "sha256": _sha(files[f"tables/{table}.parquet"])}
+            if not audit_only else {"archive_member": "index.json", "sha256": _sha(files["index.json"])}
+        ),
         "live_fabric_verified": False, "record": stored, "field": field,
         "field_value": stored.get(field) if field is not None else None,
         "field_binding_status": field_status, "field_transform": transform,

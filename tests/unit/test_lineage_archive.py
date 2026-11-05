@@ -333,6 +333,14 @@ def test_source_change_prevents_archival(producer):
     assert not producer["out"].exists()
 
 
+def test_missing_l3_evidence_is_not_metadata_only_success(producer):
+    evidence_file = next(producer["l3_root"].rglob("evidence-spans/*.json"))
+    evidence_file.unlink()
+    with pytest.raises(FileNotFoundError):
+        create_archive(**archive_inputs(producer))
+    assert not producer["out"].exists()
+
+
 def test_create_only_and_disjoint_output(producer):
     options = archive_inputs(producer)
     with pytest.raises(RuntimeError, match="COLLISION"):
