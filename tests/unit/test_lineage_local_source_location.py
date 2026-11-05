@@ -37,7 +37,9 @@ def test_original_text_match_and_context_geometry(pdf_bytes):
         if cell["row_index"] == 2 and cell["column_index"] == 0
     )
     assert cell["extracted_value"] == "B"
-    assert cell["bbox"] == [50, 190, 150, 210]
+    assert cell["native_rule_enclosure_bbox"] == [50, 190, 150, 210]
+    assert cell["rule_boundary_status"] == "NATIVE_RULE_ENCLOSURE"
+    assert all(cell["source_rule_refs"][side] for side in ("left", "top", "right", "bottom"))
     assert result["context_figures"][0]["bbox"] == [50, 250, 90, 290]
     assert result["context_figures"][0]["claim_to_region_verified"] is False
 
@@ -59,3 +61,75 @@ def test_page_context_without_a_claim(pdf_bytes):
     result = pdf_source_location(pdf_bytes, page_number=1, quote=None)
     assert result["status"] == "PAGE_CONTEXT_ONLY"
     assert not result["text_matches"]
+
+
+def test_text_extent_recovers_original_grid_without_changing_backend_bbox(pdf_bytes):
+    from types import SimpleNamespace
+
+    # PyMuPDF 2.0 can return this tighter text region for the same drawn cell.
+    detected = (55.0, 191.0, 149.0, 203.207)
+    original_find = pymupdf.Page.find_tables
+
+    def text_region_backend(page, **kwargs):
+        found = original_find(page, **kwargs)
+        tables = []
+        for table in found.tables:
+            rows = [SimpleNamespace(cells=list(row.cells)) for row in table.rows]
+            rows[2].cells[0] = detected
+            tables.append(SimpleNamespace(
+                rows=rows, bbox=table.bbox, row_count=table.row_count, col_count=table.col_count,
+                extract=lambda values=table.extract(): values,
+            ))
+        return SimpleNamespace(tables=tables)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(pymupdf.Page, "find_tables", text_region_backend)
+        result = pdf_source_location(pdf_bytes, page_number=1, quote=None)
+    cell = result["context_tables"][0]["cells"][4]
+    assert cell["bbox"] == list(detected)
+    assert cell["native_rule_enclosure_bbox"] == [50, 190, 150, 210]
+    assert cell["semantic_cell_boundary_verified"] is False
+
+
+@pytest.mark.parametrize("removed_side", ["left", "top", "right", "bottom"])
+def test_open_or_partial_frame_does_not_promote_text_extent(removed_side):
+    from fabric_kg_builder.lineage.local_source_location import _native_rules, _native_rule_enclosure
+
+    edges = {
+        "left": ((50, 190), (50, 210)), "top": ((50, 190), (150, 190)),
+        "right": ((150, 190), (150, 210)), "bottom": ((50, 210), (150, 210)),
+    }
+    with pymupdf.open() as document:
+        page = document.new_page()
+        for side, (start, end) in edges.items():
+            if side != removed_side:
+                page.draw_line(start, end)
+        location = _native_rule_enclosure(_native_rules(page.get_drawings()), (55, 191, 149, 203))
+    assert location["native_rule_enclosure_bbox"] is None
+    assert location["rule_boundary_status"] == "NOT_PROVEN"
+
+
+def test_rule_segments_require_continuous_full_boundary():
+    from fabric_kg_builder.lineage.local_source_location import _native_rules, _native_rule_enclosure
+
+    with pymupdf.open() as document:
+        page = document.new_page()
+        page.draw_rect((50, 190, 150, 210))
+        page.draw_line((50, 190), (100, 190))  # Duplicate partial strokes are harmless.
+        location = _native_rule_enclosure(_native_rules(page.get_drawings()), (55, 191, 149, 203))
+    assert location["native_rule_enclosure_bbox"] == [50, 190, 150, 210]
+
+
+def test_gap_in_rule_is_not_closed_by_detected_text_bounds():
+    from fabric_kg_builder.lineage.local_source_location import _native_rules, _native_rule_enclosure
+
+    with pymupdf.open() as document:
+        page = document.new_page()
+        for start, end in (
+            ((50, 190), (95, 190)), ((105, 190), (150, 190)),
+            ((50, 190), (50, 210)), ((150, 190), (150, 210)), ((50, 210), (150, 210)),
+        ):
+            page.draw_line(start, end)
+        location = _native_rule_enclosure(_native_rules(page.get_drawings()), (55, 191, 149, 203))
+    assert location["native_rule_enclosure_bbox"] is None
+    assert location["rule_boundary_status"] == "NOT_PROVEN"
