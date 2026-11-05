@@ -33,8 +33,10 @@ Patch increment from 0.2.7; not a tag, package publication, or cloud deployment.
 - Multiple-contributor and unknown-normalization field lineage stays explicitly
   incomplete. No Graphify runtime/default change, semantic trust promotion,
   remote archive durability, retention or ACL policy is introduced.
-- Remote verification requires an explicitly identified, authorized target.
-  Local archive resolution does not establish live DI or Fabric verification.
+- Legacy or adopted Lakehouses without the matching approved publication
+  plan, journal, table proofs and source history are outside the strict
+  prototype binding contract. Missing historical provenance is not
+  reconstructed from current rows or matching field values.
 
 ## 0.2.7 (local development)
 
