@@ -85,7 +85,10 @@ def test_text_extent_recovers_original_grid_without_changing_backend_bbox(pdf_by
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(pymupdf.Page, "find_tables", text_region_backend)
         result = pdf_source_location(pdf_bytes, page_number=1, quote=None)
-    cell = result["context_tables"][0]["cells"][4]
+    cell = next(
+        cell for cell in result["context_tables"][0]["cells"]
+        if cell["row_index"] == 2 and cell["column_index"] == 0
+    )
     assert cell["bbox"] == list(detected)
     assert cell["native_rule_enclosure_bbox"] == [50, 190, 150, 210]
     assert cell["semantic_cell_boundary_verified"] is False
