@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
+import sys
 
 import click
 from pydantic_core import to_jsonable_python
@@ -30,7 +32,8 @@ def archive_cmd(**kwargs) -> None:
     from fabric_kg_builder.lineage.archive import create_archive
 
     try:
-        result = create_archive(**kwargs)
+        with redirect_stdout(sys.stderr):
+            result = create_archive(**kwargs)
     except (OSError, ValueError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2, sort_keys=True))
@@ -50,7 +53,8 @@ def resolve_cmd(**kwargs) -> None:
     from fabric_kg_builder.lineage.archive import resolve_archive
 
     try:
-        result = resolve_archive(**kwargs)
+        with redirect_stdout(sys.stderr):
+            result = resolve_archive(**kwargs)
     except (OSError, ValueError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(to_jsonable_python(result), indent=2, sort_keys=True))

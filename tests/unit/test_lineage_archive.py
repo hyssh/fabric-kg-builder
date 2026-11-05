@@ -367,3 +367,20 @@ def test_cli_archive_resolve_and_unknown_field(producer):
     ])
     assert result.exit_code != 0
     assert "FIELD_NOT_FOUND" in result.output
+
+
+def test_cli_preserves_json_stdout_and_surfaces_backend_diagnostics(tmp_path, monkeypatch, capsys):
+    import fabric_kg_builder.lineage.archive as archive
+
+    def noisy_backend(**kwargs):
+        print("dependency diagnostic")
+        return {"metadata_status": "INCOMPLETE"}
+
+    monkeypatch.setattr(archive, "resolve_archive", noisy_backend)
+    lineage_cmd.main([
+        "resolve", "--archive", str(tmp_path), "--publication-version", "local-v1",
+        "--table", "table", "--record", "record",
+    ], standalone_mode=False)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"metadata_status": "INCOMPLETE"}
+    assert "dependency diagnostic" in captured.err

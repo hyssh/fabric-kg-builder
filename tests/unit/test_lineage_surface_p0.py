@@ -7,9 +7,12 @@ This is not model/DI extraction, live publication or a general quality measure.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -165,6 +168,19 @@ def test_surface_local_adapter_to_publication_archive_field(public_pdf, tmp_path
         [87.02, 464.04, 148.63, 476.88], abs=0.02,
     )
     assert result["live_fabric_verified"] is False
+    completed = subprocess.run(
+        [
+            sys.executable, "-c",
+            "from fabric_kg_builder.cli.lineage_cmd import lineage_cmd; lineage_cmd()",
+            "resolve", "--archive", str(archive), "--archive-hash", created["archive_hash"],
+            "--publication-version", "local-manual-surface-001",
+            "--table", table, "--record", record, "--field", field,
+        ],
+        capture_output=True, text=True, cwd=tmp_path,
+        env=os.environ | {"PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["resolution_status"] == "COMPLETE"
 
 
 def test_surface_original_table_and_figure_geometry_only(public_pdf):
