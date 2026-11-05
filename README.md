@@ -5,7 +5,7 @@ Discover and design a domain-fit schema, evaluate it against your questions,
 then explicitly approve extraction and publication. Use the `fabric-kg` Python
 CLI directly or through the customer-facing GitHub Copilot CLI plugin.
 
-**Development version: 0.2.7.** Install from source; this is not a claim of a
+**Development version: 0.2.8.** Install from source; this is not a claim of a
 published PyPI release.
 
 [Project site](https://hyssh.github.io/fabric-kg-builder/) ·
@@ -16,6 +16,17 @@ See a [user-supplied Data Agent example](https://hyssh.github.io/fabric-kg-build
 for Surface Go 2 tools, components, and precautions. It is illustrative, not a
 benchmark or evidence of Leiden answer-quality gains. Verify the source service
 guide before performing any repair.
+
+## What changed in 0.2.8
+
+The additive `lineage archive` and `lineage bind-publication` commands connect
+historical evidence/source definitions to the exact workspace, Lakehouse,
+table, and Delta version recorded by a completed create-only prototype journal.
+`lineage resolve-stored` checks that binding and can explicitly read back the
+pinned OneLake table and record before returning provenance. Remote reads
+require `--read-remote --approve-read BINDING_HASH`; by default remote verification
+is **NOT_RUN**, and a local snapshot is never a live publication version.
+Existing DI, sealed evidence, native hierarchy, and publication approval remain unchanged.
 
 ## What changed in 0.2.7
 
@@ -284,7 +295,7 @@ evaluate question gaps, and prepare a plan for review. Keep model spending,
 schema approval, extraction, and publication as distinct decisions.
 
 See [plugin installation and commands](plugins/fabric-kg/README.md) for
-additional installation options. For 0.2.7, use the source-install instructions
+additional installation options. For 0.2.8, use the source-install instructions
 above rather than assuming a PyPI package is available.
 
 ## Safety and limits

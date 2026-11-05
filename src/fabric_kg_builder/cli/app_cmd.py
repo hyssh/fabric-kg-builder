@@ -1535,6 +1535,11 @@ def publish_prototype_agent_cmd(
     help="Prototype only: publish an entity's evidence-grounded label for an absent required "
     "non-key string property (recorded as a warning) instead of blocking publication.",
 )
+@click.option("--lineage-archive", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="Opt-in existing historical archive for the exact approved prototype plan.")
+@click.option("--lineage-archive-hash", help="Trusted archive hash; required with --lineage-archive.")
+@click.option("--lineage-binding-out", type=click.Path(path_type=Path),
+              help="New provenance binding directory, written only after verified live publication.")
 def publish_structured_cmd(
     l4_run: Path,
     l3_root: Path,
@@ -1554,6 +1559,9 @@ def publish_structured_cmd(
     hierarchy_state: Path | None = None,
     ontology_inheritance: bool = False,
     required_label_fallback: bool = False,
+    lineage_archive: Path | None = None,
+    lineage_archive_hash: str | None = None,
+    lineage_binding_out: Path | None = None,
 ) -> None:
     """Compile and plan the L5a structured publication of a sealed L4 run.
 
@@ -1575,6 +1583,24 @@ def publish_structured_cmd(
         raise click.ClickException("--ontology-inheritance requires --prototype-create-only")
     if required_label_fallback and not prototype_create_only:
         raise click.ClickException("--required-label-fallback requires --prototype-create-only")
+    lineage_options = (lineage_archive, lineage_archive_hash, lineage_binding_out)
+    lineage_binding_inputs: tuple[Path, str, Path, Path] | None = None
+    if any(item is not None for item in lineage_options):
+        if lineage_archive is None or lineage_archive_hash is None or lineage_binding_out is None:
+            raise click.ClickException("Supply --lineage-archive, --lineage-archive-hash and --lineage-binding-out together")
+        if not prototype_create_only or dry_run or prototype_journal is None or materialize_dir is None:
+            raise click.ClickException("Lineage publication wiring requires --prototype-create-only --live, an existing approved --plan, --prototype-journal and --materialize")
+        lineage_binding_inputs = (lineage_archive, lineage_archive_hash, prototype_journal, lineage_binding_out)
+        from fabric_kg_builder.lineage.publication_binding import preflight_publication_binding
+
+        try:
+            preflight_publication_binding(
+                archive=lineage_archive, archive_hash=lineage_archive_hash,
+                plan=plan_path, journal=prototype_journal, out=lineage_binding_out,
+                protected_roots={"L4": l4_run, "L3": l3_root, "materialization": materialize_dir},
+            )
+        except (OSError, ValueError, RuntimeError) as error:
+            raise click.ClickException(str(error)) from error
     quality_policy = None
     if quality_policy_path is not None:
         from fabric_kg_builder.serving.business_quality import parse_quality_policy
@@ -1604,6 +1630,22 @@ def publish_structured_cmd(
                 **({"ontology_inheritance": True} if ontology_inheritance else {}),
                 **({"required_label_fallback": True} if required_label_fallback else {}),
             )
+            if lineage_binding_inputs is not None:
+                from fabric_kg_builder.lineage.publication_binding import bind_publication
+
+                archive, archive_hash, journal, binding_out = lineage_binding_inputs
+                try:
+                    binding = bind_publication(
+                        archive=archive, archive_hash=archive_hash,
+                        plan=plan_path, journal=journal, out=binding_out,
+                    )
+                except (OSError, ValueError, RuntimeError) as error:
+                    raise click.ClickException(
+                        f"Publication resources retained; lineage binding was not created: {error}. "
+                        "Retry lineage bind-publication after correcting local inputs; do not redeploy."
+                    ) from error
+                click.echo(f"lineage_binding={binding_out}")
+                click.echo(f"lineage_binding_hash={binding['binding_hash']}")
         except ValueError as error:
             raise click.ClickException(str(error)) from error
         click.echo(f"plan_hash={result['plan_hash']}")

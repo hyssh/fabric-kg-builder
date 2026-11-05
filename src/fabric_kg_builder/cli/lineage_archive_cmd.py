@@ -58,3 +58,48 @@ def resolve_cmd(**kwargs) -> None:
     except (OSError, ValueError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(to_jsonable_python(result), indent=2, sort_keys=True))
+
+
+@click.command("bind-publication")
+@click.option("--archive", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--archive-hash", required=True, help="Archive hash retained in a trusted external index.")
+@click.option("--plan", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--journal", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--out", required=True, type=click.Path(path_type=Path), help="New binding directory, never overwritten.")
+def bind_publication_cmd(**kwargs) -> None:
+    """Link completed prototype Delta readback identities to an exact archive."""
+    from fabric_kg_builder.lineage.publication_binding import bind_publication
+
+    try:
+        with redirect_stdout(sys.stderr):
+            result = bind_publication(**kwargs)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(to_jsonable_python(result), indent=2, sort_keys=True))
+
+
+@click.command("resolve-stored")
+@click.option("--binding", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--binding-hash", required=True, help="Exact hash from a separately trusted publication index.")
+@click.option("--archive", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-id", required=True)
+@click.option("--lakehouse-id", required=True)
+@click.option("--table", required=True)
+@click.option("--delta-version", required=True, type=click.IntRange(min=0))
+@click.option("--record", required=True)
+@click.option("--field", default=None)
+@click.option("--source-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--read-remote", is_flag=True, help="Opt in to exact-version OneLake reads only; no cloud writes.")
+@click.option("--approve-read", default=None, help="Repeat the trusted binding hash to authorize the remote read.")
+@click.option("--max-rows", default=10_000, show_default=True, type=click.IntRange(1, 100_000),
+              help="Full-table readback bound; larger publications fail closed.")
+def resolve_stored_cmd(**kwargs) -> None:
+    """Resolve deployed record identity; remote readback is NOT_RUN by default."""
+    from fabric_kg_builder.lineage.publication_binding import resolve_stored_record
+
+    try:
+        with redirect_stdout(sys.stderr):
+            result = resolve_stored_record(**kwargs)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(to_jsonable_python(result), indent=2, sort_keys=True))

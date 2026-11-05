@@ -18,7 +18,9 @@ from pathlib import Path
 
 import click
 
-from fabric_kg_builder.cli.lineage_archive_cmd import archive_cmd, resolve_cmd
+from fabric_kg_builder.cli.lineage_archive_cmd import (
+    archive_cmd, bind_publication_cmd, resolve_cmd, resolve_stored_cmd,
+)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -392,6 +394,8 @@ def lineage_cmd() -> None:
 
 lineage_cmd.add_command(archive_cmd)
 lineage_cmd.add_command(resolve_cmd)
+lineage_cmd.add_command(bind_publication_cmd)
+lineage_cmd.add_command(resolve_stored_cmd)
 
 
 @click.command(

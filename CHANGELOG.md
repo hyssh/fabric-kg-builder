@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.8 (local development)
+
+Patch increment from 0.2.7; not a tag, package publication, or cloud deployment.
+
+### Added
+
+- Historical local lineage archives retain approved authority, assertions,
+  evidence definitions, SourceUnits, recorded process receipts, and optional
+  explicitly authorized original bytes, independent of producer directories.
+- `lineage bind-publication` validates completed create-only prototype
+  plan/journal Delta identities and readback proofs against an exact archive,
+  producing a create-only hash-pinned local provenance index.
+- `lineage resolve-stored` accepts explicit workspace/Lakehouse/table/Delta
+  version/record/field identity. Optional approved read-only OneLake lookup
+  checks commit ownership, bounded complete-table values, and the exact record;
+  no read occurs by default and no local fallback claims remote success.
+- Original-PDF geometry distinguishes backend-detected regions, independently
+  proven native rule enclosures, context-only images and semantic evidence.
+  CLI JSON stdout remains separate from dependency diagnostics on stderr.
+
+### Fixed
+
+- Align package, runtime, CLI, plugin and root lock version to 0.2.8; the prior
+  root lock still named 0.2.6. Historical L7 wire contract remains 0.2.4.
+
+### Scope
+
+- A binding hash must be pinned in a separately trusted operator index; the
+  journal and self-hashes are not service signatures. Only the default,
+  structurally verified create-only prototype Delta version 0 is supported.
+- Multiple-contributor and unknown-normalization field lineage stays explicitly
+  incomplete. No Graphify runtime/default change, semantic trust promotion,
+  remote archive durability, retention or ACL policy is introduced.
+- Remote verification requires an explicitly identified, authorized target.
+  Local archive resolution does not establish live DI or Fabric verification.
+
 ## 0.2.7 (local development)
 
 Install from source. This version label does not imply a published PyPI release.

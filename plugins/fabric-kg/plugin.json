@@ -1,7 +1,7 @@
 {
   "name": "fabric-kg",
   "description": "Guide the installed fabric-kg CLI through corpus-first design, approved extraction, evidence validation, optional native Leiden, and explicitly approved Fabric prototype publication. Includes the pipeline skill, an optional Surface service-guide example, and the KG-builder agent.",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "author": {
     "name": "hyssh"
   },

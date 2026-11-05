@@ -296,9 +296,11 @@ def _create_inputs(
 
 
 @pytest.mark.unit
-def test_release_version_and_41_top_level_commands() -> None:
-    assert __version__ == "0.2.7"
-    assert len(cli.commands) == 41
+def test_release_version_and_42_top_level_commands() -> None:
+    assert __version__ == "0.2.8"
+    assert len(cli.commands) == 42
+    assert "review-graphify-import" in cli.commands
+    assert {"archive", "resolve", "bind-publication", "resolve-stored"} <= set(cli.commands["lineage"].commands)
     # 0.2.7 adds the derived community hierarchy command.
     assert "derive-hierarchy" in cli.commands
     assert "assess-business-quality" in cli.commands

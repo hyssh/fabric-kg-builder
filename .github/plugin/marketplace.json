@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Plugins for building Microsoft Fabric knowledge graphs with the fabric-kg CLI.",
-    "version": "0.2.7"
+    "version": "0.2.8"
   },
   "plugins": [
     {
       "name": "fabric-kg",
       "description": "Corpus-first design and evidence-backed extraction with the installed fabric-kg CLI, optional native Leiden, and explicitly approved Fabric prototype publication. Includes a pipeline skill, an optional Surface service-guide example, and the KG-builder agent.",
-      "version": "0.2.7",
+      "version": "0.2.8",
       "source": "plugins/fabric-kg"
     }
   ]
