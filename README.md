@@ -26,6 +26,7 @@ table, and Delta version recorded by a completed create-only prototype journal.
 pinned OneLake table and record before returning provenance. Remote reads
 require `--read-remote --approve-read BINDING_HASH`; by default remote verification
 is **NOT_RUN**, and a local snapshot is never a live publication version.
+See [Historical lineage lookup and trust boundaries](LINEAGE.md).
 Existing DI, sealed evidence, native hierarchy, and publication approval remain unchanged.
 
 ## What changed in 0.2.7
